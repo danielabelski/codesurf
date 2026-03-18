@@ -1,8 +1,17 @@
 import { ipcMain } from 'electron'
+import { homedir } from 'os'
+import { join } from 'path'
 
 // node-pty must be required (not imported) due to native module ESM issues
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pty = require('node-pty')
+
+function expandHome(arg: string): string {
+  if (!arg.startsWith('~')) return arg
+  if (arg === '~') return homedir()
+  if (arg.startsWith('~/') || arg.startsWith('~\\')) return join(homedir(), arg.slice(2))
+  return arg
+}
 
 interface PtyInstance {
   write: (data: string) => void
@@ -23,7 +32,7 @@ export function registerTerminalIPC(): void {
 
     // If a binary is specified, spawn it directly (no shell wrapper)
     const bin = launchBin || process.env.SHELL || '/bin/zsh'
-    const args = launchBin ? (launchArgs ?? []) : []
+    const args = launchBin ? (launchArgs ?? []).map(expandHome) : []
 
     const term: PtyInstance = pty.spawn(bin, args, {
       name: 'xterm-256color',
