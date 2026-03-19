@@ -9,6 +9,7 @@
  *   { "mcpServers": { "kanban": { "type": "http", "url": "http://localhost:<port>/mcp" } } }
  */
 
+import { bus } from './event-bus'
 import { createServer, IncomingMessage, ServerResponse } from 'http'
 import { promises as fs } from 'fs'
 import { join } from 'path'
@@ -185,6 +186,90 @@ const TOOLS = [
       },
       required: ['card_id', 'question']
     }
+  },
+  // ── Bus tools (universal) ────────────────────────────────────────────────
+  {
+    name: 'update_progress',
+    description: 'Report progress on a task. Any tile subscribed to this channel will see the update.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string', description: 'Channel to publish to (e.g. tile:abc123, task:xyz)' },
+        status: { type: 'string', description: 'Current status text' },
+        percent: { type: 'number', description: 'Progress 0-100 (optional)' },
+        detail: { type: 'string', description: 'Additional detail (optional)' }
+      },
+      required: ['channel', 'status']
+    }
+  },
+  {
+    name: 'log_activity',
+    description: 'Log an activity event. Appears in any subscribed activity feed or tile indicator.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string', description: 'Channel to publish to' },
+        message: { type: 'string', description: 'Activity message' },
+        level: { type: 'string', enum: ['info', 'warn', 'error', 'success'], description: 'Severity level' }
+      },
+      required: ['channel', 'message']
+    }
+  },
+  {
+    name: 'create_task',
+    description: 'Create a new task visible to any subscribed task list or kanban.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string', description: 'Channel to publish to' },
+        title: { type: 'string' },
+        description: { type: 'string' },
+        status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'failed'] }
+      },
+      required: ['channel', 'title']
+    }
+  },
+  {
+    name: 'update_task',
+    description: 'Update a task status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string' },
+        task_id: { type: 'string' },
+        status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'failed'] },
+        title: { type: 'string', description: 'Updated title (optional)' },
+        detail: { type: 'string', description: 'Status detail (optional)' }
+      },
+      required: ['channel', 'task_id', 'status']
+    }
+  },
+  {
+    name: 'notify',
+    description: 'Send a notification to the canvas operator.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string' },
+        title: { type: 'string' },
+        message: { type: 'string' },
+        level: { type: 'string', enum: ['info', 'warn', 'error', 'success'] }
+      },
+      required: ['channel', 'message']
+    }
+  },
+  {
+    name: 'ask',
+    description: 'Ask the canvas operator a question. Returns when they respond.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channel: { type: 'string' },
+        question: { type: 'string' },
+        options: { type: 'array', items: { type: 'string' }, description: 'Optional choices' }
+      },
+      required: ['channel', 'question']
+    }
   }
 ]
 
@@ -244,6 +329,12 @@ function handleTool(name: string, args: Record<string, unknown>): string {
     const payload = { cardId, summary: args.summary, nextCol: args.next_col }
     pushSSE(cardId, 'card_complete', payload)
     sendToRenderer('card_complete', payload)
+    bus.publish({
+      channel: `card:${cardId}`,
+      type: 'task',
+      source: 'mcp',
+      payload: { cardId, summary: args.summary, nextCol: args.next_col, action: 'complete' }
+    })
     return `Card ${cardId} marked complete: ${args.summary}`
   }
 
@@ -251,6 +342,12 @@ function handleTool(name: string, args: Record<string, unknown>): string {
     const payload = { cardId, note: args.note, status: args.status }
     pushSSE(cardId, 'card_update', payload)
     sendToRenderer('card_update', payload)
+    bus.publish({
+      channel: `card:${cardId}`,
+      type: 'progress',
+      source: 'mcp',
+      payload: { cardId, note: args.note, status: args.status }
+    })
     return `Card ${cardId} updated`
   }
 
@@ -258,6 +355,12 @@ function handleTool(name: string, args: Record<string, unknown>): string {
     const payload = { cardId, reason: args.reason }
     pushSSE(cardId, 'card_error', payload)
     sendToRenderer('card_error', payload)
+    bus.publish({
+      channel: `card:${cardId}`,
+      type: 'notification',
+      source: 'mcp',
+      payload: { cardId, reason: args.reason, level: 'error' }
+    })
     return `Card ${cardId} flagged: ${args.reason}`
   }
 
@@ -265,6 +368,12 @@ function handleTool(name: string, args: Record<string, unknown>): string {
     const payload = { cardId, event: args.event, data: args.payload ?? {} }
     pushSSE(cardId, args.event as string, payload)
     sendToRenderer('canvas_event', payload)
+    bus.publish({
+      channel: `card:${cardId}`,
+      type: 'data',
+      source: 'mcp',
+      payload: { cardId, event: args.event, data: args.payload ?? {} }
+    })
     return `Event '${args.event}' sent to canvas`
   }
 
@@ -272,7 +381,81 @@ function handleTool(name: string, args: Record<string, unknown>): string {
     const payload = { cardId, question: args.question, options: args.options ?? [] }
     pushSSE(cardId, 'input_requested', payload)
     sendToRenderer('input_requested', payload)
+    bus.publish({
+      channel: `card:${cardId}`,
+      type: 'ask',
+      source: 'mcp',
+      payload: { cardId, question: args.question, options: args.options ?? [] }
+    })
     return `Input requested from canvas operator: "${args.question}"`
+  }
+
+  // ── Bus tools (universal) ────────────────────────────────────────────────
+
+  if (name === 'update_progress') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'progress',
+      source: 'mcp',
+      payload: { status: args.status, percent: args.percent, detail: args.detail }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Progress updated on ${args.channel}: ${args.status}`
+  }
+
+  if (name === 'log_activity') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'activity',
+      source: 'mcp',
+      payload: { message: args.message, level: args.level ?? 'info' }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Activity logged on ${args.channel}: ${args.message}`
+  }
+
+  if (name === 'create_task') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'task',
+      source: 'mcp',
+      payload: { title: args.title, description: args.description, status: args.status ?? 'pending', action: 'create' }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Task created on ${args.channel}: ${args.title}`
+  }
+
+  if (name === 'update_task') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'task',
+      source: 'mcp',
+      payload: { task_id: args.task_id, status: args.status, title: args.title, detail: args.detail, action: 'update' }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Task ${args.task_id} updated on ${args.channel}: ${args.status}`
+  }
+
+  if (name === 'notify') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'notification',
+      source: 'mcp',
+      payload: { title: args.title, message: args.message, level: args.level ?? 'info' }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Notification sent on ${args.channel}: ${args.message}`
+  }
+
+  if (name === 'ask') {
+    const evt = bus.publish({
+      channel: args.channel as string,
+      type: 'ask',
+      source: 'mcp',
+      payload: { question: args.question, options: args.options ?? [] }
+    })
+    sendToRenderer('bus:event', evt)
+    return `Question asked on ${args.channel}: "${args.question}"`
   }
 
   return 'Unknown tool'
@@ -285,7 +468,7 @@ function handleMCP(req: MCPRequest): unknown {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'collaborator-kanban', version: '1.0.0' }
+        serverInfo: { name: 'collaborator', version: '1.0.0' }
       }
     }
   }

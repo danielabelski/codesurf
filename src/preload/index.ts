@@ -1,5 +1,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+function channelMatches(pattern: string, channel: string): boolean {
+  if (pattern === '*') return true
+  if (pattern.endsWith(':*')) return channel.startsWith(pattern.slice(0, -1))
+  return pattern === channel
+}
+
 // Expose IPC bridges to the renderer
 contextBridge.exposeInMainWorld('electron', {
   // Workspace operations
@@ -131,5 +137,32 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeAllListeners('mcp:inject')
     },
     inject: (cardId: string, message: string) => ipcRenderer.invoke('terminal:write', cardId, message + '\r')
+  },
+
+  // Event bus
+  bus: {
+    publish: (channel: string, type: string, source: string, payload: Record<string, unknown>) =>
+      ipcRenderer.invoke('bus:publish', channel, type, source, payload),
+    subscribe: (channel: string, subscriberId: string, callback: (event: any) => void) => {
+      ipcRenderer.invoke('bus:subscribe', channel, subscriberId)
+      const handler = (_: any, evt: any) => {
+        if (evt.channel === channel || channelMatches(channel, evt.channel)) callback(evt)
+      }
+      ipcRenderer.on('bus:event', handler)
+      return () => {
+        ipcRenderer.removeListener('bus:event', handler)
+        ipcRenderer.invoke('bus:unsubscribeAll', subscriberId)
+      }
+    },
+    unsubscribeAll: (subscriberId: string) => ipcRenderer.invoke('bus:unsubscribeAll', subscriberId),
+    history: (channel: string, limit?: number) => ipcRenderer.invoke('bus:history', channel, limit),
+    channelInfo: (channel: string) => ipcRenderer.invoke('bus:channelInfo', channel),
+    unreadCount: (channel: string, subscriberId: string) => ipcRenderer.invoke('bus:unreadCount', channel, subscriberId),
+    markRead: (channel: string, subscriberId: string) => ipcRenderer.invoke('bus:markRead', channel, subscriberId),
+    onEvent: (callback: (event: any) => void) => {
+      const handler = (_: any, evt: any) => callback(evt)
+      ipcRenderer.on('bus:event', handler)
+      return () => ipcRenderer.removeListener('bus:event', handler)
+    }
   }
 })

@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { existsSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { bus } from '../event-bus'
 
 function ensureNodePtySpawnHelperExecutable(): void {
   const candidates = [
@@ -64,6 +65,25 @@ interface PtyInstance {
 }
 
 const terminals = new Map<string, PtyInstance>()
+const terminalBuffers = new Map<string, { data: string; timer: ReturnType<typeof setTimeout> | undefined }>()
+const TERMINAL_BUS_DEBOUNCE = 800 // ms
+
+function flushTerminalToBus(tileId: string): void {
+  const buf = terminalBuffers.get(tileId)
+  if (!buf || !buf.data) return
+  const data = buf.data
+  buf.data = ''
+  // Strip ANSI for the bus event
+  const clean = data.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim()
+  if (!clean) return
+  const truncated = clean.length > 200 ? clean.slice(-200) : clean
+  bus.publish({
+    channel: `tile:${tileId}`,
+    type: 'activity',
+    source: `terminal:${tileId}`,
+    payload: { output: truncated }
+  })
+}
 
 export function registerTerminalIPC(): void {
   ipcMain.handle('terminal:create', (event, tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]) => {
@@ -77,15 +97,37 @@ export function registerTerminalIPC(): void {
     const bin = launchBin || process.env.SHELL || '/bin/zsh'
     const args = launchBin ? (launchArgs ?? []).map(expandHome) : []
 
+    // Check if we should inject MCP config for agent CLIs
+    const agentBins = ['claude', 'codex', 'aider', 'opencode']
+    const isAgent = launchBin && agentBins.some(a => launchBin.includes(a))
+    const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CARD_ID: tileId }
+    if (isAgent) {
+      const mcpConfigPath = join(homedir(), 'clawd-collab', 'mcp-server.json')
+      spawnEnv.COLLABORATOR_MCP_CONFIG = mcpConfigPath
+      bus.publish({
+        channel: `tile:${tileId}`,
+        type: 'system',
+        source: `terminal:${tileId}`,
+        payload: { action: 'agent_launched', agent: launchBin }
+      })
+    }
+
     const term: PtyInstance = pty.spawn(bin, args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
       cwd: workspaceDir,
-      env: { ...process.env, CARD_ID: tileId }
+      env: spawnEnv
     })
 
     terminals.set(tileId, term)
+
+    bus.publish({
+      channel: `tile:${tileId}`,
+      type: 'system',
+      source: `terminal:${tileId}`,
+      payload: { action: 'created', workspaceDir }
+    })
 
     term.onData((data: string) => {
       try {
@@ -94,6 +136,16 @@ export function registerTerminalIPC(): void {
           event.sender.send(`terminal:active:${tileId}`)
         }
       } catch { /* renderer may have been destroyed */ }
+
+      // Accumulate and debounce terminal output to bus
+      let buf = terminalBuffers.get(tileId)
+      if (!buf) {
+        buf = { data: '', timer: undefined }
+        terminalBuffers.set(tileId, buf)
+      }
+      buf.data += data
+      if (buf.timer) clearTimeout(buf.timer)
+      buf.timer = setTimeout(() => flushTerminalToBus(tileId), TERMINAL_BUS_DEBOUNCE)
     })
 
     return { cols: 80, rows: 24 }
@@ -115,5 +167,15 @@ export function registerTerminalIPC(): void {
       try { term.kill() } catch { /* ignore */ }
       terminals.delete(tileId)
     }
+    bus.publish({
+      channel: `tile:${tileId}`,
+      type: 'system',
+      source: `terminal:${tileId}`,
+      payload: { action: 'destroyed' }
+    })
+    // Clean up buffer
+    const buf = terminalBuffers.get(tileId)
+    if (buf?.timer) clearTimeout(buf.timer)
+    terminalBuffers.delete(tileId)
   })
 }

@@ -11,10 +11,21 @@ interface Props {
   children: React.ReactNode
   isSelected?: boolean
   forceExpanded?: boolean // controlled from outside
+  busChannel?: string           // channel this tile subscribes to (default: `tile:${tile.id}`)
+  busUnreadCount?: number       // unread count passed from parent
+  onBusPopupToggle?: () => void // callback when badge is clicked
+  showBusPopup?: boolean        // controlled popup visibility
+  busEvents?: Array<{           // recent events to show in popup
+    id: string
+    type: string
+    timestamp: number
+    source: string
+    payload: Record<string, unknown>
+  }>
 }
 
 const TYPE_LABELS: Record<string, string> = {
-  terminal: 'Terminal', note: 'Note', code: 'Code', image: 'Image', kanban: 'Board', browser: 'Browser'
+  terminal: 'Terminal', note: 'Note', code: 'Code', image: 'Image', kanban: 'Board', browser: 'Browser', chat: 'Chat'
 }
 
 export function fileLabel(tile: TileState): string {
@@ -41,7 +52,8 @@ function ResizeHandle({ dir, onMouseDown }: {
 
 export function TileChrome({
   tile, onClose, onTitlebarMouseDown, onResizeMouseDown, onContextMenu,
-  onExpandChange, children, isSelected, forceExpanded
+  onExpandChange, children, isSelected, forceExpanded,
+  busUnreadCount, onBusPopupToggle, showBusPopup, busEvents
 }: Props): JSX.Element {
   const [localExpanded, setLocalExpanded] = useState(false)
   const expanded = forceExpanded ?? localExpanded
@@ -163,6 +175,30 @@ export function TileChrome({
           {expanded ? '⊡' : '⊞'}
         </button>
 
+        {/* Bus event indicator */}
+        {(busUnreadCount ?? 0) > 0 && (
+          <button
+            data-no-drag=""
+            onClick={e => { e.stopPropagation(); onBusPopupToggle?.() }}
+            onMouseDown={e => e.stopPropagation()}
+            style={{
+              minWidth: 18, height: 18, borderRadius: 9,
+              background: '#4a9eff',
+              border: 'none', cursor: 'pointer',
+              color: '#fff', fontSize: 10, fontWeight: 600,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              padding: '0 5px',
+              marginLeft: 4,
+              transition: 'background 0.1s',
+            }}
+            onMouseEnter={e => (e.currentTarget.style.background = '#5ab0ff')}
+            onMouseLeave={e => (e.currentTarget.style.background = '#4a9eff')}
+            title={`${busUnreadCount} new event${busUnreadCount !== 1 ? 's' : ''}`}
+          >
+            {busUnreadCount! > 99 ? '99+' : busUnreadCount}
+          </button>
+        )}
+
         <button
           data-no-drag=""
           style={{
@@ -190,6 +226,76 @@ export function TileChrome({
       {(['n','s','e','w','ne','nw','se','sw'] as const).map(dir => (
         <ResizeHandle key={dir} dir={dir} onMouseDown={e => onResizeMouseDown(e, dir)} />
       ))}
+
+      {/* Bus event popup */}
+      {showBusPopup && busEvents && (
+        <div
+          data-no-drag=""
+          onMouseDown={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            top: 34, right: 4,
+            width: 300, maxHeight: 280,
+            background: '#1a1a1a',
+            border: '1px solid #333',
+            borderRadius: 8,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+            zIndex: 20,
+            overflow: 'hidden',
+            display: 'flex', flexDirection: 'column',
+          }}
+        >
+          <div style={{
+            padding: '6px 10px',
+            borderBottom: '1px solid #2d2d2d',
+            fontSize: 11, fontWeight: 600, color: '#888',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span>Events</span>
+            <button
+              onClick={e => { e.stopPropagation(); onBusPopupToggle?.() }}
+              style={{
+                background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: 12
+              }}
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+            {busEvents.length === 0 ? (
+              <div style={{ padding: '12px', textAlign: 'center', color: '#555', fontSize: 11 }}>
+                No events yet
+              </div>
+            ) : (
+              busEvents.slice(-30).reverse().map(evt => (
+                <div key={evt.id} style={{
+                  padding: '4px 10px',
+                  borderBottom: '1px solid #1f1f1f',
+                  fontSize: 11,
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                    <span style={{
+                      color: evt.type === 'notification' ? '#ffb432' :
+                             evt.type === 'progress' ? '#4a9eff' :
+                             evt.type === 'task' ? '#66bb6a' :
+                             '#888',
+                      fontWeight: 500,
+                    }}>
+                      {evt.type}
+                    </span>
+                    <span style={{ color: '#555', fontSize: 10 }}>
+                      {new Date(evt.timestamp).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  <div style={{ color: '#aaa' }}>
+                    {(evt.payload as any).message ?? (evt.payload as any).status ?? (evt.payload as any).title ?? JSON.stringify(evt.payload).slice(0, 80)}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

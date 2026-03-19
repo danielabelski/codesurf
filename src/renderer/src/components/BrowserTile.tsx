@@ -167,6 +167,40 @@ const createClusoInjectScript = (jsContent: string, cssContent: string): string 
 `
 
 // ---------------------------------------------------------------------------
+// Bus bridge injection script — lets webview content publish to the EventBus
+// ---------------------------------------------------------------------------
+
+function createBusBridgeScript(tileId: string): string {
+  return `
+    (function() {
+      if (window.__collaboratorBridge) return;
+      window.__collaboratorBridge = true;
+
+      // Allow webview content to send events to the host via console.log transport
+      window.collaborator = {
+        publish: function(type, payload, channel) {
+          console.log(JSON.stringify({
+            __collaborator: true,
+            type: type || 'data',
+            channel: channel || 'tile:${tileId}',
+            payload: payload || {}
+          }));
+        },
+        notify: function(message, level) {
+          this.publish('notification', { message: message, level: level || 'info' });
+        },
+        progress: function(status, percent) {
+          this.publish('progress', { status: status, percent: percent });
+        },
+        log: function(message) {
+          this.publish('activity', { message: message });
+        }
+      };
+    })();
+  `
+}
+
+// ---------------------------------------------------------------------------
 // URL helpers
 // ---------------------------------------------------------------------------
 function isLikelyUrl(value: string): boolean {
@@ -393,6 +427,12 @@ export function BrowserTile({ tileId, initialUrl, width, height, zIndex: _zIndex
       setIsClusoReadyRef.current(false)
       setIsClusoActiveRef.current(false)
       injectCluso()
+      // Inject bus bridge so webview content can publish to the EventBus
+      if (wvRef.current) {
+        wvRef.current
+          .executeJavaScript(createBusBridgeScript(tileId))
+          .catch(err => console.warn('[BrowserTile] Bus bridge injection failed:', err))
+      }
     }
 
     const onFailLoad = () => {
@@ -414,9 +454,30 @@ export function BrowserTile({ tileId, initialUrl, width, height, zIndex: _zIndex
       }
     }
 
-    // ---- cluso console message handler ----------------------------------
+    // ---- console message handler (bus bridge + cluso) -------------------
     const onConsoleMessage = (e: Electron.ConsoleMessageEvent) => {
       const { message } = e
+
+      // Bridge collaborator postMessage to the EventBus
+      if (message.startsWith('{"__collaborator"')) {
+        try {
+          const data = JSON.parse(message) as {
+            __collaborator?: boolean
+            type?: string
+            channel?: string
+            payload?: Record<string, unknown>
+          }
+          if (data.__collaborator) {
+            window.electron?.bus?.publish(
+              data.channel || `tile:${tileId}`,
+              data.type || 'data',
+              `browser:${tileId}`,
+              data.payload || {}
+            )
+          }
+        } catch { /* not valid JSON — ignore */ }
+        return
+      }
 
       if (!message.startsWith('__CLUSO_')) return
 

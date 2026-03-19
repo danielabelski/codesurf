@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import type { AppSettings } from '../../../shared/types'
+import type { AppSettings, FontConfig } from '../../../shared/types'
 import { DEFAULT_SETTINGS, withDefaultSettings } from '../../../shared/types'
-import { Settings, Monitor, Terminal, FolderOpen, Layout, Sliders, Network, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
+import { Settings, Type, Monitor, Terminal, FolderOpen, Layout, Sliders, Network, Plus, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
 
 interface Workspace {
   id: string
@@ -15,9 +15,10 @@ interface Props {
   workspaces?: Workspace[]
 }
 
-type Section = 'canvas' | 'terminal' | 'sidebar' | 'tiles' | 'behaviour' | 'mcp'
+type Section = 'general' | 'canvas' | 'terminal' | 'sidebar' | 'tiles' | 'behaviour' | 'mcp'
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; description: string }[] = [
+  { id: 'general',   label: 'General',   icon: <Type size={15} />,      description: 'App typography — primary, secondary and monospace fonts' },
   { id: 'canvas',    label: 'Canvas',    icon: <Monitor size={15} />,   description: 'Background, grid and snap settings' },
   { id: 'terminal',  label: 'Terminal',  icon: <Terminal size={15} />,  description: 'Font size and family for terminal tiles' },
   { id: 'sidebar',   label: 'Sidebar',   icon: <FolderOpen size={15} />,description: 'File tree sort and ignored folders' },
@@ -114,6 +115,77 @@ function ColorSwatch({ value, onChange }: { value: string; onChange: (v: string)
   )
 }
 
+const SANS_FONTS = [
+  '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif',
+  '"SF Pro Display", "Segoe UI", "Helvetica Neue", sans-serif',
+  '"Helvetica Neue", Helvetica, Arial, sans-serif',
+  '"Inter", "Segoe UI", sans-serif',
+  '"Geist", "SF Pro Text", sans-serif',
+  'system-ui, sans-serif',
+]
+
+const MONO_FONTS = [
+  '"JetBrains Mono", "Menlo", "Monaco", "SF Mono", "Fira Code", monospace',
+  '"Fira Code", "JetBrains Mono", monospace',
+  '"SF Mono", "Menlo", "Monaco", monospace',
+  '"Cascadia Code", "Fira Code", monospace',
+  '"Source Code Pro", "Menlo", monospace',
+  '"Geist Mono", "SF Mono", monospace',
+  'monospace',
+]
+
+function FontSelect({ value, onChange, fonts }: { value: string; onChange: (v: string) => void; fonts: string[] }): JSX.Element {
+  const displayName = (stack: string) => {
+    const first = stack.split(',')[0].trim().replace(/^"|"$/g, '')
+    return first.startsWith('-apple-system') ? 'System Default' : first
+  }
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      style={{
+        width: 200, padding: '5px 10px', fontSize: 12,
+        background: '#222', color: '#ccc',
+        border: '1px solid #333', borderRadius: 8, outline: 'none',
+        fontFamily: value
+      }}
+    >
+      {fonts.map(f => (
+        <option key={f} value={f} style={{ fontFamily: f }}>
+          {displayName(f)}
+        </option>
+      ))}
+      {!fonts.includes(value) && (
+        <option value={value} style={{ fontFamily: value }}>
+          {displayName(value)} (custom)
+        </option>
+      )}
+    </select>
+  )
+}
+
+function FontGroup({ label, font, onChange, fonts }: {
+  label: string
+  font: FontConfig
+  onChange: (f: FontConfig) => void
+  fonts: string[]
+}): JSX.Element {
+  return (
+    <>
+      <SectionLabel label={label} />
+      <SettingRow label="Font family" description="Select from common font stacks">
+        <FontSelect value={font.family} onChange={v => onChange({ ...font, family: v })} fonts={fonts} />
+      </SettingRow>
+      <SettingRow label="Font size" description="Size in pixels">
+        <NumInput value={font.size} min={8} max={32} onChange={v => onChange({ ...font, size: v })} />
+      </SettingRow>
+      <SettingRow label="Line height" description="Line height multiplier">
+        <NumInput value={font.lineHeight} min={1} max={3} step={0.1} onChange={v => onChange({ ...font, lineHeight: v })} />
+      </SettingRow>
+    </>
+  )
+}
+
 // ─── Setting row ──────────────────────────────────────────────────────────────
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -146,7 +218,7 @@ function SectionLabel({ label }: { label: string }): JSX.Element {
 // ─── Main panel ───────────────────────────────────────────────────────────────
 export function SettingsPanel({ onClose, onSettingsChange, workspaces = [] }: Props): JSX.Element {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
-  const [section, setSection] = useState<Section>('canvas')
+  const [section, setSection] = useState<Section>('general')
   const [mcpConfig, setMcpConfig] = useState<MCPConfig | null>(null)
   const [mcpSaved, setMcpSaved] = useState(false)
   const [addingServer, setAddingServer] = useState(false)
@@ -257,6 +329,21 @@ export function SettingsPanel({ onClose, onSettingsChange, workspaces = [] }: Pr
 
   const renderContent = () => {
     switch (section) {
+      case 'general':
+        return (
+          <>
+            <FontGroup label="Primary Font" font={settings.primaryFont} onChange={v => update('primaryFont', v)} fonts={SANS_FONTS} />
+            <FontGroup label="Secondary Font" font={settings.secondaryFont} onChange={v => update('secondaryFont', v)} fonts={SANS_FONTS} />
+            <FontGroup label="Monospace Font" font={settings.monoFont} onChange={v => update('monoFont', v)} fonts={MONO_FONTS} />
+            <div style={{ marginTop: 16, padding: '12px 16px', background: '#0d0d0d', borderRadius: 10, border: '1px solid #1a1a1a' }}>
+              <div style={{ fontSize: 12, color: '#555' }}>
+                <strong style={{ color: '#666' }}>Primary</strong> — headings, labels, and UI text.{' '}
+                <strong style={{ color: '#666' }}>Secondary</strong> — descriptions, metadata, and smaller text.{' '}
+                <strong style={{ color: '#666' }}>Monospace</strong> — code, terminals, and data.
+              </div>
+            </div>
+          </>
+        )
       case 'canvas':
         return (
           <>

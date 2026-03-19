@@ -32,6 +32,7 @@ const LazySettingsPanel = React.lazy(() => import('./components/SettingsPanel').
 const LazyTerminalTile = React.lazy(() => import('./components/TerminalTile').then(m => ({ default: m.TerminalTile })))
 const LazyCodeTile = React.lazy(() => import('./components/CodeTile').then(m => ({ default: m.CodeTile })))
 const LazyNoteTile = React.lazy(() => import('./components/NoteTile').then(m => ({ default: m.NoteTile })))
+const LazyChatTile = React.lazy(() => import('./components/ChatTile').then(m => ({ default: m.ChatTile })))
 const LazyClusoWidgetMount = React.lazy(() => import('./components/ClusoWidgetMount').then(m => ({ default: m.ClusoWidgetMount })))
 
 type DragState =
@@ -1077,6 +1078,16 @@ function App(): JSX.Element {
             }}
           />
         )
+      case 'chat':
+        return (
+          <LazyChatTile
+            tileId={tile.id}
+            workspaceId={workspace?.id ?? ''}
+            workspaceDir={workspace?.path ?? ''}
+            width={tile.width}
+            height={tile.height}
+          />
+        )
       default:
         return null
     }
@@ -1176,6 +1187,7 @@ function App(): JSX.Element {
             onNewTerminal={() => addTile('terminal')}
             onNewKanban={() => addTile('kanban')}
             onNewBrowser={() => addTile('browser')}
+            onNewChat={() => addTile('chat')}
             collapsed={sidebarCollapsed}
             onToggleCollapse={() => setSidebarCollapsed(p => !p)}
           />

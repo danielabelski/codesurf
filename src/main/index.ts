@@ -9,6 +9,7 @@ import { startMCPServer, getMCPPort } from './mcp-server'
 import { registerAgentsIPC } from './ipc/agents'
 import { registerStreamIPC } from './ipc/stream'
 import { registerGitIPC } from './ipc/git'
+import { registerBusIPC } from './ipc/bus'
 // browserTile BrowserView IPC was removed — renderer uses <webview> tag directly
 
 function createWindow(asTab = false): BrowserWindow {
@@ -76,6 +77,7 @@ app.whenReady().then(async () => {
   registerAgentsIPC()
   registerStreamIPC()
   registerGitIPC()
+  registerBusIPC()
   // registerBrowserTileIPC() — removed, renderer uses <webview> tag directly
 
   // Start local MCP server for agent→kanban callbacks

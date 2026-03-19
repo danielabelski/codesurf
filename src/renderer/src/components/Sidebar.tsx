@@ -49,6 +49,7 @@ interface Props {
   onNewTerminal: () => void
   onNewKanban: () => void
   onNewBrowser: () => void
+  onNewChat: () => void
   collapsed: boolean
   onToggleCollapse: () => void
 }
@@ -622,7 +623,7 @@ function FlatEntry({
 }
 
 export function Sidebar({
-  workspace, workspaces, onSwitchWorkspace, onNewWorkspace, onOpenFile, onNewTerminal, onNewKanban, onNewBrowser,
+  workspace, workspaces, onSwitchWorkspace, onNewWorkspace, onOpenFile, onNewTerminal, onNewKanban, onNewBrowser, onNewChat,
   collapsed, onToggleCollapse: _onToggleCollapse
 }: Props): JSX.Element {
   const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([])
@@ -1140,6 +1141,14 @@ export function Sidebar({
           onClick={onNewBrowser}
         >
           Browser
+        </button>
+        <button
+          style={{ width: '100%', padding: '6px 0', borderRadius: 6, border: '1px solid #2d2d2d', background: '#222', color: '#666', fontSize: 12, cursor: 'pointer', fontFamily: 'monospace' }}
+          onMouseEnter={e => (e.currentTarget.style.background = '#2a2a2a')}
+          onMouseLeave={e => (e.currentTarget.style.background = '#222')}
+          onClick={onNewChat}
+        >
+          Chat
         </button>
       </div>
 

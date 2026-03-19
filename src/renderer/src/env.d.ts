@@ -84,6 +84,16 @@ interface ElectronAPI {
     get(): Promise<import('../../shared/types').AppSettings>
     set(settings: import('../../shared/types').AppSettings): Promise<import('../../shared/types').AppSettings>
   }
+  bus: {
+    publish(channel: string, type: string, source: string, payload: Record<string, unknown>): Promise<import('../../shared/types').BusEvent>
+    subscribe(channel: string, subscriberId: string, callback: (event: import('../../shared/types').BusEvent) => void): () => void
+    unsubscribeAll(subscriberId: string): Promise<void>
+    history(channel: string, limit?: number): Promise<import('../../shared/types').BusEvent[]>
+    channelInfo(channel: string): Promise<import('../../shared/types').ChannelInfo>
+    unreadCount(channel: string, subscriberId: string): Promise<number>
+    markRead(channel: string, subscriberId: string): Promise<void>
+    onEvent(callback: (event: import('../../shared/types').BusEvent) => void): () => void
+  }
 }
 
 declare global {
