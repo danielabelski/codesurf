@@ -1605,19 +1605,6 @@ function App(): JSX.Element {
             })}
           </div>
 
-          {/* Zoom indicator */}
-          {viewport.zoom !== 1 && (
-            <div style={{
-              position: 'absolute', bottom: 62, right: 16,
-              background: 'rgba(30,30,30,0.85)', border: '1px solid #3a3a3a',
-              borderRadius: 6, padding: '4px 10px',
-              fontSize: 12, color: '#888',
-              pointerEvents: 'none'
-            }}>
-              {Math.round(viewport.zoom * 100)}%
-            </div>
-          )}
-
           {/* Group button — appears when 2+ tiles are rubber-band selected */}
           {selectedTileIds.size >= 2 && (
             <div
