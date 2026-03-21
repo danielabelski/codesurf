@@ -1230,19 +1230,19 @@ export function Sidebar({
       </div>
 
       <div style={{ borderTop: '1px solid #252525', padding: '8px 12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
           <div
             title="Beta build"
             style={{
-              height: 20,
-              padding: '0 11px',
+              height: 17,
+              padding: '0 9px',
               borderRadius: 999,
               border: '1px solid rgba(255,255,255,0.72)',
               color: 'rgba(255,255,255,0.9)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 500,
               letterSpacing: 0.3,
               textTransform: 'uppercase',
