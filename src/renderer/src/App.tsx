@@ -710,11 +710,9 @@ function App(): JSX.Element {
     // Snapshot positions of all tiles in the same group for co-movement
     const groupSnapshots: { id: string; x: number; y: number }[] = []
     if (tile.groupId) {
-      setTiles(prev => {
-        prev.filter(t => t.groupId === tile.groupId && t.id !== tile.id)
-          .forEach(t => groupSnapshots.push({ id: t.id, x: t.x, y: t.y }))
-        return prev
-      })
+      tilesRef.current
+        .filter(t => t.groupId === tile.groupId && t.id !== tile.id)
+        .forEach(t => groupSnapshots.push({ id: t.id, x: t.x, y: t.y }))
     }
     setDragState({
       type: 'tile',
