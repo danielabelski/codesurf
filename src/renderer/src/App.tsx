@@ -93,6 +93,9 @@ function App(): JSX.Element {
   const [groups, setGroups] = useState<GroupState[]>([])
   const [viewport, setViewport] = useState({ tx: 0, ty: 0, zoom: 1 })
   const prevZoomRef = React.useRef(1)
+  const panVelocityRef = useRef({ vx: 0, vy: 0 })
+  const panLastPos = useRef({ x: 0, y: 0, t: 0 })
+  const panInertiaRaf = useRef<number>(0)
   const [nextZIndex, setNextZIndex] = useState(1)
   const [selectedTileId, setSelectedTileId] = useState<string | null>(null)
   const [selectedTileIds, setSelectedTileIds] = useState<Set<string>>(new Set())
@@ -395,6 +398,9 @@ function App(): JSX.Element {
     e.preventDefault()
     const isPan = e.button === 1 || (e.button === 0 && (e.metaKey || spaceHeld.current))
     if (isPan) {
+      cancelAnimationFrame(panInertiaRaf.current)
+      panVelocityRef.current = { vx: 0, vy: 0 }
+      panLastPos.current = { x: e.clientX, y: e.clientY, t: performance.now() }
       setDragState({ type: 'pan', startX: e.clientX, startY: e.clientY, initTx: viewport.tx, initTy: viewport.ty })
       setSelectedTileId(null)
       return
@@ -542,6 +548,16 @@ function App(): JSX.Element {
       const dy = e.clientY - dragState.startY
 
       if (dragState.type === 'pan') {
+        const now = performance.now()
+        const dt = now - panLastPos.current.t
+        if (dt > 0) {
+          const decay = 0.4
+          panVelocityRef.current = {
+            vx: decay * panVelocityRef.current.vx + (1 - decay) * (e.clientX - panLastPos.current.x) / dt * 16,
+            vy: decay * panVelocityRef.current.vy + (1 - decay) * (e.clientY - panLastPos.current.y) / dt * 16,
+          }
+        }
+        panLastPos.current = { x: e.clientX, y: e.clientY, t: now }
         setViewport(prev => ({ ...prev, tx: dragState.initTx + dx, ty: dragState.initTy + dy }))
       } else if (dragState.type === 'group-resize') {
         const wdx = dx / viewport.zoom
@@ -712,6 +728,21 @@ function App(): JSX.Element {
             setSelectedTileIds(hit)
             return prev
           })
+        }
+      }
+      // Kick off inertia when releasing a pan
+      if (dragState.type === 'pan') {
+        const { vx, vy } = panVelocityRef.current
+        if (Math.abs(vx) > 0.5 || Math.abs(vy) > 0.5) {
+          const friction = 0.92
+          const animate = () => {
+            const v = panVelocityRef.current
+            if (Math.abs(v.vx) < 0.5 && Math.abs(v.vy) < 0.5) return
+            setViewport(prev => ({ ...prev, tx: prev.tx + v.vx, ty: prev.ty + v.vy }))
+            panVelocityRef.current = { vx: v.vx * friction, vy: v.vy * friction }
+            panInertiaRaf.current = requestAnimationFrame(animate)
+          }
+          panInertiaRaf.current = requestAnimationFrame(animate)
         }
       }
       setGuides([])
@@ -1228,32 +1259,40 @@ function App(): JSX.Element {
 
   const fontTokens = React.useMemo(() => settings.fonts, [settings.fonts])
   const translucentBackground = settings.translucentBackground
-  const shellBackground = translucentBackground ? 'transparent' : '#111'
-  const sidebarBackground = '#1a1a1a'
+  const shellBackground = 'transparent'
+  const sidebarBackground = 'transparent'
   const pillBackground = '#252525'
-  const toolbarBackground = '#111'
+  const toolbarBackground = 'transparent'
   const canvasBackground = translucentBackground ? withAlpha(settings.canvasBackground, 0.74) : settings.canvasBackground
 
   return (
     <FontTokenProvider value={fontTokens}>
     <FontProvider value={appFonts}>
-    <div className="w-full h-full flex" style={{ background: shellBackground, color: '#d4d4d4', fontFamily: appFonts.sans, fontSize: appFonts.size }}>
-      {/* Sidebar inset panel — rounded, padded from window edges, traffic lights sit on top */}
+    <div className="w-full h-full" style={{ position: 'relative', color: '#d4d4d4', fontFamily: appFonts.sans, fontSize: appFonts.size }}>
+      {/* Sidebar inset panel — floats over the canvas */}
       <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        bottom: 0,
         padding: '8px 0 8px 8px',
         flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
-        background: toolbarBackground,
+        zIndex: 100,
+        pointerEvents: 'none',
       }}>
         <div style={{
           height: '100%',
-          background: sidebarBackground,
+          background: 'rgba(30,30,30,0.85)',
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
           borderRadius: 10,
           border: sidebarCollapsed ? 'none' : '1px solid rgba(255,255,255,0.12)',
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
+          pointerEvents: 'auto',
         }}>
           {/* Traffic light drag zone — sits inside the sidebar panel */}
           <div
@@ -1324,17 +1363,22 @@ function App(): JSX.Element {
         </div>
       </div>
 
-      {/* Main area — toolbar + canvas */}
-      <div className="flex-1 flex flex-col overflow-hidden" style={{ position: 'relative' }}>
-        {/* Toolbar row — drag region with workspace info + buttons */}
+      {/* Main area — toolbar overlays top, canvas fills entire window */}
+      <div className="absolute inset-0 flex flex-col" style={{ position: 'absolute' }}>
+        {/* Toolbar row — floats over canvas */}
         <div
           className="flex items-center flex-shrink-0"
           style={{
-            height: 52,
+            height: 38,
             // @ts-ignore
             WebkitAppRegion: 'drag',
-            paddingLeft: sidebarCollapsed ? 90 : 16,
-            background: toolbarBackground,
+            paddingLeft: panelLayout
+              ? (sidebarCollapsed ? 84 : 296)
+              : (sidebarCollapsed ? 90 : 16),
+            transition: 'padding-left 0.15s ease',
+            position: 'relative',
+            zIndex: 90,
+            paddingTop: 8,
           }}
         >
           {/* Workspace pill tabs */}
@@ -1428,13 +1472,14 @@ function App(): JSX.Element {
           style={{
             display: panelLayout ? 'none' : 'flex',
             position: 'absolute',
-            left: 8,
+            left: sidebarCollapsed ? 8 : 298,
             top: '50%',
             transform: 'translateY(-50%)',
+            transition: 'left 0.15s ease',
             width: 8,
             height: 40,
-            background: pillBackground,
-            border: '1px solid #333',
+            background: '#555',
+            border: '1px solid #666',
             borderRadius: 9999,
             cursor: 'pointer',
             alignItems: 'center', justifyContent: 'center',
@@ -1443,21 +1488,22 @@ function App(): JSX.Element {
             userSelect: 'none',
             zIndex: 200,
           }}
-          onMouseEnter={e => { e.currentTarget.style.background = pillBackground; e.currentTarget.style.color = '#aaa' }}
-          onMouseLeave={e => { e.currentTarget.style.background = sidebarBackground; e.currentTarget.style.color = '#555' }}
+          onMouseEnter={e => { e.currentTarget.style.background = '#777' }}
+          onMouseLeave={e => { e.currentTarget.style.background = '#555' }}
         >
           {''}
         </div>
 
-        {/* Canvas */}
+        {/* Canvas — fills entire window, sits behind sidebar & toolbar */}
         <div
           ref={canvasRef}
-          className="flex-1 relative overflow-hidden"
+          className="absolute inset-0 overflow-hidden"
           style={{
             background: canvasBackground,
             cursor: isDraggingCanvas ? 'grabbing' : (spaceHeld.current ? 'grab' : 'default'),
             userSelect: 'none',
             WebkitUserSelect: 'none',
+            zIndex: 0,
           } as React.CSSProperties}
           onMouseDown={handleCanvasMouseDown}
           onDoubleClick={handleCanvasDoubleClick}
@@ -1881,8 +1927,17 @@ function App(): JSX.Element {
 
           </div>{/* end canvas content wrapper */}
 
-          {/* Expanded panel layout — VS Code-style tabs + splits */}
+          {/* Expanded panel layout — VS Code-style tabs + splits, inset to avoid sidebar + toolbar */}
           {panelLayout && (
+            <div style={{
+              position: 'absolute',
+              top: 52,
+              left: sidebarCollapsed ? 0 : 288,
+              right: 0,
+              bottom: 0,
+              zIndex: 50,
+              transition: 'left 0.15s ease',
+            }}>
             <Suspense fallback={null}>
               <LazyPanelLayout
                 root={panelLayout}
@@ -1939,6 +1994,7 @@ function App(): JSX.Element {
                 }}
               />
             </Suspense>
+            </div>
           )}
 
           {/* Minimap */}
