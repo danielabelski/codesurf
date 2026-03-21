@@ -102,6 +102,8 @@ function Btn({ label, title, active, loading, onClick }: {
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         width: 29, height: 29, borderRadius: 9,
         border: `1px solid ${active ? 'rgba(90,170,255,0.42)' : '#2d2d2d'}`,
+        // @ts-ignore
+        WebkitAppRegion: 'no-drag',
         background: active
           ? 'linear-gradient(180deg, rgba(74,158,255,0.20) 0%, rgba(74,158,255,0.10) 100%)'
           : 'rgba(30,30,30,0.9)',
@@ -197,6 +199,8 @@ export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onToggleT
         pointerEvents: 'all',
         zIndex: 1000,
         alignItems: 'center',
+        // @ts-ignore
+        WebkitAppRegion: 'no-drag',
       }}
     >
       <button
@@ -207,6 +211,8 @@ export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onToggleT
           height: 29,
           borderRadius: 9,
           background: 'rgba(20,20,20,0.92)',
+          // @ts-ignore
+          WebkitAppRegion: 'no-drag',
           border: '1px solid #2d2d2d',
           cursor: 'pointer',
           display: 'flex',
@@ -238,6 +244,8 @@ export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onToggleT
           gap: 4,
           padding: '4px 6px',
           background: 'rgba(20,20,20,0.92)',
+          // @ts-ignore
+          WebkitAppRegion: 'no-drag',
           border: '1px solid #2d2d2d',
           borderRadius: 8,
           backdropFilter: 'blur(8px)',
@@ -259,6 +267,8 @@ export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onToggleT
             fontSize: 10,
             color: zoom === 1 ? '#4a9eff' : '#888',
             background: 'transparent',
+            // @ts-ignore
+            WebkitAppRegion: 'no-drag',
             border: 'none',
             cursor: 'pointer',
             padding: '4px 5px',

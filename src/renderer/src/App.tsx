@@ -2061,35 +2061,36 @@ function App(): JSX.Element {
             </Suspense>
           )}
 
-          {/* Arrange toolbar */}
-          <Suspense fallback={null}>
-            <LazyArrangeToolbar
-              tiles={tiles}
-              onArrange={(updated, mode) => {
-                if (panelLayout) exitExpandedMode()
-                setCanvasArrangeMode(mode)
-                handleArrange(updated)
-              }}
-              zoom={viewport.zoom}
-              isTabbedView={!!panelLayout}
-              activeCanvasMode={canvasArrangeMode}
-              onToggleTabs={() => {
-                if (panelLayout) exitExpandedMode()
-                else enterTabbedView()
-              }}
-              onZoomToggle={() => {
-                setViewport(prev => {
-                  if (prev.zoom === 1) {
-                    return { ...prev, zoom: prevZoomRef.current !== 1 ? prevZoomRef.current : 1 }
-                  }
-                  prevZoomRef.current = prev.zoom
-                  return { ...prev, zoom: 1 }
-                })
-              }}
-              onOpenSettings={() => setShowSettings(true)}
-            />
-          </Suspense>
         </div>
+
+        {/* Arrange toolbar — render above the titlebar drag layer */}
+        <Suspense fallback={null}>
+          <LazyArrangeToolbar
+            tiles={tiles}
+            onArrange={(updated, mode) => {
+              if (panelLayout) exitExpandedMode()
+              setCanvasArrangeMode(mode)
+              handleArrange(updated)
+            }}
+            zoom={viewport.zoom}
+            isTabbedView={!!panelLayout}
+            activeCanvasMode={canvasArrangeMode}
+            onToggleTabs={() => {
+              if (panelLayout) exitExpandedMode()
+              else enterTabbedView()
+            }}
+            onZoomToggle={() => {
+              setViewport(prev => {
+                if (prev.zoom === 1) {
+                  return { ...prev, zoom: prevZoomRef.current !== 1 ? prevZoomRef.current : 1 }
+                }
+                prevZoomRef.current = prev.zoom
+                return { ...prev, zoom: 1 }
+              })
+            }}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        </Suspense>
       </div>
       {showMCP && (
         <Suspense fallback={null}>
