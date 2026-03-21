@@ -661,7 +661,11 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
   }
 
   return (
-    <div style={{ position: 'absolute', top: 0, right: 8, bottom: 8, left: 8, zIndex: 99990, background: '#1e1e1e', display: 'flex', flexDirection: 'column', borderRadius: 8, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.12)' }}>
+    <div
+      style={{ position: 'absolute', top: 0, right: 8, bottom: 8, left: 8, zIndex: 99990, background: '#1e1e1e', display: 'flex', flexDirection: 'column', borderRadius: 8, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.12)' }}
+      onMouseDown={e => e.stopPropagation()}
+      onWheel={e => e.stopPropagation()}
+    >
       {/* Panel tree */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {renderNode(root)}

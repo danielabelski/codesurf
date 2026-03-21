@@ -527,6 +527,16 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
     return cleanup
   }, [tileId])
 
+  const focusComposer = useCallback(() => {
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      const pos = ta.value.length
+      ta.setSelectionRange(pos, pos)
+    })
+  }, [])
+
   const sendMessage = useCallback(async () => {
     if (!input.trim() || isStreaming) return
 
@@ -544,6 +554,7 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
     setIsStreaming(true)
 
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
+    focusComposer()
 
     window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
       message: `User: ${userMsg.content.slice(0, 100)}`, role: 'user'
@@ -568,14 +579,16 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
         m.id === assistantId ? { ...m, content: `Error: ${err}`, isStreaming: false } : m
       ))
       setIsStreaming(false)
+      focusComposer()
     }
-  }, [input, isStreaming, messages, tileId, provider, model])
+  }, [input, isStreaming, messages, tileId, provider, model, mode, thinking, focusComposer])
 
   const stopStreaming = useCallback(() => {
     window.electron?.chat?.stop?.(tileId)
     setIsStreaming(false)
     setMessages(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
-  }, [tileId])
+    focusComposer()
+  }, [tileId, focusComposer])
 
   const clearConversation = useCallback(() => {
     if (isStreaming) return
@@ -899,7 +912,6 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
           value={input}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
-          disabled={isStreaming}
           placeholder={isDictating ? 'Listening...' : 'Message the agent, tag @files, or use /commands and /skills'}
           rows={1}
           style={{
@@ -908,7 +920,7 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
             border: 'none', padding: '12px 14px 6px 14px',
             fontSize, fontFamily: fontSans, lineHeight: 1.5,
             resize: 'none', outline: 'none', overflow: 'hidden',
-            minHeight: 32, opacity: isStreaming ? 0.5 : 1,
+            minHeight: 32, opacity: 1,
           }}
         />
 
@@ -1065,6 +1077,7 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
           {isStreaming ? (
             <button
               onClick={stopStreaming}
+              onMouseDown={e => e.preventDefault()}
               style={{
                 width: 28, height: 28, minWidth: 28, borderRadius: '50%',
                 background: '#e54d2e', border: 'none',
@@ -1081,6 +1094,7 @@ export function ChatTile({ tileId, workspaceId: _workspaceId, workspaceDir: _wor
           ) : (
             <button
               onClick={sendMessage}
+              onMouseDown={e => e.preventDefault()}
               disabled={!input.trim()}
               style={{
                 width: 28, height: 28, minWidth: 28, borderRadius: '50%',
