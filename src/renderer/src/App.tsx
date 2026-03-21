@@ -241,9 +241,14 @@ function App(): JSX.Element {
   const tilesRef = useRef<TileState[]>(tiles)
   const groupsRef = useRef<GroupState[]>(groups)
 
-  // Keep tilesRef / groupsRef in sync with state
+  const viewportRef = useRef(viewport)
+  const nextZIndexRef = useRef(nextZIndex)
+
+  // Keep tilesRef / groupsRef / viewportRef / nextZIndexRef in sync with state
   tilesRef.current = tiles
   groupsRef.current = groups
+  viewportRef.current = viewport
+  nextZIndexRef.current = nextZIndex
 
   // Context menus
   type CtxMenu = { x: number; y: number; items: MenuItem[] }
@@ -1334,7 +1339,7 @@ function App(): JSX.Element {
         if (workspace) {
           if (saveTimer.current) clearTimeout(saveTimer.current)
           saveTimer.current = setTimeout(() => {
-            const state: CanvasState = { tiles: prev.tiles, groups: prev.groups, viewport: viewport, nextZIndex: nextZIndex }
+            const state: CanvasState = { tiles: prev.tiles, groups: prev.groups, viewport: viewportRef.current, nextZIndex: nextZIndexRef.current }
             window.electron.canvas.save(workspace.id, state)
             skipHistory.current = false
           }, 500)
@@ -1353,7 +1358,7 @@ function App(): JSX.Element {
         if (workspace) {
           if (saveTimer.current) clearTimeout(saveTimer.current)
           saveTimer.current = setTimeout(() => {
-            const state: CanvasState = { tiles: next.tiles, groups: next.groups, viewport: viewport, nextZIndex: nextZIndex }
+            const state: CanvasState = { tiles: next.tiles, groups: next.groups, viewport: viewportRef.current, nextZIndex: nextZIndexRef.current }
             window.electron.canvas.save(workspace.id, state)
             skipHistory.current = false
           }, 500)
