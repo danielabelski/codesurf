@@ -1461,7 +1461,7 @@ function App(): JSX.Element {
                   onClick={() => { if (!isActive) handleSwitchWorkspace(id) }}
                   style={{
                     height: 26, paddingLeft: 12, paddingRight: openWorkspaceIds.length > 1 ? 6 : 12,
-                    borderRadius: 9999,
+                    borderRadius: 8,
                     background: isActive ? 'rgba(255,255,255,0.09)' : 'transparent',
                     border: `1px solid ${isActive ? 'rgba(255,255,255,0.12)' : 'transparent'}`,
                     color: isActive ? '#ccc' : '#555',
@@ -1501,7 +1501,7 @@ function App(): JSX.Element {
                   if (next) { setOpenWorkspaceIds(prev => [...prev, next.id]); handleSwitchWorkspace(next.id) }
                 }}
                 style={{
-                  width: 26, height: 26, borderRadius: 9999,
+                  width: 26, height: 26, borderRadius: 8,
                   background: 'transparent', border: '1px solid transparent',
                   cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   color: '#555', transition: 'all 0.1s',
