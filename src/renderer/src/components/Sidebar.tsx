@@ -53,6 +53,9 @@ interface Props {
   onNewBrowser: () => void
   onNewChat: () => void
   collapsed: boolean
+  width: number
+  onWidthChange: (width: number) => void
+  onResizeStateChange?: (resizing: boolean) => void
   onToggleCollapse: () => void
 }
 
@@ -644,7 +647,7 @@ function FlatEntry({
 
 export function Sidebar({
   workspace, workspaces, onSwitchWorkspace, onNewWorkspace, onOpenFolder, onOpenFile, onNewTerminal, onNewKanban, onNewBrowser, onNewChat,
-  collapsed, onToggleCollapse: _onToggleCollapse
+  collapsed, width, onWidthChange, onResizeStateChange, onToggleCollapse: _onToggleCollapse
 }: Props): JSX.Element {
   const fonts = useAppFonts()
   const [treeEntries, setTreeEntries] = useState<TreeEntry[]>([])
@@ -652,7 +655,8 @@ export function Sidebar({
   const [viewMode, setViewMode] = useState<ViewMode>('tree')
   const [search, setSearch] = useState('')
   const [gitStatus, setGitStatus] = useState<Record<string, GitStatus>>({})
-  const [width, setWidth] = useState(280)
+  const widthRef = useRef(width)
+  useEffect(() => { widthRef.current = width }, [width])
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
   const [wsDropdownOpen, setWsDropdownOpen] = useState(false)
   const [newWsInput, setNewWsInput] = useState(false)
@@ -772,16 +776,20 @@ export function Sidebar({
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!resizing.current) return
-      setWidth(Math.max(200, Math.min(520, startWidth.current + e.clientX - startX.current)))
+      onWidthChange(Math.max(200, Math.min(520, startWidth.current + e.clientX - startX.current)))
     }
-    const onUp = () => { resizing.current = false }
+    const onUp = () => {
+      if (!resizing.current) return
+      resizing.current = false
+      onResizeStateChange?.(false)
+    }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     return () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [])
+  }, [onResizeStateChange, onWidthChange])
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -1176,7 +1184,13 @@ export function Sidebar({
 
       <div
         style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 3, cursor: 'col-resize' }}
-        onMouseDown={e => { resizing.current = true; startX.current = e.clientX; startWidth.current = width; e.preventDefault() }}
+        onMouseDown={e => {
+          resizing.current = true
+          startX.current = e.clientX
+          startWidth.current = widthRef.current
+          onResizeStateChange?.(true)
+          e.preventDefault()
+        }}
         onMouseEnter={e => (e.currentTarget.style.background = '#4a9eff44')}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       />

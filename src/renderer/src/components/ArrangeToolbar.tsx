@@ -5,15 +5,17 @@ import type { TileState } from '../../../shared/types'
 
 const GAP = 40
 
+type Mode = 'grid' | 'column' | 'row'
+
 interface Props {
   tiles: TileState[]
-  onArrange: (updated: TileState[]) => void
+  onArrange: (updated: TileState[], mode: Mode) => void
   zoom: number
   onZoomToggle: () => void
-  onEnterTabs: () => void
+  onToggleTabs: () => void
+  isTabbedView?: boolean
+  activeCanvasMode?: Mode | null
 }
-
-type Mode = 'grid' | 'column' | 'row'
 
 // ─── Grid layout ────────────────────────────────────────────────────────────
 function arrangeGrid(tiles: TileState[]): TileState[] {
@@ -96,14 +98,21 @@ function Btn({ label, title, active, loading, onClick }: {
       disabled={loading}
       style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        width: 32, height: 32, borderRadius: 6,
-        border: `1px solid ${active ? '#4a9eff55' : '#2d2d2d'}`,
-        background: active ? 'rgba(74,158,255,0.12)' : 'rgba(30,30,30,0.9)',
-        color: active ? '#4a9eff' : '#888',
+        width: 32, height: 32, borderRadius: 10,
+        border: `1px solid ${active ? 'rgba(90,170,255,0.42)' : '#2d2d2d'}`,
+        background: active
+          ? 'linear-gradient(180deg, rgba(74,158,255,0.20) 0%, rgba(74,158,255,0.10) 100%)'
+          : 'rgba(30,30,30,0.9)',
+        color: active ? '#d7ebff' : '#888',
         cursor: loading ? 'wait' : 'pointer',
-        transition: 'all 0.1s',
+        transition: 'all 0.12s ease',
         fontSize: 14,
         opacity: loading ? 0.5 : 1,
+        boxShadow: active
+          ? 'inset 0 1px 0 rgba(255,255,255,0.14), 0 8px 24px rgba(24,84,160,0.28), 0 0 0 1px rgba(74,158,255,0.08)'
+          : 'none',
+        backdropFilter: active ? 'blur(14px)' : 'none',
+        WebkitBackdropFilter: active ? 'blur(14px)' : 'none',
       }}
       onMouseEnter={e => {
         if (!active) {
@@ -158,20 +167,18 @@ const RowIcon = () => (
 )
 
 // ─── Toolbar ─────────────────────────────────────────────────────────────────
-export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onEnterTabs }: Props): JSX.Element {
+export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onToggleTabs, isTabbedView = false, activeCanvasMode = null }: Props): JSX.Element {
   const [loading, setLoading] = useState(false)
-  const [lastMode, setLastMode] = useState<Mode | null>(null)
 
   const run = (mode: Mode) => {
     if (tiles.length < 2 || loading) return
     setLoading(true)
-    setLastMode(mode)
     try {
       let updated: TileState[]
       if (mode === 'grid') updated = arrangeGrid(tiles)
       else if (mode === 'column') updated = arrangeColumn(tiles)
       else updated = arrangeRow(tiles)
-      onArrange(updated)
+      onArrange(updated, mode)
     } finally {
       setLoading(false)
     }
@@ -196,11 +203,11 @@ export function ArrangeToolbar({ tiles, onArrange, zoom, onZoomToggle, onEnterTa
         alignItems: 'center',
       }}
     >
-      <Btn label={<TabsIcon />}   title="Tabbed view"              active={false}                loading={false}   onClick={onEnterTabs} />
+      <Btn label={<TabsIcon />}   title="Tabbed view"              active={isTabbedView}                              loading={false}   onClick={onToggleTabs} />
       <div style={{ width: 1, height: 20, background: '#2d2d2d', margin: '0 2px' }} />
-      <Btn label={<GridIcon />}   title="Grid layout (auto-wrap)"  active={lastMode === 'grid'}   loading={loading} onClick={() => run('grid')} />
-      <Btn label={<ColumnIcon />} title="Stack in column"          active={lastMode === 'column'} loading={loading} onClick={() => run('column')} />
-      <Btn label={<RowIcon />}    title="Arrange in row"           active={lastMode === 'row'}    loading={loading} onClick={() => run('row')} />
+      <Btn label={<GridIcon />}   title="Grid layout (auto-wrap)"  active={!isTabbedView && activeCanvasMode === 'grid'}   loading={loading} onClick={() => run('grid')} />
+      <Btn label={<ColumnIcon />} title="Stack in column"          active={!isTabbedView && activeCanvasMode === 'column'} loading={loading} onClick={() => run('column')} />
+      <Btn label={<RowIcon />}    title="Arrange in row"           active={!isTabbedView && activeCanvasMode === 'row'}    loading={loading} onClick={() => run('row')} />
       <div style={{ width: 1, height: 20, background: '#2d2d2d', margin: '0 2px' }} />
       <button
         onClick={onZoomToggle}

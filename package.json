@@ -1,6 +1,6 @@
 {
   "name": "contex",
-  "version": "2.2.1",
+  "version": "0.1.0",
   "description": "Infinite canvas workspace for AI agents",
   "main": "dist-electron/main/index.js",
   "scripts": {

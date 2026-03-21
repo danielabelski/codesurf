@@ -114,6 +114,10 @@ function App(): JSX.Element {
   const expandedTileIdRef = useRef<string | null>(null)
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(280)
+  const [sidebarResizing, setSidebarResizing] = useState(false)
+  const [sidebarPillVisible, setSidebarPillVisible] = useState(true)
+  const [canvasArrangeMode, setCanvasArrangeMode] = useState<'grid' | 'column' | 'row' | null>(null)
   const [guides, setGuides] = useState<{ x?: number; y?: number }[]>([])
 
   useEffect(() => { panelLayoutRef.current = panelLayout }, [panelLayout])
@@ -1304,6 +1308,16 @@ function App(): JSX.Element {
     monoSize: settings.fonts?.mono?.size ?? settings.monoFont?.size ?? 13,
   }), [settings.fonts, settings.primaryFont, settings.monoFont])
 
+  useEffect(() => {
+    if (sidebarResizing) {
+      setSidebarPillVisible(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => setSidebarPillVisible(true), 90)
+    return () => window.clearTimeout(timer)
+  }, [sidebarResizing])
+
   const fontTokens = React.useMemo(() => settings.fonts, [settings.fonts])
   const translucentBackground = settings.translucentBackground
   const shellBackground = 'transparent'
@@ -1311,6 +1325,9 @@ function App(): JSX.Element {
   const pillBackground = '#252525'
   const toolbarBackground = 'transparent'
   const canvasBackground = translucentBackground ? withAlpha(settings.canvasBackground, 0.74) : settings.canvasBackground
+  const openSidebarToolbarPadding = sidebarWidth + 16
+  const openSidebarPillLeft = sidebarWidth + 18
+  const expandedLayoutLeft = sidebarWidth + 8
 
   return (
     <FontTokenProvider value={fontTokens}>
@@ -1403,6 +1420,9 @@ function App(): JSX.Element {
                 onNewBrowser={() => addTile('browser')}
                 onNewChat={() => addTile('chat')}
                 collapsed={sidebarCollapsed}
+                width={sidebarWidth}
+                onWidthChange={setSidebarWidth}
+                onResizeStateChange={setSidebarResizing}
                 onToggleCollapse={() => setSidebarCollapsed(p => !p)}
               />
             </Suspense>
@@ -1420,8 +1440,8 @@ function App(): JSX.Element {
             // @ts-ignore
             WebkitAppRegion: 'drag',
             paddingLeft: panelLayout
-              ? (sidebarCollapsed ? 84 : 296)
-              : (sidebarCollapsed ? 90 : 296),
+              ? (sidebarCollapsed ? 84 : openSidebarToolbarPadding)
+              : (sidebarCollapsed ? 90 : openSidebarToolbarPadding),
             transition: 'padding-left 0.15s ease',
             position: 'relative',
             zIndex: 90,
@@ -1517,12 +1537,12 @@ function App(): JSX.Element {
         <div
           onClick={() => setSidebarCollapsed(p => !p)}
           style={{
-            display: panelLayout ? 'none' : 'flex',
+            display: panelLayout || !sidebarPillVisible ? 'none' : 'flex',
             position: 'absolute',
-            left: sidebarCollapsed ? 8 : 298,
+            left: sidebarCollapsed ? 8 : openSidebarPillLeft,
             top: '50%',
             transform: 'translateY(-50%)',
-            transition: 'left 0.15s ease',
+            transition: 'opacity 0.12s ease',
             width: 8,
             height: 40,
             background: '#555',
@@ -1978,8 +1998,8 @@ function App(): JSX.Element {
           {panelLayout && (
             <div style={{
               position: 'absolute',
-              top: 52,
-              left: sidebarCollapsed ? 0 : 288,
+              top: 44,
+              left: sidebarCollapsed ? 0 : expandedLayoutLeft,
               right: 0,
               bottom: 0,
               zIndex: 50,
@@ -2063,9 +2083,18 @@ function App(): JSX.Element {
           <Suspense fallback={null}>
             <LazyArrangeToolbar
               tiles={tiles}
-              onArrange={handleArrange}
+              onArrange={(updated, mode) => {
+                if (panelLayout) exitExpandedMode()
+                setCanvasArrangeMode(mode)
+                handleArrange(updated)
+              }}
               zoom={viewport.zoom}
-              onEnterTabs={enterTabbedView}
+              isTabbedView={!!panelLayout}
+              activeCanvasMode={canvasArrangeMode}
+              onToggleTabs={() => {
+                if (panelLayout) exitExpandedMode()
+                else enterTabbedView()
+              }}
               onZoomToggle={() => {
                 setViewport(prev => {
                   if (prev.zoom === 1) {

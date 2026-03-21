@@ -10,6 +10,56 @@ const MOBILE_UA =
 
 const CLUSO_EMBED_JS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.js'
 const CLUSO_EMBED_CSS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.css'
+const WEBVIEW_DISPOSE_DELAY_MS = 15000
+
+type WebviewRegistryEntry = {
+  webview: Electron.WebviewTag
+  disposeTimer: ReturnType<typeof setTimeout> | null
+}
+
+const webviewRegistry = new Map<string, WebviewRegistryEntry>()
+
+function createManagedWebview(tileId: string, src: string): Electron.WebviewTag {
+  const webview = document.createElement('webview') as Electron.WebviewTag
+  webview.setAttribute('allowpopups', '')
+  webview.setAttribute('partition', `persist:browser-tile-${tileId}`)
+  webview.setAttribute('useragent', DESKTOP_UA)
+  webview.setAttribute('webpreferences', 'devTools=yes')
+  webview.style.cssText =
+    'position: absolute; top: 0; left: 0; right: 0; bottom: 0; border: none; background: #111;'
+  webview.src = src
+  return webview
+}
+
+function getOrCreateManagedWebview(tileId: string, src: string): { webview: Electron.WebviewTag; reused: boolean } {
+  const existing = webviewRegistry.get(tileId)
+  if (existing) {
+    if (existing.disposeTimer !== null) {
+      clearTimeout(existing.disposeTimer)
+      existing.disposeTimer = null
+    }
+    return { webview: existing.webview, reused: true }
+  }
+
+  const webview = createManagedWebview(tileId, src)
+  webviewRegistry.set(tileId, { webview, disposeTimer: null })
+  return { webview, reused: false }
+}
+
+function scheduleManagedWebviewDisposal(tileId: string, webview: Electron.WebviewTag): void {
+  const entry = webviewRegistry.get(tileId)
+  if (!entry || entry.webview !== webview) return
+
+  if (entry.disposeTimer !== null) clearTimeout(entry.disposeTimer)
+
+  entry.disposeTimer = window.setTimeout(() => {
+    const latest = webviewRegistry.get(tileId)
+    if (!latest || latest.webview !== webview) return
+    if (webview.parentElement) webview.parentElement.removeChild(webview)
+    try { webview.remove() } catch { /* ignore */ }
+    webviewRegistry.delete(tileId)
+  }, WEBVIEW_DISPOSE_DELAY_MS)
+}
 
 // ---------------------------------------------------------------------------
 // Cluso injection script — ported verbatim from 1code agent-preview.tsx
@@ -440,39 +490,35 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     loadAssets()
   }, [injectCluso])
 
-  // Create the webview imperatively (1code pattern)
+  // Create or reattach the webview imperatively so page state survives view switches
   useEffect(() => {
     const container = wvContainerRef.current
     if (!container) return
 
-    const webview = document.createElement('webview') as Electron.WebviewTag
-    webview.setAttribute('allowpopups', '')
-    webview.setAttribute('partition', `persist:browser-tile-${tileId}`)
-    webview.setAttribute('useragent', DESKTOP_UA)
-    webview.setAttribute('webpreferences', 'devTools=yes')
-    // Absolute inset: bypasses Chromium percentage-height bugs and CSS transform clipping
-    webview.style.cssText =
-      'position: absolute; top: 0; left: 0; right: 0; bottom: 0; border: none; background: #111;'
+    const { webview, reused } = getOrCreateManagedWebview(tileId, initialSrc.current)
 
     wvRef.current = webview
-    wvReadyRef.current = false
+    wvReadyRef.current = reused
 
     // ---- helpers --------------------------------------------------------
     const updateNav = () => {
       if (!wvRef.current) return
       const url = wvRef.current.getURL()
-      setCurrentUrlRef.current(url)
+      if (url) {
+        setCurrentUrlRef.current(url)
+        if (document.activeElement !== inputRef.current) {
+          setAddressBarRef.current(url)
+        }
+      }
       setCanGoBackRef.current(wvRef.current.canGoBack())
       setCanGoForwardRef.current(wvRef.current.canGoForward())
       setIsLoadingRef.current(wvRef.current.isLoading())
-      if (document.activeElement !== inputRef.current) {
-        setAddressBarRef.current(url)
-      }
     }
 
     // ---- event handlers -------------------------------------------------
     const onDomReady = () => {
       wvReadyRef.current = true
+      updateNav()
     }
 
     const onStartLoad = () => setIsLoadingRef.current(true)
@@ -502,8 +548,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     const onNavigateInPage = () => updateNav()
 
     const onNewWindow = (e: Event) => {
-      // 'new-window' is deprecated but still fires at runtime; the event
-      // carries a `url` property that isn't in the base Event type.
       const ev = e as Event & { url?: string }
       if (ev.url) {
         e.preventDefault()
@@ -515,7 +559,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     const onConsoleMessage = (e: Electron.ConsoleMessageEvent) => {
       const { message } = e
 
-      // Bridge contex postMessage to the EventBus
       if (message.startsWith('{"__contex"')) {
         try {
           const data = JSON.parse(message) as {
@@ -579,8 +622,14 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     webview.addEventListener('new-window', onNewWindow)
     webview.addEventListener('console-message', onConsoleMessage)
 
-    webview.src = initialSrc.current
-    container.appendChild(webview)
+    if (!container.contains(webview)) container.appendChild(webview)
+
+    if (reused) {
+      queueMicrotask(() => {
+        if (!mountedRef.current || wvRef.current !== webview) return
+        updateNav()
+      })
+    }
 
     return () => {
       webview.removeEventListener('dom-ready', onDomReady)
@@ -594,6 +643,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       if (container.contains(webview)) container.removeChild(webview)
       wvRef.current = null
       wvReadyRef.current = false
+      scheduleManagedWebviewDisposal(tileId, webview)
     }
   }, [tileId, injectCluso])
 
