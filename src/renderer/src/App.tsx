@@ -1513,24 +1513,6 @@ function App(): JSX.Element {
               </button>
             )}
           </div>
-          {/* Settings — pinned top-right */}
-          <button
-            title="Settings"
-            onClick={() => setShowSettings(true)}
-            style={{
-              marginLeft: 'auto', marginRight: 16,
-              width: 30, height: 30, borderRadius: 6,
-              background: 'transparent', border: '1px solid transparent',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#555', transition: 'all 0.1s',
-              // @ts-ignore
-              WebkitAppRegion: 'no-drag',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = '#ccc'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#555'; e.currentTarget.style.borderColor = 'transparent' }}
-          >
-            <Icon glyph="⚙" size={18} />
-          </button>
         </div>
 
         {/* Sidebar collapse pill — floats over the canvas left edge; hidden in tab mode */}
@@ -2104,6 +2086,7 @@ function App(): JSX.Element {
                   return { ...prev, zoom: 1 }
                 })
               }}
+              onOpenSettings={() => setShowSettings(true)}
             />
           </Suspense>
         </div>
