@@ -1,8 +1,10 @@
 import { ipcMain } from 'electron'
-import { exec } from 'child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'util'
+import { existsSync, statSync } from 'fs'
+import path from 'node:path'
 
-const execAsync = promisify(exec)
+const execFileAsync = promisify(execFile)
 
 export type GitStatus = 'modified' | 'untracked' | 'added' | 'deleted' | 'renamed' | 'conflict'
 
@@ -29,12 +31,18 @@ function parseStatus(code: string): GitStatus {
 export function registerGitIPC(): void {
   ipcMain.handle('git:status', async (_, dirPath: string): Promise<GitStatusResult> => {
     try {
-      // Find repo root
-      const { stdout: rootRaw } = await execAsync('git rev-parse --show-toplevel', { cwd: dirPath })
+      // SEC-05: Validate that dirPath exists and is a directory
+      const resolvedDir = path.resolve(dirPath)
+      if (!existsSync(resolvedDir) || !statSync(resolvedDir).isDirectory()) {
+        return { isRepo: false, root: dirPath, files: [] }
+      }
+
+      // Find repo root — use execFile to avoid shell interpretation
+      const { stdout: rootRaw } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd: resolvedDir })
       const root = rootRaw.trim()
 
       // Get porcelain status
-      const { stdout } = await execAsync('git status --porcelain -u', { cwd: root })
+      const { stdout } = await execFileAsync('git', ['status', '--porcelain', '-u'], { cwd: root })
       const files: GitFileStatus[] = []
 
       for (const line of stdout.split('\n')) {
