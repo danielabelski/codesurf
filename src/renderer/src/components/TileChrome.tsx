@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import type { TileState, SkillConfig, ContextItem, ActivityStatus } from '../../../shared/types'
 import { buildObjective } from '../utils/objectiveBuilder'
+import { ContextMenu, type MenuItem } from './ContextMenu'
 
 // --- Drawer data types ---
 
@@ -206,107 +207,184 @@ function ActionBtn({ title, color, onClick, children }: {
   )
 }
 
+function parseTaskLines(input: string): string[] {
+  return input
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .map(line => line.replace(/^(?:[-*+•]\s*)?(?:\[(?: |x|X)\]\s*)?(?:\d+[.)]\s*)?/, '').trim())
+    .filter(Boolean)
+}
+
 function TasksPanel({ tasks, onUpdateTask, onDeleteTask, onAddTask }: {
   tasks: TaskItem[]
   onUpdateTask: (id: string, status: TaskItem['status']) => void
   onDeleteTask: (id: string) => void
   onAddTask: (title: string) => void
 }): JSX.Element {
-  const [adding, setAdding] = useState(false)
   const [newTitle, setNewTitle] = useState('')
-  const inputRef = useRef<HTMLInputElement>(null)
+  const [taskMenu, setTaskMenu] = useState<{ x: number; y: number; task: TaskItem } | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => { if (adding) inputRef.current?.focus() }, [adding])
+  const focusComposer = () => {
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
 
   const submit = () => {
     const t = newTitle.trim()
-    if (t) { onAddTask(t); setNewTitle(''); setAdding(false) }
+    if (!t) return
+    onAddTask(t)
+    setNewTitle('')
+    focusComposer()
+  }
+
+  const addMany = (titles: string[]) => {
+    const cleaned = titles.map(title => title.trim()).filter(Boolean)
+    if (cleaned.length === 0) return
+    cleaned.forEach(onAddTask)
+    setNewTitle('')
+    focusComposer()
   }
 
   const pending = tasks.filter(t => t.status !== 'done')
   const done = tasks.filter(t => t.status === 'done')
 
+  const toggleTaskDone = (task: TaskItem) => {
+    onUpdateTask(task.id, task.status === 'done' ? 'pending' : 'done')
+  }
+
+  const menuItemsForTask = (task: TaskItem): MenuItem[] => {
+    const statusItems: Array<{ status: TaskItem['status']; label: string }> = [
+      { status: 'pending', label: 'Mark as Pending' },
+      { status: 'in-progress', label: 'Mark as In Progress' },
+      { status: 'paused', label: 'Mark as Paused' },
+      { status: 'done', label: 'Mark as Done' },
+    ]
+
+    return [
+      ...statusItems
+        .filter(item => item.status !== task.status)
+        .map(item => ({ label: item.label, action: () => onUpdateTask(task.id, item.status) })),
+      { label: '', action: () => {}, divider: true },
+      { label: 'Delete Task', danger: true, action: () => onDeleteTask(task.id) },
+    ]
+  }
+
+  const renderTaskRow = (task: TaskItem, doneRow = false): JSX.Element => (
+    <div
+      key={task.id}
+      style={{ padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}
+      onContextMenu={e => {
+        e.preventDefault()
+        e.stopPropagation()
+        setTaskMenu({ x: e.clientX, y: e.clientY, task })
+      }}
+    >
+      <button
+        title={task.status === 'done' ? 'Mark pending' : 'Mark done'}
+        onClick={() => toggleTaskDone(task)}
+        style={{
+          flexShrink: 0,
+          width: 18,
+          height: 18,
+          border: 'none',
+          background: 'transparent',
+          padding: 0,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        <TaskStatusIcon status={task.status} />
+      </button>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: doneRow ? '#555' : '#bbb', textDecoration: doneRow ? 'line-through' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {task.title}
+      </div>
+      <div style={{ display: 'flex', gap: 1, flexShrink: 0 }}>
+        {task.status === 'paused' ? (
+          <ActionBtn title="Resume" color="#4a9eff" onClick={() => onUpdateTask(task.id, 'in-progress')}>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2l5 3-5 3z" fill="currentColor"/></svg>
+          </ActionBtn>
+        ) : !doneRow ? (
+          <ActionBtn title="Pause" color="#ffb432" onClick={() => onUpdateTask(task.id, 'paused')}>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2v6M7 2v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+          </ActionBtn>
+        ) : null}
+        {!doneRow && (
+          <ActionBtn title="Done" color="#666" onClick={() => onUpdateTask(task.id, 'done')}>
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5.5l2.5 2.5 3.5-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </ActionBtn>
+        )}
+        <ActionBtn title="Delete" color={doneRow ? '#444' : '#666'} onClick={() => onDeleteTask(task.id)}>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
+        </ActionBtn>
+      </div>
+    </div>
+  )
+
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0', display: 'flex', flexDirection: 'column' }}>
-      {/* Add task bar */}
+      {/* Task composer */}
       <div style={{ padding: '4px 8px', flexShrink: 0 }}>
-        {adding ? (
-          <div style={{ display: 'flex', gap: 4 }}>
-            <input
-              ref={inputRef}
-              value={newTitle}
-              onChange={e => setNewTitle(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') { setAdding(false); setNewTitle('') } }}
-              placeholder="Task title..."
-              style={{
-                flex: 1, height: 24, borderRadius: 4, border: '1px solid #333',
-                background: '#1a1a1a', color: '#ccc', fontSize: 11, padding: '0 6px',
-                outline: 'none',
-              }}
-              onFocus={e => (e.currentTarget.style.borderColor = '#4a9eff')}
-              onBlur={e => (e.currentTarget.style.borderColor = '#333')}
-            />
-            <button onClick={submit} style={{
-              height: 24, borderRadius: 4, border: 'none', background: '#4a9eff', color: '#fff',
-              fontSize: 10, fontWeight: 600, padding: '0 8px', cursor: 'pointer',
-            }}>Add</button>
-          </div>
-        ) : (
-          <button onClick={() => setAdding(true)} style={{
-            width: '100%', height: 24, borderRadius: 4, border: '1px dashed #333',
-            background: 'transparent', color: '#555', fontSize: 10, cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+        <textarea
+          ref={inputRef}
+          value={newTitle}
+          onChange={e => setNewTitle(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              submit()
+            }
+            if (e.key === 'Escape') setNewTitle('')
           }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = '#555'; e.currentTarget.style.color = '#888' }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = '#333'; e.currentTarget.style.color = '#555' }}
-          >
-            <span style={{ fontSize: 13, lineHeight: 1 }}>+</span> Add task
-          </button>
+          onPaste={e => {
+            const pasted = e.clipboardData.getData('text/plain')
+            const lines = parseTaskLines(pasted)
+            if (lines.length <= 1) return
+            e.preventDefault()
+            addMany(lines)
+          }}
+          placeholder="Add a task..."
+          rows={2}
+          style={{
+            width: '100%', borderRadius: 6, border: '0.5px solid rgba(255,255,255,0.12)', background: 'rgba(26,26,26,0.88)',
+            color: '#ccc', fontSize: 11, padding: '4px 8px', resize: 'vertical', outline: 'none', minHeight: 36, maxHeight: 100, lineHeight: 1.4,
+          }}
+          onFocus={e => {
+            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.18)'
+            e.currentTarget.style.boxShadow = '0 0 0 0.5px rgba(74,158,255,0.18)'
+          }}
+          onBlur={e => {
+            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)'
+            e.currentTarget.style.boxShadow = 'none'
+          }}
+        />
+        {newTitle.trim() && (
+          <button onClick={submit} style={{
+            marginTop: 3, height: 20, borderRadius: 4, border: 'none', background: '#4a9eff',
+            color: '#fff', fontSize: 10, fontWeight: 600, padding: '0 8px', cursor: 'pointer',
+          }}>Add task</button>
         )}
       </div>
 
-      {tasks.length === 0 && !adding ? (
+      {tasks.length === 0 ? (
         <EmptyState text="No tasks yet" />
       ) : (
         <>
-          {pending.map(t => (
-            <div key={t.id} style={{ padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ flexShrink: 0 }}><TaskStatusIcon status={t.status} /></div>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: '#bbb', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {t.title}
-              </div>
-              <div style={{ display: 'flex', gap: 1, flexShrink: 0 }}>
-                {t.status === 'paused' ? (
-                  <ActionBtn title="Resume" color="#4a9eff" onClick={() => onUpdateTask(t.id, 'in-progress')}>
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2l5 3-5 3z" fill="currentColor"/></svg>
-                  </ActionBtn>
-                ) : t.status !== 'done' ? (
-                  <ActionBtn title="Pause" color="#ffb432" onClick={() => onUpdateTask(t.id, 'paused')}>
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2v6M7 2v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
-                  </ActionBtn>
-                ) : null}
-                <ActionBtn title="Done" color="#3fb950" onClick={() => onUpdateTask(t.id, 'done')}>
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 5.5l2.5 2.5 3.5-4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                </ActionBtn>
-                <ActionBtn title="Delete" color="#666" onClick={() => onDeleteTask(t.id)}>
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
-                </ActionBtn>
-              </div>
-            </div>
-          ))}
+          {pending.map(task => renderTaskRow(task))}
           {done.length > 0 && pending.length > 0 && <Divider />}
-          {done.map(t => (
-            <div key={t.id} style={{ padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <div style={{ flexShrink: 0 }}><TaskStatusIcon status={t.status} /></div>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 11, color: '#555', textDecoration: 'line-through', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {t.title}
-              </div>
-              <ActionBtn title="Delete" color="#444" onClick={() => onDeleteTask(t.id)}>
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 2.5l5 5M7.5 2.5l-5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
-              </ActionBtn>
-            </div>
-          ))}
+          {done.map(task => renderTaskRow(task, true))}
         </>
+      )}
+      {taskMenu && (
+        <ContextMenu
+          x={taskMenu.x}
+          y={taskMenu.y}
+          items={menuItemsForTask(taskMenu.task)}
+          onClose={() => setTaskMenu(null)}
+        />
       )}
     </div>
   )

@@ -514,6 +514,14 @@ function App(): JSX.Element {
     }
     const updated = tiles.filter(t => t.id !== id)
     setTiles(updated)
+    setPanelLayout(prev => {
+      if (!prev) return prev
+      const next = removeTileFromTree(prev, id)
+      if (next) return next
+      const emptyLeaf = createLeaf([])
+      setActivePanelId(emptyLeaf.id)
+      return emptyLeaf
+    })
     if (selectedTileId === id) setSelectedTileId(null)
     saveCanvas(updated, viewport, nextZIndex)
   }, [tiles, workspace?.id, workspace?.path, selectedTileId, viewport, nextZIndex, saveCanvas])
@@ -1856,13 +1864,15 @@ function App(): JSX.Element {
                         setTimeout(() => ghost.remove(), 0)
                       }}
                       style={{
-                        position: 'absolute', top: -28, left: 0,
+                        position: 'absolute', top: -28 / viewport.zoom, left: 0,
                         display: 'flex', gap: 6, alignItems: 'center',
                         userSelect: 'none', pointerEvents: 'all',
                         background: 'none',
                         border: 'none',
                         padding: '3px 0',
                         cursor: 'grab',
+                        transform: `scale(${1 / viewport.zoom})`,
+                        transformOrigin: 'left bottom',
                       }}>
                       {/* Color swatch / picker */}
                       <div style={{ position: 'relative' }}>
@@ -2132,17 +2142,7 @@ function App(): JSX.Element {
                   )
                 }}
                 onLayoutChange={setPanelLayout}
-                onCloseTab={(tileId) => {
-                  const updated = removeTileFromTree(panelLayout, tileId)
-                  if (!updated) {
-                    // Last tab closed — show empty state with fresh leaf
-                    const emptyLeaf = createLeaf([])
-                    setPanelLayout(emptyLeaf)
-                    setActivePanelId(emptyLeaf.id)
-                  } else {
-                    setPanelLayout(updated)
-                  }
-                }}
+                onCloseTab={closeTile}
                 onAddTile={(type) => addTile(type as TileState['type'])}
                 onExit={exitExpandedMode}
                 activePanelId={activePanelId}
