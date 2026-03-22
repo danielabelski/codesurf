@@ -12,6 +12,7 @@ const MOBILE_UA =
 const CLUSO_EMBED_JS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.js'
 const CLUSO_EMBED_CSS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.css'
 const WEBVIEW_DISPOSE_DELAY_MS = 15000
+const WEBVIEW_PARKING_ROOT_ID = 'browser-tile-webview-parking-root'
 
 type WebviewRegistryEntry = {
   webview: Electron.WebviewTag
@@ -19,6 +20,28 @@ type WebviewRegistryEntry = {
 }
 
 const webviewRegistry = new Map<string, WebviewRegistryEntry>()
+
+function getWebviewParkingRoot(): HTMLDivElement {
+  let root = document.getElementById(WEBVIEW_PARKING_ROOT_ID) as HTMLDivElement | null
+  if (root) return root
+
+  root = document.createElement('div')
+  root.id = WEBVIEW_PARKING_ROOT_ID
+  root.style.cssText = [
+    'position:fixed',
+    'left:-10000px',
+    'top:-10000px',
+    'width:1px',
+    'height:1px',
+    'overflow:hidden',
+    'opacity:0',
+    'pointer-events:none',
+    'visibility:hidden',
+    'z-index:-1',
+  ].join(';')
+  document.body.appendChild(root)
+  return root
+}
 
 function createManagedWebview(tileId: string, src: string): Electron.WebviewTag {
   const webview = document.createElement('webview') as Electron.WebviewTag
@@ -391,7 +414,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const inputRef = useRef<HTMLInputElement>(null)
   const mountedRef = useRef(true)
   const clusoToggleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const stateLoadedRef = useRef(false)
 
   // Track component mount state for async cleanup
   useEffect(() => {
@@ -418,9 +440,10 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const [isClusoActive, setIsClusoActive] = useState(false)
   const [isToolbarHovered, setIsToolbarHovered] = useState(false)
   const [isAddressFocused, setIsAddressFocused] = useState(false)
+  const [stateLoaded, setStateLoaded] = useState(!workspaceId)
 
   useEffect(() => {
-    stateLoadedRef.current = false
+    setStateLoaded(!workspaceId)
     if (!workspaceId) return
     window.electron.canvas.loadTileState(workspaceId, tileId).then((saved: any) => {
       if (!saved) return
@@ -438,12 +461,12 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       if (typeof saved.isLoading === 'boolean') setIsLoading(saved.isLoading)
       if (saved.mode === 'desktop' || saved.mode === 'mobile') setMode(saved.mode)
     }).catch(() => {}).finally(() => {
-      stateLoadedRef.current = true
+      setStateLoaded(true)
     })
   }, [workspaceId, tileId])
 
   useEffect(() => {
-    if (!workspaceId || !stateLoadedRef.current) return
+    if (!workspaceId || !stateLoaded) return
     window.electron.canvas.saveTileState(workspaceId, tileId, {
       addressBar,
       currentUrl,
@@ -515,6 +538,10 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
   // Create or reattach the webview imperatively so page state survives view switches
   useEffect(() => {
+    // Wait for persisted tile state before creating a fresh webview, otherwise
+    // remounts can briefly boot to HOMEPAGE and then navigate back.
+    if (!stateLoaded) return
+
     const container = wvContainerRef.current
     if (!container) return
 
@@ -663,12 +690,17 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       webview.removeEventListener('did-navigate-in-page', onNavigateInPage)
       webview.removeEventListener('new-window', onNewWindow)
       webview.removeEventListener('console-message', onConsoleMessage)
-      if (container.contains(webview)) container.removeChild(webview)
+      // Park the live webview offscreen instead of detaching it outright.
+      // Reusing a parked guest preserves page/session state across view switches.
+      const parkingRoot = getWebviewParkingRoot()
+      if (container.contains(webview) || webview.parentElement !== parkingRoot) {
+        parkingRoot.appendChild(webview)
+      }
       wvRef.current = null
       wvReadyRef.current = false
       scheduleManagedWebviewDisposal(tileId, webview)
     }
-  }, [tileId, injectCluso])
+  }, [tileId, injectCluso, stateLoaded])
 
   // Navigate when initialUrl prop changes (e.g. opened from sidebar)
   const prevInitialUrl = useRef(startUrl)
