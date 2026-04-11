@@ -1,5 +1,8 @@
 # CodeSurf
 
+https://github.com/user-attachments/assets/f847a2b1-3212-423f-91bb-a96923710f39
+
+
 Infinite canvas workspace for AI agents and developers.
 
 CodeSurf is an Electron desktop app where terminals, chats, code editors, browsers, notes, boards, and extensions live together on a spatial canvas. It also supports tabbed/layout views, local agent tooling, and project-scoped workspace state.
