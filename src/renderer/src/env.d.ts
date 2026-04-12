@@ -258,6 +258,7 @@ interface ElectronAPI {
       rss: number
       heapTotal: number
       heapUsed: number
+      heapLimit: number
       external: number
       arrayBuffers: number
       bus: { channels: number; events: number; subscriptions: number; readCursors: number }

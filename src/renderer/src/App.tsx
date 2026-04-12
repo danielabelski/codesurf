@@ -15,6 +15,7 @@ import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf,
 import { getDroppedPaths, toFileUrl, isMediaFile } from './utils/dnd'
 import { disposeChatTileRuntimeState } from './components/chatTileRuntimeState'
 import { disposeMediaTile } from './components/MediaTile'
+import { MainStatusBar } from './components/MainStatusBar'
 
 const LazyPanelLayout = React.lazy(() => import('./components/PanelLayout').then(m => ({ default: m.PanelLayout })))
 
@@ -3343,6 +3344,7 @@ function App(): JSX.Element {
   const sidebarToFooterGap = 8
   const sidebarPanelBottomOffset = sidebarFooterBottom + sidebarFooterHeight - 12
   const mainPanelBottomInset = sidebarPanelBottomOffset
+  const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
   const openSidebarPillLeft = sidebarWidth - 4
   const expandedLayoutLeft = sidebarWidth + 2
@@ -3566,6 +3568,21 @@ function App(): JSX.Element {
             onAddExtensionTile={(type) => addTile(type as TileType)}
           />
         </Suspense>
+      </div>
+
+      <div
+        style={{
+          position: 'absolute',
+          left: mainStatusBarLeft,
+          right: 0,
+          bottom: 0,
+          height: sidebarFooterHeight,
+          zIndex: 95,
+          pointerEvents: 'none',
+          transition: 'left 0.15s ease',
+        }}
+      >
+        <MainStatusBar />
       </div>
 
       {/* Main area — toolbar overlays top, canvas fills entire window */}

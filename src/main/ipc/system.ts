@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
+import { getHeapStatistics } from 'v8'
 import { bus } from '../event-bus'
 import { removeTile as removePeerTile } from '../peer-state'
 
@@ -52,10 +53,12 @@ export function registerSystemIPC(): void {
 
   ipcMain.handle('system:memStats', () => {
     const mem = process.memoryUsage()
+    const heap = getHeapStatistics()
     return {
       rss: mem.rss,
       heapTotal: mem.heapTotal,
       heapUsed: mem.heapUsed,
+      heapLimit: heap.heap_size_limit,
       external: mem.external,
       arrayBuffers: mem.arrayBuffers,
       bus: bus.getStats(),
