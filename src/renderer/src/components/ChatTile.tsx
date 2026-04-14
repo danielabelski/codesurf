@@ -287,6 +287,7 @@ const CHAT_TRIM_NOTICE_PREFIX = '[CodeSurf memory guard]'
 const CHAT_COMPOSER_MAX_WIDTH = CHAT_MESSAGE_MAX_WIDTH
 const CHAT_COMPOSER_MIN_WIDTH = 400
 const CHAT_COMPOSER_SIDE_INSET = 24
+const CHAT_COMPOSER_DRAWER_INDENT = 20
 const CHAT_COMPOSER_MIN_HEIGHT = 105
 const CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT = 56
 const CHAT_AUTO_SCROLL_THRESHOLD = 48
@@ -1007,8 +1008,8 @@ function ensureShimmerStyle(): void {
     .chat-md ul:last-child, .chat-md ol:last-child { margin-bottom: 0; }
     .chat-md li { line-height: 1.55; margin-bottom: 2px; }
     .chat-md li > p { margin: 0; }
-    .chat-md a { color: inherit; opacity: 0.85; text-decoration: underline; text-underline-offset: 2px; }
-    .chat-md a:hover { opacity: 1; }
+    .chat-md a { color: ${theme.accent.base}; opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
+    .chat-md a:hover { color: ${theme.accent.hover}; opacity: 1; }
     .chat-md blockquote {
       border-left: 3px solid rgba(128,128,128,0.4); padding-left: 10px;
       margin: 6px 0; opacity: 0.85;
@@ -2621,34 +2622,39 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             zIndex: 5,
             display: 'flex',
             alignItems: 'center',
-            gap: 6,
-            padding: '7px 10px',
-            borderRadius: 999,
+            justifyContent: 'center',
+            width: 52,
+            height: 52,
+            minWidth: 52,
+            padding: 0,
+            borderRadius: '50%',
             border: `1px solid ${theme.chat.divider}`,
             background: theme.surface.panelElevated,
             color: theme.text.secondary,
             cursor: 'pointer',
             boxShadow: theme.shadow.panel,
-            fontSize: 12,
-            fontFamily: fontSans,
+            backdropFilter: 'blur(10px)',
+            ...NON_SELECTABLE_UI_STYLE,
           }}
         >
-          <ArrowDown size={13} />
-          <span>Latest</span>
+          <ArrowDown size={26} strokeWidth={1.9} />
         </button>
       )}
 
       {latestChangeSummary && (
         <div style={{
           flexShrink: 0,
-          width: `min(calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px), ${CHAT_COMPOSER_MAX_WIDTH}px)`,
-          minWidth: `min(${CHAT_COMPOSER_MIN_WIDTH}px, calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px))`,
-          margin: '0 auto 0 auto',
+          width: `min(calc(100% - ${(CHAT_COMPOSER_SIDE_INSET + CHAT_COMPOSER_DRAWER_INDENT) * 2}px), ${CHAT_COMPOSER_MAX_WIDTH - CHAT_COMPOSER_DRAWER_INDENT * 2}px)`,
+          minWidth: `min(${Math.max(260, CHAT_COMPOSER_MIN_WIDTH - CHAT_COMPOSER_DRAWER_INDENT * 2)}px, calc(100% - ${(CHAT_COMPOSER_SIDE_INSET + CHAT_COMPOSER_DRAWER_INDENT) * 2}px))`,
+          margin: '0 auto -1px auto',
           border: `1px solid ${theme.chat.divider}`,
-          borderRadius: queuedTurns.length > 0 ? '18px 18px 0 0' : 18,
-          background: theme.surface.panelElevated,
+          borderBottom: 'none',
+          borderRadius: '18px 18px 0 0',
+          background: theme.surface.panelMuted,
           boxShadow: theme.shadow.panel,
           overflow: 'hidden',
+          position: 'relative',
+          zIndex: 1,
         }}>
           <div style={{
             display: 'flex',
