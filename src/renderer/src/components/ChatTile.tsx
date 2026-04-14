@@ -17,6 +17,7 @@ import {
   FileText, Paperclip, Plus, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
+import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
@@ -453,17 +454,27 @@ function getRelativeMentionPath(filePath: string, workspaceDir: string): string 
 // --- Markdown renderer for chat bubbles (Streamdown) ------------------------------
 
 // Post-render patch: fix Streamdown's code block layout via direct DOM style overrides
-function usePatchCodeBlocks(ref: React.RefObject<HTMLDivElement | null>) {
+function usePatchCodeBlocks(
+  ref: React.RefObject<HTMLDivElement | null>,
+  theme: ReturnType<typeof useTheme>,
+  fonts: ReturnType<typeof useAppFonts>,
+) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    const shellBackground = theme.mode === 'light' ? theme.surface.panel : theme.surface.panelMuted
+    const bodyBackground = theme.mode === 'light' ? theme.surface.panelMuted : '#0f131d'
+    const headerBackground = theme.mode === 'light' ? theme.surface.panel : '#171c28'
+    const headerColor = theme.text.muted
     const blocks = el.querySelectorAll<HTMLElement>('[data-streamdown="code-block"]')
     blocks.forEach(block => {
       // Container: kill padding, gap, margin
-      block.style.cssText = 'padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid rgba(128,128,128,0.2)!important;max-width:100%!important'
+      block.style.cssText = `padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;max-width:100%!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
       // Header: compact
       const header = block.querySelector<HTMLElement>('[data-streamdown="code-block-header"]')
-      if (header) header.style.cssText = 'height:22px!important;font-size:10px!important;padding:0 8px!important'
+      if (header) {
+        header.style.cssText = `height:22px!important;font-size:10px!important;padding:0 8px!important;background:${headerBackground}!important;color:${headerColor}!important;border-bottom:1px solid ${theme.border.subtle}!important`
+      }
       // Actions wrapper (parent of code-block-actions): same line as header
       const actionsWrapper = block.querySelector<HTMLElement>('[data-streamdown="code-block-actions"]')?.parentElement
       if (actionsWrapper) actionsWrapper.style.cssText = 'margin-top:-22px!important;height:22px!important;pointer-events:none;position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:flex-end'
@@ -481,20 +492,25 @@ function usePatchCodeBlocks(ref: React.RefObject<HTMLDivElement | null>) {
       }
       // Code body: compact
       const body = block.querySelector<HTMLElement>('[data-streamdown="code-block-body"]')
-      if (body) body.style.cssText = 'padding:8px 10px!important;font-size:11px!important;border:none!important;border-radius:0!important'
+      if (body) {
+        body.style.cssText = `padding:8px 10px!important;font-size:${Math.max(12, fonts.size - 1)}px!important;border:none!important;border-radius:0!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
+      }
       // Pre: small font, preserve whitespace
       block.querySelectorAll<HTMLElement>('pre').forEach(pre => {
-        pre.style.cssText += ';font-size:11px!important;line-height:1.4!important;margin:0!important;border-radius:0!important;white-space:pre!important'
+        pre.style.cssText += `;font-size:${Math.max(12, fonts.size - 1)}px!important;line-height:1.5!important;margin:0!important;border-radius:0!important;white-space:pre!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
       })
       block.querySelectorAll<HTMLElement>('pre > code').forEach(code => {
-        code.style.cssText += ';font-size:11px!important;line-height:1.4!important'
+        code.style.cssText += `;font-size:${Math.max(12, fonts.size - 1)}px!important;line-height:1.5!important;color:${theme.text.primary}!important;background:transparent!important`
         // Each direct child span is a line — must be display:block
         code.querySelectorAll<HTMLElement>(':scope > span').forEach(line => {
           line.style.display = 'block'
         })
       })
+      block.querySelectorAll<HTMLElement>('button').forEach(button => {
+        button.style.color = headerColor
+      })
     })
-  })
+  }, [fonts.size, ref, theme.border.default, theme.border.subtle, theme.mode, theme.surface.panel, theme.surface.panelMuted, theme.text.muted, theme.text.primary])
 }
 
 function normalizeChatMarkdownText(text: string): string {
@@ -528,8 +544,10 @@ const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
   className?: string
 }) => {
   const ref = useRef<HTMLDivElement>(null)
+  const theme = useTheme()
+  const fonts = useAppFonts()
   const normalizedText = useMemo(() => normalizeChatMarkdownText(text), [text])
-  usePatchCodeBlocks(ref)
+  usePatchCodeBlocks(ref, theme, fonts)
 
   useEffect(() => {
     const root = ref.current
@@ -559,7 +577,11 @@ const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
         className={`chat-md ${className ?? ''}`}
         plugins={streamdownPlugins}
         mode={isStreaming ? 'streaming' : 'static'}
-        shikiTheme={['github-light', 'github-dark']}
+        shikiTheme={
+          theme.mode === 'light'
+            ? ['github-light', 'github-light']
+            : ['github-dark', 'github-dark']
+        }
         controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}
         lineNumbers={false}
       >

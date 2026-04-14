@@ -12,7 +12,7 @@ import { DEFAULT_THEME_ID, getThemeById, resolveEffectiveThemeId, registerCustom
 import type { PanelNode } from './components/PanelLayout'
 import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf, closeOthersInLeaf, closeToRightInLeaf, findLeafById } from './components/PanelLayout'
 import { getDroppedPaths, toFileUrl, isMediaFile } from './utils/dnd'
-import { disposeChatTileRuntimeState } from './components/chatTileRuntimeState'
+import { disposeChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
 import { disposeMediaTile } from './components/MediaTile'
 import { MainStatusBar } from './components/MainStatusBar'
 
@@ -682,6 +682,7 @@ function App(): JSX.Element {
   const [showMinimap, setShowMinimap] = useState(false)
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [panelLayout, setPanelLayout] = useState<PanelNode | null>(null)
+  const [chatReloadTokens, setChatReloadTokens] = useState<Record<string, number>>({})
   const [extActionsVersion, setExtActionsVersion] = useState(0)
   const [activePanelId, setActivePanelId] = useState<string | null>(null)
   const [expandLayoutGroupId, setExpandLayoutGroupId] = useState<string | null>(null)
@@ -704,6 +705,10 @@ function App(): JSX.Element {
   const [discoveryPulses, setDiscoveryPulses] = useState<DiscoveryPulse[]>([])
   const [showAgentSetup, setShowAgentSetup] = useState(false)
   const { extensionTiles, extensionEntries } = useExtensions(workspace?.path ?? null)
+  const extensionNameById = useMemo(
+    () => new Map((extensionEntries ?? []).map(entry => [entry.id, entry.name] as const)),
+    [extensionEntries],
+  )
   const [systemPrefersDark, setSystemPrefersDark] = useState(true)
   const [brandWordmarkIndex, setBrandWordmarkIndex] = useState(1)
   const [brandPaletteIndex, setBrandPaletteIndex] = useState(0)
@@ -751,6 +756,18 @@ function App(): JSX.Element {
   useEffect(() => {
     if (selectedWorkspaceFilePath) setSidebarSelectedPath(selectedWorkspaceFilePath)
   }, [selectedWorkspaceFilePath])
+
+  const getPanelTileLabel = useCallback((tileId: string): string => {
+    const tile = tiles.find(ti => ti.id === tileId)
+    if (!tile) return 'Unknown'
+    if (tile.label?.trim()) return tile.label.trim()
+    if (tile.filePath) return tile.filePath.replace(/\\/g, '/').split('/').pop() ?? tile.filePath
+    if (tile.type.startsWith('ext:')) {
+      const friendlyName = extensionNameById.get(tile.type.slice(4))
+      if (friendlyName?.trim()) return friendlyName.trim()
+    }
+    return tile.type.charAt(0).toUpperCase() + tile.type.slice(1)
+  }, [extensionNameById, tiles])
 
   // Workspace pill tabs — open workspace ids within this window
   const [openWorkspaceIds, setOpenWorkspaceIds] = useState<string[]>([])
@@ -3868,12 +3885,7 @@ function App(): JSX.Element {
                         <Suspense fallback={null}>
                           <LazyPanelLayout
                             root={layout}
-                            getTileLabel={(tileId) => {
-                              const t = tiles.find(ti => ti.id === tileId)
-                              if (!t) return 'Unknown'
-                              return t.filePath?.replace(/\\/g, '/').split('/').pop()
-                                ?? t.type.charAt(0).toUpperCase() + t.type.slice(1)
-                            }}
+                            getTileLabel={getPanelTileLabel}
                             renderTile={(tileId) => {
                               const t = tiles.find(ti => ti.id === tileId)
                               if (!t) return null
@@ -4554,12 +4566,7 @@ function App(): JSX.Element {
               <LazyPanelLayout
                 root={panelLayout}
                 insetBottom={mainPanelBottomInset}
-                getTileLabel={(tileId) => {
-                  const t = tiles.find(ti => ti.id === tileId)
-                  if (!t) return 'Unknown'
-                  return t.filePath?.replace(/\\/g, '/').split('/').pop()
-                    ?? t.type.charAt(0).toUpperCase() + t.type.slice(1)
-                }}
+                getTileLabel={getPanelTileLabel}
                 renderTile={(tileId) => {
                   const t = tiles.find(ti => ti.id === tileId)
                   if (!t) return null

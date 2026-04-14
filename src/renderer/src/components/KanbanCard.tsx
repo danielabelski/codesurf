@@ -151,15 +151,24 @@ function ensureShimmerStyle(): void {
   document.head.appendChild(style)
 }
 
-function usePatchCodeBlocks(ref: React.RefObject<HTMLDivElement | null>) {
+function usePatchCodeBlocks(
+  ref: React.RefObject<HTMLDivElement | null>,
+  theme: ReturnType<typeof useTheme>,
+  fonts: ReturnType<typeof useAppFonts>,
+) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    const shellBackground = theme.mode === 'light' ? theme.surface.panel : theme.surface.panelMuted
+    const bodyBackground = theme.mode === 'light' ? theme.surface.panelMuted : '#0f131d'
+    const headerBackground = theme.mode === 'light' ? theme.surface.panel : '#171c28'
     const blocks = el.querySelectorAll<HTMLElement>('[data-streamdown="code-block"]')
     blocks.forEach(block => {
-      block.style.cssText = 'padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid rgba(128,128,128,0.2)!important;max-width:100%!important'
+      block.style.cssText = `padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;max-width:100%!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
       const header = block.querySelector<HTMLElement>('[data-streamdown="code-block-header"]')
-      if (header) header.style.cssText = 'height:22px!important;font-size:10px!important;padding:0 8px!important'
+      if (header) {
+        header.style.cssText = `height:22px!important;font-size:10px!important;padding:0 8px!important;background:${headerBackground}!important;color:${theme.text.muted}!important;border-bottom:1px solid ${theme.border.subtle}!important`
+      }
       const actionsWrapper = block.querySelector<HTMLElement>('[data-streamdown="code-block-actions"]')?.parentElement
       if (actionsWrapper) actionsWrapper.style.cssText = 'margin-top:-22px!important;height:22px!important;pointer-events:none;position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:flex-end'
       const actions = block.querySelector<HTMLElement>('[data-streamdown="code-block-actions"]')
@@ -168,17 +177,25 @@ function usePatchCodeBlocks(ref: React.RefObject<HTMLDivElement | null>) {
         actions.querySelectorAll<HTMLElement>('button').forEach(btn => { btn.style.cssText = 'width:18px!important;height:18px!important;padding:1px!important' })
       }
       const body = block.querySelector<HTMLElement>('[data-streamdown="code-block-body"]')
-      if (body) body.style.cssText = 'padding:8px 10px!important;font-size:11px!important;border:none!important;border-radius:0!important'
+      if (body) body.style.cssText = `padding:8px 10px!important;font-size:${Math.max(12, fonts.size - 1)}px!important;border:none!important;border-radius:0!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
+      block.querySelectorAll<HTMLElement>('pre').forEach(pre => {
+        pre.style.cssText += `;font-size:${Math.max(12, fonts.size - 1)}px!important;line-height:1.5!important;margin:0!important;border-radius:0!important;white-space:pre!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
+      })
+      block.querySelectorAll<HTMLElement>('pre > code').forEach(code => {
+        code.style.cssText += `;font-size:${Math.max(12, fonts.size - 1)}px!important;line-height:1.5!important;color:${theme.text.primary}!important;background:transparent!important`
+      })
     })
-  })
+  }, [fonts.size, ref, theme.border.default, theme.border.subtle, theme.mode, theme.surface.panel, theme.surface.panelMuted, theme.text.muted, theme.text.primary])
 }
 
 function ChatMarkdown({ text, isStreaming }: { text: string; isStreaming?: boolean }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
-  usePatchCodeBlocks(ref)
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  usePatchCodeBlocks(ref, theme, fonts)
   return (
     <div ref={ref}>
-      <Streamdown className="chat-md" plugins={streamdownPlugins} mode={isStreaming ? 'streaming' : 'static'} shikiTheme={['github-light', 'github-dark']} controls={{ code: { copy: true, download: false }, table: false, mermaid: false }} lineNumbers={false}>
+      <Streamdown className="chat-md" plugins={streamdownPlugins} mode={isStreaming ? 'streaming' : 'static'} shikiTheme={theme.mode === 'light' ? ['github-light', 'github-light'] : ['github-dark', 'github-dark']} controls={{ code: { copy: true, download: false }, table: false, mermaid: false }} lineNumbers={false}>
         {text}
       </Streamdown>
     </div>

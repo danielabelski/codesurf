@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Pin, Settings } from 'lucide-react'
 import type { Workspace, TileState } from '../../../shared/types'
-import { getCurvierBlockRadius } from '../../../shared/types'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { ContextMenu, type MenuItem } from './ContextMenu'
@@ -75,6 +74,70 @@ function SectionHeader({ label, collapsed, onToggle, extra }: { label: string; c
       </div>
       {extra && <div onClick={e => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>{extra}</div>}
     </div>
+  )
+}
+
+function ThreadMenuSectionLabel({ children }: { children: React.ReactNode }): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  return (
+    <div style={{
+      padding: '6px 12px 4px',
+      fontSize: Math.max(11, fonts.secondarySize + 1),
+      fontWeight: 500,
+      color: theme.text.disabled,
+    }}>
+      {children}
+    </div>
+  )
+}
+
+function ThreadMenuItem({
+  icon,
+  label,
+  active = false,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  active?: boolean
+  onClick: () => void
+}): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: '100%',
+        border: 'none',
+        background: hovered ? theme.surface.hover : 'transparent',
+        color: active ? theme.text.primary : theme.text.secondary,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '9px 12px',
+        borderRadius: 8,
+        cursor: 'pointer',
+        fontFamily: fonts.primary,
+        fontSize: Math.max(fonts.size, 14),
+        lineHeight: 1.2,
+        textAlign: 'left',
+      }}
+    >
+      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 18, color: theme.text.muted, flexShrink: 0 }}>
+        {icon}
+      </span>
+      <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
+      <span style={{ width: 14, color: theme.text.secondary, opacity: active ? 1 : 0, flexShrink: 0 }}>
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+          <path d="M3 7.3 5.7 10 11 4.7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
+    </button>
   )
 }
 
@@ -186,6 +249,9 @@ interface SessionProjectGroup {
   sessions: DisplaySessionEntry[]
 }
 
+type ThreadOrganizeMode = 'project' | 'chronological'
+type ThreadSortMode = 'updated' | 'title'
+
 const SESSION_PAGE_SIZE = 10
 
 function sessionMetaText(session: SessionEntry): string {
@@ -209,7 +275,16 @@ function isSubagentSession(session: SessionEntry): boolean {
   return sessionMetaText(session).includes('subagent')
 }
 
-function buildNestedSessionList(sessions: SessionEntry[]): DisplaySessionEntry[] {
+function compareSessions(a: SessionEntry, b: SessionEntry, sortMode: ThreadSortMode): number {
+  if (sortMode === 'title') {
+    const titleCompare = a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+    if (titleCompare !== 0) return titleCompare
+    return b.updatedAt - a.updatedAt
+  }
+  return b.updatedAt - a.updatedAt
+}
+
+function buildNestedSessionList(sessions: SessionEntry[], sortMode: ThreadSortMode): DisplaySessionEntry[] {
   type SessionNode = {
     session: SessionEntry
     children: SessionNode[]
@@ -217,7 +292,7 @@ function buildNestedSessionList(sessions: SessionEntry[]): DisplaySessionEntry[]
     subtreeUpdatedAt: number
   }
 
-  const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+  const sorted = [...sessions].sort((a, b) => compareSessions(a, b, sortMode))
   const nodes = new Map(sorted.map(session => [session.id, {
     session,
     children: [],
@@ -270,14 +345,14 @@ function buildNestedSessionList(sessions: SessionEntry[]): DisplaySessionEntry[]
     for (const child of node.children) {
       latest = Math.max(latest, computeSubtree(child))
     }
-    node.children.sort((a, b) => b.subtreeUpdatedAt - a.subtreeUpdatedAt || b.session.updatedAt - a.session.updatedAt)
+    node.children.sort((a, b) => compareSessions(a.session, b.session, sortMode))
     node.subtreeUpdatedAt = latest
     return latest
   }
 
   const roots = [...nodes.values()].filter(node => !node.parentId)
   for (const root of roots) computeSubtree(root)
-  roots.sort((a, b) => b.subtreeUpdatedAt - a.subtreeUpdatedAt || b.session.updatedAt - a.session.updatedAt)
+  roots.sort((a, b) => compareSessions(a.session, b.session, sortMode))
 
   const flattened: DisplaySessionEntry[] = []
   const walk = (node: SessionNode, depth: number) => {
@@ -287,20 +362,6 @@ function buildNestedSessionList(sessions: SessionEntry[]): DisplaySessionEntry[]
 
   for (const root of roots) walk(root, 0)
   return flattened
-}
-
-// ─── Tile label helper ───────────────────────────────────────────────────────
-
-function tileLabel(tile: TileState): string {
-  if (tile.filePath) {
-    const name = tile.filePath.split('/').pop() ?? tile.filePath
-    return name
-  }
-  const TYPE_LABELS: Record<string, string> = {
-    terminal: 'Terminal', note: 'Note', code: 'Code', image: 'Image',
-    kanban: 'Board', browser: 'Browser', chat: 'Chat', files: 'Files',
-  }
-  return TYPE_LABELS[tile.type] ?? tile.type
 }
 
 // ─── SidebarFooter ──────────────────────────────────────────────────────────
@@ -423,23 +484,42 @@ export function Sidebar({
   const scrollContentRef = useRef<HTMLDivElement>(null)
   useEffect(() => { widthRef.current = width }, [width])
   const [sectionsCollapsed, setSectionsCollapsed] = useState<Record<string, boolean>>({})
-  const [tileCtx, setTileCtx] = useState<{ x: number; y: number; tile: TileState } | null>(null)
   const [sessionCtx, setSessionCtx] = useState<{ x: number; y: number; session: SessionEntry } | null>(null)
-  const [renamingTileId, setRenamingTileId] = useState<string | null>(null)
-  const [renameValue, setRenameValue] = useState('')
   const [sessions, setSessions] = useState<SessionEntry[]>([])
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false)
+  const [threadOrganizeMode, setThreadOrganizeMode] = useState<ThreadOrganizeMode>('project')
+  const [threadSortMode, setThreadSortMode] = useState<ThreadSortMode>('updated')
   const [showCronSessions, setShowCronSessions] = useState(false)
   const [showSubagentSessions, setShowSubagentSessions] = useState(false)
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const deleteConfirmTimerRef = useRef<number | null>(null)
+  const threadMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     return () => {
       if (deleteConfirmTimerRef.current) window.clearTimeout(deleteConfirmTimerRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    if (!threadMenuOpen) return
+    const handlePointerDown = (event: MouseEvent) => {
+      if (threadMenuRef.current && !threadMenuRef.current.contains(event.target as Node)) {
+        setThreadMenuOpen(false)
+      }
+    }
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setThreadMenuOpen(false)
+    }
+    window.addEventListener('mousedown', handlePointerDown)
+    window.addEventListener('keydown', handleEscape)
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown)
+      window.removeEventListener('keydown', handleEscape)
+    }
+  }, [threadMenuOpen])
 
   // Load sessions for current workspace
   useEffect(() => {
@@ -466,33 +546,6 @@ export function Sidebar({
     }
   }, [workspace?.id])
 
-  const BORDER_RADIUS_CYCLE = [12, 0, 16, 24, 32]
-  const getStoredBorderRadius = (radius?: number) => Number.isFinite(radius) ? Math.max(0, Math.round(radius as number)) : 12
-  const cycleBorderRadius = useCallback((tile: TileState) => {
-    const current = getStoredBorderRadius(tile.borderRadius)
-    const currentIndex = BORDER_RADIUS_CYCLE.indexOf(current)
-    const next = currentIndex >= 0
-      ? BORDER_RADIUS_CYCLE[(currentIndex + 1) % BORDER_RADIUS_CYCLE.length]
-      : BORDER_RADIUS_CYCLE[0]
-    onUpdateTile(tile.id, { borderRadius: next })
-  }, [onUpdateTile])
-
-  const tileContextMenuItems = useCallback((tile: TileState): MenuItem[] => {
-    const items: MenuItem[] = [
-      { label: 'Rename', action: () => { setRenamingTileId(tile.id); setRenameValue(tile.label ?? tileLabel(tile)) } },
-      { label: '', action: () => {}, divider: true },
-      { label: tile.hideTitlebar ? 'Show Titlebar' : 'Hide Titlebar', action: () => onUpdateTile(tile.id, { hideTitlebar: !tile.hideTitlebar }) },
-    ]
-    if (tile.type === 'browser') {
-      items.push({ label: tile.hideNavbar ? 'Show Navbar' : 'Hide Navbar', action: () => onUpdateTile(tile.id, { hideNavbar: !tile.hideNavbar }) })
-    }
-    items.push(
-      { label: `Corner Radius: ${getCurvierBlockRadius(tile.borderRadius)}px`, action: () => cycleBorderRadius(tile) },
-      { label: '', action: () => {}, divider: true },
-      { label: 'Close', action: () => onCloseTile(tile.id), danger: true },
-    )
-    return items
-  }, [onUpdateTile, onCloseTile, cycleBorderRadius])
   const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
     const items: MenuItem[] = []
 
@@ -535,19 +588,7 @@ export function Sidebar({
     }
   }, [onResizeStateChange, onWidthChange])
 
-  // Group tiles by type for the Extensions section
-  const coreTiles = useMemo(() => tiles.filter(t => ['terminal', 'code', 'note', 'browser', 'chat', 'files', 'file', 'kanban', 'image'].includes(t.type)), [tiles])
   const extensionInstances = useMemo(() => tiles.filter(t => t.type.startsWith('ext:')), [tiles])
-
-  // Group core tiles by type
-  const coreGroups = useMemo(() => {
-    const groups: Record<string, TileState[]> = {}
-    for (const t of coreTiles) {
-      if (!groups[t.type]) groups[t.type] = []
-      groups[t.type].push(t)
-    }
-    return groups
-  }, [coreTiles])
 
   // Group extension tiles by type
   const extGroups = useMemo(() => {
@@ -596,18 +637,25 @@ export function Sidebar({
       if (!showSubagentSessions && isSubagentSession(session)) return false
       return true
     })
-    return buildNestedSessionList(filtered)
-  }, [sessions, showCronSessions, showSubagentSessions])
+    return buildNestedSessionList(filtered, threadSortMode)
+  }, [sessions, showCronSessions, showSubagentSessions, threadSortMode])
 
   useEffect(() => {
     setVisibleSessionCount(SESSION_PAGE_SIZE)
-  }, [workspace?.id, showCronSessions, showSubagentSessions, sessions.length])
+  }, [workspace?.id, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode, sessions.length])
 
   const displayedSessions = useMemo(() => {
     return visibleSessions.slice(0, visibleSessionCount)
   }, [visibleSessions, visibleSessionCount])
 
   const displayedSessionGroups = useMemo<SessionProjectGroup[]>(() => {
+    if (threadOrganizeMode === 'chronological') {
+      return displayedSessions.length > 0 ? [{
+        key: 'chronological',
+        label: 'Threads',
+        sessions: displayedSessions,
+      }] : []
+    }
     const groups = new Map<string, SessionProjectGroup>()
     for (const session of displayedSessions) {
       const key = session.projectPath?.trim() || workspace?.path?.trim() || workspace?.id || 'project'
@@ -623,7 +671,7 @@ export function Sidebar({
       })
     }
     return [...groups.values()]
-  }, [displayedSessions, workspace])
+  }, [displayedSessions, threadOrganizeMode, workspace])
 
   const hasMoreSessions = displayedSessions.length < visibleSessions.length
 
@@ -653,6 +701,14 @@ export function Sidebar({
       }
     }
   }, [workspace, deletingSessionId])
+
+  const handleCreateWorkspaceFromSidebar = useCallback(() => {
+    const suggested = `Workspace ${workspaces.length + 1}`
+    const name = window.prompt('New workspace name', suggested)?.trim()
+    if (!name) return
+    onNewWorkspace(name)
+    setThreadMenuOpen(false)
+  }, [onNewWorkspace, workspaces.length])
 
   const emitScrollMetrics = useCallback(() => {
     const el = scrollRef.current
@@ -744,79 +800,6 @@ export function Sidebar({
           ))}
         </div>
 
-        {/* ── BLOCKS ── */}
-        <SectionHeader label="Blocks" collapsed={!!sectionsCollapsed.blocks} onToggle={() => toggleSection('blocks')} />
-        {!sectionsCollapsed.blocks && (
-          <div style={{ paddingBottom: 6 }}>
-            {Object.entries(coreGroups).map(([type, instances]) => (
-              <React.Fragment key={type}>
-                {instances.map(tile => (
-                  renamingTileId === tile.id ? (
-                    <div key={tile.id} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 12px', margin: '0 6px' }}>
-                      <span style={{ color: theme.text.muted, flexShrink: 0, display: 'flex', alignItems: 'center' }}>{TILE_ICONS[tile.type] ?? TILE_ICONS.code}</span>
-                      <input
-                        autoFocus
-                        value={renameValue}
-                        onChange={e => setRenameValue(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') {
-                            const trimmed = renameValue.trim()
-                            onUpdateTile(tile.id, { label: trimmed || undefined })
-                            setRenamingTileId(null)
-                          }
-                          if (e.key === 'Escape') setRenamingTileId(null)
-                        }}
-                        onBlur={() => {
-                          const trimmed = renameValue.trim()
-                          onUpdateTile(tile.id, { label: trimmed || undefined })
-                          setRenamingTileId(null)
-                        }}
-                        style={{
-                          flex: 1, padding: '2px 6px', fontSize: fonts.size, borderRadius: 4,
-                          background: theme.surface.input, color: theme.text.primary,
-                          border: `1px solid ${theme.accent.base}`, outline: 'none',
-                          fontFamily: 'inherit', minWidth: 0,
-                        }}
-                      />
-                    </div>
-                  ) : (
-                    <SidebarItem
-                      key={tile.id}
-                      label={tileLabel(tile)}
-                      icon={TILE_ICONS[tile.type] ?? TILE_ICONS.code}
-                      onClick={() => onFocusTile(tile.id)}
-                      onContextMenu={e => { e.preventDefault(); setTileCtx({ x: e.clientX, y: e.clientY, tile }) }}
-                      extra={
-                        <div style={{ display: 'flex', gap: 1, flexShrink: 0 }}>
-                          {/* Hide/show titlebar */}
-                          <button onClick={e => { e.stopPropagation(); onUpdateTile(tile.id, { hideTitlebar: !tile.hideTitlebar }) }}
-                            title={tile.hideTitlebar ? 'Show titlebar' : 'Hide titlebar'}
-                            style={{ width: 18, height: 18, borderRadius: 3, border: 'none', background: 'transparent', color: tile.hideTitlebar ? theme.accent.base : theme.text.disabled, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0 }}
-                            className="sidebar-tile-action"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.3" /><path d="M1 4.5h12" stroke="currentColor" strokeWidth="1.3" /></svg>
-                          </button>
-                          {/* Cycle border radius */}
-                          <button onClick={e => { e.stopPropagation(); cycleBorderRadius(tile) }}
-                            title={`Border radius: ${getCurvierBlockRadius(tile.borderRadius)}px`}
-                            style={{ width: 18, height: 18, borderRadius: 3, border: 'none', background: 'transparent', color: theme.text.disabled, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0 }}
-                            className="sidebar-tile-action"
-                          >
-                            <svg width="10" height="10" viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="12" height="12" rx={Math.min(getCurvierBlockRadius(tile.borderRadius) / 2, 6)} stroke="currentColor" strokeWidth="1.3" /></svg>
-                          </button>
-                        </div>
-                      }
-                    />
-                  )
-                ))}
-              </React.Fragment>
-            ))}
-            {coreTiles.length === 0 && (
-              <div style={{ padding: '4px 12px', fontSize: fonts.secondarySize, color: theme.text.disabled }}>No blocks open</div>
-            )}
-          </div>
-        )}
-
         <div style={{ padding: '8px 12px 10px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
             <span style={{
@@ -828,53 +811,110 @@ export function Sidebar({
             }}>
               Threads
             </span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={threadMenuRef}>
               <button
-                title={showCronSessions ? 'Hide cron sessions' : 'Show cron sessions'}
-                aria-label={showCronSessions ? 'Hide cron sessions' : 'Show cron sessions'}
-                onClick={() => setShowCronSessions(value => !value)}
+                title="Filter and sort threads"
+                aria-label="Filter and sort threads"
+                onClick={() => setThreadMenuOpen(open => !open)}
                 style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 7,
+                  width: 28,
+                  height: 28,
+                  borderRadius: 9,
                   border: 'none',
-                  background: showCronSessions ? theme.surface.hover : 'transparent',
-                  color: showCronSessions ? theme.text.secondary : theme.text.disabled,
+                  background: threadMenuOpen ? theme.surface.hover : 'transparent',
+                  color: threadMenuOpen ? theme.text.secondary : theme.text.disabled,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  opacity: showCronSessions ? 1 : 0.7,
+                  opacity: threadMenuOpen || showCronSessions || showSubagentSessions || threadOrganizeMode !== 'project' || threadSortMode !== 'updated' ? 1 : 0.8,
                 }}
               >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.2" />
-                  <path d="M7 4.4v2.9l1.8 1.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M2.5 4h11M4.5 8h7M6.5 12h3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
               </button>
               <button
-                title={showSubagentSessions ? 'Hide subagent sessions' : 'Show subagent sessions'}
-                aria-label={showSubagentSessions ? 'Hide subagent sessions' : 'Show subagent sessions'}
-                onClick={() => setShowSubagentSessions(value => !value)}
+                title="New workspace"
+                aria-label="New workspace"
+                onClick={handleCreateWorkspaceFromSidebar}
                 style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 7,
+                  width: 28,
+                  height: 28,
+                  borderRadius: 9,
                   border: 'none',
-                  background: showSubagentSessions ? theme.surface.hover : 'transparent',
-                  color: showSubagentSessions ? theme.text.secondary : theme.text.disabled,
+                  background: 'transparent',
+                  color: theme.text.disabled,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  opacity: showSubagentSessions ? 1 : 0.7,
+                  opacity: 0.85,
                 }}
+                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
+                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
               >
-                <svg width="15" height="15" viewBox="0 0 14 14" fill="none">
-                  <path d="M4 3.2h6M4 10.8h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                  <path d="M4.8 3.2v2.1c0 .9.7 1.6 1.6 1.6h1.2c.9 0 1.6.7 1.6 1.6v2.3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                <svg width="17" height="17" viewBox="0 0 18 18" fill="none">
+                  <path d="M2.75 5.25c0-1.1.9-2 2-2h2.9l1.6 1.6h4.05c1.1 0 2 .9 2 2v5.95c0 1.1-.9 2-2 2H4.75c-1.1 0-2-.9-2-2v-7.55Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+                  <path d="M13.5 2.75v4M11.5 4.75h4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
                 </svg>
               </button>
+              {threadMenuOpen && (
+                <div style={{
+                  position: 'absolute',
+                  top: 34,
+                  right: 0,
+                  width: 292,
+                  background: theme.surface.panelElevated,
+                  border: `1px solid ${theme.border.default}`,
+                  borderRadius: 14,
+                  boxShadow: theme.shadow.panel,
+                  padding: 8,
+                  zIndex: 1000,
+                }}>
+                  <ThreadMenuSectionLabel>Organize</ThreadMenuSectionLabel>
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 5c0-.83.67-1.5 1.5-1.5h2.5l1.4 1.4H12c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5H4c-.83 0-1.5-.67-1.5-1.5V5Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" /></svg>}
+                    label="By project"
+                    active={threadOrganizeMode === 'project'}
+                    onClick={() => setThreadOrganizeMode('project')}
+                  />
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.1" stroke="currentColor" strokeWidth="1.25" /><path d="M8 5.2v3.3l2 1.35" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                    label="Chronological list"
+                    active={threadOrganizeMode === 'chronological'}
+                    onClick={() => setThreadOrganizeMode('chronological')}
+                  />
+                  <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                  <ThreadMenuSectionLabel>Sort by</ThreadMenuSectionLabel>
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 12.5V6.2M3.5 6.2l-1.8 1.8M3.5 6.2 5.3 8" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /><rect x="7" y="3.25" width="6" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /><rect x="7" y="7" width="4.5" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /><rect x="7" y="10.75" width="3" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /></svg>}
+                    label="Updated"
+                    active={threadSortMode === 'updated'}
+                    onClick={() => setThreadSortMode('updated')}
+                  />
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 4h9M5.5 7h5M6.5 10h4M7.5 13h2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>}
+                    label="Title"
+                    active={threadSortMode === 'title'}
+                    onClick={() => setThreadSortMode('title')}
+                  />
+                  <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                  <ThreadMenuSectionLabel>Show</ThreadMenuSectionLabel>
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 5.1h10M3 10.9h10" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" /><path d="M4.3 5.1v2.2c0 .92.75 1.67 1.67 1.67h1.06c.92 0 1.67.75 1.67 1.67v1" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                    label="Sub-threads"
+                    active={showSubagentSessions}
+                    onClick={() => setShowSubagentSessions(value => !value)}
+                  />
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5.1" stroke="currentColor" strokeWidth="1.25" /><path d="M8 5.2v3.3l2 1.35" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                    label="Cron jobs"
+                    active={showCronSessions}
+                    onClick={() => setShowCronSessions(value => !value)}
+                  />
+                </div>
+              )}
             </div>
           </div>
 
@@ -884,24 +924,26 @@ export function Sidebar({
             <>
               {displayedSessionGroups.map(group => (
                 <div key={group.key} style={{ paddingBottom: 8 }}>
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '6px 0 8px',
-                      color: theme.text.secondary,
-                    }}
-                  >
-                    <span style={{ display: 'flex', alignItems: 'center', color: theme.text.disabled }}>
-                      <svg width="16" height="16" viewBox="0 0 14 14" fill="none">
-                        <path d="M1.8 4.1c0-.9.7-1.6 1.6-1.6h2l1.1 1.2h4.1c.9 0 1.6.7 1.6 1.6v4.4c0 .9-.7 1.6-1.6 1.6H3.4c-.9 0-1.6-.7-1.6-1.6V4.1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                      </svg>
-                    </span>
-                    <span style={{ fontSize: fonts.size + 1, fontWeight: 600, color: theme.text.secondary }}>
-                      {group.label}
-                    </span>
-                  </div>
+                  {threadOrganizeMode === 'project' && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        padding: '6px 0 8px',
+                        color: theme.text.secondary,
+                      }}
+                    >
+                      <span style={{ display: 'flex', alignItems: 'center', color: theme.text.disabled }}>
+                        <svg width="16" height="16" viewBox="0 0 14 14" fill="none">
+                          <path d="M1.8 4.1c0-.9.7-1.6 1.6-1.6h2l1.1 1.2h4.1c.9 0 1.6.7 1.6 1.6v4.4c0 .9-.7 1.6-1.6 1.6H3.4c-.9 0-1.6-.7-1.6-1.6V4.1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                      <span style={{ fontSize: fonts.size + 1, fontWeight: 600, color: theme.text.secondary }}>
+                        {group.label}
+                      </span>
+                    </div>
+                  )}
 
                   {group.sessions.map(session => (
                     <SidebarItem
@@ -1187,10 +1229,6 @@ export function Sidebar({
         />
       )}
 
-      {/* Tile context menu */}
-      {tileCtx && (
-        <ContextMenu x={tileCtx.x} y={tileCtx.y} items={tileContextMenuItems(tileCtx.tile)} onClose={() => setTileCtx(null)} />
-      )}
       {sessionCtx && (
         <ContextMenu x={sessionCtx.x} y={sessionCtx.y} items={sessionContextMenuItems(sessionCtx.session)} onClose={() => setSessionCtx(null)} />
       )}
