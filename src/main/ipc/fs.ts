@@ -207,12 +207,17 @@ export function registerFsIPC(): void {
   })
 
   ipcMain.handle('fs:stat', async (_, filePath: string) => {
-    const stats = await fs.stat(validateFsPath(filePath))
-    return {
-      size: stats.size,
-      mtimeMs: stats.mtimeMs,
-      isFile: stats.isFile(),
-      isDir: stats.isDirectory(),
+    try {
+      const stats = await fs.stat(validateFsPath(filePath))
+      return {
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        isFile: stats.isFile(),
+        isDir: stats.isDirectory(),
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
     }
   })
 
