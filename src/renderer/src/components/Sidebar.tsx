@@ -836,8 +836,13 @@ export function Sidebar({
         const workspaceEntry = workspaceById.get(workspaceId)
         if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry)
       }
+      // Switch to this project's workspace (also reopens the tab if it was closed)
+      const targetWsId = projectEntry.workspaceIds[0]
+      if (targetWsId && targetWsId !== workspace?.id) {
+        _onSwitchWorkspace(targetWsId)
+      }
     }
-  }, [activeProjectId, collapsedThreadGroups, loadWorkspaceSessions, projectEntries, workspaceById])
+  }, [activeProjectId, collapsedThreadGroups, loadWorkspaceSessions, projectEntries, workspaceById, workspace?.id, _onSwitchWorkspace])
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
