@@ -46,11 +46,16 @@ const windowTitles = new Map<number, string>()
 const freshWindowIds = new Set<number>()
 let extensionRegistry: ExtensionRegistry | null = null
 function resolveAppIconPath(): string | null {
+  const iconName = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
   const candidates = [
+    join(process.resourcesPath, iconName),
+    join(process.resourcesPath, 'resources', iconName),
+    join(app.getAppPath(), 'resources', iconName),
+    join(app.getAppPath(), '..', 'resources', iconName),
+    join(__dirname, `../../resources/${iconName}`),
+    // Fallback to PNG on any platform
     join(process.resourcesPath, 'icon.png'),
-    join(process.resourcesPath, 'resources', 'icon.png'),
     join(app.getAppPath(), 'resources', 'icon.png'),
-    join(app.getAppPath(), '..', 'resources', 'icon.png'),
     join(__dirname, '../../resources/icon.png'),
   ]
 
@@ -101,7 +106,11 @@ function broadcastWindowList(): void {
     focused: w.webContents.id === focusedId,
   }))
   for (const w of wins) {
-    w.webContents.send('window:list-changed', list)
+    try {
+      w.webContents.send('window:list-changed', list)
+    } catch {
+      // Window's render frame may be disposed during focus transitions
+    }
   }
 }
 
@@ -114,7 +123,8 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
-    titleBarStyle: 'hiddenInset',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    frame: process.platform !== 'darwin',
     ...(iconPath ? { icon: iconPath } : {}),
     ...getWindowAppearanceOptions(),
     webPreferences: {
