@@ -107,13 +107,43 @@ function whichSync(cmd: string): string | null {
 }
 
 /** Check if a file exists and is executable */
-async function isExecutable(path: string): Promise<boolean> {
+async function isExecutable(filePath: string): Promise<boolean> {
+  // Try the exact path first
   try {
-    await fs.access(path, 0o1) // X_OK
+    await fs.access(filePath)
     return true
-  } catch {
-    return false
+  } catch { /* continue */ }
+
+  // On Windows, try common executable extensions if no extension provided
+  if (process.platform === 'win32' && !/\.\w+$/.test(filePath)) {
+    for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
+      try {
+        await fs.access(filePath + ext)
+        return true
+      } catch { /* continue */ }
+    }
   }
+
+  return false
+}
+
+/** Resolve a path to its actual file, adding .exe/.cmd on Windows if needed */
+async function resolveExecutablePath(filePath: string): Promise<string | null> {
+  try {
+    await fs.access(filePath)
+    return filePath
+  } catch { /* continue */ }
+
+  if (process.platform === 'win32' && !/\.\w+$/.test(filePath)) {
+    for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
+      try {
+        await fs.access(filePath + ext)
+        return filePath + ext
+      } catch { /* continue */ }
+    }
+  }
+
+  return null
 }
 
 /** Walk nvm versions dir to find a binary */
@@ -203,9 +233,10 @@ async function detectBinary(agentId: string): Promise<AgentPathEntry> {
 
   // 3. Hardcoded fallback paths
   for (const p of FALLBACK_PATHS[agentId] ?? []) {
-    if (await isExecutable(p)) {
-      const version = getVersionSync(p)
-      return { path: p, version, detectedAt: now, confirmed: false }
+    const resolved = await resolveExecutablePath(p)
+    if (resolved) {
+      const version = getVersionSync(resolved)
+      return { path: resolved, version, detectedAt: now, confirmed: false }
     }
   }
 
@@ -273,9 +304,13 @@ export async function detectAllAgents(): Promise<AgentPathsConfig> {
   for (const key of ['claude', 'codex', 'opencode', 'openclaw', 'hermes'] as const) {
     const entry = config[key]
     if (entry.path && entry.confirmed) {
-      if (!(await isExecutable(entry.path))) {
+      const resolved = await resolveExecutablePath(entry.path)
+      if (!resolved) {
         console.log(`[AgentPaths] Previously confirmed ${key} at ${entry.path} no longer exists, re-detecting`)
         config[key] = await detectBinary(key)
+      } else if (resolved !== entry.path) {
+        // Update path if it resolved to a different name (e.g. added .exe)
+        entry.path = resolved
       }
     }
   }
@@ -315,21 +350,25 @@ export function registerAgentPathsIPC(): void {
 
   ipcMain.handle('agentPaths:detect', async () => detectAllAgents())
 
-  ipcMain.handle('agentPaths:set', async (_, agentId: string, path: string | null) => {
+  ipcMain.handle('agentPaths:set', async (_, agentId: string, inputPath: string | null) => {
     if (!cachedPaths) return null
     const key = agentId as 'claude' | 'codex' | 'opencode' | 'openclaw' | 'hermes'
     if (!(key in cachedPaths)) return null
 
+    let resolvedPath: string | null = null
     let version: string | null = null
-    if (path) {
-      if (!(await isExecutable(path))) {
-        return { error: `Not executable: ${path}` }
+    if (inputPath) {
+      // Normalize path separators
+      const normalized = inputPath.replace(/\//g, process.platform === 'win32' ? '\\' : '/')
+      resolvedPath = await resolveExecutablePath(normalized)
+      if (!resolvedPath) {
+        return { error: `Not found: ${inputPath}` }
       }
-      version = getVersionSync(path)
+      version = getVersionSync(resolvedPath)
     }
 
     cachedPaths[key] = {
-      path,
+      path: resolvedPath,
       version,
       detectedAt: new Date().toISOString(),
       confirmed: true,
