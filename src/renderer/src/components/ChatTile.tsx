@@ -3077,34 +3077,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       }}
     >
 
-      {/* Header bar with session indicator */}
-      {sessionId && (
-        <div style={{
-          flexShrink: 0, display: 'flex', alignItems: 'center',
-          padding: '4px 14px', gap: 6,
-          borderBottom: `1px solid ${theme.chat.divider}`, fontSize: monoSize - 3,
-          color: theme.chat.muted, fontFamily: fontMono, fontWeight: monoWeight, lineHeight: monoLineHeight,
-        }}>
-          <span style={{
-            width: 5, height: 5, borderRadius: '50%',
-            background: theme.status.success, flexShrink: 0,
-          }} />
-          <span>Session {sessionId.slice(0, 8)}</span>
-          <span style={{ flex: 1 }} />
-          <button
-            onClick={clearConversation}
-            disabled={isStreaming}
-            style={{
-              background: 'none', border: 'none', cursor: isStreaming ? 'default' : 'pointer',
-              color: theme.chat.subtle, padding: 2, display: 'flex', alignItems: 'center',
-              opacity: isStreaming ? 0.3 : 0.6,
-            }}
-            title="Clear conversation"
-          >
-            <Trash2 size={10} />
-          </button>
-        </div>
-      )}
 
       {/* Messages */}
       <div

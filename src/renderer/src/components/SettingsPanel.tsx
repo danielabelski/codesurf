@@ -2412,7 +2412,7 @@ function CompactFontRow({ label, description, token, fontOptions, onChange }: {
       </div>
       <div style={{ display: 'grid', gap: 8 }}>
         <FontSelect value={token.family} onChange={family => onChange({ ...token, family })} fonts={fontOptions} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
           <StepperNumberField value={token.size} min={8} max={32} step={1} onChange={size => onChange({ ...token, size })} />
           <StepperNumberField value={token.weight ?? 400} min={100} max={900} step={100} onChange={weight => onChange({ ...token, weight })} />
           <StepperNumberField value={token.lineHeight} min={0.7} max={2.2} step={0.05} onChange={lineHeight => onChange({ ...token, lineHeight })} format={value => value.toFixed(2)} />
