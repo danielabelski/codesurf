@@ -86,7 +86,7 @@ function EventRow({ ev, onJump, onReply }: { ev: ActivityEvent; onJump: (id: str
         <span style={{ fontSize: 10, color: theme.accent.base, fontFamily: 'inherit', flexShrink: 0, maxWidth: 96, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {ev.cardTitle}
         </span>
-        <span style={{ fontSize: fonts.secondarySize, color: isInput ? eventColor : theme.text.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isInput ? 600 : 400 }}>
+        <span style={{ fontSize: fonts.secondarySize, color: isInput ? eventColor : theme.text.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isInput ? 600 : fonts.secondaryWeight }}>
           {ev.message}
         </span>
       </div>

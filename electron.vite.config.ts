@@ -58,6 +58,7 @@ export default defineConfig({
           resolve: {
             alias: {
               '@': resolve(__dirname, 'src/renderer/src'),
+              extend: resolve(__dirname, 'src/renderer/src/vendor/extend.ts'),
               ...clusoAlias
             }
           },
@@ -71,8 +72,22 @@ export default defineConfig({
             reportCompressedSize: false
           },
           optimizeDeps: {
-            noDiscovery: true,
-            include: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime', 'elkjs/lib/elk.bundled.js', 'streamdown', '@streamdown/code', 'style-to-js', 'style-to-object', 'hast-util-to-jsx-runtime'],
+            include: [
+              'react',
+              'react-dom',
+              'react-dom/client',
+              'react/jsx-runtime',
+              'elkjs/lib/elk.bundled.js',
+              'streamdown',
+              '@streamdown/code',
+              'style-to-js',
+              'style-to-object',
+              'hast-util-to-jsx-runtime',
+              'debug',
+              'micromark',
+              'unified',
+              'extend',
+            ],
             exclude: ['@xterm/xterm', '@xterm/addon-fit', '@monaco-editor/react', 'monaco-editor'],
           }
         }

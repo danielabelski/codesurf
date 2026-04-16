@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import type { PromptTemplate, PromptField, SkillDefinition, AgentMode } from '../../../shared/types'
+import { renderMarkdown } from './NoteTile'
 
 type Tab = 'prompts' | 'skills' | 'tools' | 'agents'
 
@@ -543,21 +544,50 @@ export function SkillsSection({ workspacePath, hideHeaderText = false }: { works
               <button onClick={() => setViewMode('preview')} style={{ fontSize: 10, padding: '3px 10px', borderRadius: 4, border: `1px solid ${viewMode === 'preview' ? theme.border.accent : theme.border.default}`, background: viewMode === 'preview' ? theme.accent.soft : 'transparent', color: viewMode === 'preview' ? theme.accent.base : theme.text.muted, cursor: 'pointer' }}>Preview</button>
               <button onClick={() => setViewMode('raw')} style={{ fontSize: 10, padding: '3px 10px', borderRadius: 4, border: `1px solid ${viewMode === 'raw' ? theme.border.accent : theme.border.default}`, background: viewMode === 'raw' ? theme.accent.soft : 'transparent', color: viewMode === 'raw' ? theme.accent.base : theme.text.muted, cursor: 'pointer' }}>Raw</button>
             </div>
-            <div style={{
-              flex: 1, padding: 12, borderRadius: 8, overflow: 'auto',
-              background: theme.surface.panelMuted, border: `1px solid ${theme.border.subtle}`,
-              fontSize: fonts.secondarySize, lineHeight: 1.6,
-              fontFamily: viewMode === 'raw' ? '"JetBrains Mono", monospace' : 'inherit',
-              color: theme.text.secondary, whiteSpace: viewMode === 'raw' ? 'pre-wrap' : 'normal',
-            }}>
-              {selected.content || 'No content'}
-            </div>
+            {viewMode === 'raw' ? (
+              <div style={{
+                flex: 1, padding: 12, borderRadius: 8, overflow: 'auto',
+                background: theme.surface.panelMuted, border: `1px solid ${theme.border.subtle}`,
+                fontSize: fonts.secondarySize, lineHeight: 1.6,
+                fontFamily: '"JetBrains Mono", monospace',
+                color: theme.text.secondary, whiteSpace: 'pre-wrap',
+              }}>
+                {selected.content || 'No content'}
+              </div>
+            ) : (
+              <div
+                className="skill-preview-markdown"
+                style={{
+                  flex: 1, padding: 12, borderRadius: 8, overflow: 'auto',
+                  background: theme.surface.panelMuted, border: `1px solid ${theme.border.subtle}`,
+                  fontSize: fonts.secondarySize, lineHeight: 1.6,
+                  color: theme.text.secondary,
+                }}
+                dangerouslySetInnerHTML={{ __html: selected.content ? renderMarkdown(selected.content) : 'No content' }}
+              />
+            )}
           </>
         ) : (
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.disabled, fontSize: fonts.secondarySize }}>Select a skill to view details</div>
         )}
       </div>
       </div>
+      <style>{`
+        .skill-preview-markdown h1 { font-size: 1.6em; font-weight: 700; color: ${theme.text.primary}; margin: 0 0 12px; }
+        .skill-preview-markdown h2 { font-size: 1.3em; font-weight: 600; color: ${theme.text.secondary}; margin: 16px 0 8px; }
+        .skill-preview-markdown h3 { font-size: 1.1em; font-weight: 600; color: ${theme.text.secondary}; margin: 12px 0 6px; }
+        .skill-preview-markdown p  { color: ${theme.text.secondary}; line-height: 1.7; margin: 0 0 10px; }
+        .skill-preview-markdown code { background: ${theme.surface.panel}; color: ${theme.accent.base}; padding: 1px 5px; border-radius: 3px; font-size: 12px; font-family: "JetBrains Mono", monospace; }
+        .skill-preview-markdown pre { background: ${theme.surface.panel}; border: 1px solid ${theme.border.default}; border-radius: 4px; padding: 12px; overflow-x: auto; margin: 10px 0; }
+        .skill-preview-markdown pre code { background: none; padding: 0; }
+        .skill-preview-markdown ul, .skill-preview-markdown ol { color: ${theme.text.secondary}; padding-left: 20px; margin: 6px 0; }
+        .skill-preview-markdown li { line-height: 1.7; }
+        .skill-preview-markdown a { color: ${theme.accent.base}; text-decoration: none; }
+        .skill-preview-markdown a:hover { text-decoration: underline; }
+        .skill-preview-markdown blockquote { border-left: 3px solid ${theme.border.strong}; padding-left: 12px; color: ${theme.text.muted}; margin: 8px 0; }
+        .skill-preview-markdown hr { border: none; border-top: 1px solid ${theme.border.default}; margin: 16px 0; }
+        .skill-preview-markdown strong { color: ${theme.text.primary}; }
+      `}</style>
     </div>
   )
 }

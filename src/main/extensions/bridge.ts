@@ -155,6 +155,13 @@ export function getBridgeScript(tileId: string, extId: string): string {
       getPath: () => _rpc('workspace.getPath'),
     },
 
+    chat: {
+      send: (request) => _rpc('chat.send', { request }),
+      stop: (cardId) => _rpc('chat.stop', { cardId }),
+      clearSession: (cardId) => _rpc('chat.clearSession', { cardId }),
+      onStream: (cb) => _on('chat.stream', cb),
+    },
+
     relay: {
       init: () => _rpc('relay.init'),
       listParticipants: () => _rpc('relay.listParticipants'),

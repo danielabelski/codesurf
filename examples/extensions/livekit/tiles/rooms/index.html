@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveKit Rooms</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--ct-font-primary, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+    font-size: var(--ct-font-primary-size, 13px);
+    line-height: var(--ct-font-primary-line, 1.5);
+    background: var(--ct-bg, transparent);
+    color: var(--ct-text, #1a1a2e);
+    padding: 16px;
+    height: 100vh;
+    overflow-y: auto;
+  }
+
+  /* ---- status bar ---- */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--ct-panel, #f8f8fa);
+    border: 1px solid var(--ct-border, #e2e2e8);
+    border-radius: var(--ct-radius, 8px);
+    margin-bottom: 14px;
+  }
+  .status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.stopped  { background: var(--ct-muted, #999); }
+  .status-dot.starting { background: var(--ct-warning, #e6a817); }
+  .status-dot.running  { background: var(--ct-success, #22a55a); }
+  .status-dot.error    { background: var(--ct-danger, #dc3545); }
+
+  .status-label {
+    flex: 1;
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--ct-muted, #777);
+  }
+  .status-mode {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--ct-accent-s, #eef0ff);
+    color: var(--ct-accent, #4f46e5);
+    font-weight: 600;
+  }
+
+  /* ---- buttons ---- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--ct-border, #ddd);
+    border-radius: var(--ct-radius, 6px);
+    background: var(--ct-panel-2, #fff);
+    color: var(--ct-text, #111);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn:hover { background: var(--ct-hover, #f0f0f4); }
+  .btn-primary {
+    background: var(--ct-accent, #4f46e5);
+    color: #fff;
+    border-color: var(--ct-accent, #4f46e5);
+  }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-danger {
+    color: var(--ct-danger, #dc3545);
+    border-color: var(--ct-danger, #dc3545);
+  }
+  .btn-danger:hover { background: var(--ct-danger, #dc3545); color: #fff; }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+  .btn:disabled { opacity: 0.4; pointer-events: none; }
+
+  /* ---- toolbar ---- */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .toolbar .btn { flex-shrink: 0; }
+
+  /* ---- create form ---- */
+  .create-form {
+    display: none;
+    padding: 14px;
+    background: var(--ct-panel, #f8f8fa);
+    border: 1px solid var(--ct-border, #e2e2e8);
+    border-radius: var(--ct-radius, 8px);
+    margin-bottom: 14px;
+  }
+  .create-form.visible { display: block; }
+  .create-form h3 {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--ct-text, #111);
+  }
+  .form-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .form-row input {
+    flex: 1;
+    padding: 6px 10px;
+    font-size: 12px;
+    border: 1px solid var(--ct-border, #ddd);
+    border-radius: var(--ct-radius, 6px);
+    background: var(--ct-panel-2, #fff);
+    color: var(--ct-text, #111);
+    outline: none;
+  }
+  .form-row input:focus { border-color: var(--ct-accent, #4f46e5); }
+  .form-row input::placeholder { color: var(--ct-dim, #aaa); }
+
+  /* ---- room list ---- */
+  .room-list { list-style: none; }
+  .room-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--ct-panel, #f8f8fa);
+    border: 1px solid var(--ct-border, #e2e2e8);
+    border-radius: var(--ct-radius, 8px);
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .room-item:hover {
+    border-color: var(--ct-accent, #4f46e5);
+    background: var(--ct-hover, #f0f0f4);
+  }
+  .room-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    background: var(--ct-accent-s, #eef0ff);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .room-icon svg { width: 18px; height: 18px; color: var(--ct-accent, #4f46e5); }
+  .room-info { flex: 1; min-width: 0; }
+  .room-name {
+    font-weight: 600;
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .room-meta {
+    font-size: 11px;
+    color: var(--ct-muted, #888);
+    margin-top: 2px;
+  }
+  .room-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--ct-dim, #aaa);
+    font-size: 13px;
+  }
+  .empty-state svg { width: 48px; height: 48px; margin-bottom: 12px; opacity: 0.3; }
+</style>
+</head>
+<body>
+
+<!-- Status bar -->
+<div class="status-bar">
+  <div class="status-dot stopped" id="statusDot"></div>
+  <span class="status-label" id="statusLabel">Stopped</span>
+  <span class="status-mode" id="modeLabel">local</span>
+  <button class="btn btn-sm btn-primary" id="serverToggle" onclick="toggleServer()">Start</button>
+</div>
+
+<!-- Toolbar -->
+<div class="toolbar">
+  <button class="btn btn-primary" onclick="showCreateForm()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    New Room
+  </button>
+  <button class="btn" onclick="refreshRooms()">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+    Refresh
+  </button>
+</div>
+
+<!-- Create form -->
+<div class="create-form" id="createForm">
+  <h3>Create Room</h3>
+  <div class="form-row">
+    <input type="text" id="roomNameInput" placeholder="Room name" autofocus>
+    <input type="number" id="maxParticipantsInput" placeholder="Max (0 = unlimited)" style="max-width:140px" min="0">
+  </div>
+  <div class="form-row">
+    <button class="btn btn-primary" onclick="createRoom()">Create</button>
+    <button class="btn" onclick="hideCreateForm()">Cancel</button>
+  </div>
+</div>
+
+<!-- Room list -->
+<ul class="room-list" id="roomList"></ul>
+<div class="empty-state" id="emptyState">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg>
+  <div>No rooms yet</div>
+  <div style="font-size:11px;margin-top:4px">Start the server and create a room to get going</div>
+</div>
+
+<script>
+  let state = { serverStatus: 'stopped', mode: 'local', rooms: [] }
+  let tileId = null
+
+  /* ---- bridge init ---- */
+  async function init() {
+    if (!window.contex) return
+    const meta = await window.contex.tile.getMeta()
+    tileId = meta.tileId
+
+    // restore state
+    const saved = await window.contex.tile.getState()
+    if (saved && saved.rooms) state.rooms = saved.rooms
+
+    // get live state from main.js
+    try {
+      const s = await window.contex.ext.invoke('getState')
+      if (s) Object.assign(state, s)
+    } catch (e) { console.warn('getState failed:', e) }
+
+    // subscribe to updates
+    await window.contex.bus.subscribe('livekit')
+
+    render()
+  }
+
+  window.addEventListener('message', (e) => {
+    if (e.data?.type === 'contex-bridge-ready') init()
+    if (e.data?.type === 'contex-event' && e.data?.event === 'bus.event.livekit') {
+      const d = e.data.data
+      if (d?.payload) Object.assign(state, d.payload)
+      else if (d) Object.assign(state, d)
+      render()
+    }
+  })
+  if (window.contex) init()
+
+  /* ---- render ---- */
+  function render() {
+    // status
+    const dot = document.getElementById('statusDot')
+    dot.className = `status-dot ${state.serverStatus}`
+    document.getElementById('statusLabel').textContent =
+      state.serverStatus === 'running' ? 'Connected' :
+      state.serverStatus === 'starting' ? 'Starting...' :
+      state.serverStatus === 'error' ? 'Error' : 'Stopped'
+
+    document.getElementById('modeLabel').textContent = state.mode || 'local'
+
+    const btn = document.getElementById('serverToggle')
+    btn.textContent = state.serverStatus === 'running' ? 'Stop' : 'Start'
+    if (state.serverStatus === 'starting') btn.disabled = true
+    else btn.disabled = false
+
+    // rooms
+    const list = document.getElementById('roomList')
+    const empty = document.getElementById('emptyState')
+
+    if (!state.rooms || state.rooms.length === 0) {
+      list.innerHTML = ''
+      empty.style.display = 'block'
+      return
+    }
+    empty.style.display = 'none'
+
+    list.innerHTML = state.rooms.map((r) => `
+      <li class="room-item" onclick="enterRoom('${esc(r.name)}')">
+        <div class="room-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="7" width="20" height="15" rx="2"/>
+            <polyline points="17 2 12 7 7 2"/>
+          </svg>
+        </div>
+        <div class="room-info">
+          <div class="room-name">${esc(r.name)}</div>
+          <div class="room-meta">
+            ${r.participants ? r.participants.length : 0} participant${r.participants && r.participants.length !== 1 ? 's' : ''}
+            ${r.maxParticipants ? ' / max ' + r.maxParticipants : ''}
+          </div>
+        </div>
+        <div class="room-actions" onclick="event.stopPropagation()">
+          <button class="btn btn-sm" onclick="enterRoom('${esc(r.name)}')" title="Enter room">Enter</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteRoom('${esc(r.name)}')" title="Delete room">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+          </button>
+        </div>
+      </li>
+    `).join('')
+
+    // persist
+    if (window.contex) window.contex.tile.setState({ rooms: state.rooms })
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
+
+  /* ---- actions ---- */
+  async function toggleServer() {
+    if (!window.contex) return
+    if (state.serverStatus === 'running') {
+      await window.contex.ext.invoke('stopServer')
+    } else {
+      await window.contex.ext.invoke('startServer')
+    }
+  }
+
+  function showCreateForm() { document.getElementById('createForm').classList.add('visible') }
+  function hideCreateForm() { document.getElementById('createForm').classList.remove('visible') }
+
+  async function createRoom() {
+    const name = document.getElementById('roomNameInput').value.trim()
+    if (!name) return
+    const max = parseInt(document.getElementById('maxParticipantsInput').value) || 0
+    if (window.contex) {
+      await window.contex.ext.invoke('createRoom', name, max)
+    }
+    document.getElementById('roomNameInput').value = ''
+    document.getElementById('maxParticipantsInput').value = ''
+    hideCreateForm()
+  }
+
+  async function deleteRoom(name) {
+    if (window.contex) await window.contex.ext.invoke('deleteRoom', name)
+  }
+
+  async function refreshRooms() {
+    if (window.contex) await window.contex.ext.invoke('listRooms')
+  }
+
+  async function enterRoom(name) {
+    if (!window.contex) return
+    // set shared context so the room tile picks it up
+    await window.contex.context.set('ctx:livekit:active-room', { name })
+    // open a room tile
+    await window.contex.canvas.createTile('ext:livekit-room', {})
+  }
+
+  // enter on key press
+  document.getElementById('roomNameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') createRoom()
+  })
+</script>
+</body>
+</html>

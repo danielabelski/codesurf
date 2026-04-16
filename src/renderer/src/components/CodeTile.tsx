@@ -95,6 +95,8 @@ export function CodeTile({ filePath, initialContent = '' }: Props): JSX.Element 
             horizontalScrollbarSize: 6
           },
           fontFamily: fonts.mono,
+          fontWeight: String(fonts.monoWeight),
+          lineHeight: Math.round(fonts.monoSize * fonts.monoLineHeight),
           fontLigatures: true
         }}
       />

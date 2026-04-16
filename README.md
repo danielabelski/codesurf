@@ -54,6 +54,37 @@ npm run dist:windows   # NSIS installer + portable .exe
 npm run dist:linux     # AppImage + .deb
 ```
 
+## npm distribution
+
+CodeSurf can also be shipped as a thin npm package. The npm package contains the app build output and launcher scripts, but it does not bundle the Electron runtime itself.
+
+On first launch, the `codesurf` launcher downloads Electron into `~/.codesurf/electron` and reuses that cached runtime after that.
+
+Build the publishable npm package directory and tarball with Bun:
+
+```bash
+bun run build:npm
+```
+
+That command writes:
+
+- `release/npm/package/` — the publishable package contents
+- `release/npm/*.tgz` — the tarball produced by `npm pack`
+
+You can test the packaged launcher locally with:
+
+```bash
+npm install -g ./release/npm/codesurf-0.1.0.tgz
+codesurf
+```
+
+Install from npm once published:
+
+```bash
+npm install -g codesurf
+codesurf
+```
+
 ## Project structure
 
 ```text

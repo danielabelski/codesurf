@@ -1,0 +1,92 @@
+{
+  "id": "livekit-rooms",
+  "name": "LiveKit Rooms",
+  "version": "1.0.0",
+  "description": "Real-time voice, video and text chat rooms powered by LiveKit. Launch a local dev server or connect to a remote instance, create rooms, and join with audio/video/text.",
+  "author": "contex",
+  "tier": "power",
+  "ui": { "mode": "native" },
+  "main": "main.js",
+  "contributes": {
+    "tiles": [
+      {
+        "type": "lk",
+        "label": "LiveKit",
+        "icon": "",
+        "entry": "tiles/index.html",
+        "defaultSize": { "w": 760, "h": 680 },
+        "minSize": { "w": 520, "h": 420 }
+      }
+    ],
+    "contextMenu": [
+      { "label": "LiveKit", "action": "createTile", "tileType": "ext:lk" }
+    ],
+    "settings": [
+      { "key": "serverUrl", "label": "Server URL", "type": "string", "default": "ws://localhost:7880" },
+      { "key": "apiKey", "label": "API Key", "type": "string", "default": "devkey" },
+      { "key": "apiSecret", "label": "API Secret", "type": "string", "default": "secret" },
+      { "key": "defaultIdentity", "label": "Default Identity", "type": "string", "default": "" }
+    ],
+    "context": {
+      "produces": ["ctx:lk-server", "ctx:lk-room"],
+      "consumes": ["ctx:lk-server", "ctx:lk-room"]
+    },
+    "actions": [
+      { "name": "startLocalServer", "description": "Start a local LiveKit dev server." },
+      { "name": "stopLocalServer", "description": "Stop the local LiveKit dev server." },
+      { "name": "createRoom", "description": "Create a LiveKit room. Params: { name: string }" },
+      { "name": "deleteRoom", "description": "Delete a LiveKit room. Params: { name: string }" },
+      { "name": "listRooms", "description": "List all LiveKit rooms." },
+      { "name": "joinRoom", "description": "Join a LiveKit room in the current LiveKit tile. Params: { room: string, identity?: string }" },
+      { "name": "sendChat", "description": "Send a text message into the current LiveKit room. Params: { text: string, sender?: string, room?: string }" }
+    ],
+    "mcpTools": [
+      {
+        "name": "lk_list_rooms",
+        "description": "List all active LiveKit rooms.",
+        "inputSchema": { "type": "object", "properties": {} }
+      },
+      {
+        "name": "lk_create_room",
+        "description": "Create a new LiveKit room.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "name": { "type": "string", "description": "Room name" } },
+          "required": ["name"]
+        }
+      },
+      {
+        "name": "lk_delete_room",
+        "description": "Delete a LiveKit room.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "name": { "type": "string", "description": "Room name" } },
+          "required": ["name"]
+        }
+      },
+      {
+        "name": "lk_list_participants",
+        "description": "List participants in a LiveKit room.",
+        "inputSchema": {
+          "type": "object",
+          "properties": { "room": { "type": "string", "description": "Room name" } },
+          "required": ["room"]
+        }
+      },
+      {
+        "name": "lk_send_chat_message",
+        "description": "Queue a text chat message into a joined LiveKit room tile.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "text": { "type": "string", "description": "Message body" },
+            "sender": { "type": "string", "description": "Optional display sender label" },
+            "room": { "type": "string", "description": "Optional room name filter" }
+          },
+          "required": ["text"]
+        }
+      }
+    ]
+  },
+  "permissions": ["network", "process"]
+}

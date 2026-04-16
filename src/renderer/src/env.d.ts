@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
- import type { Workspace, ProjectRecord } from '../../shared/types'
+ import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord } from '../../shared/types'
 
 interface ElectronAPI {
   appearance: {
@@ -62,7 +62,8 @@ interface ElectronAPI {
     inject(cardId: string, message: string): Promise<void>
   }
   chat?: {
-    send(req: unknown): Promise<{ ok: boolean }>
+    send(req: unknown): Promise<{ ok: boolean; jobId?: string; detached?: boolean }>
+    resumeJob?(req: unknown): Promise<{ ok: boolean; resumed?: boolean; jobId?: string | null }>
     stop(cardId: string): Promise<void>
     clearSession(cardId: string): Promise<{ ok: boolean }>
     opencodeModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }>; source?: string; loading?: boolean }>
@@ -75,6 +76,16 @@ interface ElectronAPI {
   }
   app?: {
     relaunch(): Promise<void>
+  }
+  execution: {
+    listHosts(): Promise<ExecutionHostRecord[]>
+    upsertHost(host: ExecutionHostRecord): Promise<ExecutionHostRecord[]>
+    deleteHost(id: string): Promise<{ ok: true; hosts: ExecutionHostRecord[] }>
+    resolveTarget(preference: ExecutionPreference): Promise<{
+      host: ExecutionHostRecord
+      fallback: boolean
+      reason: string
+    }>
   }
   window: {
     new(): Promise<void>
@@ -121,6 +132,7 @@ interface ElectronAPI {
     onSessionsChanged(cb: (payload: { workspaceId: string }) => void): () => void
     getSessionState(workspaceId: string, sessionEntryId: string): Promise<any>
     deleteSession(workspaceId: string, sessionEntryId: string): Promise<{ ok: boolean; error?: string }>
+    renameSession(workspaceId: string, sessionEntryId: string, title: string): Promise<{ ok: boolean; error?: string; title?: string }>
   }
   kanban?: {
     load(workspaceId: string, tileId: string): Promise<{ columns: Array<{ id: string; title: string }>; cards: import('./components/KanbanCard').KanbanCardData[] } | null>
@@ -155,6 +167,11 @@ interface ElectronAPI {
     set(settings: import('../../shared/types').AppSettings): Promise<import('../../shared/types').AppSettings>
     getRawJson(): Promise<{ path: string; content: string }>
     setRawJson(json: string): Promise<{ ok: boolean; error?: string; settings?: import('../../shared/types').AppSettings }>
+  }
+  permissions: {
+    list(): Promise<{ path: string; grants: import('../../shared/types').ToolPermissionGrant[] }>
+    clear(id: string): Promise<{ path: string; grants: import('../../shared/types').ToolPermissionGrant[] }>
+    clearAll(): Promise<{ path: string; grants: import('../../shared/types').ToolPermissionGrant[] }>
   }
   activity: {
     upsert(workspaceId: string, data: {
@@ -274,6 +291,62 @@ interface ElectronAPI {
       external: number
       arrayBuffers: number
       bus: { channels: number; events: number; subscriptions: number; readCursors: number }
+    }>
+    daemonStatus(): Promise<{
+      running: boolean
+      info: {
+        pid: number
+        port: number
+        startedAt: string
+        protocolVersion: number
+        appVersion: string | null
+      } | null
+    }>
+    daemonSummary(): Promise<{
+      running: boolean
+      info: {
+        pid: number
+        port: number
+        startedAt: string
+        protocolVersion: number
+        appVersion: string | null
+      } | null
+      jobs: {
+        total: number
+        active: number
+        backgroundActive: number
+        completed: number
+        failed: number
+        cancelled: number
+        other: number
+        recent: Array<{
+          id: string
+          taskLabel: string | null
+          status: string
+          runMode: string | null
+          workspaceId: string | null
+          cardId: string | null
+          provider: string | null
+          model: string | null
+          workspaceDir: string | null
+          sessionId: string | null
+          initialPrompt: string | null
+          updatedAt: string | null
+          requestedAt: string | null
+          lastSequence: number
+          error: string | null
+        }>
+      }
+    }>
+    restartDaemon(): Promise<{
+      running: boolean
+      info: {
+        pid: number
+        port: number
+        startedAt: string
+        protocolVersion: number
+        appVersion: string | null
+      } | null
     }>
     onGcRequested(callback: () => void): () => void
   }

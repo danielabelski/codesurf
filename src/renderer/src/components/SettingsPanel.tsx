@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, lazy } from 'react'
-import type { AppSettings, FontSettings, FontToken } from '../../../shared/types'
+import type { AppSettings, ExecutionHostRecord, ExecutionMode, FontToken, ToolPermissionGrant } from '../../../shared/types'
 import { DEFAULT_FONTS, withDefaultSettings } from '../../../shared/types'
-import { Settings, Type, Monitor, FolderOpen, Plus, Trash2, ChevronDown, ChevronRight, FileJson, AlertTriangle, Check, Copy, RotateCcw, FormInput, Code2, Puzzle, RefreshCw, Star, Wrench, Users, FileText, Globe, Eye, EyeOff, PanelRight, Pin } from 'lucide-react'
+import { Settings, Type, Monitor, FolderOpen, Plus, Trash2, ChevronDown, ChevronRight, FileJson, AlertTriangle, Check, Copy, RotateCcw, FormInput, Code2, Puzzle, RefreshCw, Star, Wrench, Users, FileText, Globe, Eye, EyeOff, PanelRight, Pin, Shield } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { THEME_OPTIONS, getThemeCanvasDefaults, resolveEffectiveThemeId, getThemeById, type AppearanceMode } from '../theme'
@@ -28,17 +28,19 @@ interface Props {
   systemPrefersDark?: boolean
 }
 
-type BuiltinSection = 'general' | 'canvas' | 'sidebar' | 'browser' | 'mcp' | 'extensions' | 'prompts' | 'skills' | 'tools' | 'agents'
+type BuiltinSection = 'general' | 'daemon' | 'canvas' | 'sidebar' | 'browser' | 'permissions' | 'mcp' | 'extensions' | 'prompts' | 'skills' | 'tools' | 'agents'
 type Section = BuiltinSection | `ext:${string}`
 
 const SECTIONS: { id: Section; label: string; icon: React.ReactNode; description: string; group?: string }[] = [
   // App settings
   { id: 'general',    label: 'General',    icon: <Type size={15} />,       description: 'Display settings — fonts, weights, sizes, line heights, and raw JSON', group: 'app' },
+  { id: 'daemon',     label: 'Daemon',     icon: <Settings size={15} />,   description: 'Daemon status, restart controls, execution routing, and remote hosts', group: 'app' },
   { id: 'canvas',     label: 'Canvas',     icon: <Monitor size={15} />,    description: 'Background, grid and snap settings', group: 'app' },
 
   { id: 'sidebar',    label: 'Sidebar',    icon: <FolderOpen size={15} />, description: 'File tree sort and ignored folders', group: 'app' },
 
   { id: 'browser',    label: 'Browser',    icon: <Globe size={15} />,      description: 'Chrome data sync — cookies, bookmarks, history', group: 'app' },
+  { id: 'permissions', label: 'Permissions', icon: <Shield size={15} />,   description: 'Tool approval memory, scoped grants, and reset controls', group: 'app' },
   // Customisation
   { id: 'prompts',    label: 'Prompts',    icon: <FileText size={15} />,   description: 'Prompt templates with variables and fields', group: 'customise' },
   { id: 'skills',     label: 'Skills',     icon: <Star size={15} />,       description: 'Custom skills and skill registry', group: 'customise' },
@@ -67,6 +69,11 @@ interface MCPConfig {
   updatedAt: string
 }
 
+type PermissionListResult = {
+  path: string
+  grants: ToolPermissionGrant[]
+}
+
 type ExtensionListEntry = {
   id: string
   name: string
@@ -88,6 +95,7 @@ function notifyExtensionsChanged(): void {
 
 // ─── Extension settings panel ─────────────────────────────────────────────────
 function ExtSettingsPanel({ extId, tileType }: { extId: string; tileType: string }): React.JSX.Element {
+  const theme = useTheme()
   const [src, setSrc] = useState<string | null>(null)
   useEffect(() => {
     window.electron.extensions?.tileEntry?.(extId, tileType)
@@ -175,11 +183,12 @@ function RangeInput({ value, min, max, step = 0.01, onChange, formatValue }: { v
   )
 }
 
-function TextInput({ value, onChange, width = 240 }: { value: string; onChange: (v: string) => void; width?: number }): React.JSX.Element {
+function TextInput({ value, onChange, width = 240, placeholder }: { value: string; onChange: (v: string) => void; width?: number; placeholder?: string }): React.JSX.Element {
   const theme = useTheme()
   return (
     <input
       type="text" value={value}
+      placeholder={placeholder}
       onChange={e => onChange(e.target.value)}
       style={{
         width, padding: '5px 10px', fontSize: 'inherit',
@@ -351,6 +360,23 @@ function SectionLabel({ label }: { label: string }): React.JSX.Element {
 
 interface ChromeProfile { name: string; dir: string; email?: string }
 
+type DaemonStatus = {
+  running: boolean
+  info: {
+    pid: number
+    port: number
+    startedAt: string
+    protocolVersion: number
+    appVersion: string | null
+  } | null
+}
+
+type ExecutionResolution = {
+  host: ExecutionHostRecord
+  fallback: boolean
+  reason: string
+}
+
 function ChromeSyncSection({ settings, onUpdate, theme }: {
   settings: AppSettings
   onUpdate: (key: keyof AppSettings, value: any) => void
@@ -494,6 +520,20 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
   const [extensionsError, setExtensionsError] = useState<string | null>(null)
   const [expandedExtId, setExpandedExtId] = useState<string | null>(null)
   const [extSettingsMap, setExtSettingsMap] = useState<Record<string, Record<string, unknown>>>({})
+  const [daemonStatus, setDaemonStatus] = useState<DaemonStatus | null>(null)
+  const [daemonLoading, setDaemonLoading] = useState(false)
+  const [daemonRestarting, setDaemonRestarting] = useState(false)
+  const [daemonError, setDaemonError] = useState<string | null>(null)
+  const [executionHosts, setExecutionHosts] = useState<ExecutionHostRecord[]>([])
+  const [executionHostsLoading, setExecutionHostsLoading] = useState(false)
+  const [executionHostsError, setExecutionHostsError] = useState<string | null>(null)
+  const [executionResolution, setExecutionResolution] = useState<ExecutionResolution | null>(null)
+  const [newHostLabel, setNewHostLabel] = useState('')
+  const [newHostUrl, setNewHostUrl] = useState('')
+  const [newHostToken, setNewHostToken] = useState('')
+  const [permissionData, setPermissionData] = useState<PermissionListResult | null>(null)
+  const [permissionsLoading, setPermissionsLoading] = useState(false)
+  const [permissionsError, setPermissionsError] = useState<string | null>(null)
 
   const latestSettingsSaveRef = useRef(0)
   const settingsRef = useRef<AppSettings>(withDefaultSettings(initialSettings))
@@ -509,6 +549,138 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
       if (cfg) setMcpConfig(cfg as MCPConfig)
     })
   }, [])
+
+  const loadDaemonStatus = useCallback(async () => {
+    setDaemonLoading(true)
+    setDaemonError(null)
+    try {
+      const next = await window.electron.system.daemonStatus()
+      setDaemonStatus(next)
+    } catch (e) {
+      setDaemonError(e instanceof Error ? e.message : String(e))
+      setDaemonStatus(null)
+    } finally {
+      setDaemonLoading(false)
+    }
+  }, [])
+
+  const loadExecutionHosts = useCallback(async () => {
+    setExecutionHostsLoading(true)
+    setExecutionHostsError(null)
+    try {
+      const next = await window.electron.execution.listHosts()
+      setExecutionHosts(next)
+    } catch (e) {
+      setExecutionHostsError(e instanceof Error ? e.message : String(e))
+      setExecutionHosts([])
+    } finally {
+      setExecutionHostsLoading(false)
+    }
+  }, [])
+
+  const resolveExecutionPreference = useCallback(async (nextSettings: AppSettings) => {
+    try {
+      const resolution = await window.electron.execution.resolveTarget(nextSettings.execution)
+      setExecutionResolution(resolution)
+    } catch {
+      setExecutionResolution(null)
+    }
+  }, [])
+
+  const loadPermissions = useCallback(async () => {
+    setPermissionsLoading(true)
+    setPermissionsError(null)
+    try {
+      const next = await window.electron.permissions.list()
+      setPermissionData(next)
+    } catch (e) {
+      setPermissionsError(e instanceof Error ? e.message : String(e))
+      setPermissionData(null)
+    } finally {
+      setPermissionsLoading(false)
+    }
+  }, [])
+
+  const clearPermissionGrantById = useCallback(async (id: string) => {
+    try {
+      const next = await window.electron.permissions.clear(id)
+      setPermissionData(next)
+      setPermissionsError(null)
+    } catch (e) {
+      setPermissionsError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const clearAllPermissionGrants = useCallback(async () => {
+    try {
+      const next = await window.electron.permissions.clearAll()
+      setPermissionData(next)
+      setPermissionsError(null)
+    } catch (e) {
+      setPermissionsError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const handleRestartDaemon = useCallback(async () => {
+    setDaemonRestarting(true)
+    setDaemonError(null)
+    try {
+      const next = await window.electron.system.restartDaemon()
+      setDaemonStatus(next)
+    } catch (e) {
+      setDaemonError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDaemonRestarting(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (section !== 'daemon') return
+    let cancelled = false
+
+    const refresh = async () => {
+      try {
+        const next = await window.electron.system.daemonStatus()
+        if (!cancelled) {
+          setDaemonStatus(next)
+          setDaemonError(null)
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setDaemonError(e instanceof Error ? e.message : String(e))
+          setDaemonStatus(null)
+        }
+      } finally {
+        if (!cancelled) setDaemonLoading(false)
+      }
+    }
+
+    setDaemonLoading(true)
+    void refresh()
+    const interval = window.setInterval(() => {
+      void refresh()
+    }, 5000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [section])
+
+  useEffect(() => {
+    if (section !== 'permissions') return
+    void loadPermissions()
+  }, [section, loadPermissions])
+
+  useEffect(() => {
+    if (section !== 'daemon') return
+    void loadExecutionHosts()
+  }, [section, loadExecutionHosts])
+
+  useEffect(() => {
+    if (section !== 'daemon') return
+    void resolveExecutionPreference(settings)
+  }, [section, settings, resolveExecutionPreference])
 
   // Load workspace MCP servers when MCP section is opened
   useEffect(() => {
@@ -700,6 +872,29 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     }
   }, [persistSettings])
 
+  const saveExecutionHost = useCallback(async (host: ExecutionHostRecord) => {
+    setExecutionHostsError(null)
+    try {
+      const next = await window.electron.execution.upsertHost(host)
+      setExecutionHosts(next)
+    } catch (e) {
+      setExecutionHostsError(e instanceof Error ? e.message : String(e))
+    }
+  }, [])
+
+  const removeExecutionHost = useCallback(async (hostId: string) => {
+    setExecutionHostsError(null)
+    try {
+      const result = await window.electron.execution.deleteHost(hostId)
+      setExecutionHosts(result.hosts)
+      if (settings.execution.hostId === hostId) {
+        updateSettingsPatch({ execution: { ...settings.execution, hostId: null, mode: 'auto' } })
+      }
+    } catch (e) {
+      setExecutionHostsError(e instanceof Error ? e.message : String(e))
+    }
+  }, [settings.execution, updateSettingsPatch])
+
   const applyThemePreset = useCallback((themeId: string) => {
     const canvas = getThemeCanvasDefaults(themeId)
     updateSettingsPatch({
@@ -814,6 +1009,315 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
           </>
         )
       }
+      case 'daemon': {
+        const daemonRunning = daemonStatus?.running === true
+        const daemonInfo = daemonStatus?.info ?? null
+        const daemonStartedLabel = daemonInfo?.startedAt
+          ? new Date(daemonInfo.startedAt).toLocaleString()
+          : 'Unavailable'
+        return (
+          <>
+            <SectionLabel label="Daemon" />
+            <SettingRow label="Status" description="The detached CodeSurf daemon persists workspaces, projects, settings, and session indexing outside the renderer.">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: daemonRunning ? theme.status.success : theme.status.danger,
+                    boxShadow: daemonRunning ? `0 0 8px ${theme.status.success}66` : 'none',
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ fontSize: fonts.secondarySize, color: daemonRunning ? theme.text.secondary : theme.status.danger }}>
+                  {daemonLoading
+                    ? 'Checking…'
+                    : daemonRunning
+                      ? `Active${daemonInfo?.pid ? ` · PID ${daemonInfo.pid}` : ''}${daemonInfo?.port ? ` · port ${daemonInfo.port}` : ''}`
+                      : 'Offline'}
+                </span>
+              </div>
+            </SettingRow>
+            <SettingRow label="Runtime" description="Daemon boot time and protocol metadata.">
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                <span style={{ fontSize: fonts.secondarySize, color: theme.text.secondary }}>
+                  Started {daemonStartedLabel}
+                </span>
+                <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, fontFamily: fonts.mono }}>
+                  protocol {daemonInfo?.protocolVersion ?? '—'} · app {daemonInfo?.appVersion ?? '—'}
+                </span>
+              </div>
+            </SettingRow>
+            <SettingRow label="Control" description="Refresh the status view or restart the daemon without quitting the app.">
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => { void loadDaemonStatus() }}
+                  disabled={daemonLoading || daemonRestarting}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontSize: fonts.secondarySize,
+                    fontWeight: 600,
+                    border: `1px solid ${theme.border.default}`,
+                    background: theme.surface.input,
+                    color: theme.text.secondary,
+                    cursor: daemonLoading || daemonRestarting ? 'not-allowed' : 'pointer',
+                    opacity: daemonLoading || daemonRestarting ? 0.6 : 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <RefreshCw size={14} />
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleRestartDaemon() }}
+                  disabled={daemonRestarting}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontSize: fonts.secondarySize,
+                    fontWeight: 600,
+                    border: `1px solid ${theme.border.default}`,
+                    background: theme.accent.soft,
+                    color: theme.accent.hover,
+                    cursor: daemonRestarting ? 'not-allowed' : 'pointer',
+                    opacity: daemonRestarting ? 0.6 : 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                  }}
+                >
+                  <RotateCcw size={14} />
+                  {daemonRestarting ? 'Restarting…' : 'Restart daemon'}
+                </button>
+              </div>
+            </SettingRow>
+            {daemonError && (
+              <div style={{ fontSize: fonts.secondarySize, color: theme.status.danger, padding: '4px 2px' }}>
+                {daemonError}
+              </div>
+            )}
+            <SectionLabel label="Execution" />
+            <SettingRow
+              label="Default routing"
+              description="Choose whether new work prefers the local daemon, stays in-process, or pins to a specific registered host."
+            >
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: 460 }}>
+                {([
+                  { id: 'auto', label: 'Auto' },
+                  { id: 'prefer-local-daemon', label: 'Prefer daemon' },
+                  { id: 'runtime-only', label: 'Runtime only' },
+                  { id: 'daemon-only', label: 'Daemon only' },
+                  { id: 'specific-host', label: 'Specific host' },
+                ] as const satisfies Array<{ id: ExecutionMode; label: string }>).map(option => {
+                  const activeExecutionMode = (settings.execution?.mode ?? 'auto') === option.id
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => updateSettingsPatch({
+                        execution: {
+                          mode: option.id,
+                          hostId: option.id === 'specific-host'
+                            ? (settings.execution?.hostId ?? executionHosts.find(host => host.type === 'remote-daemon')?.id ?? null)
+                            : null,
+                        },
+                      })}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 8,
+                        fontSize: fonts.secondarySize,
+                        fontWeight: 600,
+                        border: `1px solid ${activeExecutionMode ? theme.accent.base : theme.border.default}`,
+                        background: activeExecutionMode ? theme.accent.soft : theme.surface.input,
+                        color: activeExecutionMode ? theme.accent.hover : theme.text.secondary,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </SettingRow>
+            {(settings.execution?.mode ?? 'auto') === 'specific-host' && (
+              <SettingRow
+                label="Pinned host"
+                description="Use one registered remote daemon for new work until you change the policy."
+              >
+                <select
+                  value={settings.execution?.hostId ?? ''}
+                  onChange={e => updateSettingsPatch({
+                    execution: {
+                      ...settings.execution,
+                      mode: 'specific-host',
+                      hostId: e.target.value || null,
+                    },
+                  })}
+                  style={{
+                    minWidth: 220,
+                    padding: '6px 10px',
+                    fontSize: fonts.secondarySize,
+                    background: theme.surface.input,
+                    color: theme.text.secondary,
+                    border: `1px solid ${theme.border.default}`,
+                    borderRadius: 8,
+                    outline: 'none',
+                  }}
+                >
+                  <option value="">Select host…</option>
+                  {executionHosts.filter(host => host.type === 'remote-daemon' && host.enabled !== false).map(host => (
+                    <option key={host.id} value={host.id}>
+                      {host.label} · {host.type}
+                    </option>
+                  ))}
+                </select>
+              </SettingRow>
+            )}
+            <SettingRow
+              label="Resolved target"
+              description="What the current policy resolves to right now, using the daemon status and registered hosts."
+            >
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, maxWidth: 420 }}>
+                <span style={{ fontSize: fonts.secondarySize, color: theme.text.secondary, fontWeight: 600 }}>
+                  {executionResolution
+                    ? `${executionResolution.host.label}${executionResolution.fallback ? ' · fallback' : ''}`
+                    : 'Unavailable'}
+                </span>
+                <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, textAlign: 'right', lineHeight: 1.4 }}>
+                  {executionResolution?.reason ?? 'Execution routing has not been resolved yet.'}
+                </span>
+              </div>
+            </SettingRow>
+            <SectionLabel label="Hosts" />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8 }}>
+              {executionHostsLoading && (
+                <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, padding: '4px 2px' }}>
+                  Loading hosts…
+                </div>
+              )}
+              {executionHosts.map(host => {
+                const builtin = host.type !== 'remote-daemon'
+                return (
+                  <div
+                    key={host.id}
+                    style={{
+                      background: theme.surface.panelMuted,
+                      border: `1px solid ${theme.border.default}`,
+                      borderRadius: 10,
+                      padding: '12px 14px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 600 }}>{host.label}</span>
+                        <span style={{ fontSize: 10, color: theme.text.disabled, textTransform: 'uppercase', letterSpacing: '0.06em' }}>{host.type}</span>
+                        {builtin && (
+                          <span style={{ fontSize: 10, color: theme.text.disabled, textTransform: 'uppercase', letterSpacing: '0.06em' }}>built-in</span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, fontFamily: host.url ? fonts.mono : undefined, marginTop: 3 }}>
+                        {host.url || (host.type === 'runtime' ? 'In-process Electron main runtime' : 'Detached daemon on this machine')}
+                      </div>
+                    </div>
+                    {!builtin && (
+                      <>
+                        <Toggle
+                          value={host.enabled !== false}
+                          onChange={value => { void saveExecutionHost({ ...host, enabled: value }) }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { void removeExecutionHost(host.id) }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: theme.text.disabled,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+              <div
+                style={{
+                  background: theme.surface.panelMuted,
+                  border: `1px dashed ${theme.border.default}`,
+                  borderRadius: 10,
+                  padding: '12px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8,
+                }}
+              >
+                <div style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 600 }}>Add remote daemon</div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <TextInput value={newHostLabel} onChange={setNewHostLabel} width={180} placeholder="Mac Mini" />
+                  <TextInput value={newHostUrl} onChange={setNewHostUrl} width={240} placeholder="https://daemon.example.com" />
+                  <TextInput value={newHostToken} onChange={setNewHostToken} width={200} placeholder="Optional token" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const trimmedLabel = newHostLabel.trim()
+                      const trimmedUrl = newHostUrl.trim()
+                      if (!trimmedLabel || !trimmedUrl) return
+                      const id = trimmedLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || `host-${Date.now()}`
+                      void saveExecutionHost({
+                        id,
+                        type: 'remote-daemon',
+                        label: trimmedLabel,
+                        url: trimmedUrl,
+                        authToken: newHostToken.trim() || null,
+                        enabled: true,
+                      }).then(() => {
+                        setNewHostLabel('')
+                        setNewHostUrl('')
+                        setNewHostToken('')
+                      })
+                    }}
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 8,
+                      fontSize: fonts.secondarySize,
+                      fontWeight: 600,
+                      border: `1px solid ${theme.border.default}`,
+                      background: theme.accent.soft,
+                      color: theme.accent.hover,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Add host
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled }}>
+                  <span>Label</span>
+                  <span>URL</span>
+                  <span>Token</span>
+                </div>
+              </div>
+            </div>
+            {executionHostsError && (
+              <div style={{ fontSize: fonts.secondarySize, color: theme.status.danger, padding: '4px 2px' }}>
+                {executionHostsError}
+              </div>
+            )}
+          </>
+        )
+      }
       case 'canvas':
         return (
           <>
@@ -865,10 +1369,155 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
           </>
         )
 
+      case 'permissions':
+        return (
+          <>
+            <SectionLabel label="Tool Permission Memory" />
+            <div style={{ background: theme.surface.panelMuted, borderRadius: 10, padding: '12px 16px', marginBottom: 12 }}>
+              <div style={{ fontSize: fonts.size, color: theme.text.secondary, marginBottom: 6 }}>
+                Approvals are remembered per provider, tool, and workspace.
+              </div>
+              <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, lineHeight: 1.6 }}>
+                When a tool asks for approval, CodeSurf can allow it once, for this session, for the rest of today, or permanently.
+              </div>
+              <div style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, fontFamily: fonts.mono, marginTop: 8 }}>
+                {permissionData?.path ?? '~/.codesurf/permissions.json'}
+              </div>
+            </div>
+            <SettingRow label="Stored grants" description="Clear remembered approvals so tools prompt again.">
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => { void loadPermissions() }}
+                  disabled={permissionsLoading}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontSize: fonts.secondarySize,
+                    fontWeight: 600,
+                    border: `1px solid ${theme.border.default}`,
+                    background: theme.surface.input,
+                    color: theme.text.secondary,
+                    cursor: permissionsLoading ? 'not-allowed' : 'pointer',
+                    opacity: permissionsLoading ? 0.6 : 1,
+                  }}
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void clearAllPermissionGrants() }}
+                  disabled={permissionsLoading || (permissionData?.grants.length ?? 0) === 0}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    fontSize: fonts.secondarySize,
+                    fontWeight: 600,
+                    border: `1px solid ${theme.border.default}`,
+                    background: `${theme.status.danger}14`,
+                    color: theme.status.danger,
+                    cursor: permissionsLoading || (permissionData?.grants.length ?? 0) === 0 ? 'not-allowed' : 'pointer',
+                    opacity: permissionsLoading || (permissionData?.grants.length ?? 0) === 0 ? 0.6 : 1,
+                  }}
+                >
+                  Clear all
+                </button>
+              </div>
+            </SettingRow>
+            {permissionsError && (
+              <div style={{ fontSize: fonts.secondarySize, color: theme.status.danger, padding: '4px 2px 10px' }}>
+                {permissionsError}
+              </div>
+            )}
+            {(permissionData?.grants.length ?? 0) === 0 ? (
+              <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, padding: '8px 2px' }}>
+                {permissionsLoading ? 'Loading permission grants…' : 'No remembered tool approvals.'}
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {permissionData!.grants.map(grant => (
+                  <div key={grant.id} style={{ background: theme.surface.panelMuted, borderRadius: 10, padding: '12px 14px', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 600 }}>{grant.title || grant.toolName}</span>
+                        <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, background: theme.surface.input, padding: '2px 8px', borderRadius: 999 }}>
+                          {grant.provider}
+                        </span>
+                        <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.status.success, background: `${theme.status.success}14`, padding: '2px 8px', borderRadius: 999 }}>
+                          {grant.scope === 'forever' ? 'all time' : grant.scope}
+                        </span>
+                      </div>
+                      {grant.description && (
+                        <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, marginTop: 4 }}>
+                          {grant.description}
+                        </div>
+                      )}
+                      <div style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, fontFamily: fonts.mono, marginTop: 6, wordBreak: 'break-all' }}>
+                        {grant.toolName}{grant.workspaceDir ? ` · ${grant.workspaceDir}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { void clearPermissionGrantById(grant.id) }}
+                      style={{
+                        padding: '6px 10px',
+                        borderRadius: 8,
+                        fontSize: fonts.secondarySize,
+                        fontWeight: 600,
+                        border: `1px solid ${theme.border.default}`,
+                        background: 'transparent',
+                        color: theme.text.secondary,
+                        cursor: 'pointer',
+                        flexShrink: 0,
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )
+
 
 
       case 'browser':
-        return <ChromeSyncSection settings={settings} onUpdate={update} theme={theme} />
+        return (
+          <>
+            <SectionLabel label="Links" />
+            <SettingRow label="Open links in" description="Choose whether rendered links open in a browser block on the canvas or in your default external browser.">
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {([
+                  { id: 'browser-block', label: 'Browser block' },
+                  { id: 'external-browser', label: 'External browser' },
+                ] as const).map(option => {
+                  const active = (settings.linkOpenMode ?? 'browser-block') === option.id
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => update('linkOpenMode', option.id)}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: 8,
+                        fontSize: fonts.secondarySize,
+                        fontWeight: 600,
+                        border: `1px solid ${active ? theme.accent.base : theme.border.default}`,
+                        background: active ? theme.accent.soft : theme.surface.input,
+                        color: active ? theme.accent.hover : theme.text.secondary,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </SettingRow>
+            <ChromeSyncSection settings={settings} onUpdate={update} theme={theme} />
+          </>
+        )
 
       case 'tools':
       case 'mcp': {
@@ -1640,33 +2289,6 @@ function validateDisplayJson(value: string): { ok: true; parsed: Partial<AppSett
   }
 }
 
-function SliderField({ value, min, max, step, onChange, format }: {
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (value: number) => void
-  format?: (value: number) => string
-}): React.JSX.Element {
-  const theme = useTheme()
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        style={{ width: '100%', minWidth: 0 }}
-      />
-      <span style={{ width: 32, textAlign: 'right', fontSize: 10, color: theme.text.secondary, fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
-        {format ? format(value) : value}
-      </span>
-    </div>
-  )
-}
-
 function StepperNumberField({ value, min, max, step, onChange, format }: {
   value: number
   min: number
@@ -1799,7 +2421,7 @@ function CompactFontRow({ label, description, token, fontOptions, onChange }: {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
           <StepperNumberField value={token.size} min={8} max={32} step={1} onChange={size => onChange({ ...token, size })} />
           <StepperNumberField value={token.weight ?? 400} min={100} max={900} step={100} onChange={weight => onChange({ ...token, weight })} />
-          <StepperNumberField value={token.lineHeight} min={1} max={2.2} step={0.05} onChange={lineHeight => onChange({ ...token, lineHeight })} format={value => value.toFixed(2)} />
+          <StepperNumberField value={token.lineHeight} min={0.7} max={2.2} step={0.05} onChange={lineHeight => onChange({ ...token, lineHeight })} format={value => value.toFixed(2)} />
         </div>
       </div>
     </div>
@@ -1915,6 +2537,44 @@ function DisplaySettingsEditor({
             <CompactFontRow label="Primary" description="Main UI text, headings, chat messages" token={settings.fonts.primary} fontOptions={SANS_FONTS} onChange={next => updateFont('primary', next)} />
             <CompactFontRow label="Secondary" description="Metadata, subtitles, labels, smaller text" token={settings.fonts.secondary} fontOptions={SANS_FONTS} onChange={next => updateFont('secondary', next)} />
             <CompactFontRow label="Monospace" description="Terminal, code editor, data display" token={settings.fonts.mono} fontOptions={MONO_FONTS} onChange={next => updateFont('mono', next)} />
+          </div>
+
+          {/* Live font preview */}
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 10,
+            padding: '12px 14px',
+            background: theme.surface.panelMuted,
+            border: `1px solid ${theme.border.subtle}`,
+            borderRadius: 10,
+          }}>
+            <div style={{ fontSize: fonts.secondarySize - 2, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1.2, textTransform: 'uppercase' }}>Preview</div>
+            <div style={{
+              fontFamily: settings.fonts.primary.family,
+              fontSize: settings.fonts.primary.size,
+              fontWeight: settings.fonts.primary.weight ?? 400,
+              lineHeight: settings.fonts.primary.lineHeight,
+              color: theme.text.primary,
+            }}>
+              Primary: The quick brown fox jumps over the lazy dog
+            </div>
+            <div style={{
+              fontFamily: settings.fonts.secondary.family,
+              fontSize: settings.fonts.secondary.size,
+              fontWeight: settings.fonts.secondary.weight ?? 400,
+              lineHeight: settings.fonts.secondary.lineHeight,
+              color: theme.text.secondary,
+            }}>
+              Secondary: Metadata, labels, and smaller interface text
+            </div>
+            <div style={{
+              fontFamily: settings.fonts.mono.family,
+              fontSize: settings.fonts.mono.size,
+              fontWeight: settings.fonts.mono.weight ?? 400,
+              lineHeight: settings.fonts.mono.lineHeight,
+              color: theme.text.muted,
+            }}>
+              Mono: const result = await fetch('/api/data')
+            </div>
           </div>
 
           <SectionLabel label="Updates" />

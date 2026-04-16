@@ -55,9 +55,17 @@ export class ExtensionRegistry {
   private extraMCPTools: Array<ExtensionMCPToolContrib & { extId: string; handler?: (args: Record<string, unknown>) => Promise<string> }> = []
   private activeWorkspacePath: string | null = null
   private disabledIds: Set<string> = new Set()
+  private bundledDirs: string[]
+
+  constructor(opts?: { bundledDirs?: string[] }) {
+    this.bundledDirs = (opts?.bundledDirs ?? []).filter(Boolean)
+  }
 
   async scan(): Promise<void> {
     this.disabledIds = await loadDisabledSet()
+    for (const bundledDir of this.bundledDirs) {
+      await this.scanDir(bundledDir)
+    }
     const globalDir = join(CONTEX_HOME, EXTENSIONS_DIRNAME)
     await this.scanDir(globalDir)
   }
@@ -83,6 +91,9 @@ export class ExtensionRegistry {
     const manifests = new Map<string, ExtensionManifest>()
     const targetWorkspacePath = workspacePath ?? this.activeWorkspacePath
 
+    for (const bundledDir of this.bundledDirs) {
+      await this.scanDirLight(bundledDir, manifests, disabledIds)
+    }
     await this.scanDirLight(join(CONTEX_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
     if (targetWorkspacePath) {
       await this.scanDirLight(join(targetWorkspacePath, '.contex', EXTENSIONS_DIRNAME), manifests, disabledIds)

@@ -122,6 +122,7 @@ contextBridge.exposeInMainWorld('electron', {
     },
     getSessionState: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:getSessionState', workspaceId, sessionEntryId),
     deleteSession: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:deleteSession', workspaceId, sessionEntryId),
+    renameSession: (workspaceId: string, sessionEntryId: string, title: string) => ipcRenderer.invoke('canvas:renameSession', workspaceId, sessionEntryId, title),
   },
 
   // Kanban board state persistence
@@ -174,11 +175,23 @@ contextBridge.exposeInMainWorld('electron', {
       provider: string
       model: string
       messages: { role: string; content: string }[]
+      runMode?: 'foreground' | 'background'
       negotiatedTools?: string[]
       peers?: { peerId: string; peerType: string; tools: string[] }[]
       providerTransport?: import('../shared/types').ExtensionChatTransportConfig | null
     }) =>
       ipcRenderer.invoke('chat:send', req),
+    resumeJob: (req: {
+      cardId: string
+      provider: string
+      model: string
+      workspaceDir?: string
+      executionTarget?: 'local' | 'cloud'
+      cloudHostId?: string | null
+      executionPreference?: import('../shared/types').ExecutionPreference | null
+      jobId?: string | null
+      jobSequence?: number
+    }) => ipcRenderer.invoke('chat:resumeJob', req),
     stop: (cardId: string) => ipcRenderer.invoke('chat:stop', cardId),
     clearSession: (cardId: string) => ipcRenderer.invoke('chat:clearSession', cardId),
     opencodeModels: () => ipcRenderer.invoke('chat:opencodeModels'),
@@ -238,6 +251,17 @@ contextBridge.exposeInMainWorld('electron', {
     relaunch: () => ipcRenderer.invoke('app:relaunch')
   },
 
+  execution: {
+    listHosts: () => ipcRenderer.invoke('execution:listHosts'),
+    upsertHost: (host: import('../shared/types').ExecutionHostRecord) => ipcRenderer.invoke('execution:upsertHost', host),
+    deleteHost: (id: string) => ipcRenderer.invoke('execution:deleteHost', id),
+    resolveTarget: (preference: import('../shared/types').ExecutionPreference) => ipcRenderer.invoke('execution:resolveTarget', preference),
+  },
+
+  shell: {
+    openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  },
+
   browserTile: {
     sync: (payload: { tileId: string; url: string; mode: 'desktop' | 'mobile'; zIndex: number; visible: boolean; bounds: { left: number; top: number; width: number; height: number } }) =>
       ipcRenderer.invoke('browserTile:sync', payload),
@@ -278,6 +302,12 @@ contextBridge.exposeInMainWorld('electron', {
     set: (settings: any) => ipcRenderer.invoke('settings:set', settings),
     getRawJson: () => ipcRenderer.invoke('settings:getRawJson'),
     setRawJson: (json: string) => ipcRenderer.invoke('settings:setRawJson', json),
+  },
+
+  permissions: {
+    list: () => ipcRenderer.invoke('permissions:list'),
+    clear: (id: string) => ipcRenderer.invoke('permissions:clear', id),
+    clearAll: () => ipcRenderer.invoke('permissions:clearAll'),
   },
 
   // Update checker
@@ -444,6 +474,9 @@ contextBridge.exposeInMainWorld('electron', {
     cleanupTile: (tileId: string) => ipcRenderer.invoke('system:cleanupTile', tileId),
     gc: () => ipcRenderer.invoke('system:gc'),
     memStats: () => ipcRenderer.invoke('system:memStats'),
+    daemonStatus: () => ipcRenderer.invoke('system:daemonStatus'),
+    daemonSummary: () => ipcRenderer.invoke('system:daemonSummary'),
+    restartDaemon: () => ipcRenderer.invoke('system:restartDaemon'),
     onGcRequested: (callback: () => void) => {
       const handler = () => {
         // window.gc exists when renderer is launched with --js-flags=--expose-gc

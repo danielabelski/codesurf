@@ -14,8 +14,17 @@
       "entry": "tiles/board/index.html",
       "defaultSize": { "w": 960, "h": 680 },
       "minSize": { "w": 680, "h": 480 }
+    }, {
+      "type": "agent-kanban-summary",
+      "label": "Agent Summary",
+      "entry": "tiles/summary/index.html",
+      "defaultSize": { "w": 420, "h": 360 },
+      "minSize": { "w": 320, "h": 240 }
     }],
-    "contextMenu": [{ "label": "New Agent Kanban", "action": "createTile", "tileType": "ext:agent-kanban-board" }],
+    "contextMenu": [
+      { "label": "New Agent Kanban", "action": "createTile", "tileType": "ext:agent-kanban-board" },
+      { "label": "New Agent Summary", "action": "createTile", "tileType": "ext:agent-kanban-summary" }
+    ],
     "context": {
       "produces": ["ctx:kanban:task-started", "ctx:kanban:task-completed"],
       "consumes": []
@@ -24,7 +33,8 @@
       { "name": "createTask",  "description": "Create a new task. Params: { prompt, agentId?, baseRef?, columnId? }" },
       { "name": "startTask",   "description": "Start an agent on a task. Params: { taskId }" },
       { "name": "completeTask","description": "Mark a task done (move to trash). Params: { taskId }" },
-      { "name": "getBoard",    "description": "Return the current board state as JSON." }
+      { "name": "getBoard",    "description": "Return the current board state as JSON." },
+      { "name": "getSummary",  "description": "Return the current summary widget model as JSON." }
     ]
   }
 }

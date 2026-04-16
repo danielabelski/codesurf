@@ -5,7 +5,8 @@
   "description": "Infinite canvas workspace for AI agents",
   "main": "dist-electron/main/index.js",
   "bin": {
-    "codesurf": "bin/codesurf.cjs"
+    "codesurf": "bin/codesurf.cjs",
+    "codesurfd": "bin/codesurfd.mjs"
   },
   "files": [
     "bin/",
@@ -16,12 +17,14 @@
     "README.md"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npm run test:daemon",
+    "test:daemon": "node --test test/daemon/*.test.mjs",
     "dev": "electron-vite dev -- --js-flags=\"--expose-gc --max-old-space-size=8192\"",
     "build:main": "cross-env EV_BUILD_TARGET=main electron-vite build",
     "build:preload": "cross-env EV_BUILD_TARGET=preload electron-vite build",
     "build:renderer": "cross-env EV_BUILD_TARGET=renderer electron-vite build",
     "build": "cross-env EV_BUILD_TARGET=main electron-vite build && cross-env EV_BUILD_TARGET=preload electron-vite build && cross-env EV_BUILD_TARGET=renderer electron-vite build",
+    "build:npm": "bun run scripts/build-npm-package.mjs",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "dist:windows": "npm run build && node scripts/patch-node-pty-win.js && electron-builder --win nsis portable",
     "dist:linux": "npm run build && electron-builder --linux AppImage deb",
@@ -88,6 +91,7 @@
     },
     "files": [
       "dist-electron/**/*",
+      "bin/**/*",
       "package.json",
       "resources/**/*"
     ],

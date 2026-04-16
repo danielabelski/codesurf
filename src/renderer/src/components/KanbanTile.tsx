@@ -932,7 +932,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width, height, o
                     <textarea value={addInstructions} onChange={e => setAddInstructions(e.target.value)}
                       onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addCard(col.id); if (e.key === 'Escape') { setAddingTo(null); setAddTitle(''); setAddInstructions('') } }}
                       placeholder="Instructions…"
-                      style={{ width: '100%', minHeight: 68, fontSize: fonts.secondarySize, padding: '6px 8px', borderRadius: 4, resize: 'vertical', background: theme.surface.input, color: theme.text.primary, border: `1px solid ${theme.border.default}`, outline: 'none', fontFamily: 'inherit', marginBottom: 6, lineHeight: 1.5 }}
+                      style={{ width: '100%', minHeight: 68, fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, padding: '6px 8px', borderRadius: 4, resize: 'vertical', background: theme.surface.input, color: theme.text.primary, border: `1px solid ${theme.border.default}`, outline: 'none', fontFamily: 'inherit', marginBottom: 6, lineHeight: fonts.secondaryLineHeight }}
                     />
                     <div style={{ display: 'flex', gap: 5 }}>
                       <button onClick={() => addCard(col.id)} style={{ flex: 1, padding: '4px 0', borderRadius: 4, background: theme.accent.base, color: theme.text.inverse, border: 'none', fontSize: fonts.secondarySize, cursor: 'pointer', fontFamily: 'inherit' }}>Add</button>

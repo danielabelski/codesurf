@@ -360,11 +360,11 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                 height: 21,
                 padding: '0 8px', cursor: 'grab', userSelect: 'none',
                 fontSize: 10, color: isActive ? theme.text.primary : theme.text.muted,
-                background: isActive ? theme.surface.selection : 'transparent',
-                border: `1px solid ${isActive ? theme.border.default : 'transparent'}`,
+                background: 'transparent',
+                border: '1px solid transparent',
                 borderBottom: `2px solid ${isActive ? theme.accent.base : 'transparent'}`,
-                borderRadius: 7,
-                transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+                borderRadius: 0,
+                transition: 'color 0.15s, border-color 0.15s',
                 flexShrink: 0, maxWidth: 220,
                 fontWeight: isActive ? 700 : 500,
                 letterSpacing: 0.3,
@@ -372,16 +372,12 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
               }}
               onMouseEnter={e => {
                 if (!isActive) {
-                  e.currentTarget.style.background = theme.surface.hover
                   e.currentTarget.style.color = theme.text.secondary
-                  e.currentTarget.style.borderColor = theme.border.default
                 }
               }}
               onMouseLeave={e => {
                 if (!isActive) {
-                  e.currentTarget.style.background = 'transparent'
                   e.currentTarget.style.color = theme.text.muted
-                  e.currentTarget.style.borderColor = 'transparent'
                 }
               }}
             >
@@ -391,9 +387,9 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
               <span
                 onMouseDown={e => e.stopPropagation()}
                 onClick={e => { e.stopPropagation(); onClose(tab.id) }}
-                style={{ width: 15, height: 15, borderRadius: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, lineHeight: 1, color: isActive ? theme.text.secondary : theme.text.disabled, flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s, background 0.15s' }}
-                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary; e.currentTarget.style.background = theme.surface.hover }}
-                onMouseLeave={e => { e.currentTarget.style.color = isActive ? theme.text.secondary : theme.text.disabled; e.currentTarget.style.background = 'transparent' }}
+                style={{ width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, lineHeight: 1, color: isActive ? theme.text.secondary : theme.text.disabled, flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s' }}
+                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
+                onMouseLeave={e => { e.currentTarget.style.color = isActive ? theme.text.secondary : theme.text.disabled }}
               >
                 ×
               </span>

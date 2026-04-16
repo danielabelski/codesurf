@@ -27,6 +27,13 @@ interface ToolItem {
   timestamp: number
 }
 
+interface AvailableToolItem {
+  id: string
+  label: string
+  source: 'builtin' | 'peer' | 'mcp-server'
+  detail?: string
+}
+
 interface MessageItem {
   id: string
   source: 'direct' | 'group'
@@ -48,6 +55,7 @@ type DrawerTab = 'tasks' | 'tools' | 'skills' | 'context' | 'messages'
 interface DrawerData {
   tasks: TaskItem[]
   tools: ToolItem[]
+  availableTools: AvailableToolItem[]
   skills: SkillConfig[]
   context: ContextItem[]
   messages: MessageItem[]
@@ -417,7 +425,7 @@ function TasksPanel({ tasks, onUpdateTask, onDeleteTask, onAddTask }: {
           rows={2}
           style={{
             width: '100%', borderRadius: 6, border: `1px solid ${theme.border.default}`, background: theme.surface.input,
-            color: theme.text.secondary, fontSize: fonts.secondarySize, padding: '4px 8px', resize: 'vertical', outline: 'none', minHeight: 36, maxHeight: 100, lineHeight: 1.4,
+            color: theme.text.secondary, fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, padding: '4px 8px', resize: 'vertical', outline: 'none', minHeight: 36, maxHeight: 100, lineHeight: fonts.secondaryLineHeight,
           }}
           onFocus={e => {
             e.currentTarget.style.borderColor = theme.border.accent
@@ -457,26 +465,83 @@ function TasksPanel({ tasks, onUpdateTask, onDeleteTask, onAddTask }: {
   )
 }
 
-function ToolsPanel({ tools }: { tools: ToolItem[] }): JSX.Element {
+function ToolsPanel({ tools, availableTools }: { tools: ToolItem[]; availableTools: AvailableToolItem[] }): JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
-  return (
-    <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
-      {tools.length === 0 ? (
-        <EmptyState text="No tool calls yet" />
-      ) : (
-        tools.slice().reverse().map(t => (
-          <div key={t.id} style={{ padding: '5px 12px', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
-            <div style={{ marginTop: 1, flexShrink: 0 }}><ToolStatusIcon status={t.status} /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: fonts.secondarySize, color: theme.text.secondary, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</div>
-              {t.input && <div style={{ fontSize: 10, color: theme.text.muted, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.input}</div>}
-              {t.elapsed != null && t.status === 'done' && (
-                <div style={{ fontSize: 9, color: theme.text.disabled, marginTop: 1 }}>{(t.elapsed / 1000).toFixed(1)}s</div>
+  const availableBySource = {
+    builtin: availableTools.filter(tool => tool.source === 'builtin'),
+    peer: availableTools.filter(tool => tool.source === 'peer'),
+    mcp: availableTools.filter(tool => tool.source === 'mcp-server'),
+  }
+
+  const renderAvailableGroup = (
+    label: string,
+    items: AvailableToolItem[],
+    sourceColor: string,
+  ): JSX.Element | null => {
+    if (items.length === 0) return null
+    return (
+      <>
+        <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>
+          {label}
+        </div>
+        {items.map(item => (
+          <div key={item.id} style={{ padding: '5px 12px', display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <div style={{ marginTop: 3, width: 6, height: 6, borderRadius: '50%', background: sourceColor, flexShrink: 0 }} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: fonts.secondarySize, color: theme.text.secondary, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {item.label}
+              </div>
+              {item.detail && (
+                <div style={{ fontSize: 10, color: theme.text.disabled, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.detail}
+                </div>
               )}
             </div>
           </div>
-        ))
+        ))}
+      </>
+    )
+  }
+
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+      {availableTools.length === 0 && tools.length === 0 ? (
+        <EmptyState text="No tools available" />
+      ) : (
+        <>
+          {availableTools.length > 0 && (
+            <>
+              <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>
+                Available now
+              </div>
+              {renderAvailableGroup('Built-in', availableBySource.builtin, theme.accent.base)}
+              {renderAvailableGroup('Connected peers', availableBySource.peer, theme.status.success)}
+              {renderAvailableGroup('MCP servers', availableBySource.mcp, theme.status.warning)}
+            </>
+          )}
+
+          {tools.length > 0 && (
+            <>
+              {availableTools.length > 0 && <Divider />}
+              <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>
+                Recent tool activity
+              </div>
+              {tools.slice().reverse().map(t => (
+                <div key={t.id} style={{ padding: '5px 12px', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                  <div style={{ marginTop: 1, flexShrink: 0 }}><ToolStatusIcon status={t.status} /></div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: fonts.secondarySize, color: theme.text.secondary, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</div>
+                    {t.input && <div style={{ fontSize: 10, color: theme.text.muted, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.input}</div>}
+                    {t.elapsed != null && t.status === 'done' && (
+                      <div style={{ fontSize: 9, color: theme.text.disabled, marginTop: 1 }}>{(t.elapsed / 1000).toFixed(1)}s</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
       )}
     </div>
   )
@@ -489,6 +554,8 @@ function SkillsPanel({ skills, onToggle }: {
   const theme = useTheme()
   const fonts = useAppFonts()
   const builtin = skills.filter(s => s.source === 'builtin')
+  const workspace = skills.filter(s => s.source === 'workspace')
+  const commands = skills.filter(s => s.source === 'command')
   const mcpGroups = new Map<string, SkillConfig[]>()
   for (const s of skills.filter(s => s.source === 'mcp')) {
     const key = s.server ?? 'MCP'
@@ -531,6 +598,18 @@ function SkillsPanel({ skills, onToggle }: {
               {builtin.map(renderSkill)}
             </>
           )}
+          {workspace.length > 0 && (
+            <>
+              <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>Workspace Skills</div>
+              {workspace.map(renderSkill)}
+            </>
+          )}
+          {commands.length > 0 && (
+            <>
+              <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>Commands</div>
+              {commands.map(renderSkill)}
+            </>
+          )}
           {[...mcpGroups.entries()].map(([server, list]) => (
             <React.Fragment key={server}>
               <div style={{ padding: '6px 8px 2px', fontSize: 9, fontWeight: 700, color: theme.text.disabled, letterSpacing: 1, textTransform: 'uppercase' }}>{server}</div>
@@ -569,7 +648,7 @@ function ContextPanel({ items, onAddNote, onRemoveItem }: {
           style={{
             width: '100%', borderRadius: 4, border: `1px solid ${theme.border.default}`, background: theme.surface.input,
             color: theme.text.secondary, fontSize: fonts.secondarySize, padding: '4px 6px', resize: 'vertical', outline: 'none',
-            minHeight: 36, maxHeight: 100, lineHeight: 1.4,
+            minHeight: 36, maxHeight: 100, lineHeight: fonts.secondaryLineHeight,
           }}
           onFocus={e => (e.currentTarget.style.borderColor = theme.border.accent)}
           onBlur={e => (e.currentTarget.style.borderColor = theme.border.default)}
@@ -669,7 +748,7 @@ function DrawerPanel({ data, activeTab, onTabChange, onUpdateTask, onDeleteTask,
   const fonts = useAppFonts()
   const counts: Record<DrawerTab, number> = {
     tasks: data.tasks.filter(t => t.status !== 'done').length,
-    tools: data.tools.filter(t => t.status === 'running').length,
+    tools: data.availableTools.length > 0 ? data.availableTools.length : data.tools.filter(t => t.status === 'running').length,
     skills: data.skills.filter(s => s.enabled).length,
     context: data.context.length,
     messages: data.messages.length,
@@ -708,7 +787,7 @@ function DrawerPanel({ data, activeTab, onTabChange, onUpdateTask, onDeleteTask,
         </div>
       </div>
       {activeTab === 'tasks' && <TasksPanel tasks={data.tasks} onUpdateTask={onUpdateTask} onDeleteTask={onDeleteTask} onAddTask={onAddTask} />}
-      {activeTab === 'tools' && <ToolsPanel tools={data.tools} />}
+      {activeTab === 'tools' && <ToolsPanel tools={data.tools} availableTools={data.availableTools} />}
       {activeTab === 'skills' && <SkillsPanel skills={data.skills} onToggle={onToggleSkill} />}
       {activeTab === 'context' && <ContextPanel items={data.context} onAddNote={onAddNote} onRemoveItem={onRemoveContext} />}
       {activeTab === 'messages' && <MessagePanel messages={data.messages} />}
@@ -871,6 +950,46 @@ function processEvent(evt: { type: string; payload: Record<string, unknown>; id:
     })
   }
 
+  if (evt.type === 'tool_inventory') {
+    const incoming = Array.isArray(p?.tools) ? p.tools : []
+    const nextTools: AvailableToolItem[] = incoming
+      .filter((tool): tool is Record<string, unknown> => typeof tool === 'object' && tool !== null)
+      .map((tool, index) => {
+        const source = tool.source === 'peer' || tool.source === 'mcp-server' ? tool.source : 'builtin'
+        const label = typeof tool.label === 'string' ? tool.label : typeof tool.name === 'string' ? tool.name : `Tool ${index + 1}`
+        return {
+          id: typeof tool.id === 'string' ? tool.id : `${source}:${label}`,
+          label,
+          source,
+          detail: typeof tool.detail === 'string' ? tool.detail : undefined,
+        }
+      })
+
+    setData(prev => ({ ...prev, availableTools: nextTools }))
+  }
+
+  if (evt.type === 'skill_inventory') {
+    const incoming = Array.isArray(p?.skills) ? p.skills : []
+    const nextSkills: SkillConfig[] = incoming
+      .filter((skill): skill is Record<string, unknown> => typeof skill === 'object' && skill !== null)
+      .map((skill, index) => {
+        const source = skill.source === 'mcp' || skill.source === 'workspace' || skill.source === 'command'
+          ? skill.source
+          : 'builtin'
+        const name = typeof skill.name === 'string' ? skill.name : `Skill ${index + 1}`
+        return {
+          id: typeof skill.id === 'string' ? skill.id : `${source}:${name}`,
+          name,
+          enabled: skill.enabled !== false,
+          source,
+          server: typeof skill.server === 'string' ? skill.server : undefined,
+          description: typeof skill.description === 'string' ? skill.description : undefined,
+        }
+      })
+
+    setData(prev => ({ ...prev, skills: nextSkills }))
+  }
+
   // Skills and context are managed interactively via the drawer, not from bus events.
   // Bus events for files/notes are persisted to the activity store but don't populate the drawer.
 }
@@ -892,7 +1011,7 @@ export function TileChrome({
   const expanded = forceExpanded ?? localExpanded
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<DrawerTab>('tasks')
-  const [data, setData] = useState<DrawerData>({ tasks: [], tools: [], skills: [], context: [], messages: [] })
+  const [data, setData] = useState<DrawerData>({ tasks: [], tools: [], availableTools: [], skills: [], context: [], messages: [] })
   const hasDrawer = DRAWER_TYPES.has(tile.type)
   const peerIds = React.useMemo(() => [...new Set((connectedPeers ?? []).filter(Boolean))], [connectedPeers])
 
@@ -1250,7 +1369,7 @@ export function TileChrome({
             />
           ) : (
             <span style={{
-              flex: 1, fontSize: fonts.size, fontWeight: 500, color: titlebarForeground,
+              flex: 1, fontSize: fonts.size, fontWeight: Math.min(900, fonts.weight + 100), color: titlebarForeground,
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
             }}>
               {fileLabel(tile)}
@@ -1383,7 +1502,7 @@ export function TileChrome({
 
         {/* Content */}
         <div
-          style={{ flex: 1, overflow: 'hidden', minHeight: 0, position: 'relative', userSelect: 'text', WebkitUserSelect: 'text' } as React.CSSProperties}
+          style={{ flex: 1, overflow: 'hidden', minHeight: 0, position: 'relative' } as React.CSSProperties}
           onDragOver={e => { if (tile.type !== 'kanban') e.stopPropagation() }}
           onDrop={e => { if (tile.type !== 'kanban') e.stopPropagation() }}
         >

@@ -155,7 +155,14 @@ export function registerFsIPC(): void {
   })
 
   ipcMain.handle('fs:readFile', async (_, filePath: string) => {
-    return await fs.readFile(validateFsPath(filePath), 'utf8')
+    try {
+      return await fs.readFile(validateFsPath(filePath), 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return ''
+      }
+      throw error
+    }
   })
 
   ipcMain.handle('fs:writeFile', async (_, filePath: string, content: string) => {

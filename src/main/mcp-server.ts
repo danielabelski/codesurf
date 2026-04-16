@@ -43,6 +43,34 @@ type UserConfigWorkspaceRef = {
   path: string
 }
 
+function workspaceCanvasStatePath(workspaceId: string): string {
+  return join(CONTEX_HOME, 'workspaces', workspaceId, '.contex', 'canvas-state.json')
+}
+
+async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
+  const workspaces = await readWorkspaceRefsFromUserConfig()
+  for (const ws of workspaces) {
+    try {
+      const notePath = join(ws.path, '.contex', tileId, 'context', 'note.txt')
+      const stat = await fs.stat(notePath).catch(() => null)
+      if (stat?.isFile()) return notePath
+    } catch {
+      // ignore
+    }
+
+    try {
+      const raw = await fs.readFile(workspaceCanvasStatePath(ws.id), 'utf8')
+      const parsed = JSON.parse(raw) as { tiles?: Array<Record<string, unknown>> }
+      const tile = parsed.tiles?.find(entry => entry?.id === tileId && entry?.type === 'note')
+      const filePath = typeof tile?.filePath === 'string' ? tile.filePath.trim() : ''
+      if (filePath) return filePath
+    } catch {
+      // ignore
+    }
+  }
+  return null
+}
+
 async function readWorkspaceRefsFromUserConfig(): Promise<UserConfigWorkspaceRef[]> {
   try {
     const userConfigPath = join(getContexDir(), 'config.json')
@@ -872,16 +900,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     }
 
     if (name === 'note_read_content') {
-      // Read note content from the tile's context file
       try {
-        const workspaces = await readWorkspaceRefsFromUserConfig()
-        for (const ws of workspaces) {
-          const notePath = join(ws.path, '.contex', tileId, 'context', 'note.txt')
-          try {
-            const content = await fs.readFile(notePath, 'utf8')
-            return content
-          } catch { /* not in this workspace */ }
-        }
+        const notePath = await findNoteTileBackingFile(tileId)
+        if (notePath) return await fs.readFile(notePath, 'utf8')
       } catch { /**/ }
       return `Note block ${tileId} is empty or not found`
     }
@@ -889,12 +910,26 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     if (name === 'note_write_content') {
       const content = asString(args.content)
       if (content === undefined) return 'Missing content'
+      try {
+        const notePath = await findNoteTileBackingFile(tileId)
+        if (notePath) await fs.writeFile(notePath, content, 'utf8')
+      } catch { /**/ }
       return publishPeerCommand(tileId, name, { content })
     }
 
     if (name === 'note_append_context' || name === 'file_open_context' || name === 'image_annotate' || name === 'kanban_set_status') {
       const content = asString((name === 'kanban_set_status' ? args.message : args.snippet ?? args.context ?? args.note ?? args.message))
       if (!content) return 'Missing message'
+      if (name === 'note_append_context') {
+        try {
+          const notePath = await findNoteTileBackingFile(tileId)
+          if (notePath) {
+            const previous = await fs.readFile(notePath, 'utf8').catch(() => '')
+            const next = previous ? `${previous}\n${content}` : content
+            await fs.writeFile(notePath, next, 'utf8')
+          }
+        } catch { /**/ }
+      }
       return publishPeerCommand(tileId, name, { content })
     }
 

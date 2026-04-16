@@ -1,7 +1,8 @@
-import { spawn } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import type { RelayAgentExecutor, RelaySpawnRequest, RelayTurnInput } from '../../../packages/contex-relay/src'
 import { getAgentPath, getShellEnvPath } from '../agent-paths'
+import { resolveStoredPermission } from '../permissions'
 
 const claudeSessions = new Map<string, string>()
 
@@ -28,12 +29,43 @@ function thinkingForClaude(thinking?: string): { type: string; budget_tokens?: n
 }
 
 async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+  const claudePermissionMode = modeForClaude(spawnRequest.mode)
+  const workspaceDir = typeof spawnRequest.metadata?.workspaceDir === 'string'
+    ? spawnRequest.metadata.workspaceDir
+    : typeof spawnRequest.metadata?.projectPath === 'string'
+      ? spawnRequest.metadata.projectPath
+      : typeof spawnRequest.metadata?.cwd === 'string'
+        ? spawnRequest.metadata.cwd
+        : null
   const options: Options = {
     model: spawnRequest.model ?? 'claude-sonnet-4-6',
-    permissionMode: modeForClaude(spawnRequest.mode) as any,
+    permissionMode: claudePermissionMode as any,
     thinking: thinkingForClaude(spawnRequest.thinking) as any,
     persistSession: true,
     includePartialMessages: false,
+    ...(claudePermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
+    ...(claudePermissionMode !== 'bypassPermissions' ? {
+      canUseTool: async (toolName: string, _input: Record<string, unknown>, toolOptions: any) => {
+        const allowed = resolveStoredPermission({
+          provider: 'claude',
+          toolName,
+          title: typeof toolOptions?.title === 'string' ? toolOptions.title : null,
+          description: typeof toolOptions?.description === 'string' ? toolOptions.description : null,
+          blockedPath: typeof toolOptions?.blockedPath === 'string' ? toolOptions.blockedPath : null,
+          workspaceDir,
+        })
+
+        if (allowed) {
+          return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        }
+
+        return {
+          behavior: 'deny',
+          message: `Permission required for ${toolName}. Save a session, all-day, or all-time grant from an interactive chat before using this relay agent.`,
+          toolUseID: toolOptions?.toolUseID,
+        }
+      },
+    } : {}),
   }
 
   const existingSessionId = claudeSessions.get(participantId)

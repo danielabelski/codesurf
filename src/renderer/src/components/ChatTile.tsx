@@ -8,8 +8,10 @@ import type {
   ExtensionChatModel,
   ExtensionChatProviderConfig,
   ExtensionChatTransportConfig,
+  SkillDefinition,
 } from '../../../shared/types'
 import { basename, getDroppedPaths, isImagePath } from '../utils/dnd'
+import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 import {
   ShieldCheck, ChevronDown,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
@@ -21,6 +23,35 @@ import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
+
+const CHAT_SLASH_COMMANDS = [
+  { value: '/compact', description: 'Compact conversation' },
+  { value: '/clear', description: 'Clear conversation' },
+  { value: '/model', description: 'Switch model' },
+  { value: '/mode', description: 'Switch mode (plan, build, etc.)' },
+  { value: '/help', description: 'Show help' },
+  { value: '/init', description: 'Initialize workspace' },
+] as const
+
+const CHAT_DEFAULT_SKILL_LOCATIONS = [
+  '$HOME/.claude/commands',
+  '$WORKSPACE/.claude/commands',
+  '$HOME/.claude/skills',
+  '$WORKSPACE/.claude/skills',
+  '$HOME/.config/opencode/skills',
+  '$WORKSPACE/.opencode/skills',
+  '$WORKSPACE/.cursor/rules',
+  '$WORKSPACE/.continue/prompts',
+].join('\n')
+
+function resolveChatSkillLocations(raw: string, homePath: string, workspacePath: string | null): string[] {
+  return raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => workspacePath || !line.startsWith('$WORKSPACE'))
+    .map(line => line.replace(/^\$HOME/, homePath).replace(/^\$WORKSPACE/, workspacePath ?? ''))
+}
 
 // --- Custom provider SVG icons (matching Paseo) ----------------------------------
 
@@ -181,6 +212,14 @@ interface ChatMessage {
   turns?: number
 }
 
+function shouldRenderToolBlock(block: ToolBlock): boolean {
+  return block.status === 'running'
+    || (block.fileChanges?.length ?? 0) > 0
+    || (block.commandEntries?.length ?? 0) > 0
+    || Boolean(block.summary?.trim())
+    || Boolean(block.input?.trim())
+}
+
 interface PendingAttachment {
   path: string
   kind: 'image' | 'file'
@@ -206,7 +245,11 @@ interface ChatTilePersistedState {
   thinking: string
   agentMode: boolean
   autoAgentMode: boolean
+  preserveSessionSummary?: boolean
   sessionId: string | null
+  jobId?: string | null
+  jobSequence?: number
+  cloudHostId?: string | null
   isStreaming: boolean
   executionTarget?: 'local' | 'cloud'
 }
@@ -287,7 +330,8 @@ const CHAT_TRIM_NOTICE_PREFIX = '[CodeSurf memory guard]'
 const CHAT_COMPOSER_MAX_WIDTH = CHAT_MESSAGE_MAX_WIDTH
 const CHAT_COMPOSER_MIN_WIDTH = 400
 const CHAT_COMPOSER_SIDE_INSET = 24
-const CHAT_COMPOSER_DRAWER_INDENT = 20
+const CHAT_COMPOSER_WIDTH = `min(calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px), ${CHAT_COMPOSER_MAX_WIDTH}px)`
+const CHAT_COMPOSER_MIN_WIDTH_STYLE = `min(${CHAT_COMPOSER_MIN_WIDTH}px, calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px))`
 const CHAT_COMPOSER_MIN_HEIGHT = 105
 const CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT = 56
 const CHAT_AUTO_SCROLL_THRESHOLD = 48
@@ -383,7 +427,7 @@ async function loadGitState(workspaceDir: string, force = false): Promise<Cached
 }
 
 // Font context so sub-components can read settings-derived fonts without prop drilling
-const FontCtx = React.createContext({ sans: FONT_SANS, secondary: FONT_SANS, mono: FONT_MONO, size: FONT_SIZE_DEFAULT, monoSize: MONO_SIZE_DEFAULT })
+const FontCtx = React.createContext({ sans: FONT_SANS, secondary: FONT_SANS, mono: FONT_MONO, size: FONT_SIZE_DEFAULT, monoSize: MONO_SIZE_DEFAULT, lineHeight: 1.5, weight: 400, monoLineHeight: 1.5, monoWeight: 400, secondarySize: 11, secondaryLineHeight: 1.4, secondaryWeight: 400 })
 function useFonts() { return React.useContext(FontCtx) }
 
 function sanitizeToolOutputText(text: string | undefined): string | undefined {
@@ -417,6 +461,172 @@ function buildQueuedTurnPreview(content: string, attachmentCount: number): strin
   if (truncated) return truncated
   if (attachmentCount > 0) return `Queued attachment${attachmentCount === 1 ? '' : 's'}`
   return 'Queued follow-up'
+}
+
+const RECENT_EDIT_CONTEXT_FILE_LIMIT = 3
+const RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT = 24
+const RECENT_EDIT_CONTEXT_SURROUNDING_LINES = 4
+const RECENT_EDIT_CONTEXT_MAX_CHARS = 5000
+
+function shouldAttachRecentEditContext(userText: string): boolean {
+  const normalized = userText.trim()
+  if (!normalized) return false
+  if (normalized.length > 320) return false
+
+  const hasEditIntent = /\b(edit|change|adjust|tweak|move|nudge|shift|raise|lower|increase|decrease|reduce|make|set|resize|align|position|offset|widen|narrow|shorten|lengthen|bigger|smaller|higher|lower)\b/i.test(normalized)
+    || /\b\d+(?:px|rem|em|%)\b/i.test(normalized)
+  const refersToExistingThing = /\b(it|that|those|them|this|same|again|more|further|another|still|also|back|left|right|up|down|higher|lower|bigger|smaller)\b/i.test(normalized)
+  return hasEditIntent && refersToExistingThing
+}
+
+function resolveEditedFilePath(filePath: string, workspaceDir: string): string {
+  const trimmed = String(filePath ?? '').trim()
+  if (!trimmed) return trimmed
+  if (trimmed.startsWith('/')) return trimmed
+  return `${workspaceDir.replace(/\/+$/, '')}/${trimmed.replace(/^\/+/, '')}`
+}
+
+function extractChangedLineRangesFromDiff(diff: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const line of String(diff ?? '').split('\n')) {
+    const match = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/)
+    if (!match) continue
+    const start = Number(match[1] ?? '0')
+    const count = Number(match[2] ?? '1')
+    if (!Number.isFinite(start) || start <= 0) continue
+    const safeCount = Number.isFinite(count) && count > 0 ? count : 1
+    ranges.push({ start, end: start + safeCount - 1 })
+  }
+  return ranges
+}
+
+function buildSnippetFromRanges(fileContent: string, ranges: Array<{ start: number; end: number }>): string {
+  const lines = String(fileContent ?? '').split(/\r?\n/)
+  if (lines.length === 0) return ''
+  const windows = ranges.length > 0
+    ? ranges.slice(0, 3)
+    : [{ start: 1, end: Math.min(lines.length, 8) }]
+
+  const merged: Array<{ start: number; end: number }> = []
+  for (const range of windows) {
+    const next = {
+      start: Math.max(1, range.start - RECENT_EDIT_CONTEXT_SURROUNDING_LINES),
+      end: Math.min(lines.length, range.end + RECENT_EDIT_CONTEXT_SURROUNDING_LINES),
+    }
+    const previous = merged[merged.length - 1]
+    if (previous && next.start <= previous.end + 2) {
+      previous.end = Math.max(previous.end, next.end)
+    } else {
+      merged.push(next)
+    }
+  }
+
+  let emittedLines = 0
+  const parts: string[] = []
+  for (const range of merged) {
+    if (emittedLines >= RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT) break
+    if (parts.length > 0) parts.push('...')
+    for (let lineNumber = range.start; lineNumber <= range.end; lineNumber += 1) {
+      if (emittedLines >= RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT) {
+        parts.push('...')
+        break
+      }
+      parts.push(`${lineNumber}: ${lines[lineNumber - 1] ?? ''}`)
+      emittedLines += 1
+    }
+  }
+  return parts.join('\n').trim()
+}
+
+async function buildRecentEditContext(messages: ChatMessage[], workspaceDir: string, userText: string): Promise<string | null> {
+  if (!shouldAttachRecentEditContext(userText) || !workspaceDir.trim() || !window.electron?.fs?.readFile) return null
+
+  const seenPaths = new Set<string>()
+  const recentChanges: Array<{ displayPath: string; resolvedPath: string; diff: string; changeType: string }> = []
+
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex]
+    if (message.role !== 'assistant') continue
+    const toolBlocks = message.toolBlocks ?? []
+    for (let blockIndex = toolBlocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = toolBlocks[blockIndex]
+      for (const change of [...(block.fileChanges ?? [])].reverse()) {
+        const resolvedPath = resolveEditedFilePath(change.path, workspaceDir)
+        if (!resolvedPath || seenPaths.has(resolvedPath)) continue
+        seenPaths.add(resolvedPath)
+        recentChanges.push({
+          displayPath: change.path,
+          resolvedPath,
+          diff: change.diff,
+          changeType: change.changeType,
+        })
+        if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
+      }
+      if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
+    }
+    if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
+  }
+
+  if (recentChanges.length === 0) return null
+
+  const sections: string[] = []
+  for (const change of recentChanges) {
+    try {
+      const fileContent = await window.electron.fs.readFile(change.resolvedPath)
+      const snippet = buildSnippetFromRanges(fileContent, extractChangedLineRangesFromDiff(change.diff))
+      if (!snippet) continue
+      sections.push(
+        `File: ${change.displayPath}\n` +
+        `Recent change type: ${change.changeType}\n` +
+        `Current nearby code:\n${snippet}`,
+      )
+    } catch {
+      // If the file no longer exists or can't be read, skip it quietly.
+    }
+  }
+
+  if (sections.length === 0) return null
+
+  const combined =
+    'Recent edit context from the immediately previous implementation pass. Use this only as fast-follow context if the user is referring to the same change area.\n\n'
+    + sections.join('\n\n---\n\n')
+
+  if (combined.length <= RECENT_EDIT_CONTEXT_MAX_CHARS) return combined
+  return `${combined.slice(0, RECENT_EDIT_CONTEXT_MAX_CHARS - 1).trimEnd()}…`
+}
+
+function splitMessageAttachmentPaths(text: string): {
+  bodyText: string
+  attachmentPaths: string[]
+} {
+  const marker = 'Attached file paths:'
+  const normalized = String(text ?? '')
+  const attachmentMarkerIndex = normalized.indexOf(marker)
+  if (attachmentMarkerIndex < 0) {
+    return {
+      bodyText: normalized,
+      attachmentPaths: [],
+    }
+  }
+
+  const bodyText = normalized.slice(0, attachmentMarkerIndex).trim()
+  const attachmentText = normalized.slice(attachmentMarkerIndex + marker.length).trim()
+  const attachmentPaths = attachmentText
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  if (attachmentPaths.length === 0) {
+    return {
+      bodyText: normalized,
+      attachmentPaths: [],
+    }
+  }
+
+  return {
+    bodyText,
+    attachmentPaths,
+  }
 }
 
 function truncateTextForMemory(text: string | undefined, limit: number, label: string): string {
@@ -656,24 +866,6 @@ function normalizeChatMarkdownText(text: string): string {
     .replace(/<\/image>/g, '')
 }
 
-function resolveLocalMarkdownPath(href: string): string | null {
-  const trimmed = href.trim()
-  if (!trimmed) return null
-
-  const decoded = trimmed.startsWith('file://')
-    ? decodeURIComponent(new URL(trimmed).pathname)
-    : trimmed
-
-  if (!decoded.startsWith('/')) return null
-
-  const lineHashIndex = decoded.indexOf('#L')
-  const colonLineMatch = decoded.match(/:\d+(?::\d+)?$/)
-
-  if (lineHashIndex >= 0) return decoded.slice(0, lineHashIndex)
-  if (colonLineMatch) return decoded.slice(0, decoded.length - colonLineMatch[0].length)
-  return decoded
-}
-
 const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
   text: string
   isStreaming?: boolean
@@ -690,25 +882,32 @@ const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
     if (!root) return
 
     const handleClick = (event: MouseEvent) => {
-      const target = event.target instanceof Element ? event.target : null
-      const anchor = target?.closest('a')
+      const anchor = findAnchorFromEventTarget(event)
       if (!anchor) return
 
       const href = anchor.getAttribute('href') ?? ''
-      const localPath = resolveLocalMarkdownPath(href)
-      if (!localPath) return
+      if (!dispatchOpenLink(href)) return
 
       event.preventDefault()
       event.stopPropagation()
-      void window.electron?.fs?.revealInFinder?.(localPath)
     }
 
-    root.addEventListener('click', handleClick)
-    return () => root.removeEventListener('click', handleClick)
+    root.addEventListener('click', handleClick, true)
+    return () => root.removeEventListener('click', handleClick, true)
   }, [])
 
   return (
-    <div ref={ref} style={{ minWidth: 0, maxWidth: '100%', width: '100%', overflow: 'hidden' }}>
+    <div
+      ref={ref}
+      style={{
+        minWidth: 0,
+        maxWidth: '100%',
+        width: '100%',
+        overflow: 'hidden',
+        ['--chat-link-color' as string]: theme.accent.base,
+        ['--chat-link-hover-color' as string]: theme.accent.hover,
+      }}
+    >
       <Streamdown
         className={`chat-md ${className ?? ''}`}
         plugins={streamdownPlugins}
@@ -723,6 +922,94 @@ const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
       >
         {normalizedText}
       </Streamdown>
+    </div>
+  )
+})
+
+const ChatMessageContent = React.memo(({
+  text,
+  isStreaming,
+  isUser,
+  className,
+}: {
+  text: string
+  isStreaming?: boolean
+  isUser?: boolean
+  className?: string
+}) => {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const { bodyText, attachmentPaths } = useMemo(() => splitMessageAttachmentPaths(text), [text])
+  const chipBackground = isUser
+    ? 'rgba(255,255,255,0.1)'
+    : theme.surface.panelMuted
+  const chipBorder = isUser
+    ? 'rgba(255,255,255,0.18)'
+    : theme.border.subtle
+  const chipText = isUser
+    ? '#f8fbff'
+    : theme.text.primary
+  const chipMeta = isUser
+    ? 'rgba(255,255,255,0.72)'
+    : theme.text.disabled
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: bodyText && attachmentPaths.length > 0 ? 12 : 0, minWidth: 0, width: '100%' }}>
+      {bodyText ? (
+        <ChatMarkdown text={bodyText} isStreaming={isStreaming} className={className} />
+      ) : null}
+      {attachmentPaths.length > 0 ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: Math.max(10, fonts.secondarySize - 1),
+              color: chipMeta,
+              fontWeight: 600,
+              letterSpacing: 0.2,
+            }}
+          >
+            Attached file paths
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minWidth: 0 }}>
+            {attachmentPaths.map(path => (
+              <button
+                key={path}
+                type="button"
+                title={path}
+                onClick={() => { void dispatchOpenLink(path) }}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  borderRadius: 999,
+                  border: `1px solid ${chipBorder}`,
+                  background: chipBackground,
+                  color: chipText,
+                  padding: '6px 10px',
+                  cursor: 'pointer',
+                }}
+              >
+                <FileText size={12} style={{ flexShrink: 0, opacity: 0.8 }} />
+                <span
+                  style={{
+                    minWidth: 0,
+                    maxWidth: 320,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    fontSize: Math.max(11, fonts.size - 1),
+                    lineHeight: 1.2,
+                  }}
+                >
+                  {basename(path)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 })
@@ -801,8 +1088,8 @@ const PROVIDER_MODES: Record<BuiltinProvider, ModeOption[]> = {
     { id: 'read-only', label: 'Read Only', description: 'No file modifications', color: '#58a6ff' },
   ],
   opencode: [
-    { id: 'build', label: 'Build', description: 'Execute and build code', color: '#ffb432' },
     { id: 'plan', label: 'Plan', description: 'Plan only, no execution', color: '#58a6ff' },
+    { id: 'build', label: 'Build', description: 'Execute and build code', color: '#ffb432' },
   ],
   openclaw: [
     { id: 'full-auto', label: 'Full Auto', description: 'Full auto, no approval', color: '#e54d2e' },
@@ -1008,8 +1295,8 @@ function ensureShimmerStyle(theme: ReturnType<typeof useTheme>): void {
     .chat-md ul:last-child, .chat-md ol:last-child { margin-bottom: 0; }
     .chat-md li { line-height: 1.55; margin-bottom: 2px; }
     .chat-md li > p { margin: 0; }
-    .chat-md a { color: ${theme.accent.base}; opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
-    .chat-md a:hover { color: ${theme.accent.hover}; opacity: 1; }
+    .chat-md a { color: var(--chat-link-color, #4f8cff); opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
+    .chat-md a:hover { color: var(--chat-link-hover-color, #77a2ff); opacity: 1; }
     .chat-md blockquote {
       border-left: 3px solid rgba(128,128,128,0.4); padding-left: 10px;
       margin: 6px 0; opacity: 0.85;
@@ -1085,7 +1372,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const fontLineHeight = settings?.fonts?.primary?.lineHeight ?? 1.5
   const fontWeight = settings?.fonts?.primary?.weight ?? 400
   const monoSize = settings?.fonts?.mono?.size ?? settings?.monoFont?.size ?? MONO_SIZE_DEFAULT
+  const monoLineHeight = settings?.fonts?.mono?.lineHeight ?? 1.5
+  const monoWeight = settings?.fonts?.mono?.weight ?? 400
   const fontSecondary = settings?.fonts?.secondary?.family ?? settings?.secondaryFont?.family ?? FONT_SANS
+  const secondarySize = settings?.fonts?.secondary?.size ?? 11
+  const secondaryLineHeight = settings?.fonts?.secondary?.lineHeight ?? 1.4
+  const secondaryWeight = settings?.fonts?.secondary?.weight ?? 400
   const initialRuntimeStateRef = useRef<ChatTilePersistedState | null>(getChatTileRuntimeState<ChatTilePersistedState>(tileId))
   const initialProvider = initialRuntimeStateRef.current?.provider ?? DEFAULT_PROVIDER_ID
   const initialModel = initialRuntimeStateRef.current?.model
@@ -1099,14 +1391,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       : EXTENSION_PROVIDER_MODE.id)
     ?? EXTENSION_PROVIDER_MODE.id
   const initialExecutionTarget = initialRuntimeStateRef.current?.executionTarget ?? 'local'
+  const initialCloudHostId = initialRuntimeStateRef.current?.cloudHostId ?? null
+  const initialJobId = initialRuntimeStateRef.current?.jobId ?? null
+  const initialJobSequence = initialRuntimeStateRef.current?.jobSequence ?? 0
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => initialRuntimeStateRef.current?.messages ?? [])
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(() => initialRuntimeStateRef.current?.isStreaming ?? false)
   const [executionTarget, setExecutionTarget] = useState<'local' | 'cloud'>(() => initialExecutionTarget)
+  const [cloudHostId, setCloudHostId] = useState<string | null>(() => initialCloudHostId)
   const [provider, setProvider] = useState<string>(() => initialProvider)
   const [model, setModel] = useState(() => initialModel)
   const [mcpEnabled, setMcpEnabled] = useState(() => initialRuntimeStateRef.current?.mcpEnabled ?? true)
+  const [workspaceSkills, setWorkspaceSkills] = useState<SkillDefinition[]>([])
   const mcpServers = useMCPServers()
   const [disabledServers, setDisabledServers] = useState<Set<string>>(new Set())
   const peerToolNames = useMemo(() => {
@@ -1131,6 +1428,93 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
     return Array.from(discovered).sort()
   }, [connectedPeers])
+
+  const availableToolInventory = useMemo(() => {
+    const items: Array<{ id: string; label: string; source: 'builtin' | 'peer' | 'mcp-server'; detail?: string }> = []
+    const seen = new Set<string>()
+
+    for (const tool of getAllNodeTools()) {
+      if (seen.has(`builtin:${tool.name}`)) continue
+      seen.add(`builtin:${tool.name}`)
+      items.push({
+        id: `builtin:${tool.name}`,
+        label: tool.name,
+        source: 'builtin',
+        detail: tool.description,
+      })
+    }
+
+    if (mcpEnabled) {
+      for (const server of mcpServers) {
+        const key = `mcp-server:${server.name}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        items.push({
+          id: key,
+          label: server.name,
+          source: 'mcp-server',
+          detail: server.url ? 'http server' : 'stdio server',
+        })
+      }
+
+      for (const toolName of peerToolNames) {
+        const key = `peer:${toolName}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        items.push({
+          id: key,
+          label: toolName,
+          source: 'peer',
+          detail: 'Connected peer tool',
+        })
+      }
+    }
+
+    return items.sort((a, b) => {
+      const sourceOrder = { builtin: 0, peer: 1, 'mcp-server': 2 }
+      const sourceDelta = sourceOrder[a.source] - sourceOrder[b.source]
+      if (sourceDelta !== 0) return sourceDelta
+      return a.label.localeCompare(b.label)
+    })
+  }, [mcpEnabled, mcpServers, peerToolNames])
+
+  const availableSkillInventory = useMemo(() => {
+    const items: Array<{ id: string; name: string; enabled: boolean; source: 'workspace' | 'command'; description?: string }> = []
+    const seen = new Set<string>()
+
+    for (const skill of workspaceSkills) {
+      const key = `workspace:${skill.name}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      items.push({
+        id: skill.id || key,
+        name: skill.name,
+        enabled: true,
+        source: 'workspace',
+        description: skill.description,
+      })
+    }
+
+    for (const command of CHAT_SLASH_COMMANDS) {
+      const key = `command:${command.value}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      items.push({
+        id: key,
+        name: command.value,
+        enabled: true,
+        source: 'command',
+        description: command.description,
+      })
+    }
+
+    return items.sort((a, b) => {
+      const sourceOrder = { workspace: 0, command: 1 }
+      const sourceDelta = sourceOrder[a.source] - sourceOrder[b.source]
+      if (sourceDelta !== 0) return sourceDelta
+      return a.name.localeCompare(b.name)
+    })
+  }, [workspaceSkills])
 
   // Track current context values published by peer extension tiles
   const peerContextRef = useRef<Map<string, Record<string, unknown>>>(new Map())
@@ -1207,6 +1591,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [showBranchMenu, setShowBranchMenu] = useState(false)
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(() => initialRuntimeStateRef.current?.sessionId ?? null)
+  const [preserveSessionSummary, setPreserveSessionSummary] = useState<boolean>(() => initialRuntimeStateRef.current?.preserveSessionSummary === true)
+  const [jobId, setJobId] = useState<string | null>(() => initialJobId)
+  const [jobSequence, setJobSequence] = useState<number>(() => initialJobSequence)
+  const [executionHosts, setExecutionHosts] = useState<import('../../../shared/types').ExecutionHostRecord[]>([])
+  const [localExecutionLabel, setLocalExecutionLabel] = useState('Local')
   const [opencodeModels, setOpencodeModels] = useState<ModelOption[]>(DEFAULT_MODELS.opencode)
   const [openclawAgents, setOpenclawAgents] = useState<ModelOption[]>(DEFAULT_MODELS.openclaw)
   const [modelFilter, setModelFilter] = useState('')
@@ -1223,6 +1612,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       : updater))
   }, [])
   const stateLoadedRef = useRef(false)
+  const lastJobSequenceRef = useRef<number>(initialJobSequence)
+  const resumedJobKeyRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    lastJobSequenceRef.current = jobSequence
+  }, [jobSequence])
+
+  useEffect(() => {
+    if (!jobId) {
+      resumedJobKeyRef.current = null
+    }
+  }, [jobId])
   const latestStateRef = useRef<ChatTilePersistedState | null>(null)
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const requestedProviderOptionsRef = useRef<{ opencode: boolean; openclaw: boolean }>({ opencode: false, openclaw: false })
@@ -1254,14 +1655,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const latestGitWorkspaceKeyRef = useRef(normalizeGitWorkspaceKey(_workspaceDir))
 
   // Slash commands
-  const SLASH_COMMANDS = [
-    { value: '/compact', description: 'Compact conversation' },
-    { value: '/clear', description: 'Clear conversation' },
-    { value: '/model', description: 'Switch model' },
-    { value: '/mode', description: 'Switch mode (plan, build, etc.)' },
-    { value: '/help', description: 'Show help' },
-    { value: '/init', description: 'Initialize workspace' },
-  ]
+  const SLASH_COMMANDS = CHAT_SLASH_COMMANDS
 
   // File mention stubs
   const MENTION_STUBS = [
@@ -1348,6 +1742,107 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
   useEffect(() => { ensureShimmerStyle(theme) }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    const workspacePath = _workspaceDir?.trim() || null
+    const homePath = window.electron.homedir ?? ''
+    const skillsPath = workspacePath ? `${workspacePath}/.contex/customisation/skills.json` : null
+    const locationsPath = workspacePath ? `${workspacePath}/.contex/customisation/locations-skills.json` : null
+
+    ;(async () => {
+      const discovered = new Map<string, SkillDefinition>()
+
+      const registerSkill = (skill: SkillDefinition) => {
+        const key = skill.name.trim().toLowerCase()
+        if (!key || discovered.has(key)) return
+        discovered.set(key, skill)
+      }
+
+      if (skillsPath) {
+        const savedRaw = await window.electron.fs.readFile(skillsPath).catch(() => '')
+        if (savedRaw) {
+          try {
+            const parsed = JSON.parse(savedRaw)
+            if (Array.isArray(parsed)) {
+              for (const item of parsed) {
+                if (
+                  typeof item === 'object'
+                  && item !== null
+                  && typeof (item as { id?: unknown }).id === 'string'
+                  && typeof (item as { name?: unknown }).name === 'string'
+                  && typeof (item as { content?: unknown }).content === 'string'
+                ) {
+                  registerSkill(item as SkillDefinition)
+                }
+              }
+            }
+          } catch {
+            // Ignore invalid JSON and continue with discovery.
+          }
+        }
+      }
+
+      let rawLocations = CHAT_DEFAULT_SKILL_LOCATIONS
+      if (locationsPath) {
+        const locationsRaw = await window.electron.fs.readFile(locationsPath).catch(() => '')
+        if (locationsRaw) {
+          try {
+            const parsed = JSON.parse(locationsRaw)
+            if (typeof parsed === 'string' && parsed.trim()) rawLocations = parsed
+          } catch {
+            if (locationsRaw.trim()) rawLocations = locationsRaw
+          }
+        }
+      }
+
+      const dirs = resolveChatSkillLocations(rawLocations, homePath, workspacePath)
+      for (const dir of dirs) {
+        const entries: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(dir).catch(() => [])
+        for (const entry of entries) {
+          if (entry.isDir || (entry.ext !== '.md' && entry.ext !== '.txt' && entry.ext !== '.mdc')) continue
+          const content = await window.electron.fs.readFile(entry.path).catch(() => '')
+          if (!content) continue
+          const nameMatch = content.match(/^---[\s\S]*?name:\s*(.+?)$/m)
+          const descriptionMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m)
+          const name = nameMatch?.[1]?.trim() ?? entry.name.replace(/\.(md|txt|mdc)$/i, '')
+          registerSkill({
+            id: `discovered-${entry.path}`,
+            name,
+            description: descriptionMatch?.[1]?.trim() ?? `From ${dir}`,
+            content,
+            command: name,
+          })
+        }
+      }
+
+      if (cancelled) return
+      setWorkspaceSkills(Array.from(discovered.values()).sort((a, b) => a.name.localeCompare(b.name)))
+    })().catch(() => {
+      if (!cancelled) setWorkspaceSkills([])
+    })
+
+    return () => { cancelled = true }
+  }, [_workspaceDir])
+
+  useEffect(() => {
+    window.electron?.bus?.publish(`tile:${tileId}`, 'tool_inventory', `chat:${tileId}`, {
+      provider,
+      model,
+      mcpEnabled,
+      tools: availableToolInventory,
+      updatedAt: Date.now(),
+    })
+  }, [tileId, provider, model, mcpEnabled, availableToolInventory])
+
+  useEffect(() => {
+    window.electron?.bus?.publish(`tile:${tileId}`, 'skill_inventory', `chat:${tileId}`, {
+      provider,
+      model,
+      skills: availableSkillInventory,
+      updatedAt: Date.now(),
+    })
+  }, [tileId, provider, model, availableSkillInventory])
+
   // Only tiles actively using OpenCode should subscribe to the model list, otherwise
   // every chat tile holds the same large provider payload in memory.
   useEffect(() => {
@@ -1381,6 +1876,38 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [provider])
 
   useEffect(() => {
+    const listHosts = window.electron?.execution?.listHosts
+    if (typeof listHosts !== 'function') {
+      setExecutionHosts([])
+      return
+    }
+
+    listHosts()
+      .then((hosts) => setExecutionHosts(Array.isArray(hosts) ? hosts : []))
+      .catch(() => setExecutionHosts([]))
+  }, [])
+
+  useEffect(() => {
+    if (!settings?.execution) {
+      setLocalExecutionLabel('Local')
+      return
+    }
+    const resolveTarget = window.electron?.execution?.resolveTarget
+    if (typeof resolveTarget !== 'function') {
+      setLocalExecutionLabel('Local')
+      return
+    }
+
+    resolveTarget(settings.execution)
+      .then((resolution) => {
+        setLocalExecutionLabel(resolution.host.label || 'Local')
+      })
+      .catch(() => {
+        setLocalExecutionLabel('Local')
+      })
+  }, [settings?.execution])
+
+  useEffect(() => {
     const normalized = normalizeMessagesForMemory(messages)
     if (normalized !== messages) {
       setMessages(normalized)
@@ -1402,14 +1929,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       thinking,
       agentMode: effectiveAgentMode,
       autoAgentMode,
+      preserveSessionSummary,
       sessionId,
+      jobId,
+      jobSequence,
+      cloudHostId,
       isStreaming,
     }
     if (stateLoadedRef.current) {
       if (isChatTileRuntimeStateDisposed(tileId)) return
       setChatTileRuntimeState(tileId, latestStateRef.current)
     }
-  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, sessionId, isStreaming])
+  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
 
   const persistLatestState = useCallback((stateOverride?: ChatTilePersistedState | null) => {
     if (persistTimerRef.current) {
@@ -1451,7 +1982,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (typeof saved.mode === 'string') setMode(saved.mode)
       if (typeof saved.thinking === 'string') setThinking(saved.thinking)
       if (typeof saved.autoAgentMode === 'boolean') setAutoAgentMode(saved.autoAgentMode)
+      if (typeof saved.preserveSessionSummary === 'boolean') setPreserveSessionSummary(saved.preserveSessionSummary)
       if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId)
+      if (typeof saved.jobId === 'string' || saved.jobId === null) setJobId(saved.jobId ?? null)
+      if (typeof saved.jobSequence === 'number') {
+        setJobSequence(saved.jobSequence)
+        lastJobSequenceRef.current = saved.jobSequence
+      }
+      if (typeof saved.cloudHostId === 'string' || saved.cloudHostId === null) setCloudHostId(saved.cloudHostId ?? null)
       if (typeof saved.isStreaming === 'boolean') setIsStreaming(saved.isStreaming)
     }
 
@@ -1490,7 +2028,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         persistTimerRef.current = null
       }
     }
-  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, sessionId, isStreaming, persistLatestState])
+  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
 
   useEffect(() => {
     return () => {
@@ -1505,6 +2043,32 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       persistLatestState(latest)
     }
   }, [tileId, persistLatestState])
+
+  useEffect(() => {
+    if (!stateLoadedRef.current) return
+    if (!jobId) return
+    const resumeKey = [
+      jobId,
+      executionTarget,
+      cloudHostId ?? '',
+      provider,
+      model,
+    ].join('::')
+    if (resumedJobKeyRef.current === resumeKey) return
+    resumedJobKeyRef.current = resumeKey
+
+    void window.electron.chat?.resumeJob?.({
+      cardId: tileId,
+      provider,
+      model,
+      workspaceDir: _workspaceDir,
+      executionTarget,
+      cloudHostId,
+      executionPreference: settings?.execution ?? null,
+      jobId,
+      jobSequence,
+    })
+  }, [tileId, provider, model, _workspaceDir, executionTarget, cloudHostId, settings?.execution, jobId, jobSequence])
 
   const builtinProviderEntries = useMemo<Record<BuiltinProvider, ProviderEntry>>(() => ({
     claude: {
@@ -1711,9 +2275,26 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const normalizedRepoRoot = activeRepoRoot.replace(/\/+$/, '')
   const projectFolderName = basename(normalizedRepoRoot) || 'No project'
   const currentBranchLabel = gitBranches.current ?? 'No branch'
-  const locationLabel = executionTarget === 'cloud' ? 'Cloud' : 'Local'
+  const remoteHosts = useMemo(
+    () => executionHosts.filter(host => host.type === 'remote-daemon' && host.enabled !== false),
+    [executionHosts],
+  )
+  useEffect(() => {
+    if (executionTarget !== 'cloud') return
+    if (remoteHosts.length === 0) {
+      if (cloudHostId !== null) setCloudHostId(null)
+      return
+    }
+    if (!cloudHostId || !remoteHosts.some(host => host.id === cloudHostId)) {
+      setCloudHostId(remoteHosts[0].id)
+    }
+  }, [executionTarget, remoteHosts, cloudHostId])
+  const activeCloudHost = remoteHosts.find(host => host.id === cloudHostId) ?? remoteHosts[0] ?? null
+  const locationLabel = executionTarget === 'cloud'
+    ? (activeCloudHost?.label ?? (remoteHosts.length > 0 ? 'Cloud' : 'No remote daemon'))
+    : localExecutionLabel
   const activeProjectPathLabel = executionTarget === 'cloud'
-    ? 'Cloud workspace'
+    ? (activeCloudHost?.url ?? (remoteHosts.length > 0 ? 'Cloud workspace' : 'No remote daemon configured'))
     : (normalizedRepoRoot || 'No project')
 
   const filteredBranches = useMemo(() => {
@@ -1878,6 +2459,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   useEffect(() => {
     const cleanup = window.electron?.stream?.onChunk((event: any) => {
       if (event.cardId !== tileId) return
+
+      if (typeof event.sequence === 'number') {
+        if (event.sequence <= lastJobSequenceRef.current) return
+        lastJobSequenceRef.current = event.sequence
+        setJobSequence(event.sequence)
+      }
+      if (typeof event.jobId === 'string') {
+        setJobId(event.jobId)
+      }
 
       const updateLast = (fn: (m: ChatMessage) => ChatMessage) =>
         setMessagesSafe(prev => {
@@ -2145,6 +2735,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const dispatchMessageContent = useCallback(async (messageContent: string): Promise<boolean> => {
     const trimmedContent = messageContent.trim()
     if (!trimmedContent) return false
+    const { bodyText: userBodyText } = splitMessageAttachmentPaths(trimmedContent)
 
     const state = latestStateRef.current
     const activeProvider = state?.provider ?? provider
@@ -2155,6 +2746,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const activeMcpEnabled = state?.mcpEnabled ?? mcpEnabled
     const activeMessages = state?.messages ?? messages
     const activeProviderEntry = providerEntryById.get(activeProvider) ?? currentProviderEntry
+    const nextCloudHostId = executionTarget === 'cloud'
+      ? (cloudHostId ?? activeCloudHost?.id ?? null)
+      : null
 
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
@@ -2162,22 +2756,68 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       content: trimmedContent,
       timestamp: Date.now(),
     }
+    const assistantId = `msg-${Date.now() + 1}`
+    const optimisticMessages = normalizeMessagesForMemory([
+      ...activeMessages,
+      userMsg,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        isStreaming: true,
+      },
+    ])
+    const optimisticState: ChatTilePersistedState = {
+      messages: optimisticMessages,
+      input: '',
+      attachments: [],
+      queuedTurns: state?.queuedTurns ?? queuedTurns,
+      executionTarget: state?.executionTarget ?? executionTarget,
+      provider: activeProvider,
+      model: activeModel,
+      mcpEnabled: activeMcpEnabled,
+      mode: activeMode,
+      thinking: activeThinking,
+      agentMode: state?.agentMode ?? effectiveAgentMode,
+      autoAgentMode: state?.autoAgentMode ?? autoAgentMode,
+      preserveSessionSummary: false,
+      sessionId: activeSessionId,
+      jobId: null,
+      jobSequence: 0,
+      cloudHostId: nextCloudHostId,
+      isStreaming: true,
+    }
 
-    setMessagesSafe(prev => [...prev, userMsg])
+    setPreserveSessionSummary(false)
+    setMessagesSafe(optimisticMessages)
     setIsStreaming(true)
+    setJobId(null)
+    setJobSequence(0)
+    lastJobSequenceRef.current = 0
+    resumedJobKeyRef.current = null
     stickToBottomRef.current = true
     focusComposer()
+    latestStateRef.current = optimisticState
+    persistLatestState(optimisticState)
 
     window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
       message: `User: ${userMsg.content.slice(0, 100)}`, role: 'user',
     })
 
-    const assistantId = `msg-${Date.now() + 1}`
-    setMessagesSafe(prev => [...prev, {
-      id: assistantId, role: 'assistant', content: '', timestamp: Date.now(), isStreaming: true,
-    }])
-
     try {
+      const recentEditContext = await buildRecentEditContext(activeMessages, _workspaceDir, userBodyText)
+      const requestMessages = [...activeMessages, userMsg].map((message, index, allMessages) => {
+        const isNewestUserMessage = index === allMessages.length - 1 && message.id === userMsg.id
+        if (!isNewestUserMessage || !recentEditContext) {
+          return { role: message.role, content: message.content }
+        }
+        return {
+          role: message.role,
+          content: `${message.content}\n\n---\nRecent edit context:\n${recentEditContext}`.trim(),
+        }
+      })
+
       const peers = activeMcpEnabled ? connectedPeers.map(p => ({
         peerId: p.peerId,
         peerType: p.peerType,
@@ -2186,19 +2826,42 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         context: peerContextRef.current.get(p.peerId),
       })) : []
 
-      await window.electron?.chat?.send({
+      const result = await window.electron?.chat?.send({
         cardId: tileId,
+        workspaceId,
         provider: activeProvider,
         model: activeModel,
         providerTransport: activeProviderEntry?.transport ?? null,
         mode: activeMode,
         thinking: activeThinking,
         workspaceDir: _workspaceDir,
-        messages: [...activeMessages, userMsg].map(m => ({ role: m.role, content: m.content })),
+        executionTarget,
+        cloudHostId: nextCloudHostId,
+        executionPreference: settings?.execution ?? null,
+        messages: requestMessages,
         negotiatedTools: activeMcpEnabled ? peerToolNames : undefined,
         peers: peers.length > 0 ? peers : undefined,
         sessionId: activeSessionId,
       })
+      if (result && typeof result === 'object' && 'jobId' in result && typeof (result as { jobId?: unknown }).jobId === 'string') {
+        const nextJobId = (result as { jobId: string }).jobId
+        setJobId(nextJobId)
+        setJobSequence(0)
+        lastJobSequenceRef.current = 0
+        const nextState = {
+          ...optimisticState,
+          jobId: nextJobId,
+          jobSequence: 0,
+        }
+        latestStateRef.current = nextState
+        persistLatestState(nextState)
+      } else {
+        setJobId(null)
+        setJobSequence(0)
+        lastJobSequenceRef.current = 0
+        latestStateRef.current = optimisticState
+        persistLatestState(optimisticState)
+      }
       return true
     } catch (err) {
       setMessagesSafe(prev => prev.map(m =>
@@ -2208,7 +2871,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       focusComposer()
       return false
     }
-  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, peerToolNames, focusComposer, setMessagesSafe])
+  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, persistLatestState])
 
   const queueCurrentDraft = useCallback(() => {
     const messageContent = buildOutgoingMessageContent(input, attachments)
@@ -2222,6 +2885,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       createdAt: Date.now(),
     }
 
+    setPreserveSessionSummary(false)
     setQueuedTurns(prev => [...prev, queuedTurn])
     setInput('')
     setAttachments([])
@@ -2253,6 +2917,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const stopStreaming = useCallback(() => {
     window.electron?.chat?.stop?.(tileId)
     setIsStreaming(false)
+    setJobId(null)
     setMessagesSafe(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
     focusComposer()
   }, [tileId, focusComposer])
@@ -2262,7 +2927,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setMessagesSafe([])
     setAttachments([])
     setQueuedTurns([])
+    setPreserveSessionSummary(false)
     setSessionId(null)
+    setJobId(null)
+    setJobSequence(0)
+    lastJobSequenceRef.current = 0
     window.electron?.chat?.clearSession?.(tileId)
   }, [isStreaming, tileId])
 
@@ -2389,7 +3058,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setAcQuery('')
   }, [syncComposerHeight])
 
-  const fontCtxValue = useMemo(() => ({ sans: fontSans, secondary: fontSecondary, mono: fontMono, size: fontSize, monoSize }), [fontSans, fontSecondary, fontMono, fontSize, monoSize])
+  const fontCtxValue = useMemo(() => ({ sans: fontSans, secondary: fontSecondary, mono: fontMono, size: fontSize, monoSize, lineHeight: fontLineHeight, weight: fontWeight, monoLineHeight, monoWeight, secondarySize, secondaryLineHeight, secondaryWeight }), [fontSans, fontSecondary, fontMono, fontSize, monoSize, fontLineHeight, fontWeight, monoLineHeight, monoWeight, secondarySize, secondaryLineHeight, secondaryWeight])
 
   return (
     <FontCtx.Provider value={fontCtxValue}>
@@ -2412,7 +3081,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           flexShrink: 0, display: 'flex', alignItems: 'center',
           padding: '4px 14px', gap: 6,
           borderBottom: `1px solid ${theme.chat.divider}`, fontSize: monoSize - 3,
-          color: theme.chat.muted, fontFamily: fontMono,
+          color: theme.chat.muted, fontFamily: fontMono, fontWeight: monoWeight, lineHeight: monoLineHeight,
         }}>
           <span style={{
             width: 5, height: 5, borderRadius: '50%',
@@ -2481,343 +3150,401 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             </div>
           )}
  
-          {renderedMessages.map(msg => (
-            <div key={msg.id} style={{
-              display: 'flex', flexDirection: 'column',
-              alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
-              maxWidth: msg.role === 'user' ? '60%' : '70%', minWidth: 0,
-              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-              marginBottom: msg.role === 'user' ? 5 : 0,
-              gap: 6,
-            }}>
-              {/* Thinking block — show immediately when streaming starts */}
-              {(msg.thinking || (msg.isStreaming && !msg.content)) && (
-                <ThinkingBlockView thinking={msg.thinking ?? { content: '', done: false }} />
-              )}
+          {renderedMessages.map(msg => {
+            const visibleToolBlocks = msg.toolBlocks?.filter(shouldRenderToolBlock) ?? []
+            const hasVisibleToolBlocks = visibleToolBlocks.length > 0
+            return (
+              <div key={msg.id} style={{
+                display: 'flex', flexDirection: 'column',
+                alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                width: msg.role === 'user' ? 'auto' : '100%',
+                maxWidth: msg.role === 'user' ? '60%' : '100%',
+                minWidth: 0,
+                alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                marginBottom: msg.role === 'user' ? 5 : 0,
+                gap: 6,
+              }}>
+                {/* Thinking block — show immediately when streaming starts */}
+                {(msg.thinking || (msg.isStreaming && !msg.content)) && (
+                  <ThinkingBlockView thinking={msg.thinking ?? { content: '', done: false }} />
+                )}
 
-              {/* Interleaved content blocks — text and tool calls in stream order */}
-              {(msg.contentBlocks?.length ?? 0) > 0 ? (
-                <>
-                  {(() => {
-                    const elements: JSX.Element[] = []
-                    const blocks = msg.contentBlocks!
-                    let i = 0
-                    while (i < blocks.length) {
-                      const block = blocks[i]
-                      if (block.type === 'tool') {
-                        // Collect consecutive tool blocks into a horizontal row
-                        const toolGroup: JSX.Element[] = []
-                        while (i < blocks.length && blocks[i].type === 'tool') {
-                          const tb = msg.toolBlocks?.find(t => t.id === blocks[i].toolId)
-                          if (tb) toolGroup.push(<ToolBlockView key={tb.id} block={tb} />)
-                          i++
-                        }
-                        if (toolGroup.length > 0) {
+                {/* Interleaved content blocks — text and tool calls in stream order */}
+                {(msg.contentBlocks?.length ?? 0) > 0 ? (
+                  <>
+                    {(() => {
+                      const elements: JSX.Element[] = []
+                      const blocks = msg.contentBlocks!
+                      let i = 0
+                      while (i < blocks.length) {
+                        const block = blocks[i]
+                        if (block.type === 'tool') {
+                          // Collect consecutive tool blocks, then sub-group same-name completed ones
+                          const rawTools: ToolBlock[] = []
+                          while (i < blocks.length && blocks[i].type === 'tool') {
+                            const tb = msg.toolBlocks?.find(t => t.id === blocks[i].toolId)
+                            if (tb && shouldRenderToolBlock(tb)) rawTools.push(tb)
+                            i++
+                          }
+                          // Build runs of consecutive same-name collapsible tools
+                          const toolGroup: JSX.Element[] = []
+                          let j = 0
+                          while (j < rawTools.length) {
+                            const tb = rawTools[j]
+                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
+                            if (canCollapse) {
+                              // collect consecutive same-name collapsible tools
+                              const run: ToolBlock[] = [tb]
+                              while (j + 1 < rawTools.length && rawTools[j + 1].name === tb.name && rawTools[j + 1].status === 'done' && !(rawTools[j + 1].fileChanges?.length)) {
+                                j++
+                                run.push(rawTools[j])
+                              }
+                              if (run.length >= 3) {
+                                toolGroup.push(<CollapsedToolGroup key={`grp-${run[0].id}`} name={tb.name} blocks={run} />)
+                              } else {
+                                run.forEach(b => toolGroup.push(<ToolBlockView key={b.id} block={b} />))
+                              }
+                            } else {
+                              toolGroup.push(<ToolBlockView key={tb.id} block={tb} />)
+                            }
+                            j++
+                          }
+                          if (toolGroup.length > 0) {
+                            elements.push(
+                              <div key={`tools-${i}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
+                                {toolGroup}
+                              </div>
+                            )
+                          }
+                        } else {
+                          const isLastBlock = i === blocks.length - 1
                           elements.push(
-                            <div key={`tools-${i}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
-                              {toolGroup}
+                            <div key={`text-${i}`} style={{
+                              background: msg.role === 'user' ? theme.chat.userBubble : 'transparent',
+                              border: msg.role === 'user' ? `1px solid ${theme.chat.userBubbleBorder}` : '0',
+                              borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+                              padding: '8px 12px',
+                              fontSize, lineHeight: fontLineHeight,
+                              wordBreak: 'break-word',
+                              color: theme.chat.text, position: 'relative',
+                              width: '100%', minWidth: 0, overflow: 'hidden',
+                            }}>
+                              <ChatMessageContent text={block.text} isStreaming={msg.isStreaming && isLastBlock} isUser={msg.role === 'user'} />
                             </div>
                           )
+                          i++
                         }
-                      } else {
-                        const isLastBlock = i === blocks.length - 1
-                        elements.push(
-                          <div key={`text-${i}`} style={{
-                            background: msg.role === 'user' ? theme.chat.userBubble : 'transparent',
-                            border: msg.role === 'user' ? `1px solid ${theme.chat.userBubbleBorder}` : '0',
-                            borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                            padding: '8px 12px',
-                            fontSize, lineHeight: 1.55,
-                            wordBreak: 'break-word',
-                            color: theme.chat.text, position: 'relative',
-                            width: '100%', minWidth: 0, overflow: 'hidden',
-                          }}>
-                            <ChatMarkdown text={block.text} isStreaming={msg.isStreaming && isLastBlock} />
-                          </div>
-                        )
-                        i++
                       }
-                    }
-                    return elements
-                  })()}
-                </>
-              ) : (
-                <>
-                  {/* Fallback: legacy layout for messages without contentBlocks */}
-                  {msg.toolBlocks && msg.toolBlocks.length > 0 && (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
-                      {msg.toolBlocks.map(tb => (
-                        <ToolBlockView key={tb.id} block={tb} />
-                      ))}
-                    </div>
-                  )}
-                  {msg.content && (
-                    <div style={{
-                      background: msg.role === 'user' ? theme.chat.userBubble : 'transparent',
-                      border: msg.role === 'user' ? `1px solid ${theme.chat.userBubbleBorder}` : '0',
-                      borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                      padding: '8px 12px',
-                      fontSize, lineHeight: 1.55,
-                      wordBreak: 'break-word',
-                      color: theme.chat.text, position: 'relative',
-                      width: '100%', minWidth: 0, overflow: 'hidden',
-                    }}>
-                      <ChatMarkdown text={msg.content} isStreaming={msg.isStreaming} />
-                      {msg.isStreaming && msg.content.length === 0 && !msg.toolBlocks?.length && (
-                        <WorkingDots />
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
-              {/* Cost/turns/time footer */}
-              {!msg.isStreaming && msg.role === 'assistant' && msg.cost != null && (
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
-                  padding: '0 4px',
-                }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                    <DollarSign size={9} /> ${msg.cost.toFixed(4)}
-                  </span>
-                  {msg.turns != null && (
-                    <span>{msg.turns} turn{msg.turns !== 1 ? 's' : ''}</span>
-                  )}
-                  <span>{relativeTime(msg.timestamp)}</span>
-                </div>
-              )}
-              {/* User message time footer */}
-              {!msg.isStreaming && msg.role === 'user' && (
-                <div style={{
-                  fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
-                  padding: '0 4px', textAlign: 'right',
-                }}>
-                  {relativeTime(msg.timestamp)}
-                </div>
-              )}
+                      return elements
+                    })()}
+                  </>
+                ) : (
+                  <>
+                    {/* Fallback: legacy layout for messages without contentBlocks */}
+                    {hasVisibleToolBlocks && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
+                        {(() => {
+                          const out: JSX.Element[] = []
+                          let j = 0
+                          while (j < visibleToolBlocks.length) {
+                            const tb = visibleToolBlocks[j]
+                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
+                            if (canCollapse) {
+                              const run: ToolBlock[] = [tb]
+                              while (j + 1 < visibleToolBlocks.length && visibleToolBlocks[j + 1].name === tb.name && visibleToolBlocks[j + 1].status === 'done' && !(visibleToolBlocks[j + 1].fileChanges?.length)) {
+                                j++
+                                run.push(visibleToolBlocks[j])
+                              }
+                              if (run.length >= 3) {
+                                out.push(<CollapsedToolGroup key={`grp-${run[0].id}`} name={tb.name} blocks={run} />)
+                              } else {
+                                run.forEach(b => out.push(<ToolBlockView key={b.id} block={b} />))
+                              }
+                            } else {
+                              out.push(<ToolBlockView key={tb.id} block={tb} />)
+                            }
+                            j++
+                          }
+                          return out
+                        })()}
+                      </div>
+                    )}
+                    {msg.content && (
+                      <div style={{
+                        background: msg.role === 'user' ? theme.chat.userBubble : 'transparent',
+                        border: msg.role === 'user' ? `1px solid ${theme.chat.userBubbleBorder}` : '0',
+                        borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+                        padding: '8px 12px',
+                        fontSize, lineHeight: fontLineHeight,
+                        wordBreak: 'break-word',
+                        color: theme.chat.text, position: 'relative',
+                        width: '100%', minWidth: 0, overflow: 'hidden',
+                      }}>
+                        <ChatMessageContent text={msg.content} isStreaming={msg.isStreaming} isUser={msg.role === 'user'} />
+                        {msg.isStreaming && msg.content.length === 0 && !hasVisibleToolBlocks && (
+                          <WorkingDots />
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+                {/* Cost/turns/time footer */}
+                {!msg.isStreaming && msg.role === 'assistant' && msg.cost != null && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
+                    padding: '0 4px',
+                  }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                      <DollarSign size={9} /> ${msg.cost.toFixed(4)}
+                    </span>
+                    {msg.turns != null && (
+                      <span>{msg.turns} turn{msg.turns !== 1 ? 's' : ''}</span>
+                    )}
+                    <span>{relativeTime(msg.timestamp)}</span>
+                  </div>
+                )}
+                {/* User message time footer */}
+                {!msg.isStreaming && msg.role === 'user' && (
+                  <div style={{
+                    fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
+                    padding: '0 4px', textAlign: 'right',
+                  }}>
+                    {relativeTime(msg.timestamp)}
+                  </div>
+                )}
 
-              {/* Shimmer bar while streaming */}
-              {msg.isStreaming && (
-                <div style={{
-                  height: 2, marginTop: 1, width: '60%', borderRadius: 1,
-                  background: `linear-gradient(90deg, transparent 0%, ${theme.accent.soft} 30%, ${theme.accent.base}88 50%, ${theme.accent.soft} 70%, transparent 100%)`,
-                  backgroundSize: '200% 100%',
-                  animation: 'chat-shimmer 1.5s ease-in-out infinite',
-                  alignSelf: 'flex-start',
-                }} />
-              )}
-            </div>
-          ))}
+                {/* Shimmer bar while streaming */}
+                {msg.isStreaming && (
+                  <div style={{
+                    height: 2, marginTop: 1, width: '60%', borderRadius: 1,
+                    background: `linear-gradient(90deg, transparent 0%, ${theme.accent.soft} 30%, ${theme.accent.base}88 50%, ${theme.accent.soft} 70%, transparent 100%)`,
+                    backgroundSize: '200% 100%',
+                    animation: 'chat-shimmer 1.5s ease-in-out infinite',
+                    alignSelf: 'flex-start',
+                  }} />
+                )}
+              </div>
+          )})}
         </div>
       </div>
 
-      {showScrollToLatest && (
-        <button
-          onClick={() => scrollToLatest()}
-          title="Jump to latest"
-          style={{
-            position: 'absolute',
-            right: 20,
-            bottom: 124,
-            zIndex: 5,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 52,
-            height: 52,
-            minWidth: 52,
-            padding: 0,
-            borderRadius: '50%',
-            border: `1px solid ${theme.chat.divider}`,
-            background: theme.surface.panelElevated,
-            color: theme.text.secondary,
-            cursor: 'pointer',
-            boxShadow: theme.shadow.panel,
-            backdropFilter: 'blur(10px)',
-            ...NON_SELECTABLE_UI_STYLE,
-          }}
-        >
-          <ArrowDown size={26} strokeWidth={1.9} />
-        </button>
-      )}
-
-      {latestChangeSummary && (
-        <div style={{
-          flexShrink: 0,
-          width: `min(calc(100% - ${(CHAT_COMPOSER_SIDE_INSET + CHAT_COMPOSER_DRAWER_INDENT) * 2}px), ${CHAT_COMPOSER_MAX_WIDTH - CHAT_COMPOSER_DRAWER_INDENT * 2}px)`,
-          minWidth: `min(${Math.max(260, CHAT_COMPOSER_MIN_WIDTH - CHAT_COMPOSER_DRAWER_INDENT * 2)}px, calc(100% - ${(CHAT_COMPOSER_SIDE_INSET + CHAT_COMPOSER_DRAWER_INDENT) * 2}px))`,
-          margin: '0 auto -1px auto',
-          border: `1px solid ${theme.chat.divider}`,
-          borderBottom: 'none',
-          borderRadius: '18px 18px 0 0',
-          background: theme.surface.panelMuted,
-          boxShadow: theme.shadow.panel,
-          overflow: 'hidden',
-          position: 'relative',
-          zIndex: 1,
-        }}>
+      <div style={{ flexShrink: 0, position: 'relative', overflow: 'visible' }}>
+        {showScrollToLatest && (
           <div style={{
+            position: 'absolute',
+            top: 0,
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            padding: '10px 14px',
-            ...NON_SELECTABLE_UI_STYLE,
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            zIndex: 3,
           }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: 8,
-              minWidth: 0,
-              color: theme.chat.textSecondary,
-              fontFamily: fontSans,
-            }}>
-              <span style={{ fontSize: 13, fontWeight: 500 }}>
-                {latestChangeSummary.fileCount} file{latestChangeSummary.fileCount === 1 ? '' : 's'} changed
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.success }}>
-                +{latestChangeSummary.additions}
-              </span>
-              <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.danger }}>
-                -{latestChangeSummary.deletions}
-              </span>
-            </div>
             <button
-              type="button"
-              onClick={reviewLatestChanges}
+              onClick={() => scrollToLatest()}
+              title="Jump to latest"
               style={{
-                border: 'none',
-                background: 'transparent',
-                color: theme.chat.text,
-                fontSize: 13,
-                fontFamily: fontSans,
-                fontWeight: 500,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 4,
-                padding: 0,
-                flexShrink: 0,
-                ...NON_SELECTABLE_UI_STYLE,
-              }}
-            >
-              <span>Review changes</span>
-              <ChevronRight size={13} />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {queuedTurns.length > 0 && (
-        <div style={{
-          flexShrink: 0,
-          width: `min(calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px), ${CHAT_COMPOSER_MAX_WIDTH}px)`,
-          minWidth: `min(${CHAT_COMPOSER_MIN_WIDTH}px, calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px))`,
-          margin: latestChangeSummary ? '0 auto 0 auto' : '0 auto 0 auto',
-          border: `1px solid ${theme.chat.divider}`,
-          borderTop: latestChangeSummary ? 'none' : `1px solid ${theme.chat.divider}`,
-          borderRadius: latestChangeSummary ? '0 0 18px 18px' : 18,
-          background: theme.surface.panelElevated,
-          boxShadow: theme.shadow.panel,
-          overflow: 'hidden',
-        }}>
-          {queuedTurns.map((turn, index) => (
-            <div
-              key={turn.id}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12,
-                padding: '16px 18px',
-                borderTop: index > 0 ? `1px solid ${theme.chat.divider}` : undefined,
-              }}
-            >
-              <div style={{
-                width: 18,
-                height: 18,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: theme.chat.muted,
-                flexShrink: 0,
+                width: 30,
+                height: 30,
+                minWidth: 30,
+                padding: 0,
+                borderRadius: '50%',
+                border: `1px solid ${theme.chat.divider}`,
+                background: theme.surface.panelElevated,
+                color: theme.text.secondary,
+                cursor: 'pointer',
+                boxShadow: theme.shadow.panel,
+                backdropFilter: 'blur(10px)',
+                pointerEvents: 'auto',
                 ...NON_SELECTABLE_UI_STYLE,
+              }}
+            >
+              <ArrowDown size={15} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
+
+        {latestChangeSummary && (
+          <div style={{
+            flexShrink: 0,
+            width: CHAT_COMPOSER_WIDTH,
+            minWidth: CHAT_COMPOSER_MIN_WIDTH_STYLE,
+            margin: '0 auto -1px auto',
+            border: `1px solid ${theme.chat.divider}`,
+            borderBottom: 'none',
+            borderRadius: '18px 18px 0 0',
+            background: theme.surface.panelMuted,
+            boxShadow: theme.shadow.panel,
+            overflow: 'hidden',
+            position: 'relative',
+            zIndex: 1,
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              padding: '10px 14px',
+              ...NON_SELECTABLE_UI_STYLE,
+            }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'baseline',
+                gap: 8,
+                minWidth: 0,
+                color: theme.chat.textSecondary,
+                fontFamily: fontSans,
               }}>
-                <MessageSquare size={14} />
-              </div>
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{
-                  color: theme.chat.textSecondary,
-                  fontSize: Math.max(13, fontSize + 1),
-                  fontFamily: fontSans,
-                  lineHeight: 1.35,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}>
-                  {turn.preview}
-                </div>
+                <span style={{ fontSize: 13, fontWeight: 500 }}>
+                  {latestChangeSummary.fileCount} file{latestChangeSummary.fileCount === 1 ? '' : 's'} changed
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.success }}>
+                  +{latestChangeSummary.additions}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.danger }}>
+                  -{latestChangeSummary.deletions}
+                </span>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  if (isStreaming) return
-                  setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))
-                  void dispatchMessageContent(turn.content)
-                }}
-                disabled={isStreaming}
+                onClick={reviewLatestChanges}
                 style={{
                   border: 'none',
                   background: 'transparent',
-                  color: isStreaming ? theme.chat.muted : theme.chat.textSecondary,
+                  color: theme.chat.text,
                   fontSize: 13,
                   fontFamily: fontSans,
-                  cursor: isStreaming ? 'default' : 'pointer',
+                  fontWeight: 500,
+                  cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   gap: 4,
                   padding: 0,
-                  opacity: isStreaming ? 0.45 : 1,
                   flexShrink: 0,
                   ...NON_SELECTABLE_UI_STYLE,
                 }}
               >
-                <span>Steer</span>
+                <span>Review changes</span>
                 <ChevronRight size={13} />
               </button>
-              <button
-                type="button"
-                onClick={() => setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))}
+            </div>
+          </div>
+        )}
+
+        {queuedTurns.length > 0 && (
+          <div style={{
+            flexShrink: 0,
+            width: CHAT_COMPOSER_WIDTH,
+            minWidth: CHAT_COMPOSER_MIN_WIDTH_STYLE,
+            margin: latestChangeSummary ? '0 auto 0 auto' : '0 auto 0 auto',
+            border: `1px solid ${theme.chat.divider}`,
+            borderTop: latestChangeSummary ? 'none' : `1px solid ${theme.chat.divider}`,
+            borderRadius: latestChangeSummary ? '0 0 18px 18px' : 18,
+            background: theme.surface.panelElevated,
+            boxShadow: theme.shadow.panel,
+            overflow: 'hidden',
+          }}>
+            {queuedTurns.map((turn, index) => (
+              <div
+                key={turn.id}
                 style={{
-                  border: 'none',
-                  background: 'transparent',
-                  color: theme.chat.muted,
-                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: '16px 18px',
+                  borderTop: index > 0 ? `1px solid ${theme.chat.divider}` : undefined,
+                }}
+              >
+                <div style={{
+                  width: 18,
+                  height: 18,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  padding: 0,
+                  color: theme.chat.muted,
                   flexShrink: 0,
                   ...NON_SELECTABLE_UI_STYLE,
-                }}
-                title="Remove queued message"
-              >
-                <Trash2 size={14} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+                }}>
+                  <MessageSquare size={14} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{
+                    color: theme.chat.textSecondary,
+                    fontSize: Math.max(13, fontSize + 1),
+                    fontFamily: fontSans,
+                    lineHeight: 1.35,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {turn.preview}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isStreaming) return
+                    setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))
+                    void dispatchMessageContent(turn.content)
+                  }}
+                  disabled={isStreaming}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: isStreaming ? theme.chat.muted : theme.chat.textSecondary,
+                    fontSize: 13,
+                    fontFamily: fontSans,
+                    cursor: isStreaming ? 'default' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: 0,
+                    opacity: isStreaming ? 0.45 : 1,
+                    flexShrink: 0,
+                    ...NON_SELECTABLE_UI_STYLE,
+                  }}
+                >
+                  <span>Steer</span>
+                  <ChevronRight size={13} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: theme.chat.muted,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: 0,
+                    flexShrink: 0,
+                    ...NON_SELECTABLE_UI_STYLE,
+                  }}
+                  title="Remove queued message"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
-      {/* Input bar */}
-      <div style={{
-        flexShrink: 0,
-        width: `min(calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px), ${CHAT_COMPOSER_MAX_WIDTH}px)`,
-        minWidth: `min(${CHAT_COMPOSER_MIN_WIDTH}px, calc(100% - ${CHAT_COMPOSER_SIDE_INSET * 2}px))`,
-        margin: '0 auto 6px auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-      }}>
+        {/* Input bar */}
+        <div style={{
+          flexShrink: 0,
+          width: CHAT_COMPOSER_WIDTH,
+          minWidth: CHAT_COMPOSER_MIN_WIDTH_STYLE,
+          margin: '0 auto 6px auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
         <div style={{
         minHeight: CHAT_COMPOSER_MIN_HEIGHT,
         border: isDropTarget ? `1px solid ${theme.accent.base}` : `1px solid ${composerBorder}`, borderRadius: 14,
@@ -2968,7 +3695,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             width: '100%', boxSizing: 'border-box', flex: 1,
             background: 'transparent', color: theme.chat.text,
             border: 'none', padding: '10px 14px 2px 14px',
-            fontSize, fontFamily: fontSans, lineHeight: 1.5,
+            fontSize, fontFamily: fontSans, lineHeight: fontLineHeight,
             resize: 'none', outline: 'none', overflow: 'hidden',
             minHeight: CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT, opacity: 1,
           }}
@@ -3033,7 +3760,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             <ToolbarBtn
               icon={<ThinkingIcon level={thinking} />}
               tooltip={`Thinking: ${THINKING_OPTIONS.find(t => t.id === thinking)?.label ?? 'Adaptive'}`}
-              color={thinking === 'none' ? undefined : theme.chat.text}
+              color={thinking === 'none' ? theme.chat.muted : theme.chat.textSecondary}
               onClick={() => toggleMenu('thinking')}
             />
             {showThinkingMenu && (
@@ -3159,6 +3886,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               <FooterPill
                 prefix={executionTarget === 'local' ? <LocalProjectIcon /> : <CloudProjectIcon />}
                 label={locationLabel}
+                color={theme.chat.muted}
                 active={showLocationMenu}
                 onClick={() => toggleMenu('location')}
               />
@@ -3179,8 +3907,37 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       icon={<CloudProjectIcon size={11} />}
                       label="Cloud"
                       active={executionTarget === 'cloud'}
-                      onClick={() => { setExecutionTarget('cloud'); setShowLocationMenu(false) }}
+                      sublabel={activeCloudHost?.label ?? (remoteHosts.length > 0 ? undefined : 'No remote daemon configured')}
+                      onClick={() => {
+                        if (remoteHosts.length > 0) {
+                          setExecutionTarget('cloud')
+                          setCloudHostId(activeCloudHost?.id ?? remoteHosts[0].id)
+                        }
+                        setShowLocationMenu(false)
+                      }}
                     />
+                    {remoteHosts.length > 0 && (
+                      <>
+                        <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
+                        <div style={{ padding: '8px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+                          Remote daemons
+                        </div>
+                        {remoteHosts.map(host => (
+                          <DropdownItem
+                            key={host.id}
+                            icon={<CloudProjectIcon size={11} />}
+                            label={host.label}
+                            sublabel={host.url ?? undefined}
+                            active={executionTarget === 'cloud' && activeCloudHost?.id === host.id}
+                            onClick={() => {
+                              setExecutionTarget('cloud')
+                              setCloudHostId(host.id)
+                              setShowLocationMenu(false)
+                            }}
+                          />
+                        ))}
+                      </>
+                    )}
                     <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
                     <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
                       Rate limits remaining
@@ -3194,6 +3951,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               <FooterPill
                 prefix={<BranchIcon />}
                 label={isGitRepo ? currentBranchLabel : projectFolderName}
+                color={theme.chat.muted}
                 active={showBranchMenu}
                 onClick={() => toggleMenu('branch')}
               />
@@ -3423,6 +4181,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             </div>
           </div>
         </div>
+        </div>
       </div>
     </div>
     </FontCtx.Provider>
@@ -3457,15 +4216,15 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
         onClick={() => hasContent && setExpanded(e => !e)}
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 6,
-          padding: '5px 10px 5px 8px',
-          background: expanded ? theme.surface.selection : 'transparent',
-          border: expanded ? `1px solid ${theme.surface.selectionBorder}` : '1px solid transparent',
+          padding: '2px 0',
+          background: 'transparent',
+          border: 'none',
           cursor: hasContent ? 'pointer' : 'default',
           color: isActive ? theme.accent.hover : theme.chat.muted,
           fontSize: 12, fontFamily: fonts.sans, fontWeight: 500,
-          borderRadius: expanded ? '8px 8px 0 0' : 8,
+          borderRadius: 0,
           lineHeight: 1,
-          backdropFilter: expanded ? 'blur(8px)' : 'none',
+          backdropFilter: 'none',
         }}
       >
         <Brain size={11} style={{ opacity: isActive ? 0.8 : 0.4, flexShrink: 0 }} />
@@ -3491,15 +4250,14 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
       {/* Expanded thinking content */}
       {expanded && hasContent && (
         <div style={{
-          padding: '8px 12px 10px 12px',
-          fontSize: 12, lineHeight: 1.6, color: theme.accent.hover,
+          padding: '8px 0 2px',
+          fontSize: 12, lineHeight: fonts.lineHeight, color: theme.accent.hover,
           whiteSpace: 'pre-wrap', wordBreak: 'break-word',
           fontFamily: fonts.sans, maxHeight: 200, overflowY: 'auto',
-          background: theme.surface.selection,
-          border: `1px solid ${theme.surface.selectionBorder}`,
-          borderTop: 'none',
-          borderRadius: '0 0 8px 8px',
-          backdropFilter: 'blur(8px)',
+          background: 'transparent',
+          border: 'none',
+          borderRadius: 0,
+          backdropFilter: 'none',
           opacity: 0.85,
         }}>
           {thinking.content}
@@ -3511,6 +4269,64 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
               animation: 'chat-pulse 1s ease-in-out infinite',
             }} />
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Collapses consecutive same-name completed tool chips into "Read x6" style. */
+function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[] }): JSX.Element {
+  const fonts = useFonts()
+  const theme = useTheme()
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: expanded ? 6 : 0 }}>
+      <div
+        onClick={() => setExpanded(e => !e)}
+        style={{
+          background: theme.chat.assistantBubble,
+          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          borderRadius: 8,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '5px 6px',
+          cursor: 'pointer',
+          color: theme.chat.muted,
+          fontSize: 10,
+          fontFamily: fonts.sans,
+          lineHeight: 1,
+          width: 'fit-content',
+          maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
+        }}
+      >
+        <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
+        <span style={{ fontWeight: 500, fontSize: 10.5 }}>{name}</span>
+        <span style={{
+          fontSize: 9,
+          fontWeight: 600,
+          color: theme.accent.base,
+          background: theme.accent.soft,
+          borderRadius: 6,
+          padding: '1px 5px',
+          lineHeight: '14px',
+          flexShrink: 0,
+        }}>
+          x{blocks.length}
+        </span>
+        <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
+        <ChevronRight size={12} style={{
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.15s',
+          opacity: 0.4,
+          flexShrink: 0,
+        }} />
+      </div>
+      {expanded && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingLeft: 4 }}>
+          {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
         </div>
       )}
     </div>
@@ -3547,7 +4363,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
       data-tool-block-kind={isFileChangeBlock ? 'file-changes' : 'tool'}
       style={{
         background: theme.chat.assistantBubble, border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-        borderRadius: 10,
+        borderRadius: 8,
         overflow: 'hidden',
         maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
         width: expanded || isFileChangeBlock ? '100%' : 'fit-content',
@@ -3559,12 +4375,12 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 6,
+          gap: 5,
           width: '100%',
           maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-          padding: isFileChangeBlock ? '12px 16px' : '5px 10px', background: 'none', border: 'none',
+          padding: isFileChangeBlock ? '12px 16px' : '5px 6px', background: 'none', border: 'none',
           cursor: 'pointer', color: isRunning ? theme.chat.textSecondary : theme.chat.muted,
-          fontSize: 12, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
+          fontSize: 10, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
         }}
       >
         <Wrench size={11} style={{ opacity: isRunning ? 0.7 : 0.5, flexShrink: 0 }} />
@@ -3579,7 +4395,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
             overflow: 'hidden',
           }}>
             <ShimmerText baseColor={theme.chat.textSecondary} style={{
-              fontSize: 13,
+              fontSize: 10.5,
               fontFamily: fonts.sans,
               fontWeight: 500,
               flex: '1 1 auto',
@@ -3610,16 +4426,16 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
                 <span style={{
                   display: 'block',
                   fontWeight: 600,
-                  fontSize: 13,
+                  fontSize: 10.5,
                   color: theme.chat.text,
                   flexShrink: 0,
                 }}>
                   {fileChangeSummary.fileCount} file{fileChangeSummary.fileCount === 1 ? '' : 's'} changed
                 </span>
-                <span style={{ color: theme.status.success, fontSize: 13, fontWeight: 600, flexShrink: 0 }}>
+                <span style={{ color: theme.status.success, fontSize: 10.5, fontWeight: 600, flexShrink: 0 }}>
                   +{fileChangeSummary.additions}
                 </span>
-                <span style={{ color: theme.status.danger, fontSize: 13, fontWeight: 600, flexShrink: 0 }}>
+                <span style={{ color: theme.status.danger, fontSize: 10.5, fontWeight: 600, flexShrink: 0 }}>
                   -{fileChangeSummary.deletions}
                 </span>
               </div>
@@ -3627,7 +4443,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
               <span style={{
                 display: 'block',
                 fontWeight: 500,
-                fontSize: 13,
+                fontSize: 10.5,
                 flex: '1 1 auto',
                 flexShrink: 1,
                 minWidth: 0,
@@ -3641,7 +4457,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
           </div>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 'auto', flexShrink: 0 }}>
           {block.elapsed != null && (
             <span style={{
               fontSize: 10, color: theme.chat.muted, display: 'flex', alignItems: 'center', gap: 3,
@@ -3697,7 +4513,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
                         color: theme.chat.text,
                         fontFamily: isFileChangeBlock ? fonts.sans : fonts.mono,
                         fontSize: isFileChangeBlock ? fonts.size : 11,
-                        fontWeight: isFileChangeBlock ? 500 : 400,
+                        fontWeight: isFileChangeBlock ? 500 : fonts.monoWeight,
                         textAlign: 'left',
                       }}
                     >
@@ -3724,7 +4540,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
                           margin: 0,
                           padding: '10px 12px',
                           fontSize: codePanelFontSize,
-                          lineHeight: 1.6,
+                          lineHeight: fonts.monoLineHeight,
                           fontFamily: fonts.mono,
                           whiteSpace: 'pre-wrap',
                           wordBreak: 'break-word',
@@ -3779,9 +4595,10 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
                     <pre style={{
                       margin: '6px 0 0',
                       fontSize: codePanelFontSize,
-                      lineHeight: 1.5,
+                      lineHeight: fonts.monoLineHeight,
                       color: theme.chat.muted,
                       fontFamily: fonts.mono,
+                      fontWeight: fonts.monoWeight,
                       whiteSpace: 'pre-wrap',
                       wordBreak: 'break-word',
                       maxHeight: 120,
@@ -3806,7 +4623,7 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
           <pre style={{
             margin: 0, padding: 8, borderRadius: 6,
             background: theme.surface.panelMuted, color: theme.chat.textSecondary,
-            fontSize: codePanelFontSize, lineHeight: 1.5, fontFamily: fonts.mono,
+            fontSize: codePanelFontSize, lineHeight: fonts.monoLineHeight, fontFamily: fonts.mono, fontWeight: fonts.monoWeight,
             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             maxHeight: 200, overflowY: 'auto',
           }}>

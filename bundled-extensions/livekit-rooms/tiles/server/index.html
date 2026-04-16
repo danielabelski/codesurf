@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--ct-bg, transparent);
+    color: var(--ct-text, #111);
+    padding: 16px;
+    font-size: 12px;
+    overflow-y: auto;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .header { display: flex; align-items: center; gap: 8px; }
+  .header h2 { font-size: 13px; font-weight: 600; flex: 1; }
+
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.on  { background: var(--ct-success, #16a34a); box-shadow: 0 0 6px var(--ct-success, #16a34a); }
+  .status-dot.off { background: var(--ct-danger, #dc2626); opacity: 0.5; }
+
+  .status-label { font-size: 11px; color: var(--ct-muted, #444); }
+
+  .section-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--ct-dim, #64748b); margin-bottom: 4px;
+  }
+
+  .field-group { display: flex; flex-direction: column; gap: 6px; }
+  .field { display: flex; align-items: center; gap: 6px; }
+  .field label { font-size: 11px; color: var(--ct-muted, #444); width: 60px; flex-shrink: 0; }
+  .field input {
+    flex: 1; background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 6px; color: var(--ct-text, #111);
+    font-size: 12px; font-family: inherit; padding: 5px 8px; outline: none;
+  }
+  .field input:focus { border-color: var(--ct-accent, #4f46e5); }
+
+  .btn-row { display: flex; gap: 6px; }
+  .btn {
+    padding: 6px 14px; border-radius: 6px; border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: var(--ct-panel, rgba(0,0,0,0.04)); color: var(--ct-text, #111);
+    font-size: 12px; font-family: inherit; cursor: pointer; transition: all 0.15s;
+  }
+  .btn:hover { background: var(--ct-panel-2, rgba(0,0,0,0.08)); }
+  .btn.primary {
+    background: var(--ct-accent, #4f46e5); color: #fff; border-color: transparent;
+  }
+  .btn.primary:hover { opacity: 0.9; }
+  .btn.danger { color: var(--ct-danger, #dc2626); }
+  .btn.danger:hover { background: rgba(220,38,38,0.08); }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+
+  .logs {
+    flex: 1; min-height: 80px;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 6px; padding: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 10px;
+    color: var(--ct-muted, #444); overflow-y: auto;
+    white-space: pre-wrap; word-break: break-all;
+    line-height: 1.5;
+  }
+  .logs:empty::before {
+    content: 'No logs yet. Start the server to see output.';
+    color: var(--ct-dim, #64748b);
+  }
+
+  .mode-tabs { display: flex; gap: 2px; background: var(--ct-panel, rgba(0,0,0,0.04)); border-radius: 6px; padding: 2px; }
+  .mode-tab {
+    flex: 1; padding: 5px 0; border: none; background: transparent; color: var(--ct-muted, #444);
+    font-size: 11px; font-family: inherit; cursor: pointer; border-radius: 4px; text-align: center;
+    transition: all 0.15s;
+  }
+  .mode-tab.active { background: var(--ct-accent, #4f46e5); color: #fff; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div id="statusDot" class="status-dot off"></div>
+  <h2>LiveKit Server</h2>
+  <span id="statusLabel" class="status-label">Disconnected</span>
+</div>
+
+<div class="mode-tabs">
+  <button class="mode-tab active" data-mode="local">Local Dev</button>
+  <button class="mode-tab" data-mode="remote">Remote</button>
+</div>
+
+<div id="localPanel">
+  <div class="btn-row">
+    <button class="btn primary" id="startBtn">Start Server</button>
+    <button class="btn danger" id="stopBtn" disabled>Stop</button>
+  </div>
+</div>
+
+<div id="remotePanel" style="display:none">
+  <div class="field-group">
+    <div class="field">
+      <label>URL</label>
+      <input id="urlInput" type="text" placeholder="ws://localhost:7880" />
+    </div>
+    <div class="field">
+      <label>API Key</label>
+      <input id="keyInput" type="text" placeholder="devkey" />
+    </div>
+    <div class="field">
+      <label>Secret</label>
+      <input id="secretInput" type="password" placeholder="secret" />
+    </div>
+    <div class="btn-row">
+      <button class="btn primary" id="saveBtn">Save & Connect</button>
+    </div>
+  </div>
+</div>
+
+<div class="section-label">Server Logs</div>
+<div class="logs" id="logs"></div>
+
+<script>
+  var mode = 'local'
+  var statusDot = document.getElementById('statusDot')
+  var statusLabel = document.getElementById('statusLabel')
+  var startBtn = document.getElementById('startBtn')
+  var stopBtn = document.getElementById('stopBtn')
+  var saveBtn = document.getElementById('saveBtn')
+  var logsEl = document.getElementById('logs')
+  var urlInput = document.getElementById('urlInput')
+  var keyInput = document.getElementById('keyInput')
+  var secretInput = document.getElementById('secretInput')
+
+  function setStatus(running, label) {
+    statusDot.className = 'status-dot ' + (running ? 'on' : 'off')
+    statusLabel.textContent = label || (running ? 'Running' : 'Disconnected')
+  }
+
+  function renderLogs(lines) {
+    logsEl.textContent = (lines || []).join('\n')
+    logsEl.scrollTop = logsEl.scrollHeight
+  }
+
+  // Mode tabs
+  document.querySelector('.mode-tabs').addEventListener('click', function(e) {
+    var tab = e.target.closest('[data-mode]')
+    if (!tab) return
+    mode = tab.dataset.mode
+    document.querySelectorAll('.mode-tab').forEach(function(t) {
+      t.classList.toggle('active', t.dataset.mode === mode)
+    })
+    document.getElementById('localPanel').style.display = mode === 'local' ? '' : 'none'
+    document.getElementById('remotePanel').style.display = mode === 'remote' ? '' : 'none'
+  })
+
+  startBtn.addEventListener('click', function() {
+    if (!window.contex) return
+    startBtn.disabled = true
+    window.contex.ext.invoke('startLocal', '{}')
+      .then(function(raw) {
+        var data = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (!data.ok) {
+          startBtn.disabled = false
+          setStatus(false, data.error || 'Failed')
+        }
+      })
+      .catch(function(e) {
+        startBtn.disabled = false
+        setStatus(false, e.message)
+      })
+  })
+
+  stopBtn.addEventListener('click', function() {
+    if (!window.contex) return
+    window.contex.ext.invoke('stopLocal', '{}').catch(function() {})
+  })
+
+  saveBtn.addEventListener('click', function() {
+    if (!window.contex) return
+    var settings = {
+      serverUrl: urlInput.value || 'ws://localhost:7880',
+      apiKey: keyInput.value || 'devkey',
+      apiSecret: secretInput.value || 'secret',
+    }
+    window.contex.settings.set(settings).then(function() {
+      setStatus(false, 'Saved — checking...')
+      // Try listing rooms to verify connection
+      window.contex.ext.invoke('listRooms', '{}')
+        .then(function() { setStatus(true, 'Connected') })
+        .catch(function(e) { setStatus(false, 'Error: ' + e.message) })
+    })
+  })
+
+  function refresh() {
+    if (!window.contex) return
+    window.contex.ext.invoke('getStatus', '{}')
+      .then(function(raw) {
+        var data = typeof raw === 'string' ? JSON.parse(raw) : raw
+        var running = data.running
+        setStatus(running, running ? 'Running (' + data.url + ')' : 'Disconnected')
+        startBtn.disabled = running
+        stopBtn.disabled = !data.local || !running
+        renderLogs(data.logTail || [])
+        if (window.contex.context) {
+          window.contex.context.set('ctx:lk-server', { running: running, url: data.url })
+        }
+      })
+      .catch(function() {})
+  }
+
+  function loadSettings() {
+    if (!window.contex) return
+    window.contex.settings.get('serverUrl').then(function(v) { urlInput.value = v || 'ws://localhost:7880' }).catch(function() {})
+    window.contex.settings.get('apiKey').then(function(v) { keyInput.value = v || 'devkey' }).catch(function() {})
+    window.contex.settings.get('apiSecret').then(function(v) { secretInput.value = v || 'secret' }).catch(function() {})
+  }
+
+  function setupBus() {
+    if (!window.contex || !window.contex.bus) return
+    window.contex.bus.subscribe('lk-server', function(event) {
+      var d = event?.payload || {}
+      setStatus(d.running, d.running ? 'Running (' + d.url + ')' : 'Disconnected')
+      startBtn.disabled = d.running
+      stopBtn.disabled = !d.local || !d.running
+      if (d.logTail) renderLogs(d.logTail)
+    })
+  }
+
+  function init() {
+    loadSettings()
+    setupBus()
+    refresh()
+  }
+
+  if (window.contex) init()
+  else window.addEventListener('message', function handler(e) {
+    if (e.data?.type === 'contex-bridge-ready') {
+      window.removeEventListener('message', handler)
+      setTimeout(init, 50)
+    }
+  })
+</script>
+</body>
+</html>

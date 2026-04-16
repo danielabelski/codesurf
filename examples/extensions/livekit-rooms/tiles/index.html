@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--ct-bg, transparent);
+    color: var(--ct-text, #111);
+    font-size: 12px;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .lobby,
+  .room-view {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .lobby {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .section {
+    padding: 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+  }
+
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--ct-dim, #64748b);
+    margin-bottom: 8px;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .title-row h2 {
+    font-size: 15px;
+    font-weight: 600;
+    flex: 1;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-dot.on {
+    background: var(--ct-success, #16a34a);
+    box-shadow: 0 0 6px var(--ct-success, #16a34a);
+  }
+
+  .status-dot.off {
+    background: var(--ct-danger, #dc2626);
+    opacity: 0.55;
+  }
+
+  .status-text {
+    font-size: 11px;
+    color: var(--ct-muted, #444);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mode-tabs {
+    display: flex;
+    gap: 2px;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border-radius: 8px;
+    padding: 2px;
+  }
+
+  .mode-tab {
+    flex: 1;
+    padding: 6px 0;
+    border: none;
+    background: transparent;
+    color: var(--ct-muted, #444);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+
+  .mode-tab.active {
+    background: var(--ct-accent, #4f46e5);
+    color: #fff;
+  }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .field-group label {
+    font-size: 11px;
+    color: var(--ct-muted, #444);
+  }
+
+  .field-group input {
+    width: 100%;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 8px;
+    color: var(--ct-text, #111);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 8px 10px;
+    outline: none;
+  }
+
+  .field-group input:focus {
+    border-color: var(--ct-accent, #4f46e5);
+  }
+
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .row.wrap {
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    color: var(--ct-text, #111);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .btn:hover { background: var(--ct-panel-2, rgba(0,0,0,0.08)); }
+
+  .btn.primary {
+    background: var(--ct-accent, #4f46e5);
+    border-color: transparent;
+    color: #fff;
+  }
+
+  .btn.primary:hover { opacity: 0.92; }
+
+  .btn.danger {
+    color: var(--ct-danger, #dc2626);
+  }
+
+  .btn.danger:hover { background: rgba(220,38,38,0.08); }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .logs {
+    min-height: 84px;
+    max-height: 120px;
+    overflow-y: auto;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 8px;
+    padding: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 10px;
+    line-height: 1.45;
+    color: var(--ct-muted, #444);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .logs:empty::before {
+    content: 'No server logs yet.';
+    color: var(--ct-dim, #64748b);
+  }
+
+  .rooms-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .rooms-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    border-top: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+  }
+
+  .rooms-empty {
+    padding: 18px 12px;
+    color: var(--ct-dim, #64748b);
+    text-align: center;
+  }
+
+  .room-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+  }
+
+  .room-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .room-name {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .room-meta {
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--ct-dim, #64748b);
+  }
+
+  .room-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .sm-btn {
+    padding: 5px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: transparent;
+    color: var(--ct-muted, #444);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .sm-btn.join {
+    color: var(--ct-accent, #4f46e5);
+    border-color: var(--ct-accent, #4f46e5);
+  }
+
+  .sm-btn.del {
+    color: var(--ct-danger, #dc2626);
+  }
+
+  .manual-join {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    flex-shrink: 0;
+  }
+
+  .topbar .room-title {
+    font-size: 13px;
+    font-weight: 600;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .participant-count {
+    font-size: 11px;
+    color: var(--ct-dim, #64748b);
+  }
+
+  .ctrl-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    color: var(--ct-muted, #444);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+  }
+
+  .ctrl-btn:hover { background: var(--ct-panel-2, rgba(0,0,0,0.08)); }
+  .ctrl-btn.active { background: var(--ct-accent, #4f46e5); color: #fff; border-color: transparent; }
+  .ctrl-btn.danger { background: var(--ct-danger, #dc2626); color: #fff; border-color: transparent; }
+  .ctrl-btn.muted-state { background: rgba(220,38,38,0.12); color: var(--ct-danger, #dc2626); border-color: rgba(220,38,38,0.2); }
+
+  .video-area {
+    flex: 1;
+    display: grid;
+    gap: 4px;
+    padding: 4px;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-auto-rows: 1fr;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .video-cell {
+    position: relative;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 120px;
+  }
+
+  .video-cell video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 8px;
+  }
+
+  .video-cell .avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--ct-accent-s, rgba(79,70,229,0.1));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--ct-accent, #4f46e5);
+  }
+
+  .video-cell .label {
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .video-cell .speaking-ring {
+    position: absolute;
+    inset: 0;
+    border: 2px solid var(--ct-accent, #4f46e5);
+    border-radius: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+  }
+
+  .video-cell.speaking .speaking-ring { opacity: 1; }
+
+  .chat-panel {
+    height: 180px;
+    min-height: 100px;
+    border-top: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+
+  .chat-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+  }
+
+  .chat-header-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ct-dim, #64748b);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  .assistant-status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ct-muted, #444);
+    white-space: nowrap;
+  }
+
+  .assistant-btn {
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    color: var(--ct-text, #111);
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .assistant-btn.active {
+    background: var(--ct-accent, #4f46e5);
+    color: #fff;
+    border-color: transparent;
+  }
+
+  .chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 12px;
+  }
+
+  .chat-msg { margin-bottom: 6px; }
+  .chat-msg .sender { font-weight: 600; font-size: 11px; color: var(--ct-accent, #4f46e5); }
+  .chat-msg .text { font-size: 12px; color: var(--ct-text, #111); margin-top: 1px; word-break: break-word; }
+  .chat-msg .ts { font-size: 10px; color: var(--ct-dim, #64748b); margin-left: 6px; }
+
+  .chat-input-row {
+    display: flex;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+  }
+
+  .chat-input-row input {
+    flex: 1;
+    background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 6px;
+    color: var(--ct-text, #111);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 6px 10px;
+    outline: none;
+  }
+
+  .chat-input-row input:focus { border-color: var(--ct-accent, #4f46e5); }
+
+  .chat-input-row button {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: none;
+    background: var(--ct-accent, #4f46e5);
+    color: #fff;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .hidden { display: none !important; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-thumb { background: var(--ct-border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="lobby" class="lobby">
+  <div class="section">
+    <div class="title-row">
+      <div id="statusDot" class="status-dot off"></div>
+      <h2>LiveKit</h2>
+      <div id="statusText" class="status-text">Disconnected</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Connection</div>
+    <div class="mode-tabs" id="modeTabs">
+      <button class="mode-tab active" data-mode="local">Local</button>
+      <button class="mode-tab" data-mode="remote">Remote</button>
+    </div>
+    <div class="field-grid" style="margin-top:10px">
+      <div class="field-group">
+        <label for="urlInput">Server URL</label>
+        <input id="urlInput" type="text" placeholder="ws://localhost:7880" />
+      </div>
+      <div class="row">
+        <div class="field-group" style="flex:1">
+          <label for="keyInput">API Key</label>
+          <input id="keyInput" type="text" placeholder="devkey" />
+        </div>
+        <div class="field-group" style="flex:1">
+          <label for="secretInput">API Secret</label>
+          <input id="secretInput" type="password" placeholder="secret" />
+        </div>
+      </div>
+      <div class="row wrap">
+        <button class="btn primary" id="saveBtn">Save</button>
+        <button class="btn primary" id="startBtn">Start Server</button>
+        <button class="btn danger" id="stopBtn" disabled>Stop</button>
+        <button class="btn" id="refreshBtn">Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Server Logs</div>
+    <div id="logsEl" class="logs"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Join</div>
+    <div class="manual-join">
+      <input id="roomInput" type="text" placeholder="Room name" />
+      <input id="identityInput" type="text" placeholder="Your name" />
+      <button class="btn primary" id="joinBtn">Join</button>
+    </div>
+    <div id="joinError" style="margin-top:8px; color:var(--ct-danger, #dc2626); font-size:11px;"></div>
+  </div>
+
+  <div class="rooms-panel">
+    <div class="section">
+      <div class="section-label">Rooms</div>
+      <div class="row">
+        <input id="newRoomInput" type="text" placeholder="New room name" style="flex:1; background:var(--ct-panel, rgba(0,0,0,0.04)); border:1px solid var(--ct-border, rgba(0,0,0,0.09)); border-radius:8px; color:var(--ct-text, #111); font-size:12px; font-family:inherit; padding:8px 10px; outline:none;" />
+        <button class="btn primary" id="createBtn">Create</button>
+      </div>
+    </div>
+    <div id="roomsList" class="rooms-list"></div>
+  </div>
+</div>
+
+<div id="roomView" class="room-view hidden" style="display:flex; flex-direction:column;">
+  <div class="topbar">
+    <span id="roomLabel" class="room-title"></span>
+    <span id="pCount" class="participant-count">0 participants</span>
+    <button class="ctrl-btn" id="micBtn" title="Toggle Microphone">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="23"/>
+        <line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </button>
+    <button class="ctrl-btn" id="camBtn" title="Toggle Camera">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="23 7 16 12 23 17 23 7"/>
+        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+      </svg>
+    </button>
+    <button class="ctrl-btn" id="screenBtn" title="Share Screen">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+        <line x1="8" y1="21" x2="16" y2="21"/>
+        <line x1="12" y1="17" x2="12" y2="21"/>
+      </svg>
+    </button>
+    <button class="ctrl-btn danger" id="leaveBtn" title="Leave Room">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+        <line x1="12" y1="2" x2="12" y2="12"/>
+      </svg>
+    </button>
+  </div>
+
+  <div id="videoGrid" class="video-area"></div>
+  <div id="audioSink" style="display:none"></div>
+
+  <div class="chat-panel">
+    <div class="chat-header">
+      <span class="chat-header-title">Chat</span>
+      <span id="assistantStatus" class="assistant-status">Assistant off</span>
+      <button id="assistantToggleBtn" class="assistant-btn">Enable</button>
+      <button id="assistantTalkBtn" class="assistant-btn">Talk</button>
+    </div>
+    <div id="chatMessages" class="chat-messages"></div>
+    <div class="chat-input-row">
+      <input id="chatInput" type="text" placeholder="Type a message..." />
+      <button id="chatSendBtn">Send</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.js"></script>
+<script>
+  var mode = 'local'
+  var room = null
+  var currentRoomName = ''
+  var currentIdentity = ''
+  var micEnabled = true
+  var camEnabled = false
+  var chatMessages = []
+  var rooms = []
+  var roomsLoading = false
+
+  var LivekitClient = window.LivekitClient || window.livekit
+
+  var lobbyEl = document.getElementById('lobby')
+  var roomViewEl = document.getElementById('roomView')
+  var statusDot = document.getElementById('statusDot')
+  var statusText = document.getElementById('statusText')
+  var logsEl = document.getElementById('logsEl')
+  var urlInput = document.getElementById('urlInput')
+  var keyInput = document.getElementById('keyInput')
+  var secretInput = document.getElementById('secretInput')
+  var saveBtn = document.getElementById('saveBtn')
+  var startBtn = document.getElementById('startBtn')
+  var stopBtn = document.getElementById('stopBtn')
+  var refreshBtn = document.getElementById('refreshBtn')
+  var roomInput = document.getElementById('roomInput')
+  var identityInput = document.getElementById('identityInput')
+  var joinBtn = document.getElementById('joinBtn')
+  var joinError = document.getElementById('joinError')
+  var newRoomInput = document.getElementById('newRoomInput')
+  var createBtn = document.getElementById('createBtn')
+  var roomsList = document.getElementById('roomsList')
+  var roomLabel = document.getElementById('roomLabel')
+  var pCount = document.getElementById('pCount')
+  var videoGrid = document.getElementById('videoGrid')
+  var audioSink = document.getElementById('audioSink')
+  var chatMessagesEl = document.getElementById('chatMessages')
+  var chatInput = document.getElementById('chatInput')
+  var assistantStatusEl = document.getElementById('assistantStatus')
+  var assistantToggleBtn = document.getElementById('assistantToggleBtn')
+  var assistantTalkBtn = document.getElementById('assistantTalkBtn')
+  var micBtn = document.getElementById('micBtn')
+  var camBtn = document.getElementById('camBtn')
+  var screenBtn = document.getElementById('screenBtn')
+  var leaveBtn = document.getElementById('leaveBtn')
+
+  var assistantEnabled = true
+  var assistantBusy = false
+  var assistantListening = false
+  var assistantQueue = []
+  var assistantBuffer = ''
+  var assistantCardId = ''
+  var assistantRecognition = null
+  var assistantProvider = 'claude'
+  var assistantModel = 'claude-sonnet-4-6'
+  var assistantSpeakReplies = true
+  var assistantUseCamera = true
+
+  function parseResult(raw) {
+    return typeof raw === 'string' ? JSON.parse(raw) : raw
+  }
+
+  function getAssistantName() {
+    return assistantProvider === 'codex' ? 'Codex' : 'Claude'
+  }
+
+  function ensureAssistantCardId() {
+    if (!assistantCardId) {
+      assistantCardId = 'livekit-assistant:' + ((window.contex && window.contex.tileId) ? window.contex.tileId : 'tile')
+    }
+    return assistantCardId
+  }
+
+  function updateAssistantUi() {
+    if (!assistantStatusEl) return
+    if (!assistantEnabled) assistantStatusEl.textContent = 'Assistant off'
+    else if (assistantListening) assistantStatusEl.textContent = getAssistantName() + ' listening'
+    else if (assistantBusy) assistantStatusEl.textContent = getAssistantName() + ' responding'
+    else assistantStatusEl.textContent = getAssistantName() + ' ready'
+
+    if (assistantToggleBtn) {
+      assistantToggleBtn.textContent = assistantEnabled ? 'Disable' : 'Enable'
+      assistantToggleBtn.classList.toggle('active', assistantEnabled)
+    }
+    if (assistantTalkBtn) {
+      assistantTalkBtn.textContent = assistantListening ? 'Stop' : 'Talk'
+      assistantTalkBtn.classList.toggle('active', assistantListening)
+      assistantTalkBtn.disabled = !room
+    }
+  }
+
+  function listParticipantNames() {
+    var names = []
+    if (room && room.localParticipant && room.localParticipant.identity) names.push(room.localParticipant.identity)
+    if (room) {
+      room.remoteParticipants.forEach(function(participant) {
+        if (participant && participant.identity) names.push(participant.identity)
+      })
+    }
+    return names
+  }
+
+  function getLocalVideoElement() {
+    return videoGrid.querySelector('.video-cell[data-local="true"] video')
+  }
+
+  async function captureAssistantSnapshot() {
+    if (!assistantUseCamera || !room || !camEnabled || !window.contex) return null
+    var videoEl = getLocalVideoElement()
+    if (!videoEl || videoEl.readyState < 2) return null
+
+    var width = videoEl.videoWidth || 960
+    var height = videoEl.videoHeight || 540
+    if (!width || !height) return null
+
+    var canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    var ctx2d = canvas.getContext('2d')
+    if (!ctx2d) return null
+    ctx2d.drawImage(videoEl, 0, 0, width, height)
+
+    var raw = await window.contex.ext.invoke('saveSnapshot', JSON.stringify({
+      room: currentRoomName || null,
+      dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+    }))
+    var data = parseResult(raw)
+    return data && data.path ? data.path : null
+  }
+
+  function buildAssistantPrompt(turn, snapshotPath) {
+    var transcript = chatMessages.slice(-10).map(function(message) {
+      return message.sender + ': ' + message.text
+    }).join('\n')
+
+    return [
+      'You are the live room assistant inside CodeSurf.',
+      'Respond conversationally and concisely.',
+      'Use plain text only.',
+      'If a camera snapshot path is attached, inspect it when relevant to the latest user request.',
+      'Room: ' + (currentRoomName || 'unknown'),
+      'Participants: ' + (listParticipantNames().join(', ') || 'none'),
+      transcript ? 'Recent room chat:\n' + transcript : '',
+      'Latest message from ' + turn.sender + ':\n' + turn.text,
+      snapshotPath ? 'Attached file paths:\n' + snapshotPath : '',
+    ].filter(Boolean).join('\n\n')
+  }
+
+  function speakAssistantReply(text) {
+    if (!assistantSpeakReplies || !window.speechSynthesis) return
+    var body = String(text || '').trim()
+    if (!body) return
+    try {
+      window.speechSynthesis.cancel()
+      var utterance = new SpeechSynthesisUtterance(body)
+      utterance.rate = 1
+      utterance.pitch = 1
+      window.speechSynthesis.speak(utterance)
+    } catch (error) {}
+  }
+
+  function queueAssistantTurn(text, sender, source) {
+    var body = String(text || '').trim()
+    var label = String(sender || currentIdentity || 'User').trim() || 'User'
+    if (!assistantEnabled || !room || !body) return
+    if (label === getAssistantName() || label === 'System') return
+    assistantQueue.push({ text: body, sender: label, source: source || 'chat' })
+    drainAssistantQueue()
+  }
+
+  async function drainAssistantQueue() {
+    if (assistantBusy || !assistantEnabled || !room || !assistantQueue.length || !window.contex || !window.contex.chat) {
+      updateAssistantUi()
+      return
+    }
+
+    assistantBusy = true
+    assistantBuffer = ''
+    updateAssistantUi()
+
+    var turn = assistantQueue.shift()
+    try {
+      var workspacePath = await window.contex.workspace.getPath().catch(function() { return '' })
+      var snapshotPath = await captureAssistantSnapshot().catch(function() { return null })
+      await window.contex.chat.send({
+        cardId: ensureAssistantCardId(),
+        provider: assistantProvider,
+        model: assistantModel,
+        workspaceDir: workspacePath || undefined,
+        messages: [
+          { role: 'user', content: buildAssistantPrompt(turn, snapshotPath) },
+        ],
+      })
+    } catch (error) {
+      assistantBusy = false
+      assistantBuffer = ''
+      addChatMessage('System', 'Assistant error: ' + ((error && error.message) ? error.message : String(error)))
+      updateAssistantUi()
+      if (assistantQueue.length) setTimeout(drainAssistantQueue, 0)
+    }
+  }
+
+  function getSpeechRecognitionCtor() {
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null
+  }
+
+  function stopAssistantListening() {
+    if (assistantRecognition) {
+      try { assistantRecognition.stop() } catch (error) {}
+    }
+  }
+
+  function startAssistantListening() {
+    var RecognitionCtor = getSpeechRecognitionCtor()
+    if (!RecognitionCtor) {
+      addChatMessage('System', 'Speech recognition is unavailable in this build.')
+      return
+    }
+    if (!room) return
+
+    var transcript = ''
+    assistantRecognition = new RecognitionCtor()
+    assistantRecognition.lang = 'en-GB'
+    assistantRecognition.interimResults = true
+    assistantRecognition.continuous = false
+
+    assistantRecognition.onstart = function() {
+      assistantListening = true
+      updateAssistantUi()
+    }
+
+    assistantRecognition.onresult = function(event) {
+      var finalText = []
+      for (var i = event.resultIndex; i < event.results.length; i += 1) {
+        var result = event.results[i]
+        if (result.isFinal) finalText.push(result[0].transcript)
+      }
+      if (finalText.length > 0) transcript = finalText.join(' ').trim()
+    }
+
+    assistantRecognition.onerror = function(event) {
+      if (event && event.error && event.error !== 'no-speech' && event.error !== 'aborted') {
+        addChatMessage('System', 'Voice input failed: ' + event.error)
+      }
+    }
+
+    assistantRecognition.onend = function() {
+      assistantListening = false
+      assistantRecognition = null
+      updateAssistantUi()
+      if (!transcript) return
+      sendChatText(transcript, currentIdentity, true)
+      queueAssistantTurn(transcript, currentIdentity, 'voice')
+    }
+
+    assistantRecognition.start()
+  }
+
+  function setStatus(running, text) {
+    statusDot.className = 'status-dot ' + (running ? 'on' : 'off')
+    statusText.textContent = text || (running ? 'Running' : 'Disconnected')
+  }
+
+  function setLogs(lines) {
+    logsEl.textContent = (lines || []).join('\n')
+    logsEl.scrollTop = logsEl.scrollHeight
+  }
+
+  function showJoinError(text) {
+    joinError.textContent = text || ''
+  }
+
+  function applyMode(nextMode) {
+    mode = nextMode
+    document.querySelectorAll('.mode-tab').forEach(function(tab) {
+      tab.classList.toggle('active', tab.dataset.mode === nextMode)
+    })
+    var localMode = nextMode === 'local'
+    startBtn.classList.toggle('hidden', !localMode)
+    stopBtn.classList.toggle('hidden', !localMode)
+  }
+
+  function renderRooms() {
+    while (roomsList.firstChild) roomsList.removeChild(roomsList.firstChild)
+
+    if (roomsLoading && rooms.length === 0) {
+      var loading = document.createElement('div')
+      loading.className = 'rooms-empty'
+      loading.textContent = 'Loading rooms...'
+      roomsList.appendChild(loading)
+      return
+    }
+
+    if (rooms.length === 0) {
+      var empty = document.createElement('div')
+      empty.className = 'rooms-empty'
+      empty.textContent = 'No rooms yet.'
+      roomsList.appendChild(empty)
+      return
+    }
+
+    var frag = document.createDocumentFragment()
+    rooms.forEach(function(entry) {
+      var row = document.createElement('div')
+      row.className = 'room-row'
+
+      var info = document.createElement('div')
+      info.className = 'room-info'
+
+      var name = document.createElement('div')
+      name.className = 'room-name'
+      name.textContent = entry.name
+
+      var meta = document.createElement('div')
+      meta.className = 'room-meta'
+      var count = entry.num_participants || entry.numParticipants || 0
+      meta.textContent = count + ' participant' + (count === 1 ? '' : 's')
+
+      info.appendChild(name)
+      info.appendChild(meta)
+
+      var actions = document.createElement('div')
+      actions.className = 'room-actions'
+
+      var join = document.createElement('button')
+      join.className = 'sm-btn join'
+      join.textContent = 'Join'
+      join.addEventListener('click', function(event) {
+        event.stopPropagation()
+        roomInput.value = entry.name
+        joinRoom(entry.name, identityInput.value.trim())
+      })
+
+      var del = document.createElement('button')
+      del.className = 'sm-btn del'
+      del.textContent = 'Delete'
+      del.addEventListener('click', function(event) {
+        event.stopPropagation()
+        deleteRoom(entry.name)
+      })
+
+      actions.appendChild(join)
+      actions.appendChild(del)
+
+      row.addEventListener('click', function() {
+        roomInput.value = entry.name
+      })
+
+      row.appendChild(info)
+      row.appendChild(actions)
+      frag.appendChild(row)
+    })
+
+    roomsList.appendChild(frag)
+  }
+
+  function loadServerStatus() {
+    if (!window.contex) return Promise.resolve()
+    return window.contex.ext.invoke('getStatus', '{}')
+      .then(function(raw) {
+        var data = parseResult(raw)
+        setStatus(!!data.running, data.running ? 'Running (' + data.url + ')' : 'Disconnected')
+        setLogs(data.logTail || [])
+        startBtn.disabled = !!data.running
+        stopBtn.disabled = !(data.local && data.running)
+      })
+      .catch(function(error) {
+        setStatus(false, error && error.message ? error.message : 'Disconnected')
+      })
+  }
+
+  function loadRooms() {
+    if (!window.contex || roomsLoading) return
+    roomsLoading = true
+    renderRooms()
+    window.contex.ext.invoke('listRooms', '{}')
+      .then(function(raw) {
+        var data = parseResult(raw)
+        rooms = data.rooms || []
+      })
+      .catch(function(error) {
+        console.error('LiveKit listRooms failed:', error)
+        rooms = []
+      })
+      .finally(function() {
+        roomsLoading = false
+        renderRooms()
+      })
+  }
+
+  function saveSettings() {
+    if (!window.contex) return Promise.resolve(false)
+    var settings = {
+      serverUrl: urlInput.value.trim() || 'ws://localhost:7880',
+      apiKey: keyInput.value.trim() || 'devkey',
+      apiSecret: secretInput.value.trim() || 'secret',
+      defaultIdentity: identityInput.value.trim(),
+      assistantEnabled: assistantEnabled,
+      assistantProvider: assistantProvider,
+      assistantModel: assistantModel,
+      assistantSpeakReplies: assistantSpeakReplies,
+      assistantUseCamera: assistantUseCamera,
+    }
+    return window.contex.settings.set(settings).then(function() { return true })
+  }
+
+  function createRoom() {
+    var name = newRoomInput.value.trim()
+    if (!name || !window.contex) return
+    createBtn.disabled = true
+    saveSettings()
+      .then(function() {
+        return window.contex.ext.invoke('createRoom', JSON.stringify({ name: name }))
+      })
+      .then(function() {
+        newRoomInput.value = ''
+        loadRooms()
+      })
+      .catch(function(error) {
+        console.error('LiveKit createRoom failed:', error)
+      })
+      .finally(function() {
+        createBtn.disabled = false
+      })
+  }
+
+  function deleteRoom(name) {
+    if (!window.contex) return
+    window.contex.ext.invoke('deleteRoom', JSON.stringify({ name: name }))
+      .then(function() { loadRooms() })
+      .catch(function(error) { console.error('LiveKit deleteRoom failed:', error) })
+  }
+
+  function showLobby() {
+    roomViewEl.classList.add('hidden')
+    lobbyEl.classList.remove('hidden')
+  }
+
+  function showRoomView() {
+    lobbyEl.classList.add('hidden')
+    roomViewEl.classList.remove('hidden')
+  }
+
+  function updateParticipantCount() {
+    if (!room) return
+    var count = room.remoteParticipants.size + 1
+    pCount.textContent = count + ' participant' + (count === 1 ? '' : 's')
+  }
+
+  function addParticipantCell(participant, isLocal) {
+    var cell = document.createElement('div')
+    cell.className = 'video-cell'
+    cell.dataset.sid = participant.sid || participant.identity
+    cell.dataset.local = isLocal ? 'true' : 'false'
+
+    var videoTrack = null
+    participant.trackPublications.forEach(function(pub) {
+      if (pub.track && (pub.kind === 'video' || pub.source === LivekitClient.Track.Source.Camera || pub.source === LivekitClient.Track.Source.ScreenShare)) {
+        if (!pub.isMuted) videoTrack = pub.track
+      }
+    })
+
+    if (videoTrack) {
+      var videoEl = videoTrack.attach()
+      videoEl.style.width = '100%'
+      videoEl.style.height = '100%'
+      videoEl.style.objectFit = 'cover'
+      if (isLocal) videoEl.style.transform = 'scaleX(-1)'
+      cell.appendChild(videoEl)
+    } else {
+      var avatar = document.createElement('div')
+      avatar.className = 'avatar'
+      avatar.textContent = (participant.identity || '?')[0].toUpperCase()
+      cell.appendChild(avatar)
+    }
+
+    var label = document.createElement('div')
+    label.className = 'label'
+    label.textContent = (participant.identity || 'Unknown') + (isLocal ? ' (you)' : '')
+    cell.appendChild(label)
+
+    var ring = document.createElement('div')
+    ring.className = 'speaking-ring'
+    cell.appendChild(ring)
+
+    videoGrid.appendChild(cell)
+  }
+
+  function syncRemoteAudio() {
+    while (audioSink.firstChild) audioSink.removeChild(audioSink.firstChild)
+    if (!room) return
+
+    room.remoteParticipants.forEach(function(participant) {
+      participant.trackPublications.forEach(function(pub) {
+        if (!pub.track || pub.kind !== 'audio' || pub.isMuted) return
+        var audioEl = pub.track.attach()
+        audioEl.autoplay = true
+        audioEl.playsInline = true
+        audioEl.muted = false
+        audioEl.volume = 1
+        audioSink.appendChild(audioEl)
+        if (typeof audioEl.play === 'function') {
+          audioEl.play().catch(function() {})
+        }
+      })
+    })
+  }
+
+  function renderGrid() {
+    while (videoGrid.firstChild) videoGrid.removeChild(videoGrid.firstChild)
+    if (!room) return
+    addParticipantCell(room.localParticipant, true)
+    room.remoteParticipants.forEach(function(participant) {
+      addParticipantCell(participant, false)
+    })
+    syncRemoteAudio()
+    updateParticipantCount()
+  }
+
+  function addChatMessage(sender, text) {
+    chatMessages.push({ sender: sender, text: text, ts: new Date() })
+    if (chatMessages.length > 200) chatMessages = chatMessages.slice(-200)
+    if (window.contex && window.contex.tile) {
+      window.contex.tile.setState('chatMessages', chatMessages.slice(-100)).catch(function() {})
+    }
+    renderChat()
+  }
+
+  function renderChat() {
+    while (chatMessagesEl.firstChild) chatMessagesEl.removeChild(chatMessagesEl.firstChild)
+    chatMessages.forEach(function(message) {
+      var wrapper = document.createElement('div')
+      wrapper.className = 'chat-msg'
+
+      var sender = document.createElement('span')
+      sender.className = 'sender'
+      sender.textContent = message.sender
+
+      var ts = document.createElement('span')
+      ts.className = 'ts'
+      ts.textContent = message.ts.getHours() + ':' + String(message.ts.getMinutes()).padStart(2, '0')
+
+      var text = document.createElement('div')
+      text.className = 'text'
+      text.textContent = message.text
+
+      wrapper.appendChild(sender)
+      wrapper.appendChild(ts)
+      wrapper.appendChild(text)
+      chatMessagesEl.appendChild(wrapper)
+    })
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight
+  }
+
+  function sendChatText(text, sender, echoLocal) {
+    var body = String(text || '').trim()
+    if (!body || !room) return false
+    var label = String(sender || currentIdentity || 'Agent').trim() || currentIdentity || 'Agent'
+    var data = new TextEncoder().encode(JSON.stringify({ type: 'chat', sender: label, text: body }))
+    room.localParticipant.publishData(data, { reliable: true })
+    if (echoLocal !== false) {
+      addChatMessage(label, body)
+    }
+    return true
+  }
+
+  function sendChat() {
+    var text = chatInput.value.trim()
+    if (!text || !room) return
+    chatInput.value = ''
+    sendChatText(text, currentIdentity, true)
+    queueAssistantTurn(text, currentIdentity, 'text')
+  }
+
+  async function joinRoom(roomName, identity) {
+    showJoinError('')
+    if (!roomName) {
+      showJoinError('Room name required')
+      return
+    }
+    if (!identity) {
+      showJoinError('Name required')
+      return
+    }
+
+    joinBtn.disabled = true
+    joinBtn.textContent = 'Connecting...'
+
+    try {
+      if (!window.contex) throw new Error('Bridge not ready')
+      await saveSettings()
+      var raw = await window.contex.ext.invoke('generateToken', JSON.stringify({ identity: identity, room: roomName }))
+      var data = parseResult(raw)
+      var token = data.token
+      var serverUrl = data.serverUrl
+
+      room = new LivekitClient.Room({
+        adaptiveStream: true,
+        dynacast: true,
+      })
+
+      room.on(LivekitClient.RoomEvent.ParticipantConnected, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.ParticipantDisconnected, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.TrackSubscribed, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.TrackUnsubscribed, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.TrackMuted, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.TrackUnmuted, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.LocalTrackPublished, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.LocalTrackUnpublished, function() { renderGrid() })
+      room.on(LivekitClient.RoomEvent.ActiveSpeakersChanged, function(speakers) {
+        document.querySelectorAll('.video-cell').forEach(function(cell) { cell.classList.remove('speaking') })
+        speakers.forEach(function(participant) {
+          var cell = document.querySelector('.video-cell[data-sid="' + (participant.sid || participant.identity) + '"]')
+          if (cell) cell.classList.add('speaking')
+        })
+      })
+      room.on(LivekitClient.RoomEvent.DataReceived, function(payload, participant) {
+        try {
+          var str = new TextDecoder().decode(payload)
+          var message = JSON.parse(str)
+          if (message.type === 'chat') {
+            var senderLabel = message.sender || (participant ? participant.identity : 'Unknown')
+            addChatMessage(senderLabel, message.text)
+            queueAssistantTurn(message.text, senderLabel, 'room')
+          }
+        } catch (error) {}
+      })
+      room.on(LivekitClient.RoomEvent.Disconnected, function() {
+        leaveRoom()
+      })
+
+      await room.connect(serverUrl, token)
+
+      currentRoomName = roomName
+      currentIdentity = identity
+      roomLabel.textContent = roomName
+      showRoomView()
+      updateAssistantUi()
+
+      try {
+        await room.localParticipant.setMicrophoneEnabled(true)
+        micEnabled = true
+      } catch (error) {
+        micEnabled = false
+        addChatMessage('System', 'Microphone access was denied. Join succeeded without mic.')
+      }
+      updateMicBtn()
+
+      if (window.contex) {
+        window.contex.tile.setState('room', roomName)
+        window.contex.tile.setState('identity', identity)
+        window.contex.context.set('ctx:lk-room', { name: roomName, identity: identity, joined: true })
+      }
+
+      renderGrid()
+    } catch (error) {
+      showJoinError(error && error.message ? error.message : 'Failed to join')
+    } finally {
+      joinBtn.disabled = false
+      joinBtn.textContent = 'Join'
+    }
+  }
+
+  function leaveRoom() {
+    if (room) {
+      room.disconnect()
+      room = null
+    }
+    while (audioSink.firstChild) audioSink.removeChild(audioSink.firstChild)
+    currentRoomName = ''
+    chatMessages = []
+    assistantQueue = []
+    assistantBusy = false
+    assistantBuffer = ''
+    stopAssistantListening()
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.cancel() } catch (error) {}
+    }
+    renderChat()
+    showLobby()
+    joinBtn.disabled = false
+    joinBtn.textContent = 'Join'
+    if (window.contex) {
+      window.contex.context.set('ctx:lk-room', { joined: false })
+      if (window.contex.chat) {
+        window.contex.chat.clearSession(ensureAssistantCardId()).catch(function() {})
+      }
+    }
+    updateAssistantUi()
+  }
+
+  function updateMicBtn() {
+    micBtn.className = 'ctrl-btn' + (micEnabled ? ' active' : ' muted-state')
+  }
+
+  function updateCamBtn() {
+    camBtn.className = 'ctrl-btn' + (camEnabled ? ' active' : '')
+  }
+
+  function loadSettings() {
+    if (!window.contex) return Promise.resolve()
+    return Promise.all([
+      window.contex.settings.get('serverUrl').catch(function() { return 'ws://localhost:7880' }),
+      window.contex.settings.get('apiKey').catch(function() { return 'devkey' }),
+      window.contex.settings.get('apiSecret').catch(function() { return 'secret' }),
+      window.contex.settings.get('defaultIdentity').catch(function() { return '' }),
+      window.contex.settings.get('assistantEnabled').catch(function() { return true }),
+      window.contex.settings.get('assistantProvider').catch(function() { return 'claude' }),
+      window.contex.settings.get('assistantModel').catch(function() { return 'claude-sonnet-4-6' }),
+      window.contex.settings.get('assistantSpeakReplies').catch(function() { return true }),
+      window.contex.settings.get('assistantUseCamera').catch(function() { return true }),
+      window.contex.tile.getState('room').catch(function() { return '' }),
+      window.contex.tile.getState('identity').catch(function() { return '' }),
+      window.contex.tile.getState('chatMessages').catch(function() { return [] }),
+    ]).then(function(values) {
+      urlInput.value = values[0] || 'ws://localhost:7880'
+      keyInput.value = values[1] || 'devkey'
+      secretInput.value = values[2] || 'secret'
+      assistantEnabled = values[4] !== false
+      assistantProvider = values[5] === 'codex' ? 'codex' : 'claude'
+      assistantModel = typeof values[6] === 'string' && values[6]
+        ? values[6]
+        : (assistantProvider === 'codex' ? 'gpt-5.4' : 'claude-sonnet-4-6')
+      assistantSpeakReplies = values[7] !== false
+      assistantUseCamera = values[8] !== false
+      roomInput.value = values[9] || ''
+      identityInput.value = values[10] || values[3] || ''
+      chatMessages = Array.isArray(values[11]) ? values[11].map(function(entry) {
+        return {
+          sender: entry && entry.sender ? entry.sender : 'Unknown',
+          text: entry && entry.text ? entry.text : '',
+          ts: entry && entry.ts ? new Date(entry.ts) : new Date(),
+        }
+      }) : []
+      renderChat()
+      updateAssistantUi()
+    })
+  }
+
+  document.getElementById('modeTabs').addEventListener('click', function(event) {
+    var button = event.target.closest('[data-mode]')
+    if (!button) return
+    applyMode(button.dataset.mode)
+  })
+
+  saveBtn.addEventListener('click', function() {
+    saveSettings()
+      .then(function() {
+        return loadServerStatus()
+      })
+      .then(function() {
+        if (mode === 'remote') loadRooms()
+      })
+  })
+
+  startBtn.addEventListener('click', function() {
+    if (!window.contex) return
+    startBtn.disabled = true
+    saveSettings()
+      .then(function() {
+        return window.contex.ext.invoke('startLocal', '{}')
+      })
+      .then(function(raw) {
+        var data = parseResult(raw)
+        if (!data.ok) {
+          setStatus(false, data.error || 'Failed')
+        }
+        return loadServerStatus()
+      })
+      .then(function() {
+        loadRooms()
+      })
+      .finally(function() {
+        startBtn.disabled = false
+      })
+  })
+
+  stopBtn.addEventListener('click', function() {
+    if (!window.contex) return
+    window.contex.ext.invoke('stopLocal', '{}')
+      .then(function() { return loadServerStatus() })
+  })
+
+  refreshBtn.addEventListener('click', function() {
+    loadServerStatus()
+    loadRooms()
+  })
+
+  createBtn.addEventListener('click', createRoom)
+  newRoomInput.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') createRoom()
+  })
+  joinBtn.addEventListener('click', function() {
+    joinRoom(roomInput.value.trim(), identityInput.value.trim())
+  })
+  roomInput.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') joinRoom(roomInput.value.trim(), identityInput.value.trim())
+  })
+  identityInput.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') joinRoom(roomInput.value.trim(), identityInput.value.trim())
+  })
+
+  document.getElementById('chatSendBtn').addEventListener('click', sendChat)
+  chatInput.addEventListener('keydown', function(event) {
+    if (event.key === 'Enter') sendChat()
+  })
+
+  micBtn.addEventListener('click', async function() {
+    if (!room) return
+    var nextEnabled = !micEnabled
+    try {
+      await room.localParticipant.setMicrophoneEnabled(nextEnabled)
+      micEnabled = nextEnabled
+      updateMicBtn()
+    } catch (error) {
+      addChatMessage('System', (error && error.message) ? error.message : 'Microphone access was denied.')
+    }
+  })
+
+  camBtn.addEventListener('click', async function() {
+    if (!room) return
+    var nextEnabled = !camEnabled
+    try {
+      await room.localParticipant.setCameraEnabled(nextEnabled)
+      camEnabled = nextEnabled
+      updateCamBtn()
+      setTimeout(renderGrid, 500)
+    } catch (error) {
+      addChatMessage('System', (error && error.message) ? error.message : 'Camera access was denied.')
+    }
+  })
+
+  screenBtn.addEventListener('click', async function() {
+    if (!room) return
+    try {
+      await room.localParticipant.setScreenShareEnabled(true)
+      setTimeout(renderGrid, 500)
+    } catch (error) {
+      addChatMessage('System', (error && error.message) ? error.message : 'Screen-share access was denied.')
+    }
+  })
+
+  leaveBtn.addEventListener('click', leaveRoom)
+
+  assistantToggleBtn.addEventListener('click', function() {
+    assistantEnabled = !assistantEnabled
+    if (!assistantEnabled) {
+      assistantQueue = []
+      assistantBusy = false
+      assistantBuffer = ''
+      stopAssistantListening()
+      if (window.speechSynthesis) {
+        try { window.speechSynthesis.cancel() } catch (error) {}
+      }
+    } else if (assistantQueue.length) {
+      setTimeout(drainAssistantQueue, 0)
+    }
+
+    if (window.contex && window.contex.settings) {
+      window.contex.settings.set({ assistantEnabled: assistantEnabled }).catch(function() {})
+    }
+    updateAssistantUi()
+  })
+
+  assistantTalkBtn.addEventListener('click', function() {
+    if (assistantListening) {
+      stopAssistantListening()
+      return
+    }
+    if (!assistantEnabled) assistantEnabled = true
+    startAssistantListening()
+    updateAssistantUi()
+  })
+
+  function setupBus() {
+    if (!window.contex || !window.contex.bus) return
+    window.contex.bus.subscribe('lk-server', function(event) {
+      var payload = event && event.payload ? event.payload : event
+      setStatus(!!payload.running, payload.running ? 'Running (' + payload.url + ')' : 'Disconnected')
+      setLogs(payload.logTail || [])
+      startBtn.disabled = !!payload.running
+      stopBtn.disabled = !(payload.local && payload.running)
+    })
+    window.contex.bus.subscribe('lk-rooms', function() {
+      loadRooms()
+    })
+    window.contex.bus.subscribe('lk-chat', function(event) {
+      var payload = event && event.payload ? event.payload : event
+      var data = payload && payload.payload ? payload.payload : payload
+      if (!payload || payload.action !== 'sendChat' || !data || !data.text) return
+      if (!room) return
+      if (data.room && currentRoomName && data.room !== currentRoomName) return
+      sendChatText(data.text, data.sender || 'Agent', true)
+    })
+  }
+
+  function setupAssistantStream() {
+    if (!window.contex || !window.contex.chat) return
+    window.contex.chat.onStream(function(event) {
+      if (!event || event.cardId !== ensureAssistantCardId()) return
+
+      if (event.type === 'text' && event.text) {
+        assistantBuffer += event.text
+        return
+      }
+
+      if (event.type === 'error') {
+        assistantBusy = false
+        assistantBuffer = ''
+        addChatMessage('System', 'Assistant error: ' + (event.error || 'Unknown error'))
+        updateAssistantUi()
+        if (assistantQueue.length) setTimeout(drainAssistantQueue, 0)
+        return
+      }
+
+      if (event.type === 'done') {
+        var reply = String(assistantBuffer || '').trim()
+        assistantBusy = false
+        assistantBuffer = ''
+        if (reply) {
+          sendChatText(reply, getAssistantName(), true)
+          speakAssistantReply(reply)
+        }
+        updateAssistantUi()
+        if (assistantQueue.length) setTimeout(drainAssistantQueue, 0)
+      }
+    })
+  }
+
+  function handleHostEventMessage(event) {
+    var msg = event && event.data
+    if (!msg || typeof msg !== 'object') return
+
+    if (msg.type === 'contex-event' && msg.event === 'discovery.peersChanged') {
+      if (window.contex && window.contex.chat && assistantCardId) {
+        window.contex.chat.clearSession(ensureAssistantCardId()).catch(function() {})
+      }
+      if (room && msg.data && msg.data.length) {
+        addChatMessage('System', 'Connected block tools updated for the assistant.')
+      }
+      assistantBuffer = ''
+      assistantBusy = false
+      updateAssistantUi()
+      return
+    }
+
+    if (msg.type === 'contex-bridge-ready') {
+      window.removeEventListener('message', handleHostEventMessage)
+      setTimeout(init, 50)
+    }
+  }
+
+  function registerActions() {
+    if (!window.contex || !window.contex.actions) return
+    window.contex.actions.register('createRoom', 'Create a LiveKit room', function(params) {
+      if (params && params.name) {
+        newRoomInput.value = params.name
+        createRoom()
+      }
+    })
+    window.contex.actions.register('listRooms', 'Refresh room list', function() {
+      loadRooms()
+    })
+    window.contex.actions.register('joinRoom', 'Join a LiveKit room', function(params) {
+      if (params && params.room) {
+        roomInput.value = params.room
+        if (params.identity) identityInput.value = params.identity
+        joinRoom(params.room, identityInput.value.trim())
+      }
+    })
+    window.contex.actions.register('leaveRoom', 'Leave the current room', function() {
+      leaveRoom()
+    })
+    window.contex.actions.register('startLocalServer', 'Start the local LiveKit server', function() {
+      startBtn.click()
+    })
+    window.contex.actions.register('stopLocalServer', 'Stop the local LiveKit server', function() {
+      stopBtn.click()
+    })
+    window.contex.actions.register('toggleMic', 'Toggle microphone', function() {
+      micBtn.click()
+    })
+    window.contex.actions.register('toggleCam', 'Toggle camera', function() {
+      camBtn.click()
+    })
+    window.contex.actions.register('sendChat', 'Send a text message into the current room', function(params) {
+      if (!params || !params.text) return
+      sendChatText(params.text, params.sender || 'Agent', true)
+    })
+  }
+
+  function init() {
+    applyMode('local')
+    loadSettings()
+      .then(function() {
+        return loadServerStatus()
+      })
+      .then(function() {
+        loadRooms()
+      })
+    setupBus()
+    setupAssistantStream()
+    registerActions()
+    showLobby()
+    updateAssistantUi()
+  }
+
+  window.addEventListener('message', handleHostEventMessage)
+  if (window.contex) init()
+</script>
+</body>
+</html>

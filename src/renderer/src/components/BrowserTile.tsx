@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, RotateCcw, RotateCw, Home, Globe, Monitor, Smartphone, Crosshair } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { dispatchOpenLink } from '../utils/links'
 
 const HOMEPAGE = 'https://www.google.com'
 
@@ -887,7 +888,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       const ev = e as Event & { url?: string }
       if (ev.url) {
         e.preventDefault()
-        window.electron?.shell?.openExternal?.(ev.url)
+        void dispatchOpenLink(ev.url)
       }
     }
 

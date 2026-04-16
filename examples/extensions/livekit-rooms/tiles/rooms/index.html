@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--ct-bg, transparent);
+    color: var(--ct-text, #111);
+    font-size: 12px;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    flex-shrink: 0;
+  }
+  .toolbar h2 { font-size: 13px; font-weight: 600; flex: 1; }
+  .icon-btn {
+    padding: 4px; border: none; background: none; cursor: pointer;
+    color: var(--ct-muted, #444); border-radius: 4px; display: flex; align-items: center;
+  }
+  .icon-btn:hover { color: var(--ct-text, #111); }
+
+  .create-bar {
+    display: flex; gap: 6px; padding: 10px 12px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    flex-shrink: 0;
+  }
+  .create-bar input {
+    flex: 1; background: var(--ct-panel, rgba(0,0,0,0.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    border-radius: 6px; color: var(--ct-text, #111);
+    font-size: 12px; font-family: inherit; padding: 6px 10px; outline: none;
+  }
+  .create-bar input:focus { border-color: var(--ct-accent, #4f46e5); }
+  .create-bar input::placeholder { color: var(--ct-dim, #64748b); }
+
+  .btn {
+    padding: 6px 12px; border-radius: 6px; border: 1px solid transparent;
+    font-size: 12px; font-family: inherit; cursor: pointer; transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn.primary { background: var(--ct-accent, #4f46e5); color: #fff; }
+  .btn.primary:hover { opacity: 0.9; }
+  .btn.primary:disabled { opacity: 0.4; cursor: default; }
+
+  .list { flex: 1; overflow-y: auto; }
+  .empty {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--ct-dim, #64748b); font-size: 13px;
+  }
+
+  .room-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    cursor: pointer; transition: background 0.1s;
+  }
+  .room-row:hover { background: rgba(0,0,0,0.03); }
+  .room-row.selected { background: rgba(79,70,229,0.07); }
+
+  .room-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--ct-accent-s, rgba(79,70,229,0.1));
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .room-icon svg { color: var(--ct-accent, #4f46e5); }
+
+  .room-info { flex: 1; min-width: 0; }
+  .room-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .room-meta { font-size: 11px; color: var(--ct-dim, #64748b); margin-top: 2px; }
+
+  .room-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .sm-btn {
+    padding: 4px 8px; border-radius: 4px; border: 1px solid var(--ct-border, rgba(0,0,0,0.09));
+    background: transparent; color: var(--ct-muted, #444);
+    font-size: 11px; font-family: inherit; cursor: pointer;
+  }
+  .sm-btn:hover { background: var(--ct-panel, rgba(0,0,0,0.04)); }
+  .sm-btn.join { color: var(--ct-accent, #4f46e5); border-color: var(--ct-accent, #4f46e5); }
+  .sm-btn.join:hover { background: var(--ct-accent-s, rgba(79,70,229,0.1)); }
+  .sm-btn.del { color: var(--ct-danger, #dc2626); }
+  .sm-btn.del:hover { background: rgba(220,38,38,0.08); }
+
+  .participant-count {
+    display: inline-flex; align-items: center; gap: 3px;
+    font-size: 11px; color: var(--ct-muted, #444);
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinning { animation: spin 0.8s linear infinite; }
+
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-thumb { background: var(--ct-border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <h2>Rooms</h2>
+  <button class="icon-btn" id="refreshBtn" title="Refresh">
+    <svg id="refreshIcon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
+</div>
+
+<div class="create-bar">
+  <input id="newRoomInput" type="text" placeholder="New room name..." />
+  <button class="btn primary" id="createBtn">Create</button>
+</div>
+
+<div class="list" id="list">
+  <div class="empty">Loading rooms...</div>
+</div>
+
+<script>
+  var rooms = []
+  var loading = false
+  var listEl = document.getElementById('list')
+  var newRoomInput = document.getElementById('newRoomInput')
+  var createBtn = document.getElementById('createBtn')
+  var refreshIcon = document.getElementById('refreshIcon')
+
+  function render() {
+    while (listEl.firstChild) listEl.removeChild(listEl.firstChild)
+
+    if (loading && rooms.length === 0) {
+      var ld = document.createElement('div')
+      ld.className = 'empty'
+      ld.textContent = 'Loading rooms...'
+      listEl.appendChild(ld)
+      return
+    }
+
+    if (rooms.length === 0) {
+      var em = document.createElement('div')
+      em.className = 'empty'
+      em.textContent = 'No rooms yet. Create one above.'
+      listEl.appendChild(em)
+      return
+    }
+
+    var frag = document.createDocumentFragment()
+    rooms.forEach(function(room) {
+      var row = document.createElement('div')
+      row.className = 'room-row'
+
+      var icon = document.createElement('div')
+      icon.className = 'room-icon'
+      icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>'
+
+      var info = document.createElement('div')
+      info.className = 'room-info'
+      var nameEl = document.createElement('div')
+      nameEl.className = 'room-name'
+      nameEl.textContent = room.name
+      var meta = document.createElement('div')
+      meta.className = 'room-meta'
+      var numP = room.num_participants || room.numParticipants || 0
+      meta.textContent = numP + ' participant' + (numP !== 1 ? 's' : '')
+      info.appendChild(nameEl)
+      info.appendChild(meta)
+
+      var actions = document.createElement('div')
+      actions.className = 'room-actions'
+
+      var joinBtn = document.createElement('button')
+      joinBtn.className = 'sm-btn join'
+      joinBtn.textContent = 'Join'
+      joinBtn.addEventListener('click', function(e) {
+        e.stopPropagation()
+        joinRoom(room.name)
+      })
+
+      var delBtn = document.createElement('button')
+      delBtn.className = 'sm-btn del'
+      delBtn.textContent = 'Delete'
+      delBtn.addEventListener('click', function(e) {
+        e.stopPropagation()
+        deleteRoom(room.name)
+      })
+
+      actions.appendChild(joinBtn)
+      actions.appendChild(delBtn)
+
+      row.appendChild(icon)
+      row.appendChild(info)
+      row.appendChild(actions)
+      row.addEventListener('click', function() { joinRoom(room.name) })
+      frag.appendChild(row)
+    })
+    listEl.appendChild(frag)
+  }
+
+  function loadRooms() {
+    if (!window.contex || loading) return
+    loading = true
+    refreshIcon.classList.add('spinning')
+    window.contex.ext.invoke('listRooms', '{}')
+      .then(function(raw) {
+        var data = typeof raw === 'string' ? JSON.parse(raw) : raw
+        rooms = data.rooms || []
+      })
+      .catch(function(e) {
+        console.error('Failed to list rooms:', e)
+      })
+      .finally(function() {
+        loading = false
+        refreshIcon.classList.remove('spinning')
+        render()
+      })
+    render()
+  }
+
+  function createRoom() {
+    var name = newRoomInput.value.trim()
+    if (!name || !window.contex) return
+    createBtn.disabled = true
+    window.contex.ext.invoke('createRoom', JSON.stringify({ name: name }))
+      .then(function() {
+        newRoomInput.value = ''
+        loadRooms()
+      })
+      .catch(function(e) { console.error('Create failed:', e) })
+      .finally(function() { createBtn.disabled = false })
+  }
+
+  function deleteRoom(name) {
+    if (!window.contex) return
+    window.contex.ext.invoke('deleteRoom', JSON.stringify({ name: name }))
+      .then(function() { loadRooms() })
+      .catch(function(e) { console.error('Delete failed:', e) })
+  }
+
+  function joinRoom(name) {
+    if (!window.contex) return
+    // Publish room to context so any existing room tile picks it up
+    window.contex.context.set('ctx:lk-room', { name: name, action: 'join' })
+    // Also create a new room tile
+    window.contex.canvas.createTile('ext:lk-room', {
+      state: { room: name },
+    })
+  }
+
+  createBtn.addEventListener('click', createRoom)
+  newRoomInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') createRoom()
+  })
+  document.getElementById('refreshBtn').addEventListener('click', function() { loadRooms() })
+
+  function setupBus() {
+    if (!window.contex || !window.contex.bus) return
+    window.contex.bus.subscribe('lk-rooms', function(event) {
+      var d = event?.payload || {}
+      if (d.action === 'roomCreated' || d.action === 'roomDeleted' || d.type === 'roomCreated' || d.type === 'roomDeleted') {
+        loadRooms()
+      }
+    })
+  }
+
+  function init() {
+    setupBus()
+    loadRooms()
+    // Register actions
+    if (window.contex.actions) {
+      window.contex.actions.register('createRoom', 'Create a room', function(params) {
+        if (params && params.name) {
+          newRoomInput.value = params.name
+          createRoom()
+        }
+      })
+      window.contex.actions.register('listRooms', 'Refresh room list', function() { loadRooms() })
+      window.contex.actions.register('joinRoom', 'Join a room', function(params) {
+        if (params && params.room) joinRoom(params.room)
+      })
+    }
+  }
+
+  if (window.contex) init()
+  else window.addEventListener('message', function handler(e) {
+    if (e.data?.type === 'contex-bridge-ready') {
+      window.removeEventListener('message', handler)
+      setTimeout(init, 50)
+    }
+  })
+</script>
+</body>
+</html>

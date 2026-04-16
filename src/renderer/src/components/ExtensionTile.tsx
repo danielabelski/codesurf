@@ -17,6 +17,15 @@ export interface ExtensionAction {
   description: string
 }
 
+interface ExtensionPeerInfo {
+  peerId: string
+  peerType: string
+  tools?: string[]
+  actions?: ExtensionAction[]
+  filePath?: string
+  label?: string
+}
+
 interface ExtensionTileProps {
   tileId: string
   extType: string  // e.g. 'ext:timer'
@@ -25,7 +34,7 @@ interface ExtensionTileProps {
   workspaceId?: string
   workspacePath?: string
   isInteracting?: boolean
-  connectedPeers?: string[]
+  connectedPeers?: ExtensionPeerInfo[]
   onCreateTile?: (type: string, opts?: { filePath?: string; x?: number; y?: number; hideTitlebar?: boolean; hideNavbar?: boolean }) => string | null
   onActionsChanged?: (tileId: string, actions: ExtensionAction[]) => void
 }
@@ -40,6 +49,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   const bridgeReadyRef = useRef(false)
   const registeredActionsRef = useRef<Map<string, string>>(new Map()) // name → description
   const pendingActionResultsRef = useRef<Map<string, { resolve: (v: any) => void; reject: (e: Error) => void }>>(new Map())
+  const extensionChatCardsRef = useRef<Set<string>>(new Set())
   const handleRpcRef = useRef<((method: string, params: any) => Promise<any>) | null>(null)
 
   const [entryUrl, setEntryUrl] = useState<string | null>(null)
@@ -49,6 +59,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   const containerRef = useRef<HTMLDivElement>(null)
   const [renderedSize, setRenderedSize] = useState({ w: width, h: Math.max(0, height - 36) })
   const themeCssVarsRef = useRef<Record<string, string>>({})
+  const connectedPeerIds = useMemo(() => connectedPeers.map(peer => peer.peerId).filter(Boolean), [connectedPeers])
 
   // Use ResizeObserver to track actual rendered size — works correctly in both
   // canvas mode (TileChrome constrains the container) and panel/tab mode (container fills the pane).
@@ -172,6 +183,23 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     }
   }, [postToIframe, tileId])
 
+  const buildChatPeers = useCallback(async () => {
+    if (!workspaceId || connectedPeers.length === 0) return []
+
+    const peers = await Promise.all(connectedPeers.map(async (peer) => {
+      const context = await el.tileContext?.getAll?.(workspaceId, peer.peerId).catch?.(() => ({}))
+      return {
+        peerId: peer.peerId,
+        peerType: peer.peerType,
+        tools: Array.isArray(peer.tools) ? peer.tools : [],
+        actions: Array.isArray(peer.actions) ? peer.actions : undefined,
+        context: context && typeof context === 'object' ? context : undefined,
+      }
+    }))
+
+    return peers.filter(peer => peer.peerId)
+  }, [connectedPeers, workspaceId])
+
   const handleRpc = useCallback(async (method: string, params: any) => {
     switch (method) {
       case 'tile.getState':
@@ -207,11 +235,11 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
           height: contentHeight,
           workspaceId: workspaceId ?? '',
           workspacePath: workspacePath ?? '',
-          connectedPeers,
+          connectedPeers: connectedPeerIds,
         }
 
       case 'discovery.getPeers':
-        return connectedPeers
+        return connectedPeerIds
 
       case 'bus.publish': {
         const channel = String(params?.channel ?? '')
@@ -269,6 +297,34 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
       case 'workspace.getPath':
         return workspacePath ?? ''
+
+      case 'chat.send': {
+        const request = params?.request ?? params
+        const cardId = String(request?.cardId ?? '').trim()
+        if (!cardId) throw new Error('Missing chat cardId')
+        extensionChatCardsRef.current.add(cardId)
+        const peers = await buildChatPeers()
+        return el.chat?.send?.({
+          ...request,
+          workspaceId: request?.workspaceId ?? workspaceId,
+          workspaceDir: request?.workspaceDir ?? workspacePath,
+          peers: peers.length > 0 ? peers : undefined,
+        })
+      }
+
+      case 'chat.stop': {
+        const cardId = String(params?.cardId ?? '').trim()
+        if (!cardId) throw new Error('Missing chat cardId')
+        extensionChatCardsRef.current.delete(cardId)
+        return el.chat?.stop?.(cardId)
+      }
+
+      case 'chat.clearSession': {
+        const cardId = String(params?.cardId ?? '').trim()
+        if (!cardId) throw new Error('Missing chat cardId')
+        extensionChatCardsRef.current.delete(cardId)
+        return el.chat?.clearSession?.(cardId)
+      }
 
       case 'relay.init':
         return workspacePath ? el.relay?.init?.(workspacePath) : false
@@ -356,7 +412,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         if (!workspaceId) return {}
         const tagPrefix = typeof params?.tagPrefix === 'string' ? params.tagPrefix : undefined
         const result: Record<string, any> = {}
-        for (const peerId of connectedPeers) {
+        for (const peerId of connectedPeerIds) {
           const peerContext = await el.tileContext?.getAll?.(workspaceId, peerId, tagPrefix)
           if (peerContext) {
             result[peerId] = peerContext
@@ -386,7 +442,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       default:
         throw new Error(`Unsupported extension RPC method: ${method}`)
     }
-  }, [contentHeight, connectedPeers, ensureBusSubscription, extId, extType, onCreateTile, onActionsChanged, themeColors, tileId, width, workspaceId, workspacePath, forwardContextEvent])
+  }, [buildChatPeers, connectedPeerIds, contentHeight, ensureBusSubscription, extId, extType, onCreateTile, onActionsChanged, themeColors, tileId, width, workspaceId, workspacePath, forwardContextEvent])
 
   // Keep ref in sync so the message listener doesn't need to be re-created
   handleRpcRef.current = handleRpc
@@ -517,9 +573,40 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   }, [cleanupRelaySubscription, postToIframe, workspacePath])
 
   useEffect(() => {
+    const unsubscribe = el.stream?.onChunk?.((event: any) => {
+      const cardId = typeof event?.cardId === 'string' ? event.cardId : ''
+      if (!cardId || !extensionChatCardsRef.current.has(cardId)) return
+
+      postToIframe({
+        type: 'contex-event',
+        event: 'chat.stream',
+        data: event,
+      })
+
+      if (event?.type === 'done' || event?.type === 'error') {
+        extensionChatCardsRef.current.delete(cardId)
+      }
+    })
+
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe()
+      extensionChatCardsRef.current.clear()
+    }
+  }, [postToIframe])
+
+  useEffect(() => {
+    if (!bridgeReadyRef.current) return
+    postToIframe({
+      type: 'contex-event',
+      event: 'discovery.peersChanged',
+      data: connectedPeers,
+    })
+  }, [connectedPeers, postToIframe])
+
+  useEffect(() => {
     const peerContextUnsubs = new Map<string, () => void>()
 
-    for (const peerId of connectedPeers) {
+    for (const peerId of connectedPeerIds) {
       const channel = `ctx:${peerId}`
       const subscriberId = `exttile:${tileId}:peer-ctx:${peerId}`
 
@@ -543,7 +630,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         unsubscribe()
       }
     }
-  }, [connectedPeers, forwardContextEvent, tileId])
+  }, [connectedPeerIds, forwardContextEvent, tileId])
 
   // Listen for action invocations via tileContext:changed (proven IPC path)
   useEffect(() => {
@@ -608,7 +695,8 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       <iframe
         ref={iframeRef}
         src={entryUrl}
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts allow-same-origin allow-modals"
+        allow="camera; microphone; display-capture; autoplay"
         style={{
           position: 'absolute',
           top: 0,

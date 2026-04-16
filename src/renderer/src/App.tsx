@@ -12,6 +12,7 @@ import { DEFAULT_THEME_ID, getThemeById, resolveEffectiveThemeId, registerCustom
 import type { PanelNode } from './components/PanelLayout'
 import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf, closeOthersInLeaf, closeToRightInLeaf, findLeafById } from './components/PanelLayout'
 import { basename, getDroppedPaths, toFileUrl, isMediaFile } from './utils/dnd'
+import { CODESURF_OPEN_LINK_EVENT, stripLocalPathLocation, type CodeSurfOpenLinkDetail } from './utils/links'
 import { disposeChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
 import { disposeMediaTile } from './components/MediaTile'
 import { MainStatusBar } from './components/MainStatusBar'
@@ -157,6 +158,23 @@ function toBrowserTileUrl(filePath: string): string {
   return filePath
 }
 
+function hrefToLocalPath(href: string): string | null {
+  const trimmed = String(href ?? '').trim()
+  if (!trimmed) return null
+
+  if (trimmed.startsWith('/')) return stripLocalPathLocation(trimmed)
+
+  if (trimmed.startsWith('file://')) {
+    try {
+      return stripLocalPathLocation(decodeURIComponent(new URL(trimmed).pathname))
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}
+
 function withAlpha(color: string, alpha: number): string {
   const trimmed = color.trim()
 
@@ -269,9 +287,16 @@ type DiscoveryState = {
 }
 
 const DISCOVERY_PULSE_DURATION_MS = 1100
+const DISCOVERY_MAX_DISTANCE_MULTIPLIER = 2.1
 const SETTINGS_CACHE_KEY = 'contex:settings-cache'
+const WORKSPACE_TAB_STATE_KEY = 'codesurf:workspace-tabs:v1'
 const BRAND_WORDMARK_CACHE_KEY = 'contex:brand-wordmark-index'
 const BRAND_WORDMARK_PALETTE_CACHE_KEY = 'contex:brand-wordmark-palette-index'
+
+type PersistedWorkspaceTabState = {
+  openWorkspaceIds: string[]
+  currentWorkspaceId: string | null
+}
 
 function readCachedSettings(): AppSettings {
   if (typeof window === 'undefined') return DEFAULT_SETTINGS
@@ -283,8 +308,46 @@ function readCachedSettings(): AppSettings {
   }
 }
 
+function readPersistedWorkspaceTabState(): PersistedWorkspaceTabState {
+  if (typeof window === 'undefined') {
+    return { openWorkspaceIds: [], currentWorkspaceId: null }
+  }
+
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_TAB_STATE_KEY)
+    if (!raw) return { openWorkspaceIds: [], currentWorkspaceId: null }
+    const parsed = JSON.parse(raw) as Partial<PersistedWorkspaceTabState>
+    const openWorkspaceIds = Array.isArray(parsed.openWorkspaceIds)
+      ? parsed.openWorkspaceIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      : []
+    const currentWorkspaceId = typeof parsed.currentWorkspaceId === 'string' && parsed.currentWorkspaceId.trim().length > 0
+      ? parsed.currentWorkspaceId
+      : null
+    return {
+      openWorkspaceIds: Array.from(new Set(openWorkspaceIds)),
+      currentWorkspaceId,
+    }
+  } catch {
+    return { openWorkspaceIds: [], currentWorkspaceId: null }
+  }
+}
+
+function persistWorkspaceTabState(state: PersistedWorkspaceTabState): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(WORKSPACE_TAB_STATE_KEY, JSON.stringify({
+      openWorkspaceIds: Array.from(new Set(state.openWorkspaceIds.filter(id => typeof id === 'string' && id.trim().length > 0))),
+      currentWorkspaceId: typeof state.currentWorkspaceId === 'string' && state.currentWorkspaceId.trim().length > 0
+        ? state.currentWorkspaceId
+        : null,
+    }))
+  } catch {
+    // ignore localStorage failures
+  }
+}
+
 function getDiscoveryMaxDistance(largeGridStep: number): number {
-  return Math.max(largeGridStep * 3, largeGridStep)
+  return Math.max(largeGridStep * DISCOVERY_MAX_DISTANCE_MULTIPLIER, largeGridStep)
 }
 
 function uniq<T>(items: T[]): T[] {
@@ -738,6 +801,7 @@ function App(): JSX.Element {
   useEffect(() => { expandedTileIdRef.current = expandedTileId }, [expandedTileId])
   const currentWorkspaceIdRef = useRef<string | null>(workspace?.id ?? null)
   useEffect(() => { currentWorkspaceIdRef.current = workspace?.id ?? null }, [workspace?.id])
+  const workspaceTabsHydratedRef = useRef(false)
 
   const selectedWorkspaceFilePath = useMemo(() => {
     if (!workspace?.path) return null
@@ -794,6 +858,14 @@ function App(): JSX.Element {
   useEffect(() => {
     if (workspace?.id) setOpenWorkspaceIds(prev => prev.includes(workspace.id) ? prev : [...prev, workspace.id])
   }, [workspace?.id])
+
+  useEffect(() => {
+    if (!workspaceTabsHydratedRef.current) return
+    persistWorkspaceTabState({
+      openWorkspaceIds,
+      currentWorkspaceId: workspace?.id ?? workspacePickerReturnWorkspaceId ?? openWorkspaceIds[0] ?? null,
+    })
+  }, [openWorkspaceIds, workspace?.id, workspacePickerReturnWorkspaceId])
 
   // ─── Auto Agent Mode Effect ───────────────────────────────────────────────
   // Automatically enables agentMode on chat tiles when they get close to compatible tiles
@@ -1074,17 +1146,37 @@ function App(): JSX.Element {
         isFresh ? Promise.resolve(null) : window.electron.workspace.getActive(),
         window.electron.settings?.get()
       ])
+      const persistedWorkspaceTabs = readPersistedWorkspaceTabState()
       if (savedSettings) setSettings(withDefaultSettings(savedSettings))
       setWorkspaces(wsList)
-      setWorkspace(active)
-      if (!active) {
+      const workspaceById = new Map(wsList.map(entry => [entry.id, entry]))
+      const restoredWorkspace = persistedWorkspaceTabs.currentWorkspaceId
+        ? (workspaceById.get(persistedWorkspaceTabs.currentWorkspaceId) ?? null)
+        : null
+      const targetWorkspace = restoredWorkspace ?? active ?? wsList[0] ?? null
+      const restoredOpenWorkspaceIds = persistedWorkspaceTabs.openWorkspaceIds
+        .filter(id => workspaceById.has(id))
+
+      if (targetWorkspace && !restoredOpenWorkspaceIds.includes(targetWorkspace.id)) {
+        restoredOpenWorkspaceIds.push(targetWorkspace.id)
+      }
+
+      setOpenWorkspaceIds(Array.from(new Set(restoredOpenWorkspaceIds)))
+      setWorkspace(targetWorkspace)
+      workspaceTabsHydratedRef.current = true
+
+      if (targetWorkspace && active?.id !== targetWorkspace.id) {
+        await window.electron.workspace.setActive(targetWorkspace.id).catch(() => {})
+      }
+
+      if (!targetWorkspace) {
         showEmptyLayoutPage()
         return
       }
-      if (active) {
-        const saved: CanvasState | null = await window.electron.canvas.load(active.id)
+      if (targetWorkspace) {
+        const saved: CanvasState | null = await window.electron.canvas.load(targetWorkspace.id)
         const savedTiles = saved?.tiles ?? []
-        void window.electron.collab.pruneOrphanedTileDirs(active.path, savedTiles.map(tile => tile.id))
+        void window.electron.collab.pruneOrphanedTileDirs(targetWorkspace.path, savedTiles.map(tile => tile.id))
         if (saved) {
           const sanitizedPanel = sanitizePanelLayout((saved.panelLayout as PanelNode | null) ?? null, savedTiles.map(tile => tile.id))
           const nextActivePanelId = saved.activePanelId && sanitizedPanel.layout && findLeafById(sanitizedPanel.layout, saved.activePanelId)
@@ -1101,6 +1193,8 @@ function App(): JSX.Element {
           setPanelLayout(saved.tabViewActive ? (sanitizedPanel.layout ?? createLeaf([])) : null)
           setActivePanelId(saved.tabViewActive ? nextActivePanelId : null)
           setExpandedTileId(saved.expandedTileId ?? null)
+        } else {
+          showEmptyLayoutPage({ preserveOpenTabs: true })
         }
       }
     }
@@ -1433,6 +1527,30 @@ function App(): JSX.Element {
 
     return newTile.id
   }, [nextZIndex, viewport, viewportCenter, saveCanvas, panelLayout, activePanelId, getInitialTileSize, snapValue, triggerDiscoveryPulse, settings.gridSize, settings.gridSpacingSmall])
+
+  useEffect(() => {
+    const handleOpenLink = (event: Event) => {
+      const customEvent = event as CustomEvent<CodeSurfOpenLinkDetail>
+      const href = String(customEvent.detail?.href ?? '').trim()
+      if (!href) return
+
+      const localPath = hrefToLocalPath(href)
+      if (localPath) {
+        void resolveFileTileType(localPath).then(type => addTile(type, localPath))
+        return
+      }
+
+      if (settings.linkOpenMode === 'external-browser') {
+        void window.electron?.shell?.openExternal?.(href)
+        return
+      }
+
+      addTile('browser', href)
+    }
+
+    window.addEventListener(CODESURF_OPEN_LINK_EVENT, handleOpenLink as EventListener)
+    return () => window.removeEventListener(CODESURF_OPEN_LINK_EVENT, handleOpenLink as EventListener)
+  }, [addTile, settings.linkOpenMode])
 
   useEffect(() => {
     if (!tiles.some(tile => tile.width < getMinTileWidth(tile) || tile.height < getMinTileHeight(tile))) return
@@ -2289,7 +2407,7 @@ function App(): JSX.Element {
     const defaultModeByProvider: Record<string, string> = {
       claude: 'default',
       codex: 'full-auto',
-      opencode: 'build',
+      opencode: 'plan',
       openclaw: 'default',
       hermes: 'full',
     }
@@ -2305,8 +2423,13 @@ function App(): JSX.Element {
       thinking: 'adaptive',
       agentMode: false,
       autoAgentMode: false,
+      preserveSessionSummary: true,
       sessionId: typeof state.sessionId === 'string' || state.sessionId === null ? state.sessionId : session.sessionId,
-      isStreaming: false,
+      jobId: typeof state.jobId === 'string' || state.jobId === null ? state.jobId : null,
+      jobSequence: typeof state.jobSequence === 'number' ? state.jobSequence : 0,
+      executionTarget: state.executionTarget === 'cloud' ? 'cloud' : 'local',
+      cloudHostId: typeof state.cloudHostId === 'string' || state.cloudHostId === null ? state.cloudHostId : null,
+      isStreaming: typeof state.isStreaming === 'boolean' ? state.isStreaming : false,
     }
 
     const activeFullscreenChatTileId = (() => {
@@ -2369,6 +2492,42 @@ function App(): JSX.Element {
 
     openSessionInAppCurrentWorkspace(session)
   }, [resolveWorkspaceForSession, workspace?.id, handleSwitchWorkspace, openSessionInAppCurrentWorkspace])
+
+  const openDaemonTask = useCallback(async (task: {
+    id: string
+    taskLabel: string | null
+    status: string
+    provider: string | null
+    model: string | null
+    workspaceDir: string | null
+    sessionId: string | null
+  }) => {
+    const projectPath = normalizeWorkspacePath(task.workspaceDir)
+    if (!projectPath) return
+
+    const session: SidebarSessionEntry = {
+      id: `codesurf-job:${task.id}`,
+      source: 'codesurf',
+      scope: 'workspace',
+      tileId: null,
+      sessionId: task.sessionId,
+      provider: task.provider ?? 'claude',
+      model: task.model ?? '',
+      messageCount: 0,
+      lastMessage: task.taskLabel,
+      updatedAt: Date.now(),
+      title: task.taskLabel ?? `${task.provider ?? 'Agent'} task`,
+      projectPath,
+      sourceLabel: 'CodeSurf',
+      sourceDetail: `${task.provider ?? 'Agent'} daemon`,
+      canOpenInChat: true,
+      canOpenInApp: false,
+      relatedGroupId: null,
+      nestingLevel: 0,
+    }
+
+    await openSessionInChat(session)
+  }, [openSessionInChat])
 
   useEffect(() => {
     if (!pendingSessionOpen || !workspace?.id) return
@@ -2932,6 +3091,18 @@ function App(): JSX.Element {
       }
       default:
         if (tile.type.startsWith('ext:')) {
+          const extensionPeers = (negotiatedDiscoveryState.byTileConnections.get(tile.id) ?? []).map(peer => {
+            const extActions = extensionActionRegistry.get(peer.peerId)
+            const peerTile = tileByIdMap.get(peer.peerId)
+            return {
+              peerId: peer.peerId,
+              peerType: peer.peerType,
+              tools: peer.capabilities.filter(c => c.startsWith('tool:')).map(c => stripCapabilityPrefix(c)),
+              actions: extActions,
+              filePath: peerTile?.filePath,
+              label: peerTile?.label,
+            }
+          })
           return (
             <LazyExtensionTile
               tileId={tile.id}
@@ -2941,7 +3112,7 @@ function App(): JSX.Element {
               workspaceId={workspace?.id ?? ''}
               workspacePath={workspace?.path ?? ''}
               isInteracting={isTileInteracting}
-              connectedPeers={negotiatedDiscoveryState.byTileConnections.get(tile.id)?.map(link => link.peerId) ?? []}
+              connectedPeers={extensionPeers}
               onCreateTile={(type, opts) => addTile(
                 type as TileType,
                 opts?.filePath,
@@ -3665,7 +3836,7 @@ function App(): JSX.Element {
           transition: 'left 0.15s ease',
         }}
       >
-        <MainStatusBar />
+        <MainStatusBar onOpenDaemonTask={openDaemonTask} />
       </div>
 
       {/* Main area — toolbar overlays top, canvas fills entire window */}

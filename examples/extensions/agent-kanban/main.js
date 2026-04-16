@@ -18,7 +18,7 @@
 'use strict'
 
 const { spawn } = require('child_process')
-const { join, dirname, isAbsolute } = require('path')
+const { join, dirname, isAbsolute, basename } = require('path')
 const { mkdir, writeFile, readFile, rm, access, readdir } = require('fs').promises
 const { existsSync } = require('fs')
 const os = require('os')
@@ -36,9 +36,12 @@ const AGENT_CATALOG = [
 
 // ─── Board persistence ────────────────────────────────────────────────────────
 
-const KANBAN_HOME = join(os.homedir(), '.contex', 'agent-kanban')
+const KANBAN_HOME = join(os.homedir(), '.codesurf', 'agent-kanban')
 const WORKTREES_HOME = join(KANBAN_HOME, 'worktrees')
 const PATCHES_HOME   = join(KANBAN_HOME, 'patches')
+const LEGACY_BOARD_CHANNEL = 'agent-kanban:board'
+const LEGACY_SESSION_CHANNEL = 'agent-kanban:sessions'
+const SUMMARY_CHECKLIST_LIMIT = 8
 
 const DEFAULT_BOARD = () => ({
   columns: [
@@ -53,6 +56,127 @@ const DEFAULT_BOARD = () => ({
 
 const boards  = new Map()  // workspacePath -> board
 const sessions = new Map() // taskId -> session
+
+function isoNow() {
+  return new Date().toISOString()
+}
+
+function listTasks(board) {
+  return board.columns.flatMap(col => col.cards.map(card => ({ ...card, columnId: col.id })))
+}
+
+function summarizePrompt(prompt) {
+  const text = String(prompt || '').replace(/\s+/g, ' ').trim()
+  if (!text) return 'Untitled task'
+  return text.length > 96 ? `${text.slice(0, 95).trimEnd()}…` : text
+}
+
+function sessionStateFor(taskId) {
+  const session = sessions.get(taskId)
+  return session ? session.state : 'idle'
+}
+
+function annotateTask(board, task) {
+  const { isBlocked, blockedBy } = getBlockedStatus(board, task.id)
+  const session = sessions.get(task.id)
+  return {
+    ...task,
+    columnId: getTaskColumnId(board, task.id),
+    title: summarizePrompt(task.prompt),
+    sessionState: session ? session.state : 'idle',
+    session: session ? { status: session.state, exitCode: session.exitCode ?? null } : null,
+    worktreePath: session ? session.worktreePath : null,
+    worktreeCreated: Boolean(session && session.worktreePath),
+    exitCode: session ? session.exitCode : null,
+    isBlocked,
+    blockedBy,
+  }
+}
+
+function buildBoardPayload(workspacePath, board) {
+  return {
+    workspacePath: workspacePath || '',
+    projectName: workspacePath ? basename(workspacePath) : 'default',
+    updatedAt: isoNow(),
+    version: board.version || 1,
+    dependencies: Array.isArray(board.dependencies) ? board.dependencies : [],
+    columns: board.columns.map(col => ({
+      ...col,
+      cards: col.cards.map(card => annotateTask(board, card)),
+    })),
+  }
+}
+
+function buildSummary(workspacePath, board) {
+  const tasks = listTasks(board).map(task => annotateTask(board, task))
+  const backlog = tasks.filter(task => task.columnId === 'backlog')
+  const running = tasks.filter(task => task.columnId === 'in_progress' || task.sessionState === 'running')
+  const review = tasks.filter(task => task.columnId === 'review')
+  const archived = tasks.filter(task => task.columnId === 'trash')
+  const failed = tasks.filter(task => task.sessionState === 'interrupted')
+  const checklist = tasks
+    .filter(task => task.columnId !== 'trash')
+    .sort((a, b) => {
+      const order = { in_progress: 0, review: 1, backlog: 2, trash: 3 }
+      const ao = order[a.columnId] ?? 9
+      const bo = order[b.columnId] ?? 9
+      if (ao !== bo) return ao - bo
+      return (b.updatedAt || 0) - (a.updatedAt || 0)
+    })
+    .slice(0, SUMMARY_CHECKLIST_LIMIT)
+    .map(task => ({
+      id: task.id,
+      title: task.title,
+      done: task.columnId === 'trash',
+      state: task.sessionState,
+      columnId: task.columnId,
+    }))
+
+  return {
+    workspacePath: workspacePath || '',
+    projectName: workspacePath ? basename(workspacePath) : 'default',
+    updatedAt: isoNow(),
+    counts: {
+      backlog: backlog.length,
+      active: running.length,
+      review: review.length,
+      completed: archived.length,
+      failed: failed.length,
+      total: tasks.length,
+    },
+    checklist,
+    tasks: tasks.map(task => ({
+      id: task.id,
+      title: task.title,
+      columnId: task.columnId,
+      state: task.sessionState,
+      agentId: task.agentId || 'claude',
+      blocked: task.isBlocked,
+    })),
+  }
+}
+
+function publishTaskEvent(ctx, eventName, workspacePath, board, task, extra = {}) {
+  const payload = {
+    workspacePath: workspacePath || '',
+    board: buildBoardPayload(workspacePath, board),
+    summary: buildSummary(workspacePath, board),
+    task: task ? annotateTask(board, task) : null,
+    updatedAt: isoNow(),
+    ...extra,
+  }
+  ctx.bus.publish(eventName, 'data', payload)
+  ctx.bus.publish('agent-kanban:board-updated', 'data', payload)
+  ctx.bus.publish('agent-kanban:summary-updated', 'data', payload.summary)
+  ctx.bus.publish(LEGACY_BOARD_CHANNEL, 'data', {
+    action: 'task_update',
+    workspacePath: workspacePath || '',
+    taskId: task?.id || null,
+    board: payload.board,
+    summary: payload.summary,
+    updatedAt: payload.updatedAt,
+  })
+}
 
 function boardPath(workspacePath) {
   const safe = (workspacePath || 'default').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80)
@@ -297,7 +421,7 @@ function makeSession(taskId, agentId, wPath) {
   return { taskId, agentId, worktreePath: wPath, proc: null, state: 'idle', outputLines: [], startedAt: null, exitCode: null }
 }
 
-function startAgentProcess(session, task, bus) {
+function startAgentProcess(session, task, bus, hooks = {}) {
   const entry = AGENT_CATALOG.find(a => a.id === session.agentId)
   if (!entry) throw new Error(`Unknown agent: ${session.agentId}`)
 
@@ -314,10 +438,13 @@ function startAgentProcess(session, task, bus) {
   session.state = 'running'
   session.startedAt = Date.now()
 
-  function pushLine(line) {
-    session.outputLines.push({ t: Date.now() - session.startedAt, text: line })
+  function pushLine(line, type = 'stdout') {
+    session.outputLines.push({ t: Date.now() - session.startedAt, text: line, type })
     if (session.outputLines.length > 2000) session.outputLines.shift()
     bus.publish(`agent-kanban:output:${task.id}`, 'data', { taskId: task.id, line })
+    if (typeof hooks.onOutput === 'function') {
+      hooks.onOutput({ taskId: task.id, line, stream: type, sequence: session.outputLines.length, timestamp: isoNow() })
+    }
   }
 
   let stdoutBuf = '', stderrBuf = ''
@@ -325,27 +452,33 @@ function startAgentProcess(session, task, bus) {
     stdoutBuf += chunk.toString('utf8')
     const lines = stdoutBuf.split('\n')
     stdoutBuf = lines.pop() || ''
-    lines.forEach(l => pushLine(l))
+    lines.forEach(l => pushLine(l, 'stdout'))
   })
   proc.stderr.on('data', chunk => {
     stderrBuf += chunk.toString('utf8')
     const lines = stderrBuf.split('\n')
     stderrBuf = lines.pop() || ''
-    lines.forEach(l => pushLine(`[stderr] ${l}`))
+    lines.forEach(l => pushLine(`[stderr] ${l}`, 'stderr'))
   })
   proc.on('close', (code) => {
     if (stdoutBuf) pushLine(stdoutBuf)
-    if (stderrBuf) pushLine(`[stderr] ${stderrBuf}`)
+    if (stderrBuf) pushLine(`[stderr] ${stderrBuf}`, 'stderr')
     session.state = code === 0 ? 'done' : (session.state === 'running' ? 'interrupted' : session.state)
     session.exitCode = code
     session.proc = null
     bus.publish(`agent-kanban:output:${task.id}`, 'data', { taskId: task.id, line: `[exit ${code}]`, done: true, state: session.state })
+    if (typeof hooks.onState === 'function') {
+      hooks.onState({ taskId: task.id, state: session.state, exitCode: code, updatedAt: isoNow() })
+    }
   })
   proc.on('error', err => {
     session.state = 'interrupted'
     session.proc = null
-    pushLine(`[error] ${err.message}`)
+    pushLine(`[error] ${err.message}`, 'system')
     bus.publish(`agent-kanban:output:${task.id}`, 'data', { taskId: task.id, line: `[error] ${err.message}`, done: true, state: 'interrupted' })
+    if (typeof hooks.onState === 'function') {
+      hooks.onState({ taskId: task.id, state: 'interrupted', error: err.message, updatedAt: isoNow() })
+    }
   })
 }
 
@@ -359,27 +492,37 @@ module.exports = {
 
     ctx.ipc.handle('getBoard', async (workspacePath) => {
       const board = await loadBoard(workspacePath || '')
-      // Annotate each backlog card with its blocked status
-      const annotated = {
-        ...board,
-        columns: board.columns.map(col => ({
-          ...col,
-          cards: col.cards.map(card => {
-            if (col.id === 'backlog') {
-              return { ...card, ...getBlockedStatus(board, card.id) }
-            }
-            const sess = sessions.get(card.id)
-            return { ...card, sessionState: sess ? sess.state : 'idle' }
-          }),
-        })),
+      return buildBoardPayload(workspacePath || '', board)
+    })
+
+    ctx.ipc.handle('getSummary', async (workspacePath) => {
+      const board = await loadBoard(workspacePath || '')
+      return buildSummary(workspacePath || '', board)
+    })
+
+    ctx.ipc.handle('getTask', async ({ workspacePath, taskId }) => {
+      const board = await loadBoard(workspacePath || '')
+      const task = board.columns.flatMap(c => c.cards).find(c => c.id === taskId)
+      if (!task) return null
+      return annotateTask(board, task)
+    })
+
+    ctx.ipc.handle('openTask', async ({ workspacePath, taskId }) => {
+      const board = await loadBoard(workspacePath || '')
+      const task = board.columns.flatMap(c => c.cards).find(c => c.id === taskId)
+      if (!task) return { ok: false, error: 'Task not found' }
+      return {
+        ok: true,
+        task: annotateTask(board, task),
+        summary: buildSummary(workspacePath || '', board),
       }
-      return annotated
     })
 
     ctx.ipc.handle('createTask', async ({ workspacePath, prompt, agentId, baseRef, columnId, startInPlanMode, autoReviewEnabled, autoReviewMode }) => {
       const board = await loadBoard(workspacePath || '')
       const { board: newBoard, task } = addTaskToColumn(board, columnId || 'backlog', { prompt, agentId, baseRef: baseRef || 'HEAD', startInPlanMode, autoReviewEnabled, autoReviewMode })
       await saveBoard(workspacePath || '', newBoard)
+      publishTaskEvent(ctx, 'agent-kanban:task-created', workspacePath || '', newBoard, task)
       return { board: newBoard, task }
     })
 
@@ -388,6 +531,10 @@ module.exports = {
       const result = moveTaskToColumn(board, taskId, columnId)
       if (result.moved) {
         await saveBoard(workspacePath || '', result.board)
+        publishTaskEvent(ctx, 'agent-kanban:task-moved', workspacePath || '', result.board, result.task, {
+          fromColumnId: result.fromColumnId,
+          toColumnId: columnId,
+        })
         // If moving to trash: delete worktree, unblock dependents
         if (columnId === 'trash') {
           const readyIds = getReadyTasksOnTrash(board, taskId)
@@ -406,7 +553,10 @@ module.exports = {
     ctx.ipc.handle('updateTask', async ({ workspacePath, taskId, ...input }) => {
       const board = await loadBoard(workspacePath || '')
       const result = updateTask(board, taskId, input)
-      if (result.updated) await saveBoard(workspacePath || '', result.board)
+      if (result.updated) {
+        await saveBoard(workspacePath || '', result.board)
+        publishTaskEvent(ctx, 'agent-kanban:task-updated', workspacePath || '', result.board, result.task)
+      }
       return result
     })
 
@@ -417,6 +567,22 @@ module.exports = {
       const sess = sessions.get(taskId)
       if (sess && sess.proc) { try { sess.proc.kill() } catch {} }
       sessions.delete(taskId)
+      publishTaskEvent(ctx, 'agent-kanban:task-archived', workspacePath || '', result.board, null, { taskId })
+      return result
+    })
+
+    ctx.ipc.handle('archiveTask', async ({ workspacePath, taskId }) => {
+      const board = await loadBoard(workspacePath || '')
+      const result = moveTaskToColumn(board, taskId, 'trash')
+      if (result.moved) {
+        await saveBoard(workspacePath || '', result.board)
+        const sess = sessions.get(taskId)
+        if (sess && sess.proc) { try { sess.proc.kill() } catch {} }
+        publishTaskEvent(ctx, 'agent-kanban:task-archived', workspacePath || '', result.board, result.task, {
+          fromColumnId: result.fromColumnId,
+          toColumnId: 'trash',
+        })
+      }
       return result
     })
 
@@ -425,14 +591,21 @@ module.exports = {
     ctx.ipc.handle('addDependency', async ({ workspacePath, fromTaskId, toTaskId }) => {
       const board = await loadBoard(workspacePath || '')
       const result = addDependency(board, fromTaskId, toTaskId)
-      if (result.added) await saveBoard(workspacePath || '', result.board)
+      if (result.added) {
+        await saveBoard(workspacePath || '', result.board)
+        const task = result.board.columns.flatMap(c => c.cards).find(c => c.id === fromTaskId) || null
+        publishTaskEvent(ctx, 'agent-kanban:task-updated', workspacePath || '', result.board, task, { dependencyId: result.dependency?.id ?? null })
+      }
       return result
     })
 
     ctx.ipc.handle('removeDependency', async ({ workspacePath, dependencyId }) => {
       const board = await loadBoard(workspacePath || '')
       const result = removeDependency(board, dependencyId)
-      if (result.removed) await saveBoard(workspacePath || '', result.board)
+      if (result.removed) {
+        await saveBoard(workspacePath || '', result.board)
+        publishTaskEvent(ctx, 'agent-kanban:task-updated', workspacePath || '', result.board, null, { dependencyId })
+      }
       return result
     })
 
@@ -467,13 +640,49 @@ module.exports = {
       const sess = makeSession(taskId, task.agentId || 'claude', wPath)
       sessions.set(taskId, sess)
       try {
-        startAgentProcess(sess, task, ctx.bus)
+        startAgentProcess(sess, task, ctx.bus, {
+          onOutput: (output) => {
+            ctx.bus.publish('agent-kanban:task-output', 'data', output)
+          },
+          onState: async (state) => {
+            const latestBoard = await loadBoard(workspacePath || '')
+            const latestTask = latestBoard.columns.flatMap(c => c.cards).find(c => c.id === taskId) || task
+            publishTaskEvent(
+              ctx,
+              state.state === 'done' ? 'agent-kanban:task-completed' : 'agent-kanban:task-failed',
+              workspacePath || '',
+              latestBoard,
+              latestTask,
+              state,
+            )
+            ctx.bus.publish('agent-kanban:task-state', 'data', {
+              taskId,
+              columnId: getTaskColumnId(latestBoard, taskId),
+              state: state.state,
+              error: state.error || null,
+              updatedAt: state.updatedAt,
+            })
+          },
+        })
       } catch (err) {
         sessions.delete(taskId)
         return { ok: false, error: err.message }
       }
 
-      ctx.bus.publish(`agent-kanban:sessions`, 'data', { action: 'started', taskId, agentId: task.agentId })
+      ctx.bus.publish(LEGACY_SESSION_CHANNEL, 'data', { action: 'started', taskId, agentId: task.agentId })
+      ctx.bus.publish('agent-kanban:task-started', 'data', {
+        taskId,
+        workspacePath: workspacePath || '',
+        worktreePath: wPath || null,
+        agentId: task.agentId || 'claude',
+        updatedAt: isoNow(),
+      })
+      publishTaskEvent(ctx, 'agent-kanban:task-state', workspacePath || '', movedBoard, task, {
+        taskId,
+        columnId: getTaskColumnId(movedBoard, taskId),
+        state: 'running',
+        updatedAt: isoNow(),
+      })
       return { ok: true, worktreePath: wPath, state: 'running' }
     })
 
@@ -482,7 +691,12 @@ module.exports = {
       if (!sess || !sess.proc) return { ok: false, error: 'No running agent' }
       sess.state = 'interrupted'
       try { sess.proc.kill('SIGTERM') } catch {}
-      ctx.bus.publish(`agent-kanban:sessions`, 'data', { action: 'stopped', taskId })
+      ctx.bus.publish(LEGACY_SESSION_CHANNEL, 'data', { action: 'stopped', taskId })
+      ctx.bus.publish('agent-kanban:task-state', 'data', {
+        taskId,
+        state: 'cancelled',
+        updatedAt: isoNow(),
+      })
       return { ok: true }
     })
 
@@ -490,14 +704,19 @@ module.exports = {
       const sess = sessions.get(taskId)
       if (!sess || !sess.proc) return { ok: false, error: 'No running agent' }
       try { sess.proc.stdin.write(input + '\n') } catch (e) { return { ok: false, error: e.message } }
+      ctx.bus.publish('agent-kanban:task-awaiting-input', 'data', {
+        taskId,
+        input,
+        updatedAt: isoNow(),
+      })
       return { ok: true }
     })
 
     ctx.ipc.handle('getOutput', ({ taskId, since }) => {
       const sess = sessions.get(taskId)
-      if (!sess) return { lines: [], state: 'idle' }
+      if (!sess) return []
       const lines = since ? sess.outputLines.filter(l => l.t >= since) : sess.outputLines
-      return { lines, state: sess.state, startedAt: sess.startedAt, exitCode: sess.exitCode }
+      return lines
     })
 
     ctx.ipc.handle('getSessionState', ({ taskId }) => {
@@ -525,14 +744,14 @@ module.exports = {
     // ── MCP tools for agents ──────────────────────────────────────────────────
 
     ctx.mcp.registerTool({
-      name: 'board_get',
+      name: 'agent_kanban_get_board',
       description: 'Get the current kanban board state including all tasks and dependencies.',
       inputSchema: { type: 'object', properties: { workspacePath: { type: 'string' } } },
-      handler: async ({ workspacePath }) => JSON.stringify(await loadBoard(workspacePath || ''), null, 2),
+      handler: async ({ workspacePath }) => JSON.stringify(buildBoardPayload(workspacePath || '', await loadBoard(workspacePath || '')), null, 2),
     })
 
     ctx.mcp.registerTool({
-      name: 'board_create_task',
+      name: 'agent_kanban_create_task',
       description: 'Create a new task on the kanban board. Returns the created task.',
       inputSchema: {
         type: 'object',
@@ -549,12 +768,13 @@ module.exports = {
         const board = await loadBoard(workspacePath || '')
         const { board: newBoard, task } = addTaskToColumn(board, columnId || 'backlog', { prompt, agentId, baseRef })
         await saveBoard(workspacePath || '', newBoard)
-        return JSON.stringify(task)
+        publishTaskEvent(ctx, 'agent-kanban:task-created', workspacePath || '', newBoard, task)
+        return JSON.stringify(annotateTask(newBoard, task))
       },
     })
 
     ctx.mcp.registerTool({
-      name: 'board_move_task',
+      name: 'agent_kanban_move_task',
       description: 'Move a task to a different column: backlog|in_progress|review|trash',
       inputSchema: {
         type: 'object',
@@ -568,8 +788,248 @@ module.exports = {
       handler: async ({ workspacePath, taskId, columnId }) => {
         const board = await loadBoard(workspacePath || '')
         const result = moveTaskToColumn(board, taskId, columnId)
-        if (result.moved) await saveBoard(workspacePath || '', result.board)
+        if (result.moved) {
+          await saveBoard(workspacePath || '', result.board)
+          publishTaskEvent(ctx, 'agent-kanban:task-moved', workspacePath || '', result.board, result.task, {
+            fromColumnId: result.fromColumnId,
+            toColumnId: columnId,
+          })
+        }
         return JSON.stringify({ moved: result.moved, fromColumnId: result.fromColumnId })
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_get_summary',
+      description: 'Get the compact summary model for the current board.',
+      inputSchema: { type: 'object', properties: { workspacePath: { type: 'string' } } },
+      handler: async ({ workspacePath }) => JSON.stringify(buildSummary(workspacePath || '', await loadBoard(workspacePath || '')), null, 2),
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_get_task',
+      description: 'Get a single task with its current session/runtime annotations.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspacePath: { type: 'string' },
+          taskId: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ workspacePath, taskId }) => {
+        const board = await loadBoard(workspacePath || '')
+        const task = board.columns.flatMap(c => c.cards).find(c => c.id === taskId)
+        return JSON.stringify(task ? annotateTask(board, task) : null, null, 2)
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_update_task',
+      description: 'Update task metadata such as prompt, agent, baseRef, or review settings.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspacePath: { type: 'string' },
+          taskId: { type: 'string' },
+          prompt: { type: 'string' },
+          agentId: { type: 'string' },
+          baseRef: { type: 'string' },
+          startInPlanMode: { type: 'boolean' },
+          autoReviewEnabled: { type: 'boolean' },
+          autoReviewMode: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ workspacePath, taskId, ...input }) => {
+        const board = await loadBoard(workspacePath || '')
+        const result = updateTask(board, taskId, input)
+        if (result.updated) {
+          await saveBoard(workspacePath || '', result.board)
+          publishTaskEvent(ctx, 'agent-kanban:task-updated', workspacePath || '', result.board, result.task)
+        }
+        return JSON.stringify(result.task ? annotateTask(result.board, result.task) : null, null, 2)
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_archive_task',
+      description: 'Archive a task by moving it to trash/archive.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspacePath: { type: 'string' },
+          taskId: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ workspacePath, taskId }) => {
+        const board = await loadBoard(workspacePath || '')
+        const result = moveTaskToColumn(board, taskId, 'trash')
+        if (result.moved) {
+          await saveBoard(workspacePath || '', result.board)
+          publishTaskEvent(ctx, 'agent-kanban:task-archived', workspacePath || '', result.board, result.task, {
+            fromColumnId: result.fromColumnId,
+            toColumnId: 'trash',
+          })
+        }
+        return JSON.stringify({ archived: result.moved, taskId }, null, 2)
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_start_task',
+      description: 'Start an agent session for a task.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspacePath: { type: 'string' },
+          taskId: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ workspacePath, taskId }) => {
+        const board = await loadBoard(workspacePath || '')
+        const task = board.columns.flatMap(c => c.cards).find(c => c.id === taskId)
+        if (!task) return JSON.stringify({ ok: false, error: 'Task not found' })
+
+        const existing = sessions.get(taskId)
+        if (existing && existing.state === 'running') return JSON.stringify({ ok: false, error: 'Agent already running' })
+
+        const { isBlocked, blockedBy } = getBlockedStatus(board, taskId)
+        if (isBlocked) return JSON.stringify({ ok: false, error: `Task is blocked by: ${blockedBy.join(', ')}` })
+
+        let wPath = workspacePath
+        if (workspacePath) {
+          const wt = await ensureWorktree(workspacePath, taskId, task.baseRef || 'HEAD')
+          if (!wt.ok) return JSON.stringify({ ok: false, error: wt.error })
+          wPath = wt.path
+        }
+
+        const { board: movedBoard } = moveTaskToColumn(board, taskId, 'in_progress')
+        await saveBoard(workspacePath || '', movedBoard)
+
+        const sess = makeSession(taskId, task.agentId || 'claude', wPath)
+        sessions.set(taskId, sess)
+
+        startAgentProcess(sess, task, ctx.bus, {
+          onOutput: (output) => {
+            ctx.bus.publish('agent-kanban:task-output', 'data', output)
+          },
+          onState: async (state) => {
+            const latestBoard = await loadBoard(workspacePath || '')
+            const latestTask = latestBoard.columns.flatMap(c => c.cards).find(c => c.id === taskId) || task
+            publishTaskEvent(
+              ctx,
+              state.state === 'done' ? 'agent-kanban:task-completed' : 'agent-kanban:task-failed',
+              workspacePath || '',
+              latestBoard,
+              latestTask,
+              state,
+            )
+            ctx.bus.publish('agent-kanban:task-state', 'data', {
+              taskId,
+              columnId: getTaskColumnId(latestBoard, taskId),
+              state: state.state,
+              error: state.error || null,
+              updatedAt: state.updatedAt,
+            })
+          },
+        })
+
+        ctx.bus.publish('agent-kanban:task-started', 'data', {
+          taskId,
+          workspacePath: workspacePath || '',
+          worktreePath: wPath || null,
+          agentId: task.agentId || 'claude',
+          updatedAt: isoNow(),
+        })
+        publishTaskEvent(ctx, 'agent-kanban:task-state', workspacePath || '', movedBoard, task, {
+          taskId,
+          columnId: getTaskColumnId(movedBoard, taskId),
+          state: 'running',
+          updatedAt: isoNow(),
+        })
+        return JSON.stringify({ ok: true, worktreePath: wPath, state: 'running' }, null, 2)
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_stop_task',
+      description: 'Stop a running agent session for a task.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ taskId }) => {
+        const sess = sessions.get(taskId)
+        if (!sess || !sess.proc) return JSON.stringify({ ok: false, error: 'No running agent' })
+        sess.state = 'interrupted'
+        try { sess.proc.kill('SIGTERM') } catch {}
+        return JSON.stringify({ ok: true })
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_send_input',
+      description: 'Send additional input to a running task session.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string' },
+          input: { type: 'string' },
+        },
+        required: ['taskId', 'input'],
+      },
+      handler: async ({ taskId, input }) => {
+        const sess = sessions.get(taskId)
+        if (!sess || !sess.proc) return JSON.stringify({ ok: false, error: 'No running agent' })
+        try { sess.proc.stdin.write(`${input}\n`) } catch (error) { return JSON.stringify({ ok: false, error: error.message }) }
+        ctx.bus.publish('agent-kanban:task-awaiting-input', 'data', { taskId, input, updatedAt: isoNow() })
+        return JSON.stringify({ ok: true })
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_get_output',
+      description: 'Get buffered task output, optionally since a relative timestamp marker.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string' },
+          since: { type: 'number' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ taskId, since }) => {
+        const sess = sessions.get(taskId)
+        const lines = !sess ? [] : (since ? sess.outputLines.filter(line => line.t >= since) : sess.outputLines)
+        return JSON.stringify(lines, null, 2)
+      },
+    })
+
+    ctx.mcp.registerTool({
+      name: 'agent_kanban_open_task',
+      description: 'Return the task and summary payload needed to reopen/focus a task in UI.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          workspacePath: { type: 'string' },
+          taskId: { type: 'string' },
+        },
+        required: ['taskId'],
+      },
+      handler: async ({ workspacePath, taskId }) => {
+        const board = await loadBoard(workspacePath || '')
+        const task = board.columns.flatMap(c => c.cards).find(c => c.id === taskId)
+        return JSON.stringify(task ? {
+          ok: true,
+          task: annotateTask(board, task),
+          summary: buildSummary(workspacePath || '', board),
+        } : { ok: false, error: 'Task not found' }, null, 2)
       },
     })
 

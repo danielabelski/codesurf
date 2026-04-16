@@ -6,6 +6,7 @@ import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { useTileColor } from '../TileColorContext'
 import { ensureMonacoConfigured } from '../monaco'
+import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 
 interface Props {
   tileId?: string
@@ -19,7 +20,7 @@ interface Props {
  * (the user's own note files). This is NOT used for untrusted external input.
  * HTML entities are escaped first to prevent injection from the source text.
  */
-function renderMarkdown(md: string): string {
+export function renderMarkdown(md: string): string {
   let html = md
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
@@ -154,8 +155,7 @@ function StickyNote({ initialContent, tileId, workspacePath }: { initialContent:
   }, [contextDir, contextFile, settingsFile, setColorId, setFontId])
 
   // Auto-save content to context dir
-  const handleChange = useCallback((value: string) => {
-    setContent(value)
+  const persistContent = useCallback((value: string) => {
     if (!contextDir || !contextFile || !loaded.current) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
@@ -164,6 +164,11 @@ function StickyNote({ initialContent, tileId, workspacePath }: { initialContent:
       })
     }, 500)
   }, [contextDir, contextFile])
+
+  const handleChange = useCallback((value: string) => {
+    setContent(value)
+    persistContent(value)
+  }, [persistContent])
 
   useEffect(() => {
     if (!contextDir || !settingsFile || !loaded.current) return
@@ -187,14 +192,19 @@ function StickyNote({ initialContent, tileId, workspacePath }: { initialContent:
     const subscriberId = `note-${tileId}`
     const unsub = window.electron?.bus?.subscribe(channel, subscriberId, (event: { payload?: { command?: string; content?: string } }) => {
       if (event.payload?.command === 'note_append_context' && event.payload.content) {
-        setContent(prev => prev ? `${prev}\n${event.payload!.content}` : event.payload!.content!)
+        setContent(prev => {
+          const next = prev ? `${prev}\n${event.payload!.content}` : event.payload!.content!
+          persistContent(next)
+          return next
+        })
       }
       if (event.payload?.command === 'note_write_content' && typeof event.payload.content === 'string') {
         setContent(event.payload.content)
+        persistContent(event.payload.content)
       }
     })
     return () => unsub?.()
-  }, [tileId])
+  }, [persistContent, tileId])
 
   return (
     <div style={{
@@ -212,7 +222,7 @@ function StickyNote({ initialContent, tileId, workspacePath }: { initialContent:
           flex: 1, resize: 'none', border: 'none', outline: 'none',
           background: 'transparent',
           color: colour.text,
-          fontSize: fonts.size, lineHeight: 1.6,
+          fontSize: fonts.size, lineHeight: fonts.lineHeight, fontWeight: fonts.weight,
           padding: '8px 14px 14px',
           fontFamily: noteFont.family,
           letterSpacing: 0.1,
@@ -414,7 +424,7 @@ export function StickyColorPicker(): JSX.Element {
   )
 }
 
-function FileNote({ filePath, initialContent }: { filePath?: string; initialContent: string }): JSX.Element {
+function FileNote({ tileId, filePath, initialContent }: { tileId?: string; filePath?: string; initialContent: string }): JSX.Element {
   const [content, setContent] = useState<string | undefined>(undefined)
   const [mode, setMode] = useState<'edit' | 'preview'>('edit')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -439,9 +449,7 @@ function FileNote({ filePath, initialContent }: { filePath?: string; initialCont
     })
   }, [filePath, initialContent])
 
-  const handleChange = useCallback((value: string | undefined) => {
-    if (!loaded.current || value === undefined) return
-    setContent(value)
+  const persistContent = useCallback((value: string) => {
     if (!filePath) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
@@ -449,7 +457,33 @@ function FileNote({ filePath, initialContent }: { filePath?: string; initialCont
     }, 500)
   }, [filePath])
 
+  const handleChange = useCallback((value: string | undefined) => {
+    if (!loaded.current || value === undefined) return
+    setContent(value)
+    persistContent(value)
+  }, [persistContent])
+
   useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current) }, [])
+
+  useEffect(() => {
+    if (!tileId) return
+    const channel = `tile:${tileId}`
+    const subscriberId = `note-${tileId}`
+    const unsub = window.electron?.bus?.subscribe(channel, subscriberId, (event: { payload?: { command?: string; content?: string } }) => {
+      if (event.payload?.command === 'note_append_context' && event.payload.content) {
+        setContent(prev => {
+          const next = prev ? `${prev}\n${event.payload!.content}` : event.payload!.content!
+          persistContent(next)
+          return next
+        })
+      }
+      if (event.payload?.command === 'note_write_content' && typeof event.payload.content === 'string') {
+        setContent(event.payload.content)
+        persistContent(event.payload.content)
+      }
+    })
+    return () => unsub?.()
+  }, [persistContent, tileId])
 
   // Safe preview: render user-authored markdown (HTML-escaped first in renderMarkdown)
   useEffect(() => {
@@ -460,6 +494,25 @@ function FileNote({ filePath, initialContent }: { filePath?: string; initialCont
     wrapper.innerHTML = rendered // eslint-disable-line -- content is HTML-escaped by renderMarkdown
     while (wrapper.firstChild) previewRef.current.appendChild(wrapper.firstChild)
   }, [mode, content])
+
+  useEffect(() => {
+    const root = previewRef.current
+    if (!root) return
+
+    const handleClick = (event: MouseEvent) => {
+      const anchor = findAnchorFromEventTarget(event)
+      if (!anchor) return
+
+      const href = anchor.getAttribute('href') ?? ''
+      if (!dispatchOpenLink(href)) return
+
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    root.addEventListener('click', handleClick, true)
+    return () => root.removeEventListener('click', handleClick, true)
+  }, [])
 
   return (
     <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: theme.editor.background, position: 'relative' }}>
@@ -511,7 +564,7 @@ function FileNote({ filePath, initialContent }: { filePath?: string; initialCont
             options={{
               minimap: { enabled: false },
               fontSize: fonts.monoSize,
-              lineHeight: 1.7,
+              lineHeight: fonts.monoLineHeight,
               wordWrap: 'on',
               automaticLayout: true,
               padding: { top: 12 },
@@ -555,7 +608,7 @@ function FileNote({ filePath, initialContent }: { filePath?: string; initialCont
 
 export function NoteTile({ tileId, filePath, initialContent = '', workspacePath }: Props): JSX.Element {
   if (filePath) {
-    return <FileNote filePath={filePath} initialContent={initialContent} />
+    return <FileNote tileId={tileId} filePath={filePath} initialContent={initialContent} />
   }
   return <StickyNote initialContent={initialContent} tileId={tileId} workspacePath={workspacePath} />
 }
