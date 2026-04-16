@@ -288,7 +288,7 @@ export interface FontSettings {
 // ── System font stacks ──────────────────────────────────────────────────────
 
 const SANS_STACK = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
-const MONO_STACK = '"JetBrains Mono", "Menlo", "Monaco", "SF Mono", "Fira Code", monospace'
+const MONO_STACK = '"FiraCode Nerd Font Mono", "JetBrains Mono", "Menlo", "Monaco", "SF Mono", "Fira Code", monospace'
 
 // ── Default font tokens ─────────────────────────────────────────────────────
 

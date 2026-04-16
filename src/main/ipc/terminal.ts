@@ -221,6 +221,7 @@ function tmuxNewSessionArgs(
   env: Record<string, string>
 ): string[] {
   const tmuxArgs = [
+    '-u',  // Force UTF-8 so Nerd Font / Unicode glyphs are not stripped
     '-f', CONTEX_TMUX_CONF,
     'new-session', '-d',
     '-s', sessionName,
@@ -230,9 +231,15 @@ function tmuxNewSessionArgs(
   // Inject env vars via -e (tmux 3.2+)
   for (const [k, v] of Object.entries(env)) {
     if (k === 'PATH' || k === 'HOME' || k === 'SHELL' || k === 'TERM') continue
-    if (k.startsWith('CONTEX_') || k.startsWith('COLLAB_') || k === 'CARD_ID') {
+    if (k.startsWith('CONTEX_') || k.startsWith('COLLAB_') || k === 'CARD_ID'
+      || k === 'LANG' || k === 'LC_ALL' || k === 'LC_CTYPE') {
       tmuxArgs.push('-e', `${k}=${v}`)
     }
+  }
+  // Ensure UTF-8 locale is set so tmux doesn't strip Unicode (Nerd Font glyphs, etc.)
+  const hasLang = Object.keys(env).some(k => k === 'LANG' || k === 'LC_ALL' || k === 'LC_CTYPE')
+  if (!hasLang) {
+    tmuxArgs.splice(tmuxArgs.indexOf('new-session') + 1, 0, '-e', 'LANG=en_US.UTF-8')
   }
   tmuxArgs.push(bin, ...args)
   return tmuxArgs
@@ -476,7 +483,7 @@ export function registerTerminalIPC(): void {
     let term: PtyInstance
     if (useTmux && tmux) {
       // Attach to the tmux session via node-pty
-      term = pty.spawn(tmux, ['-f', CONTEX_TMUX_CONF, 'attach-session', '-t', sessName], {
+      term = pty.spawn(tmux, ['-u', '-f', CONTEX_TMUX_CONF, 'attach-session', '-t', sessName], {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,
