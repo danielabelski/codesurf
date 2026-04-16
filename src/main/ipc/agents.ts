@@ -1,7 +1,6 @@
 import { ipcMain } from 'electron'
-import { exec } from 'child_process'
+import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
-import { join } from 'path'
 import { homedir } from 'os'
 
 export interface AgentInfo {
@@ -111,12 +110,27 @@ async function fileExists(path: string): Promise<boolean> {
   try { await fs.access(path); return true } catch { return false }
 }
 
-function runCmd(cmd: string): Promise<string> {
+/** Run a program with literal args — no shell, so agent names can't be
+ *  interpreted as shell metacharacters. */
+function runExec(prog: string, args: string[]): Promise<string> {
   return new Promise(resolve => {
-    exec(cmd, { timeout: 3000 }, (err, stdout, stderr) => {
-      resolve(err ? '' : (stdout || stderr).trim())
+    execFile(prog, args, { timeout: 3000 }, (err, stdout, stderr) => {
+      resolve(err ? '' : (stdout || stderr).toString().trim())
     })
   })
+}
+
+/** Pick the best match from a `where`/`which` result. On Windows prefer a
+ *  native .exe so Node's spawn() can execute it directly — a leading .cmd
+ *  shim would crash with EINVAL. */
+function pickBestPath(whichOutput: string): string | null {
+  const lines = whichOutput.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (lines.length === 0) return null
+  if (process.platform === 'win32') {
+    const exeMatch = lines.find(line => /\.exe$/i.test(line))
+    if (exeMatch) return exeMatch
+  }
+  return lines[0] || null
 }
 
 async function detectAgent(agent: typeof AGENTS_TO_DETECT[0]): Promise<AgentInfo> {
@@ -126,7 +140,7 @@ async function detectAgent(agent: typeof AGENTS_TO_DETECT[0]): Promise<AgentInfo
     if (exists) {
       let version: string | undefined
       if (agent.versionFlag) {
-        const out = await runCmd(`"${bin}" ${agent.versionFlag} 2>&1`)
+        const out = await runExec(bin, [agent.versionFlag])
         const match = out.match(/[\d]+\.[\d]+[\d.]*/)
         version = match ? match[0] : out.split('\n')[0].substring(0, 30)
       }
@@ -134,14 +148,14 @@ async function detectAgent(agent: typeof AGENTS_TO_DETECT[0]): Promise<AgentInfo
     }
   }
 
-  // Try which/where as fallback
-  const whichCmd = process.platform === 'win32' ? `where ${agent.cmd}` : `which ${agent.cmd} 2>/dev/null`
-  const whichResult = await runCmd(whichCmd)
-  const whichPath = whichResult?.split(/\r?\n/)[0]?.trim()
+  // Try which/where as fallback — use execFile, not a shell string
+  const prog = process.platform === 'win32' ? 'where.exe' : 'which'
+  const whichResult = await runExec(prog, [agent.cmd])
+  const whichPath = pickBestPath(whichResult)
   if (whichPath && !whichPath.includes('not found') && !whichPath.includes('Could not find')) {
     let version: string | undefined
     if (agent.versionFlag) {
-      const out = await runCmd(`${agent.cmd} ${agent.versionFlag} 2>&1`)
+      const out = await runExec(whichPath, [agent.versionFlag])
       const match = out.match(/[\d]+\.[\d]+[\d.]*/)
       version = match ? match[0] : undefined
     }

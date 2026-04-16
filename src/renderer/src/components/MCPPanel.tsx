@@ -153,7 +153,7 @@ export function MCPPanel({ onClose }: Props): JSX.Element {
         mcpServers[name] = entry as MCPConfig['mcpServers'][string]
       }
       updatedCfg = { ...config, mcpServers, updatedAt: new Date().toISOString() }
-      const home = (window as any).process?.env?.HOME ?? ''
+      const home = (window as any).__HOME__ ?? (window as any).process?.env?.HOME ?? (window as any).process?.env?.USERPROFILE ?? ''
       await window.electron.fs.writeFile(`${home}/.contex/mcp-server.json`, JSON.stringify(updatedCfg, null, 2))
     }
 

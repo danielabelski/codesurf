@@ -25,6 +25,7 @@
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "dist:windows": "npm run build && node scripts/patch-node-pty-win.js && electron-builder --win nsis portable",
     "dist:linux": "npm run build && electron-builder --linux AppImage deb",
+    "build:icon": "node scripts/create-ico.js",
     "release:github": "npm run build && electron-builder --mac dmg zip --publish always",
     "dogfood": "electron-vite build && electron-vite preview",
     "preview": "electron-vite preview",

@@ -1,7 +1,11 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import { promises as fs } from 'fs'
 import { basename, dirname, join } from 'path'
 import { homedir } from 'os'
+
+/** Resolve the user's home dir using Electron's preferred source, with
+ *  platform-aware env-var fallbacks. Mirrors `resolveHome` in ipc/fs.ts. */
+const resolveHome = (): string => app.getPath('home') || process.env.HOME || process.env.USERPROFILE || homedir()
 import type { TileState } from '../../shared/types'
 import { CONTEX_HOME } from '../paths'
 import { findSessionEntryById, getExternalSessionChatState, invalidateExternalSessionCache, listExternalSessionEntries, type AggregatedSessionEntry } from '../session-sources'
@@ -342,7 +346,8 @@ export function registerCanvasIPC(): void {
       // Load this workspace's canvas to know which tile IDs actually belong here.
       // Orphan tile-state files can appear if an unmount-time save races a workspace
       // switch and writes into the wrong workspace's storage dir (see ChatTile's
-      // persistLatestState cleanup). We skip and delete those here.
+      // persistLatestState cleanup). We always filter orphans from the returned
+      // list; we only delete the file if it's clearly stale (see below).
       let canvasTileIds: Set<string> | null = null
       try {
         const canvasRaw = await fs.readFile(canvasStatePath(storageId), 'utf8')
@@ -360,10 +365,20 @@ export function registerCanvasIPC(): void {
             const tileId = file.replace('tile-state-', '').replace('.json', '')
 
             if (canvasTileIds && !canvasTileIds.has(tileId)) {
-              // Orphan: tile isn't on this workspace's canvas. Clean up and skip.
-              await deleteFileIfExists(filePath)
-              await deleteFileIfExists(tileSessionSummaryPath(storageId, tileId))
-              tileSessionSummaryCache.delete(tileSessionSummaryPath(storageId, tileId))
+              // Orphan: tile isn't on this workspace's canvas.
+              // Always skip from the session list. Only delete the underlying
+              // files if they've been stable for >60s — canvas-state saves are
+              // 500ms-debounced, so a tile that was just added may legitimately
+              // have a tile-state file while its canvas-state inclusion is
+              // still pending on disk. Deleting too eagerly loses real work.
+              try {
+                const stat = await fs.stat(filePath)
+                if (Date.now() - stat.mtimeMs > 60_000) {
+                  await deleteFileIfExists(filePath)
+                  await deleteFileIfExists(tileSessionSummaryPath(storageId, tileId))
+                  tileSessionSummaryCache.delete(tileSessionSummaryPath(storageId, tileId))
+                }
+              } catch { /* couldn't stat — leave the file alone */ }
               continue
             }
 
@@ -465,7 +480,7 @@ export function registerCanvasIPC(): void {
     if (entry.source === 'openclaw') {
       const [, agentId, ...keyParts] = sessionEntryId.split(':')
       const sessionKey = keyParts.join(':')
-      const indexPath = join(process.env.HOME || process.env.USERPROFILE || homedir(), '.openclaw', 'agents', agentId, 'sessions', 'sessions.json')
+      const indexPath = join(resolveHome(), '.openclaw', 'agents', agentId, 'sessions', 'sessions.json')
       if (agentId && sessionKey && await pathExists(indexPath)) {
         try {
           const raw = await fs.readFile(indexPath, 'utf8')

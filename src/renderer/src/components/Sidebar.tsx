@@ -836,8 +836,10 @@ export function Sidebar({
         const workspaceEntry = workspaceById.get(workspaceId)
         if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry)
       }
-      // Switch to this project's workspace (also reopens the tab if it was closed)
-      const targetWsId = projectEntry.workspaceIds[0]
+      // Switch to this project's workspace (also reopens the tab if it was closed).
+      // Prefer the representative workspace (which tracks the currently-active one
+      // when this project has it) so we don't flip to a different tab unnecessarily.
+      const targetWsId = projectEntry.representativeWorkspaceId ?? projectEntry.workspaceIds[0]
       if (targetWsId && targetWsId !== workspace?.id) {
         _onSwitchWorkspace(targetWsId)
       }

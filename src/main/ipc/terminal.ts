@@ -75,8 +75,9 @@ const ALLOWED_AGENT_BINS = ['claude', 'codex', 'aider', 'opencode', 'openclaw', 
 function isAllowedBinary(bin: string): boolean {
   // Allow known shells
   if (ALLOWED_SHELLS.has(bin)) return true
-  // Allow known agent CLIs (matched by basename, handle both / and \ separators)
-  const base = (bin.split(/[/\\]/).pop() || '').replace(/\.exe$/i, '')
+  // Allow known agent CLIs (matched by basename, handle both / and \ separators,
+  // strip any Windows shim extension so .exe / .cmd / .bat / .ps1 all match)
+  const base = (bin.split(/[/\\]/).pop() || '').replace(/\.(exe|cmd|bat|ps1)$/i, '')
   if (ALLOWED_AGENT_BINS.includes(base)) return true
   return false
 }
@@ -249,6 +250,7 @@ interface TerminalSession {
   listeners: Set<WebContents>
   buffer: string
   tmuxSession?: string // tmux session name if backed by tmux
+  shell: string // absolute shell binary used to spawn this pty (for cd syntax)
 }
 
 const terminals = new Map<string, TerminalSession>()
@@ -497,6 +499,7 @@ export function registerTerminalIPC(): void {
       listeners: new Set([event.sender]),
       buffer: '',
       tmuxSession: useTmux ? sessName : undefined,
+      shell: bin,
     }
     terminals.set(tileId, session)
     trackTerminalSender(event.sender, tileId)
@@ -546,8 +549,23 @@ export function registerTerminalIPC(): void {
   ipcMain.handle('terminal:cd', (_, tileId: string, dirPath: string) => {
     const session = terminals.get(tileId)
     if (!session) return
-    // \x15 = Ctrl-U (clear line), then cd, then \r (enter)
-    session.pty.write(`\x15cd ${dirPath.replace(/'/g, "'\\''")}\r`)
+    const shellBase = (session.shell.split(/[/\\]/).pop() || '').toLowerCase()
+    // \x15 = Ctrl-U (clear current input line), then the platform-appropriate
+    // cd syntax, then \r (enter)
+    let cdLine: string
+    if (shellBase === 'cmd.exe') {
+      // cmd needs `/d` to switch drives (e.g. C:\ → G:\) and double-quoting
+      cdLine = `cd /d "${dirPath.replace(/"/g, '""')}"`
+    } else if (shellBase === 'powershell.exe' || shellBase === 'pwsh.exe') {
+      // -LiteralPath avoids wildcard interpretation; single quotes are safe
+      // when we escape embedded single quotes by doubling them
+      cdLine = `Set-Location -LiteralPath '${dirPath.replace(/'/g, "''")}'`
+    } else {
+      // POSIX shells: bash/zsh/fish all accept `cd "PATH"`. Escape single
+      // quotes the bash way since we wrap in single quotes below.
+      cdLine = `cd '${dirPath.replace(/'/g, "'\\''")}'`
+    }
+    session.pty.write(`\x15${cdLine}\r`)
   })
 
   ipcMain.handle('terminal:resize', (_, tileId: string, cols: number, rows: number) => {

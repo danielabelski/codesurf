@@ -7,7 +7,7 @@
  */
 
 import { ipcMain } from 'electron'
-import { execFileSync, execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
@@ -90,9 +90,12 @@ function getShellPath(): string {
 
 /** Simple `which`/`where` using the real shell PATH */
 function whichSync(cmd: string): string | null {
+  // Use execFileSync, not execSync — execSync goes through a shell where an
+  // unescaped `cmd` could be interpreted (shell-injection surface) and fails
+  // if the name contains spaces.
   try {
-    const whichCmd = process.platform === 'win32' ? `where ${cmd}` : `which ${cmd}`
-    const result = execSync(whichCmd, {
+    const prog = process.platform === 'win32' ? 'where.exe' : 'which'
+    const result = execFileSync(prog, [cmd], {
       timeout: 3000,
       encoding: 'utf8',
       env: { ...process.env, PATH: getShellPath() },
@@ -136,18 +139,30 @@ async function isExecutable(filePath: string): Promise<boolean> {
   return false
 }
 
-/** Resolve a path to its actual file, adding .exe/.cmd on Windows if needed */
+/** Resolve a path to a spawnable native binary.
+ *
+ * On Windows we only accept `.exe` — Node's spawn() can't execute `.cmd`
+ * or `.bat` shims directly (needs shell:true, which the Claude SDK doesn't
+ * set, producing EINVAL). Callers that need a shim should spawn it through
+ * a shell themselves; the default detection pipeline persists only paths
+ * that real consumers can spawn.
+ */
 async function resolveExecutablePath(filePath: string): Promise<string | null> {
-  // On Windows, prefer .exe even when a bare file or .cmd exists in the same
-  // directory — Node's spawn() can only execute .exe directly; .cmd and .bat
-  // require shell:true which the Claude SDK doesn't set.
-  if (process.platform === 'win32' && !/\.\w+$/.test(filePath)) {
-    for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
+  if (process.platform === 'win32') {
+    const hasExt = /\.\w+$/i.test(filePath)
+    if (hasExt) {
+      if (!/\.exe$/i.test(filePath)) return null
       try {
-        await fs.access(filePath + ext)
-        return filePath + ext
-      } catch { /* continue */ }
+        await fs.access(filePath)
+        return filePath
+      } catch { return null }
     }
+    // bare name — probe only for .exe
+    const candidate = filePath + '.exe'
+    try {
+      await fs.access(candidate)
+      return candidate
+    } catch { return null }
   }
 
   try {
@@ -187,15 +202,16 @@ function getVersionSync(binPath: string): string | null {
   }
 }
 
-// Fallback paths if `which`/`where` fails
+// Fallback paths if `which`/`where` fails. On Windows these must be `.exe` —
+// `.cmd` shims can't be spawned directly by Node, so resolveExecutablePath
+// would reject them anyway.
 const isWin = process.platform === 'win32'
-const ext = isWin ? '.cmd' : ''
 
 function buildFallbackPaths(cmd: string, extras: string[] = []): string[] {
   const home = homedir()
   if (isWin) {
     return [
-      join(home, 'AppData', 'Roaming', 'npm', `${cmd}${ext}`),
+      join(home, 'AppData', 'Roaming', 'npm', `${cmd}.exe`),
       join(home, '.bun', 'bin', `${cmd}.exe`),
       join(home, '.local', 'bin', `${cmd}.exe`),
       join(home, 'go', 'bin', `${cmd}.exe`),
@@ -392,8 +408,13 @@ export function registerAgentPathsIPC(): void {
 
   ipcMain.handle('agentPaths:set', async (_, agentId: string, inputPath: string | null) => {
     if (!cachedPaths) return null
-    const key = agentId as 'claude' | 'codex' | 'opencode' | 'openclaw' | 'hermes'
-    if (!(key in cachedPaths)) return null
+    // Allowlist — cachedPaths also contains shellPath/updatedAt keys, which
+    // must never be overwritten via this IPC. Validate before casting so a
+    // malicious or buggy caller can't stomp on unrelated config.
+    const AGENT_KEYS = ['claude', 'codex', 'opencode', 'openclaw', 'hermes'] as const
+    type AgentKey = typeof AGENT_KEYS[number]
+    if (!(AGENT_KEYS as readonly string[]).includes(agentId)) return null
+    const key = agentId as AgentKey
 
     let resolvedPath: string | null = null
     let version: string | null = null
