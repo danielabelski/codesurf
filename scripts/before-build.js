@@ -2,6 +2,9 @@
  * electron-builder beforeBuild hook.
  * Runs before native dependencies are rebuilt for the target platform.
  * Patches node-pty and cpu-features so they compile on Windows.
+ *
+ * MUST return true — a falsy return tells electron-builder to treat
+ * node_modules as externally handled, which skips packing them entirely.
  */
 
 const { execSync } = require('child_process')
@@ -33,4 +36,6 @@ exports.default = async function (context) {
       console.log('[before-build] Created fallback buildcheck.gypi for Windows')
     }
   }
+
+  return true
 }

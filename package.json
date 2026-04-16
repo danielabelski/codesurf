@@ -88,8 +88,7 @@
     "files": [
       "dist-electron/**/*",
       "package.json",
-      "resources/**/*",
-      "node_modules/**/*"
+      "resources/**/*"
     ],
     "asar": true,
     "asarUnpack": [
