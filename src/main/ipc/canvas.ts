@@ -338,6 +338,18 @@ export function registerCanvasIPC(): void {
 
     for (const storageId of storageIds) {
       const dotDir = join(CONTEX_HOME, 'workspaces', storageId, '.contex')
+
+      // Load this workspace's canvas to know which tile IDs actually belong here.
+      // Orphan tile-state files can appear if an unmount-time save races a workspace
+      // switch and writes into the wrong workspace's storage dir (see ChatTile's
+      // persistLatestState cleanup). We skip and delete those here.
+      let canvasTileIds: Set<string> | null = null
+      try {
+        const canvasRaw = await fs.readFile(canvasStatePath(storageId), 'utf8')
+        const canvas = JSON.parse(canvasRaw) as { tiles?: Array<{ id?: string }> }
+        canvasTileIds = new Set((canvas.tiles ?? []).map(tile => tile.id).filter((id): id is string => typeof id === 'string'))
+      } catch { /* no canvas yet — treat as empty */ }
+
       try {
         const entries = await fs.readdir(dotDir)
         const tileStateFiles = entries.filter(name => name.startsWith('tile-state-') && name.endsWith('.json'))
@@ -346,6 +358,15 @@ export function registerCanvasIPC(): void {
           try {
             const filePath = join(dotDir, file)
             const tileId = file.replace('tile-state-', '').replace('.json', '')
+
+            if (canvasTileIds && !canvasTileIds.has(tileId)) {
+              // Orphan: tile isn't on this workspace's canvas. Clean up and skip.
+              await deleteFileIfExists(filePath)
+              await deleteFileIfExists(tileSessionSummaryPath(storageId, tileId))
+              tileSessionSummaryCache.delete(tileSessionSummaryPath(storageId, tileId))
+              continue
+            }
+
             const summaryPath = tileSessionSummaryPath(storageId, tileId)
             let summary = await readTileSessionSummary(summaryPath)
 

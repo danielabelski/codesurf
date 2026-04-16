@@ -129,11 +129,11 @@ async function isExecutable(filePath: string): Promise<boolean> {
 
 /** Resolve a path to its actual file, adding .exe/.cmd on Windows if needed */
 async function resolveExecutablePath(filePath: string): Promise<string | null> {
-  // On Windows, prefer an executable extension even if a bare file exists — npm
-  // global installs drop both a Unix-style shim and a .cmd wrapper in the same
-  // directory, and Node's spawn() can only execute the .cmd/.exe/.bat/.ps1.
+  // On Windows, prefer .exe even when a bare file or .cmd exists in the same
+  // directory — Node's spawn() can only execute .exe directly; .cmd and .bat
+  // require shell:true which the Claude SDK doesn't set.
   if (process.platform === 'win32' && !/\.\w+$/.test(filePath)) {
-    for (const ext of ['.cmd', '.exe', '.bat', '.ps1']) {
+    for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
       try {
         await fs.access(filePath + ext)
         return filePath + ext
@@ -262,15 +262,26 @@ export async function initializeAgentPathsCache(): Promise<AgentPathsConfig | nu
   const saved = await loadSavedPaths()
   if (!saved) return null
 
-  // Re-resolve each saved path so stale entries (e.g. a Windows shim without the
-  // .cmd extension) get promoted to a spawn-able path on the next app launch.
+  // Re-resolve each saved path so stale entries (e.g. a Windows npm shim) get
+  // promoted to a spawn-able native binary on the next app launch. Node's
+  // spawn() on Windows can only execute a native .exe directly; .cmd/.bat
+  // require shell:true, which most SDKs (e.g. Claude) don't set — so if the
+  // saved path isn't already an .exe, re-query PATH to look for one.
   let mutated = false
   for (const key of ['claude', 'codex', 'opencode', 'openclaw', 'hermes'] as const) {
     const entry = saved[key]
     if (!entry?.path) continue
+
     const resolved = await resolveExecutablePath(entry.path)
-    if (resolved && resolved !== entry.path) {
-      entry.path = resolved
+    let best = resolved && resolved !== entry.path ? resolved : null
+
+    if (process.platform === 'win32' && (!resolved || !/\.exe$/i.test(resolved))) {
+      const fromWhich = whichSync(key)
+      if (fromWhich && /\.exe$/i.test(fromWhich)) best = fromWhich
+    }
+
+    if (best && best !== entry.path) {
+      entry.path = best
       mutated = true
     }
   }
