@@ -152,6 +152,12 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
     windowTitles.delete(windowId)
     broadcastWindowList()
   })
+  win.on('unresponsive', () => {
+    console.error(`[window:${windowId}] BrowserWindow became unresponsive`)
+  })
+  win.webContents.on('render-process-gone', (_, details) => {
+    console.error(`[window:${windowId}] Renderer process gone`, details)
+  })
 
   win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)

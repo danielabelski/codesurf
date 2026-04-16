@@ -213,11 +213,11 @@ export function registerFsIPC(): void {
         isFile: stats.isFile(),
         isDir: stats.isDirectory(),
       }
-    } catch (err) {
+    } catch (error) {
       // Probes for optional config files are common — return null for "not found"
       // instead of throwing, so the main console isn't spammed with handler errors.
-      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null
-      throw err
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
     }
   })
 
