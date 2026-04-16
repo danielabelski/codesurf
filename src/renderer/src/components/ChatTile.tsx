@@ -3171,12 +3171,35 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       while (i < blocks.length) {
                         const block = blocks[i]
                         if (block.type === 'tool') {
-                          // Collect consecutive tool blocks into a horizontal row
-                          const toolGroup: JSX.Element[] = []
+                          // Collect consecutive tool blocks, then sub-group same-name completed ones
+                          const rawTools: ToolBlock[] = []
                           while (i < blocks.length && blocks[i].type === 'tool') {
                             const tb = msg.toolBlocks?.find(t => t.id === blocks[i].toolId)
-                            if (tb && shouldRenderToolBlock(tb)) toolGroup.push(<ToolBlockView key={tb.id} block={tb} />)
+                            if (tb && shouldRenderToolBlock(tb)) rawTools.push(tb)
                             i++
+                          }
+                          // Build runs of consecutive same-name collapsible tools
+                          const toolGroup: JSX.Element[] = []
+                          let j = 0
+                          while (j < rawTools.length) {
+                            const tb = rawTools[j]
+                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
+                            if (canCollapse) {
+                              // collect consecutive same-name collapsible tools
+                              const run: ToolBlock[] = [tb]
+                              while (j + 1 < rawTools.length && rawTools[j + 1].name === tb.name && rawTools[j + 1].status === 'done' && !(rawTools[j + 1].fileChanges?.length)) {
+                                j++
+                                run.push(rawTools[j])
+                              }
+                              if (run.length >= 3) {
+                                toolGroup.push(<CollapsedToolGroup key={`grp-${run[0].id}`} name={tb.name} blocks={run} />)
+                              } else {
+                                run.forEach(b => toolGroup.push(<ToolBlockView key={b.id} block={b} />))
+                              }
+                            } else {
+                              toolGroup.push(<ToolBlockView key={tb.id} block={tb} />)
+                            }
+                            j++
                           }
                           if (toolGroup.length > 0) {
                             elements.push(
@@ -3212,9 +3235,30 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     {/* Fallback: legacy layout for messages without contentBlocks */}
                     {hasVisibleToolBlocks && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
-                        {visibleToolBlocks.map(tb => (
-                          <ToolBlockView key={tb.id} block={tb} />
-                        ))}
+                        {(() => {
+                          const out: JSX.Element[] = []
+                          let j = 0
+                          while (j < visibleToolBlocks.length) {
+                            const tb = visibleToolBlocks[j]
+                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
+                            if (canCollapse) {
+                              const run: ToolBlock[] = [tb]
+                              while (j + 1 < visibleToolBlocks.length && visibleToolBlocks[j + 1].name === tb.name && visibleToolBlocks[j + 1].status === 'done' && !(visibleToolBlocks[j + 1].fileChanges?.length)) {
+                                j++
+                                run.push(visibleToolBlocks[j])
+                              }
+                              if (run.length >= 3) {
+                                out.push(<CollapsedToolGroup key={`grp-${run[0].id}`} name={tb.name} blocks={run} />)
+                              } else {
+                                run.forEach(b => out.push(<ToolBlockView key={b.id} block={b} />))
+                              }
+                            } else {
+                              out.push(<ToolBlockView key={tb.id} block={tb} />)
+                            }
+                            j++
+                          }
+                          return out
+                        })()}
                       </div>
                     )}
                     {msg.content && (
@@ -4217,6 +4261,64 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
               animation: 'chat-pulse 1s ease-in-out infinite',
             }} />
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Collapses consecutive same-name completed tool chips into "Read x6" style. */
+function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[] }): JSX.Element {
+  const fonts = useFonts()
+  const theme = useTheme()
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: expanded ? 6 : 0 }}>
+      <div
+        onClick={() => setExpanded(e => !e)}
+        style={{
+          background: theme.chat.assistantBubble,
+          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          borderRadius: 8,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '5px 6px',
+          cursor: 'pointer',
+          color: theme.chat.muted,
+          fontSize: 10,
+          fontFamily: fonts.sans,
+          lineHeight: 1,
+          width: 'fit-content',
+          maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
+        }}
+      >
+        <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
+        <span style={{ fontWeight: 500, fontSize: 10.5 }}>{name}</span>
+        <span style={{
+          fontSize: 9,
+          fontWeight: 600,
+          color: theme.accent.base,
+          background: theme.accent.soft,
+          borderRadius: 6,
+          padding: '1px 5px',
+          lineHeight: '14px',
+          flexShrink: 0,
+        }}>
+          x{blocks.length}
+        </span>
+        <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
+        <ChevronRight size={12} style={{
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.15s',
+          opacity: 0.4,
+          flexShrink: 0,
+        }} />
+      </div>
+      {expanded && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingLeft: 4 }}>
+          {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
         </div>
       )}
     </div>
