@@ -54,11 +54,9 @@ function validateFsPath(filePath: string): string {
     throw new Error(`Path "${filePath}" contains directory traversal`)
   }
 
-  // Warn for paths outside the home directory
-  if (!resolved.startsWith(home)) {
-    console.warn(`[fs] Warning: path "${filePath}" resolves outside home directory: ${resolved}`)
-  }
-
+  // Note: paths outside the home directory are allowed — users legitimately open
+  // projects on other drives (common on Windows where home is C:\ and projects live
+  // on D:\ or G:\). Sensitive dirs and traversal are already blocked above.
   return resolved
 }
 
@@ -207,12 +205,19 @@ export function registerFsIPC(): void {
   })
 
   ipcMain.handle('fs:stat', async (_, filePath: string) => {
-    const stats = await fs.stat(validateFsPath(filePath))
-    return {
-      size: stats.size,
-      mtimeMs: stats.mtimeMs,
-      isFile: stats.isFile(),
-      isDir: stats.isDirectory(),
+    try {
+      const stats = await fs.stat(validateFsPath(filePath))
+      return {
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        isFile: stats.isFile(),
+        isDir: stats.isDirectory(),
+      }
+    } catch (err) {
+      // Probes for optional config files are common — return null for "not found"
+      // instead of throwing, so the main console isn't spammed with handler errors.
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return null
+      throw err
     }
   })
 
