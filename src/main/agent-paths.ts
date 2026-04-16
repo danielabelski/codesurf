@@ -129,19 +129,22 @@ async function isExecutable(filePath: string): Promise<boolean> {
 
 /** Resolve a path to its actual file, adding .exe/.cmd on Windows if needed */
 async function resolveExecutablePath(filePath: string): Promise<string | null> {
-  try {
-    await fs.access(filePath)
-    return filePath
-  } catch { /* continue */ }
-
+  // On Windows, prefer an executable extension even if a bare file exists — npm
+  // global installs drop both a Unix-style shim and a .cmd wrapper in the same
+  // directory, and Node's spawn() can only execute the .cmd/.exe/.bat/.ps1.
   if (process.platform === 'win32' && !/\.\w+$/.test(filePath)) {
-    for (const ext of ['.exe', '.cmd', '.bat', '.ps1']) {
+    for (const ext of ['.cmd', '.exe', '.bat', '.ps1']) {
       try {
         await fs.access(filePath + ext)
         return filePath + ext
       } catch { /* continue */ }
     }
   }
+
+  try {
+    await fs.access(filePath)
+    return filePath
+  } catch { /* continue */ }
 
   return null
 }
@@ -256,7 +259,24 @@ async function loadSavedPaths(): Promise<AgentPathsConfig | null> {
 /** Prime in-memory cache from disk without probing binaries or shell PATH */
 export async function initializeAgentPathsCache(): Promise<AgentPathsConfig | null> {
   if (cachedPaths) return cachedPaths
-  cachedPaths = await loadSavedPaths()
+  const saved = await loadSavedPaths()
+  if (!saved) return null
+
+  // Re-resolve each saved path so stale entries (e.g. a Windows shim without the
+  // .cmd extension) get promoted to a spawn-able path on the next app launch.
+  let mutated = false
+  for (const key of ['claude', 'codex', 'opencode', 'openclaw', 'hermes'] as const) {
+    const entry = saved[key]
+    if (!entry?.path) continue
+    const resolved = await resolveExecutablePath(entry.path)
+    if (resolved && resolved !== entry.path) {
+      entry.path = resolved
+      mutated = true
+    }
+  }
+
+  cachedPaths = saved
+  if (mutated) await savePaths(saved).catch(() => { /* best-effort */ })
   return cachedPaths
 }
 
