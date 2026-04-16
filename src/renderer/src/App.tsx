@@ -3895,7 +3895,8 @@ function App(): JSX.Element {
                     height: '100%',
                     padding: '0 2px 0 0',
                     gap: 2,
-                    borderBottom: isActive ? `3px solid ${theme.accent.base}` : '3px solid transparent',
+                    borderBottom: isActive ? `2px solid ${theme.accent.base}` : '2px solid transparent',
+                    paddingBottom: 5,
                     color: isActive ? theme.text.primary : theme.text.muted,
                     transition: 'color 0.12s ease, border-color 0.12s ease',
                   }}
@@ -3981,7 +3982,8 @@ function App(): JSX.Element {
                   minWidth: 0,
                   height: '100%',
                   padding: '0 2px',
-                  borderBottom: `3px solid ${theme.accent.base}`,
+                  borderBottom: `2px solid ${theme.accent.base}`,
+                  paddingBottom: 5,
                   color: theme.text.primary,
                   fontSize: appFonts.size,
                   fontWeight: 600,
@@ -4010,7 +4012,8 @@ function App(): JSX.Element {
                   height: '100%',
                   padding: '0 2px 0 0',
                   gap: 2,
-                  borderBottom: `3px solid ${theme.accent.base}`,
+                  borderBottom: `2px solid ${theme.accent.base}`,
+                  paddingBottom: 5,
                   color: theme.text.primary,
                 }}
               >

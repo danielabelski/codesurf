@@ -1129,7 +1129,8 @@ const ChatMessageContent = React.memo(({
   const theme = useTheme()
   const fonts = useAppFonts()
   const { bodyText, attachmentPaths } = useMemo(() => splitMessageAttachmentPaths(text), [text])
-  const bodySegments = useMemo(() => splitRenderableMessageSegments(bodyText, isStreaming), [bodyText, isStreaming])
+  // JSX preview disabled — was causing render lockups on message history load
+  // const bodySegments = useMemo(() => splitRenderableMessageSegments(bodyText, isStreaming), [bodyText, isStreaming])
   const chipBackground = isUser
     ? 'rgba(255,255,255,0.1)'
     : theme.surface.panelMuted
@@ -1144,15 +1145,9 @@ const ChatMessageContent = React.memo(({
     : theme.text.disabled
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: bodySegments.length > 0 && attachmentPaths.length > 0 ? 12 : 0, minWidth: 0, width: '100%' }}>
-      {bodySegments.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0, width: '100%' }}>
-          {bodySegments.map((segment, index) => (
-            segment.type === 'jsx'
-              ? <InlineJSXPreviewBlock key={`jsx-${index}`} jsx={segment.jsx} isStreaming={segment.isStreaming} />
-              : <ChatMarkdown key={`md-${index}`} text={segment.text} isStreaming={isStreaming && index === bodySegments.length - 1} className={className} />
-          ))}
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: bodyText && attachmentPaths.length > 0 ? 12 : 0, minWidth: 0, width: '100%' }}>
+      {bodyText ? (
+        <ChatMarkdown text={bodyText} isStreaming={isStreaming} className={className} />
       ) : null}
       {attachmentPaths.length > 0 ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
