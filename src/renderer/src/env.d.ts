@@ -34,7 +34,7 @@ interface ElectronAPI {
     basename(path: string): Promise<string>
     revealInFinder?(path: string): Promise<void>
     writeBrief(cardId: string, content: string): Promise<string>
-    stat(path: string): Promise<{ size: number; mtimeMs: number; isFile: boolean; isDir: boolean }>
+    stat(path: string): Promise<{ size: number; mtimeMs: number; isFile: boolean; isDir: boolean } | null>
     isProbablyTextFile(path: string): Promise<boolean>
     copyIntoDir(sourcePath: string, destDir: string): Promise<{ path: string }>
     watch(dirPath: string, callback: () => void): () => void
