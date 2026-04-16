@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Pin, Settings } from 'lucide-react'
+import type { WorkspaceSessionEntry } from '../../../shared/session-types'
 import type { ProjectRecord, Workspace, TileState } from '../../../shared/types'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
@@ -330,32 +331,7 @@ const SESSION_SOURCE_ICONS: Record<string, React.JSX.Element> = {
   opencode: <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" strokeWidth="1.2" /><path d="M4.5 9.5 7 4.5l2.5 5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>,
 }
 
-interface SessionEntry {
-  workspaceId: string
-  workspaceName: string
-  workspacePath: string
-  id: string
-  source: 'codesurf' | 'claude' | 'codex' | 'cursor' | 'openclaw' | 'opencode'
-  scope: 'workspace' | 'project' | 'user'
-  tileId: string | null
-  sessionId: string | null
-  provider: string
-  model: string
-  messageCount: number
-  lastMessage: string | null
-  updatedAt: number
-  filePath?: string
-  title: string
-  projectPath?: string | null
-  sourceLabel: string
-  sourceDetail?: string
-  canOpenInChat?: boolean
-  canOpenInApp?: boolean
-  resumeBin?: string
-  resumeArgs?: string[]
-  relatedGroupId?: string | null
-  nestingLevel?: number
-}
+type SessionEntry = WorkspaceSessionEntry
 
 interface DisplaySessionEntry extends SessionEntry {
   displayIndent: number

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
 import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus } from 'lucide-react'
+import type { AggregatedSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
 import { withDefaultSettings, DEFAULT_SETTINGS } from '../../shared/types'
@@ -19,33 +20,9 @@ import { MainStatusBar } from './components/MainStatusBar'
 
 const LazyPanelLayout = React.lazy(() => import('./components/PanelLayout').then(m => ({ default: m.PanelLayout })))
 
-type SidebarSessionEntry = {
-  id: string
-  source: 'codesurf' | 'claude' | 'codex' | 'cursor' | 'openclaw' | 'opencode'
-  scope: 'workspace' | 'project' | 'user'
-  tileId: string | null
-  sessionId: string | null
-  provider: string
-  model: string
-  messageCount: number
-  lastMessage: string | null
-  updatedAt: number
-  filePath?: string
-  title: string
-  projectPath?: string | null
-  sourceLabel: string
-  sourceDetail?: string
-  canOpenInChat?: boolean
-  canOpenInApp?: boolean
-  resumeBin?: string
-  resumeArgs?: string[]
-  relatedGroupId?: string | null
-  nestingLevel?: number
-}
-
 type PendingSessionOpen =
-  | { kind: 'chat'; session: SidebarSessionEntry; workspaceId: string }
-  | { kind: 'app'; session: SidebarSessionEntry; workspaceId: string }
+  | { kind: 'chat'; session: AggregatedSessionEntry; workspaceId: string }
+  | { kind: 'app'; session: AggregatedSessionEntry; workspaceId: string }
 
 const LazyTileChrome = React.lazy(() => import('./components/TileChrome').then(m => ({ default: m.TileChrome })))
 const LazySidebar = React.lazy(() => import('./components/Sidebar').then(m => ({ default: m.Sidebar })))
@@ -2392,11 +2369,11 @@ function App(): JSX.Element {
     return created
   }, [workspace, workspaces])
 
-  const resolveWorkspaceForSession = useCallback(async (session: SidebarSessionEntry): Promise<Workspace | null> => {
+  const resolveWorkspaceForSession = useCallback(async (session: AggregatedSessionEntry): Promise<Workspace | null> => {
     return resolveWorkspaceForProjectPath(session.projectPath)
   }, [resolveWorkspaceForProjectPath])
 
-  const openSessionInChatCurrentWorkspace = useCallback(async (session: SidebarSessionEntry, workspaceId: string) => {
+  const openSessionInChatCurrentWorkspace = useCallback(async (session: AggregatedSessionEntry, workspaceId: string) => {
     const state = await window.electron.canvas.getSessionState(workspaceId, session.id).catch(() => null)
     if (!state) {
       if (session.filePath) handleOpenFile(session.filePath)
@@ -2458,7 +2435,7 @@ function App(): JSX.Element {
     bringToFront(chatTileId)
   }, [addTile, bringToFront, handleOpenFile])
 
-  const openSessionInChat = useCallback(async (session: SidebarSessionEntry) => {
+  const openSessionInChat = useCallback(async (session: AggregatedSessionEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
     if (!targetWorkspace?.id) return
 
@@ -2471,7 +2448,7 @@ function App(): JSX.Element {
     await openSessionInChatCurrentWorkspace(session, targetWorkspace.id)
   }, [resolveWorkspaceForSession, workspace?.id, handleSwitchWorkspace, openSessionInChatCurrentWorkspace])
 
-  const openSessionInAppCurrentWorkspace = useCallback((session: SidebarSessionEntry) => {
+  const openSessionInAppCurrentWorkspace = useCallback((session: AggregatedSessionEntry) => {
     if (!session.resumeBin) return
     const tileId = addTile('terminal', undefined, undefined, {
       launchBin: session.resumeBin,
@@ -2480,7 +2457,7 @@ function App(): JSX.Element {
     bringToFront(tileId)
   }, [addTile, bringToFront])
 
-  const openSessionInApp = useCallback(async (session: SidebarSessionEntry) => {
+  const openSessionInApp = useCallback(async (session: AggregatedSessionEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
     if (!targetWorkspace?.id) return
 
@@ -2505,7 +2482,7 @@ function App(): JSX.Element {
     const projectPath = normalizeWorkspacePath(task.workspaceDir)
     if (!projectPath) return
 
-    const session: SidebarSessionEntry = {
+    const session: AggregatedSessionEntry = {
       id: `codesurf-job:${task.id}`,
       source: 'codesurf',
       scope: 'workspace',

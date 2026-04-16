@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, lazy } from 'react'
-import type { AppSettings, ExecutionHostRecord, ExecutionMode, FontToken, ToolPermissionGrant } from '../../../shared/types'
+import type { AppSettings, ExecutionHostRecord, ExecutionMode, FontToken, ToolPermissionGrant, Workspace } from '../../../shared/types'
 import { DEFAULT_FONTS, withDefaultSettings } from '../../../shared/types'
 import { Settings, Type, Monitor, FolderOpen, Plus, Trash2, ChevronDown, ChevronRight, FileJson, AlertTriangle, Check, Copy, RotateCcw, FormInput, Code2, Puzzle, RefreshCw, Star, Wrench, Users, FileText, Globe, Eye, EyeOff, PanelRight, Pin, Shield } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
@@ -10,12 +10,6 @@ const LazyPromptsSection = lazy(() => import('./CustomisationTile').then(m => ({
 const LazySkillsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.SkillsSection })))
 const LazyToolsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.ToolsSection })))
 const LazyAgentsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.AgentsSection })))
-
-interface Workspace {
-  id: string
-  name: string
-  path: string
-}
 
 interface Props {
   onClose: () => void
