@@ -9,6 +9,7 @@ import { code } from '@streamdown/code'
 import 'streamdown/styles.css'
 import { useTheme } from '../../ThemeContext'
 import { useAppFonts } from '../../FontContext'
+import { useThemeTokens } from '../../theme-tokens'
 import { dispatchOpenLink, findAnchorFromEventTarget } from '../../utils/links'
 
 // --- Streamdown plugins (singleton) ------------------------------------------------
@@ -99,16 +100,12 @@ export function usePatchCodeBlocks(
   theme: ReturnType<typeof useTheme>,
   fonts: ReturnType<typeof useAppFonts>,
 ): void {
+  const tokens = useThemeTokens()
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const shellBackground = theme.mode === 'light' ? theme.surface.panel : theme.surface.panelMuted
-    const bodyBackground = theme.mode === 'light' ? theme.surface.panelMuted : '#0f131d'
-    const headerBackground = theme.mode === 'light' ? theme.surface.panel : '#171c28'
-    const headerColor = theme.text.muted
-    const tableShellBackground = theme.mode === 'light' ? theme.surface.panelMuted : theme.surface.panel
-    const tableInnerBackground = theme.mode === 'light' ? theme.chat.background : '#11161f'
-    const tableHeaderBackground = theme.mode === 'light' ? theme.surface.panelElevated : '#1a2230'
+    const { shellBackground, bodyBackground, headerBackground, headerColor } = tokens.code
+    const { shellBackground: tableShellBackground, innerBackground: tableInnerBackground, headerBackground: tableHeaderBackground } = tokens.table
     const fontSize = Math.max(12, fonts.size - 1)
 
     // Code blocks
@@ -180,7 +177,7 @@ export function usePatchCodeBlocks(
         cell.style.cssText = `background:${tableInnerBackground}!important;color:${theme.text.primary}!important;border:1px solid ${theme.border.subtle}!important;padding:8px 10px!important`
       })
     })
-  }, [fonts.size, ref, theme.border.default, theme.border.subtle, theme.chat.background, theme.mode, theme.surface.panel, theme.surface.panelElevated, theme.surface.panelMuted, theme.text.muted, theme.text.primary])
+  }, [fonts.size, ref, theme.border.default, theme.border.subtle, theme.text.primary, tokens])
 }
 
 // --- useLinkClickHandler hook ------------------------------------------------------
@@ -208,6 +205,26 @@ export function useLinkClickHandler(ref: React.RefObject<HTMLElement | null>): v
 
 // --- ChatMarkdown component -------------------------------------------------------
 // Renders markdown content with Streamdown, applying theme patches for code blocks and tables.
+function ChatStreamdown({ text, isStreaming, className }: {
+  text: string
+  isStreaming?: boolean
+  className?: string
+}): JSX.Element {
+  const tokens = useThemeTokens()
+  return (
+    <Streamdown
+      className={`chat-md ${className ?? ''}`}
+      plugins={streamdownPlugins}
+      mode={isStreaming ? 'streaming' : 'static'}
+      shikiTheme={tokens.shikiTheme}
+      controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}
+      lineNumbers={false}
+    >
+      {text}
+    </Streamdown>
+  )
+}
+
 export const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
   text: string
   isStreaming?: boolean
@@ -231,20 +248,7 @@ export const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
         ['--chat-link-hover-color' as string]: theme.accent.hover,
       }}
     >
-      <Streamdown
-        className={`chat-md ${className ?? ''}`}
-        plugins={streamdownPlugins}
-        mode={isStreaming ? 'streaming' : 'static'}
-        shikiTheme={
-          theme.mode === 'light'
-            ? ['github-light', 'github-light']
-            : ['github-dark', 'github-dark']
-        }
-        controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}
-        lineNumbers={false}
-      >
-        {text}
-      </Streamdown>
+      <ChatStreamdown text={text} isStreaming={isStreaming} className={className} />
     </div>
   )
 })

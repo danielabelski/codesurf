@@ -5,6 +5,7 @@ import { Settings, Type, Monitor, FolderOpen, Plus, Trash2, ChevronDown, Chevron
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { THEME_OPTIONS, getThemeCanvasDefaults, resolveEffectiveThemeId, getThemeById, type AppearanceMode } from '../theme'
+import { Toggle as UIToggle, NumInput as UINumInput } from './ui'
 
 const LazyPromptsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.PromptsSection })))
 const LazySkillsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.SkillsSection })))
@@ -107,40 +108,18 @@ function ExtSettingsPanel({ extId, tileType }: { extId: string; tileType: string
 
 // ─── Control components ────────────────────────────────────────────────────────
 function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }): React.JSX.Element {
-  const theme = useTheme()
-  return (
-    <div
-      onClick={() => onChange(!value)}
-      style={{
-        width: 32, height: 18, borderRadius: 4, cursor: 'pointer', flexShrink: 0,
-        background: value ? theme.accent.base : theme.surface.panelMuted,
-        border: `1px solid ${value ? theme.accent.base : theme.border.default}`,
-        position: 'relative', transition: 'background 0.15s, border-color 0.15s',
-      }}
-    >
-      <div style={{
-        position: 'absolute',
-        top: 2, left: value ? 16 : 2,
-        width: 12, height: 12, borderRadius: 2,
-        background: value ? theme.text.inverse : theme.text.muted,
-        transition: 'left 0.15s, background 0.15s',
-      }} />
-    </div>
-  )
+  return <UIToggle value={value} onChange={onChange} />
 }
 
 function NumInput({ value, min, max, step = 1, onChange }: { value: number; min: number; max: number; step?: number; onChange: (v: number) => void }): React.JSX.Element {
-  const theme = useTheme()
   return (
-    <input
-      type="number" value={value} min={min} max={max} step={step}
+    <UINumInput
+      value={value}
+      min={min}
+      max={max}
+      step={step}
       onChange={e => onChange(Number(e.target.value))}
-      style={{
-        width: 72, padding: '5px 10px', fontSize: 'inherit',
-        background: theme.surface.input, color: theme.text.secondary,
-        border: `1px solid ${theme.border.default}`, borderRadius: 8, outline: 'none',
-        textAlign: 'right'
-      }}
+      style={{ width: 72 }}
     />
   )
 }
