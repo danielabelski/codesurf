@@ -301,7 +301,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 16,
+          gap: 4,
           minWidth: 0,
           width: 'min(760px, 100%)',
           justifyContent: 'flex-end',

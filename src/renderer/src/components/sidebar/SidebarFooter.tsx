@@ -57,15 +57,17 @@ export function SidebarFooter({
           style={{
             display: 'inline-flex',
             alignItems: 'center',
-            gap: 6,
-            padding: '5px 10px',
+            gap: 5,
+            height: 24,
+            padding: '0 9px',
             borderRadius: 6,
             border: `1px solid ${theme.accent.base}`,
             background: theme.accent.base,
             color: theme.text.inverse,
-            fontSize: fonts.size,
+            fontSize: Math.max(11, fonts.size - 1),
             fontWeight: 600,
             fontFamily: fonts.primary,
+            lineHeight: 1,
             cursor: 'pointer',
             whiteSpace: 'nowrap',
             flexShrink: 0,
@@ -73,7 +75,7 @@ export function SidebarFooter({
           onMouseEnter={e => { e.currentTarget.style.filter = 'brightness(1.08)' }}
           onMouseLeave={e => { e.currentTarget.style.filter = 'none' }}
         >
-          <Package size={13} />
+          <Package size={12} />
           <span>Get Extensions</span>
         </button>
       )}
@@ -82,7 +84,7 @@ export function SidebarFooter({
           onClick={onOpenGallery}
           title="Get Extensions"
           style={{
-            width: 28, height: 28, borderRadius: 6,
+            width: 24, height: 24, borderRadius: 6,
             border: `1px solid ${theme.accent.base}`,
             background: theme.accent.base,
             color: theme.text.inverse,
@@ -90,12 +92,12 @@ export function SidebarFooter({
             cursor: 'pointer',
           }}
         >
-          <Package size={14} />
+          <Package size={12} />
         </button>
       )}
       <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 2, flexShrink: 0, flexDirection: 'row' }}>
         {([
-          { label: 'Settings', icon: <Settings size={14} />, action: () => onOpenSettings('general') },
+          { label: 'Settings', icon: <Settings size={12} />, action: () => onOpenSettings('general') },
           { label: 'New Terminal', icon: TILE_ICONS.terminal, action: onNewTerminal },
           { label: 'Agent Board', icon: TILE_ICONS.kanban, action: onNewKanban, disabled: true },
           { label: 'Browser', icon: TILE_ICONS.browser, action: onNewBrowser },
@@ -103,7 +105,7 @@ export function SidebarFooter({
           { label: 'Files', icon: TILE_ICONS.files, action: onNewFiles },
         ] as { label: string; icon: React.ReactNode; action: () => void; disabled?: boolean }[]).map(btn => (
           <button key={btn.label} title={btn.disabled ? `${btn.label} disabled` : btn.label} style={{
-            width: 28, height: 28, borderRadius: 6, border: 'none', background: 'transparent',
+            width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent',
             color: btn.disabled ? theme.text.disabled : footerIconColor, cursor: btn.disabled ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
             opacity: btn.disabled ? 0.45 : 1,
           }}
@@ -124,17 +126,17 @@ export function SidebarFooter({
               title={disabled ? `${ext.label} disabled` : ext.label}
               onClick={disabled ? undefined : () => onAddExtensionTile?.(ext.type)}
               style={{
-                width: 28, height: 28, borderRadius: 6, border: 'none', background: 'transparent',
+                width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent',
                 color: disabled ? theme.text.disabled : footerIconColor,
                 cursor: disabled ? 'not-allowed' : 'pointer',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 opacity: disabled ? 0.45 : 1,
-                fontSize: 14, lineHeight: 1,
+                fontSize: 12, lineHeight: 1,
               }}
               onMouseEnter={e => { if (!disabled) e.currentTarget.style.color = theme.text.primary }}
               onMouseLeave={e => { e.currentTarget.style.color = disabled ? theme.text.disabled : footerIconColor }}
             >
-              {ext.icon ? <span style={{ fontSize: 14, lineHeight: 1 }}>{ext.icon}</span> : <Puzzle size={14} />}
+              {ext.icon ? <span style={{ fontSize: 12, lineHeight: 1 }}>{ext.icon}</span> : <Puzzle size={12} />}
             </button>
           )
         })}
