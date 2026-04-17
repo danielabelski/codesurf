@@ -19,7 +19,7 @@
   "scripts": {
     "test": "npm run test:daemon",
     "test:daemon": "node --test test/daemon/*.test.mjs",
-    "dev": "electron-vite dev -- --js-flags=\"--expose-gc --max-old-space-size=8192\"",
+    "dev": "node scripts/dev.js",
     "build:main": "cross-env EV_BUILD_TARGET=main electron-vite build",
     "build:preload": "cross-env EV_BUILD_TARGET=preload electron-vite build",
     "build:renderer": "cross-env EV_BUILD_TARGET=renderer electron-vite build",
