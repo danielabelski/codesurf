@@ -13,6 +13,11 @@ import {
   tileSessionSummaryPath,
   tileStatePath,
 } from '../storage/workspaceArtifacts'
+import {
+  appendQueuedMessageEvent,
+  listActiveQueuedMessages,
+  type QueuedMessageEvent,
+} from '../storage/queuedMessagesLog'
 import { getWorkspacePathById } from './workspace'
 import { deleteFileIfExists } from '../utils/fs'
 import { broadcastToRenderer } from '../utils/broadcast'
@@ -426,6 +431,44 @@ export function registerCanvasIPC(): void {
     for (const storageId of storageIds) {
       tileSessionSummaryCache.delete(tileSessionSummaryPath(storageId, tileId))
     }
+    // Any queued messages belonging to this tile are now orphaned by definition;
+    // mark them cleared so the log stays consistent.
+    try {
+      await appendQueuedMessageEvent({
+        type: 'clear',
+        at: Date.now(),
+        workspaceId,
+        tileId,
+      })
+    } catch { /* best-effort */ }
     broadcastSessionsChanged(workspaceId)
+  })
+
+  // Queued-message event log (append-only JSONL) used to track orphans
+  // across crashes and tile deletions.
+  ipcMain.handle('canvas:queuedMessages:append', async (_, event: unknown) => {
+    if (!event || typeof event !== 'object') return
+    const record = event as Record<string, unknown>
+    const type = record.type
+    if (type !== 'enqueue' && type !== 'dispatch' && type !== 'delete' && type !== 'complete' && type !== 'clear') return
+    const workspaceId = typeof record.workspaceId === 'string' ? record.workspaceId : ''
+    const tileId = typeof record.tileId === 'string' ? record.tileId : ''
+    if (!workspaceId || !tileId) return
+    const payload: QueuedMessageEvent = {
+      type,
+      workspaceId,
+      tileId,
+      at: typeof record.at === 'number' ? record.at : Date.now(),
+    }
+    if (typeof record.queueId === 'string') payload.queueId = record.queueId
+    if (typeof record.content === 'string') payload.content = record.content
+    if (typeof record.preview === 'string') payload.preview = record.preview
+    if (typeof record.attachmentCount === 'number') payload.attachmentCount = record.attachmentCount
+    if (typeof record.createdAt === 'number') payload.createdAt = record.createdAt
+    await appendQueuedMessageEvent(payload)
+  })
+
+  ipcMain.handle('canvas:queuedMessages:listActive', async () => {
+    return await listActiveQueuedMessages()
   })
 }

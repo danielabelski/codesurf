@@ -10,10 +10,10 @@ import type {
 import { basename, getDroppedPaths, isImagePath } from '../utils/dnd'
 import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 import {
-  ShieldCheck, ChevronDown,
+  ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, DollarSign,
-  FileText, Folder, Paperclip, Plus, Trash2, Wrench
+  FileText, Folder, GripVertical, Paperclip, Plus, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
 import { useAppFonts } from '../FontContext'
@@ -23,10 +23,13 @@ import {
   type BuiltinProvider, type ModelOption, type ModeOption, type ThinkingOption,
   DEFAULT_MODELS, DEFAULT_PROVIDER_ID, PROVIDER_MODES, EXTENSION_PROVIDER_MODE,
   THINKING_OPTIONS, PROVIDER_LABELS, isBuiltinProvider, getApproxContextWindowTokens,
+  getApproxSystemOverheadTokens,
 } from '../config/providers'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
-import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage } from '../../../shared/chat-types'
+import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote } from '../../../shared/chat-types'
+import { BlockNoteAffordance } from './chat/BlockNoteAffordance'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
+import { setTileTodos, clearTileTodos, type TileTodoItem } from '../state/tileTodosStore'
 import { JSXPreview, JSXPreviewContent, JSXPreviewError } from './ai-elements/JSXPreview'
 
 const CHAT_SLASH_COMMANDS = [
@@ -36,6 +39,7 @@ const CHAT_SLASH_COMMANDS = [
   { value: '/mode', description: 'Switch mode (plan, build, etc.)' },
   { value: '/help', description: 'Show help' },
   { value: '/init', description: 'Initialize workspace' },
+  { value: '/export-notes', description: 'Copy all attached block notes to the clipboard' },
 ] as const
 
 const CHAT_DEFAULT_SKILL_LOCATIONS = [
@@ -142,6 +146,55 @@ function shouldRenderToolBlock(block: ToolBlock): boolean {
     || Boolean(block.input?.trim())
 }
 
+/**
+ * Heuristic: does a queued-message body look like pasted error output?
+ *
+ * Triggered when the user pastes a stack trace / console log into the
+ * composer so the queue bar can flag it visually (red tint, alert icon).
+ * Matches on common logger prefixes, error keywords, and file:line:col
+ * patterns; requires the text to be either reasonably long OR to contain
+ * an unambiguous signal like "Uncaught" so a plain message like
+ * "fix the error in foo.ts" doesn't light up red.
+ */
+function isUrgentQueuedContent(text: string): boolean {
+  if (!text) return false
+  const body = text.trim()
+  if (body.length < 20) return false
+  // Unambiguous error/panic markers — any one of these is enough.
+  const strongPatterns = [
+    /\buncaught\b/i,
+    /\bunhandled (?:promise )?rejection\b/i,
+    /\bstack trace\b/i,
+    /\btraceback\b/i,
+    /\bsegmentation fault\b/i,
+    /\bfatal\b/i,
+    /\bpanic:/i,
+    /\bexception\b.*\bat\b/is,
+    /^\s*at\s+\S+\s*\(.+:\d+:\d+\)/m,                  // JS stack frame
+    /\bERR_[A-Z_]+\b/,                                  // Node error codes
+    /\b(?:TypeError|ReferenceError|SyntaxError|RangeError|Error):/,
+  ]
+  for (const re of strongPatterns) {
+    if (re.test(body)) return true
+  }
+  // Weaker signals: need multiple matches or bulk size to count.
+  const weakPatterns = [
+    /\berror\b/i,
+    /\bwarning\b/i,
+    /\bfailed\b/i,
+    /\bcannot\s+(?:read|find|resolve|access)\b/i,
+    /\[Violation\]/,
+  ]
+  let weakHits = 0
+  for (const re of weakPatterns) {
+    if (re.test(body)) weakHits += 1
+    if (weakHits >= 2) return true
+  }
+  // A single weak hit plus a long body (≥300 chars) likely indicates a
+  // pasted log excerpt rather than a short imperative like "fix the error".
+  return weakHits >= 1 && body.length >= 300
+}
+
 interface PendingAttachment {
   path: string
   kind: 'image' | 'file'
@@ -153,6 +206,10 @@ interface QueuedChatTurn {
   preview: string
   attachmentCount: number
   createdAt: number
+  /** Optional parent turn id — when set, this turn renders indented beneath
+   *  its parent as a sub-item, representing work the user intends to run
+   *  *as part of* the parent turn rather than as its own top-level turn. */
+  parentId?: string | null
 }
 
 interface ChatTilePersistedState {
@@ -935,6 +992,42 @@ function splitMessageAttachmentPaths(text: string): {
   }
 }
 
+/**
+ * Extracts the set of absolute file paths that the model demonstrably "read"
+ * across a conversation. We only consider tools that actually load file
+ * bytes into the model's context:
+ *   - `Read` — canonical file read (images returned as image blocks by the harness)
+ *   - `NotebookEdit` / `NotebookRead` — ditto for notebooks
+ *
+ * Paths referenced by write/edit tools are excluded: writing to a path does
+ * not guarantee the model loaded the file contents first. The output is only
+ * used to drive the "image was read" tick on attachment chips, so being
+ * conservative here is important — the tick must never lie.
+ */
+function collectModelReadPaths(messages: ChatMessage[]): Set<string> {
+  const paths = new Set<string>()
+  for (const msg of messages) {
+    const blocks = msg.toolBlocks
+    if (!blocks || blocks.length === 0) continue
+    for (const block of blocks) {
+      if (block.name !== 'Read' && block.name !== 'NotebookRead') continue
+      // Only count a read as successful if the tool finished without error —
+      // a failed Read (e.g. file missing) did not actually load anything into
+      // context, so the tick would be misleading.
+      if (block.status !== 'done') continue
+      if (!block.input) continue
+      try {
+        const parsed = JSON.parse(block.input) as Record<string, unknown>
+        const filePath = typeof parsed.file_path === 'string' ? parsed.file_path : null
+        if (filePath) paths.add(filePath)
+      } catch {
+        // Non-JSON input — skip rather than guess.
+      }
+    }
+  }
+  return paths
+}
+
 function truncateTextForMemory(text: string | undefined, limit: number, label: string): string {
   if (!text) return ''
   if (text.length <= limit) return text
@@ -1465,11 +1558,16 @@ const ChatMessageContent = React.memo(({
   isStreaming,
   isUser,
   className,
+  readAttachmentPaths,
 }: {
   text: string
   isStreaming?: boolean
   isUser?: boolean
   className?: string
+  /** Paths that the model has demonstrably loaded via Read-style tools.
+   *  Used to render a confirmation tick on attachment chips — must only be
+   *  set when the attachment was actually consumed by the model. */
+  readAttachmentPaths?: Set<string>
 }) => {
   const theme = useTheme()
   const fonts = useAppFonts()
@@ -1507,42 +1605,53 @@ const ChatMessageContent = React.memo(({
             Attached file paths
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minWidth: 0 }}>
-            {attachmentPaths.map(path => (
-              <button
-                key={path}
-                type="button"
-                title={path}
-                onClick={() => { void dispatchOpenLink(path) }}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  minWidth: 0,
-                  maxWidth: '100%',
-                  borderRadius: 12,
-                  border: `1px solid ${chipBorder}`,
-                  background: chipBackground,
-                  color: chipText,
-                  padding: '6px 10px',
-                  cursor: 'pointer',
-                }}
-              >
-                <FileText size={12} style={{ flexShrink: 0, opacity: 0.8 }} />
-                <span
+            {attachmentPaths.map(path => {
+              const wasRead = readAttachmentPaths?.has(path) === true
+              return (
+                <button
+                  key={path}
+                  type="button"
+                  title={wasRead ? `${path} — read by the model` : path}
+                  onClick={() => { void dispatchOpenLink(path) }}
                   style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 5,
                     minWidth: 0,
-                    maxWidth: 320,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    fontSize: Math.max(11, fonts.size - 1),
-                    lineHeight: 1.2,
+                    maxWidth: '100%',
+                    borderRadius: 6,
+                    border: `1px solid ${chipBorder}`,
+                    background: chipBackground,
+                    color: chipText,
+                    padding: '3px 7px',
+                    cursor: 'pointer',
                   }}
                 >
-                  {basename(path)}
-                </span>
-              </button>
-            ))}
+                  <FileText size={10} style={{ flexShrink: 0, opacity: 0.8 }} />
+                  <span
+                    style={{
+                      minWidth: 0,
+                      maxWidth: 320,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontSize: Math.max(10, fonts.size - 2),
+                      lineHeight: 1.2,
+                    }}
+                  >
+                    {basename(path)}
+                  </span>
+                  {wasRead && (
+                    <Check
+                      size={10}
+                      color={theme.status.success}
+                      style={{ flexShrink: 0 }}
+                      aria-label="Read by the model"
+                    />
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       ) : null}
@@ -1745,6 +1854,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [messages, setMessages] = useState<ChatMessage[]>(() => initialRuntimeStateRef.current?.messages ?? [])
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(() => initialRuntimeStateRef.current?.isStreaming ?? false)
+  // Subtle liveness tracking — when streaming, we bump `lastActivityAtRef` on
+  // every message/block mutation and tick a render loop so the composer can
+  // show a breathing dot + a "quiet for Xs" label when the server goes quiet.
+  const lastActivityAtRef = useRef<number>(Date.now())
+  const [activityTick, setActivityTick] = useState(0)
+  // Progressive tool-chip collapse: remember when each ToolBlock first
+  // flipped to 'done' so we can fold chips into a group summary only after
+  // a grace period (keeps just-finished chips readable for a few seconds
+  // before they get tucked into "Called N tools"). Populated by an effect
+  // that walks messages; cleared when the chip is gone from state.
+  const toolCompletedAtRef = useRef<Map<string, number>>(new Map())
   const [executionTarget, setExecutionTarget] = useState<'local' | 'cloud'>(() => initialExecutionTarget)
   const [cloudHostId, setCloudHostId] = useState<string | null>(() => initialCloudHostId)
   const [provider, setProvider] = useState<string>(() => initialProvider)
@@ -1948,6 +2068,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [modelFilter, setModelFilter] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>(() => initialRuntimeStateRef.current?.attachments ?? [])
   const [queuedTurns, setQueuedTurns] = useState<QueuedChatTurn[]>(() => initialRuntimeStateRef.current?.queuedTurns ?? [])
+  // Drag-reorder state for the queued-turn list. A row can be dropped above
+  // ('before'), below ('after'), or onto ('into') another row — the last case
+  // nests it as a child of that row, rendered indented underneath.
+  const [draggingTurnId, setDraggingTurnId] = useState<string | null>(null)
+  const [dragOverTurn, setDragOverTurn] = useState<{ id: string; mode: 'before' | 'after' | 'into' } | null>(null)
+  // Collapse the queue into a single summary row once it grows past a few
+  // items. Keeps the composer area quiet when a batch of queued prompts
+  // stacks up. Auto-collapses on the cross-over, but the user can manually
+  // expand / re-collapse via the header.
+  const [queueCollapsed, setQueueCollapsed] = useState(true)
+  const prevQueuedCountRef = useRef(0)
   const [isDropTarget, setIsDropTarget] = useState(false)
   const [showScrollToLatest, setShowScrollToLatest] = useState(false)
   const [branchFilter, setBranchFilter] = useState('')
@@ -2296,6 +2427,87 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
   }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
 
+  // Publish latest TodoWrite todos for this tile so external chrome (tab bar,
+  // sidebar) can surface the agent's current todo list without drilling into
+  // ChatTile internals. Walks messages in reverse to find the most recent
+  // TodoWrite tool_use and parses its input JSON.
+  useEffect(() => {
+    let latest: TileTodoItem[] | null = null
+    outer: for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const msg = messages[i]
+      const blocks = msg.toolBlocks
+      if (!blocks || blocks.length === 0) continue
+      for (let j = blocks.length - 1; j >= 0; j -= 1) {
+        const tb = blocks[j]
+        if (tb.name !== 'TodoWrite') continue
+        try {
+          const parsed = JSON.parse(tb.input || '{}') as unknown
+          const todosRaw = parsed && typeof parsed === 'object'
+            ? (parsed as Record<string, unknown>).todos
+            : null
+          if (Array.isArray(todosRaw)) {
+            const normalized: TileTodoItem[] = []
+            for (const item of todosRaw) {
+              if (!item || typeof item !== 'object') continue
+              const rec = item as Record<string, unknown>
+              const content = typeof rec.content === 'string' ? rec.content : ''
+              if (!content) continue
+              const status = typeof rec.status === 'string' ? rec.status : 'pending'
+              const activeForm = typeof rec.activeForm === 'string' ? rec.activeForm : undefined
+              normalized.push({ content, status, activeForm })
+            }
+            if (normalized.length > 0) {
+              latest = normalized
+              break outer
+            }
+          }
+        } catch {
+          // Partial/streaming JSON — ignore and keep looking.
+        }
+      }
+    }
+    setTileTodos(tileId, latest)
+  }, [tileId, messages])
+
+  // Clear the published todos when the tile unmounts so stale state doesn't
+  // linger in the store.
+  useEffect(() => {
+    return () => { clearTileTodos(tileId) }
+  }, [tileId])
+
+  // Track the first moment each ToolBlock flipped to 'done' so the
+  // progressive-collapse logic (applyLiveCollapse below) can apply a grace
+  // period before folding a freshly-finished chip into the group summary.
+  // Also prune entries for tool ids that no longer exist in state.
+  useEffect(() => {
+    const seen = new Set<string>()
+    const now = Date.now()
+    for (const msg of messages) {
+      for (const tb of msg.toolBlocks ?? []) {
+        seen.add(tb.id)
+        if (tb.status === 'done' && !toolCompletedAtRef.current.has(tb.id)) {
+          toolCompletedAtRef.current.set(tb.id, now)
+        }
+      }
+    }
+    // Drop stale entries for tool blocks that got removed (e.g. conversation
+    // cleared / message regenerated).
+    for (const id of Array.from(toolCompletedAtRef.current.keys())) {
+      if (!seen.has(id)) toolCompletedAtRef.current.delete(id)
+    }
+  }, [messages])
+
+  // Auto-collapse the queue when it crosses into "too many" territory, and
+  // auto-expand when it drops back down so a lone queued item isn't hidden
+  // behind a summary row. The user can still override by clicking the header.
+  useEffect(() => {
+    const prev = prevQueuedCountRef.current
+    const next = queuedTurns.length
+    if (prev < 3 && next >= 3) setQueueCollapsed(true)
+    else if (prev >= 3 && next < 3) setQueueCollapsed(false)
+    prevQueuedCountRef.current = next
+  }, [queuedTurns.length])
+
   const persistLatestState = useCallback((stateOverride?: ChatTilePersistedState | null) => {
     if (persistTimerRef.current) {
       clearTimeout(persistTimerRef.current)
@@ -2327,6 +2539,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           preview: typeof item.preview === 'string' ? item.preview : buildQueuedTurnPreview(item.content, Number(item.attachmentCount) || 0),
           attachmentCount: Number(item.attachmentCount) || 0,
           createdAt: Number(item.createdAt) || Date.now(),
+          parentId: typeof item.parentId === 'string' ? item.parentId : null,
         })))
       }
       if (saved.provider) setProvider(saved.provider)
@@ -2367,6 +2580,46 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       stateLoadedRef.current = true
     })
   }, [workspaceId, tileId, reloadToken])
+
+  // Reset the "last activity" clock every time streaming toggles on so the
+  // quiet-indicator starts from zero for each new turn. The message-change
+  // effect below then keeps it current while tokens/tool-blocks arrive.
+  useEffect(() => {
+    if (isStreaming) {
+      lastActivityAtRef.current = Date.now()
+      setActivityTick(0)
+    }
+  }, [isStreaming])
+
+  // Any mutation to messages while streaming counts as activity.
+  useEffect(() => {
+    if (!isStreaming) return
+    lastActivityAtRef.current = Date.now()
+  }, [messages, isStreaming])
+
+  // Tick every 500ms while streaming (and for ~7s afterwards) so time-based
+  // UI can recompute: the quiet-indicator's "quiet for Xs" counter, and the
+  // progressive-collapse logic that folds just-finished tool chips into a
+  // group summary after a short grace period. Shuts off in fully-idle
+  // sessions to avoid wasteful re-renders.
+  useEffect(() => {
+    let stopAt = 0
+    if (isStreaming) {
+      stopAt = Infinity
+    } else {
+      // Keep ticking a little longer so chips that just flipped 'done' have
+      // a chance to age past COLLAPSE_GRACE_MS and fold cleanly.
+      stopAt = Date.now() + 7000
+    }
+    const id = setInterval(() => {
+      if (Date.now() > stopAt) {
+        clearInterval(id)
+        return
+      }
+      setActivityTick(n => (n + 1) & 0xffff)
+    }, 500)
+    return () => clearInterval(id)
+  }, [isStreaming])
 
   useEffect(() => {
     if (!workspaceId || !stateLoadedRef.current || isChatTileRuntimeStateDisposed(tileId)) return
@@ -2575,10 +2828,23 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     ?? { id: '', label: optionNoun === 'agent' ? 'No agent' : 'No model' }
   const currentMode = modeOptions.find(item => item.id === mode) ?? modeOptions[0] ?? EXTENSION_PROVIDER_MODE
   const contextWindowLimit = useMemo(() => getApproxContextWindowTokens(provider, model), [provider, model])
+  const systemOverheadTokens = useMemo(
+    () => getApproxSystemOverheadTokens(provider, model),
+    [provider, model],
+  )
+  // Set of attachment paths the model has actually loaded (via Read-style
+  // tools). Drives the confirmation tick on attachment chips — must stay
+  // authoritative: only paths demonstrably consumed by the model appear here.
+  const readAttachmentPaths = useMemo(() => collectModelReadPaths(messages), [messages])
   const estimatedContextTokens = useMemo(() => {
     const totalChars = messages.reduce((sum, message) => sum + estimateMessageChars(message), 0) + input.length
-    return Math.max(0, Math.round(totalChars / 4))
-  }, [messages, input])
+    const conversationTokens = Math.max(0, Math.round(totalChars / 4))
+    // Include the provider's baseline overhead (system prompt + tool schemas
+    // + injected reminders) so the indicator doesn't misleadingly report
+    // near-empty usage when the harness has already loaded tens of thousands
+    // of tokens before the first user turn.
+    return conversationTokens + systemOverheadTokens
+  }, [messages, input, systemOverheadTokens])
   const contextUsageRatio = contextWindowLimit > 0 ? Math.min(1, estimatedContextTokens / contextWindowLimit) : 0
   const contextUsagePercent = Math.max(1, Math.round(contextUsageRatio * 100))
 
@@ -2797,10 +3063,31 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     syncScrollToLatestVisibility(!atLatest)
   }, [isNearLatest, syncScrollToLatestVisibility])
 
-  // Auto-scroll only while the user is already following the latest messages.
+  // Tracks whether a block-note composer is currently active (open AND has
+  // non-empty text). While true, auto-scroll is suppressed so the viewport
+  // doesn't jump out from under the user while they're typing a note in
+  // place. New streamed tokens still land at the bottom of the scroll area,
+  // we just don't yank the scroll position to follow them.
+  const annotationComposerActiveRef = useRef(false)
+  const [_annotationComposerActive, setAnnotationComposerActiveState] = useState(false)
+  const setAnnotationComposerActive = useCallback((active: boolean) => {
+    annotationComposerActiveRef.current = active
+    setAnnotationComposerActiveState(active)
+    if (active) {
+      // Freezing the scroll position means auto-stick is no longer valid —
+      // if the user wants to jump back they can click the "scroll to latest"
+      // pill. This matches the behaviour when the user scrolls up manually.
+      stickToBottomRef.current = false
+      syncScrollToLatestVisibility(true)
+    }
+  }, [syncScrollToLatestVisibility])
+
+  // Auto-scroll only while the user is already following the latest messages
+  // AND there's no active note composer demanding stable scroll.
   useLayoutEffect(() => {
     const el = messagesRef.current
     if (!el) return
+    if (annotationComposerActiveRef.current) return
     if (!stickToBottomRef.current) {
       syncScrollToLatestVisibility(true)
       return
@@ -2808,6 +3095,122 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     el.scrollTop = el.scrollHeight
     syncScrollToLatestVisibility(false)
   }, [messages, syncScrollToLatestVisibility])
+
+  /**
+   * Updates or clears the note attached to a specific block. Passing `text === null`
+   * deletes the note. Notes are stored inline on the underlying record (message,
+   * tool block, or thinking block) so they persist with the conversation.
+   */
+  const updateBlockNote = useCallback((
+    target:
+      | { kind: 'message'; messageId: string }
+      | { kind: 'tool'; messageId: string; toolBlockId: string }
+      | { kind: 'thinking'; messageId: string; thinkingId: string },
+    text: string | null,
+  ) => {
+    const nextNote: BlockNote | null = text && text.trim().length > 0
+      ? { text: text.trim(), createdAt: Date.now() }
+      : null
+    setMessagesSafe(prev => prev.map(msg => {
+      if (msg.id !== target.messageId) return msg
+      if (target.kind === 'message') {
+        if (nextNote) {
+          const merged: BlockNote = msg.note
+            ? { ...msg.note, text: nextNote.text, updatedAt: Date.now() }
+            : nextNote
+          return { ...msg, note: merged }
+        }
+        const { note: _discard, ...rest } = msg
+        return rest
+      }
+      if (target.kind === 'tool') {
+        const blocks = msg.toolBlocks?.map(b => {
+          if (b.id !== target.toolBlockId) return b
+          if (nextNote) {
+            const merged: BlockNote = b.note
+              ? { ...b.note, text: nextNote.text, updatedAt: Date.now() }
+              : nextNote
+            return { ...b, note: merged }
+          }
+          const { note: _discard, ...rest } = b
+          return rest
+        })
+        return { ...msg, toolBlocks: blocks }
+      }
+      // thinking
+      const thinkingBlocks = msg.thinkingBlocks?.map(tb => {
+        if (tb.id !== target.thinkingId) return tb
+        if (nextNote) {
+          const merged: BlockNote = tb.note
+            ? { ...tb.note, text: nextNote.text, updatedAt: Date.now() }
+            : nextNote
+          return { ...tb, note: merged }
+        }
+        const { note: _discard, ...rest } = tb
+        return rest
+      })
+      return { ...msg, thinkingBlocks }
+    }))
+  }, [setMessagesSafe])
+
+  /**
+   * Collects every attached note from the conversation into a flat array,
+   * tagged with the block kind and source snippet so downstream analysis
+   * (or export) can surface them with context.
+   */
+  const collectAllNotes = useCallback((): Array<{
+    kind: 'message' | 'tool' | 'thinking'
+    messageId: string
+    blockId?: string
+    role?: string
+    context: string
+    note: BlockNote
+  }> => {
+    const out: Array<{ kind: 'message' | 'tool' | 'thinking'; messageId: string; blockId?: string; role?: string; context: string; note: BlockNote }> = []
+    for (const m of messages) {
+      if (m.note) {
+        const snippet = m.content.trim().slice(0, 200)
+        out.push({ kind: 'message', messageId: m.id, role: m.role, context: snippet, note: m.note })
+      }
+      for (const tb of m.toolBlocks ?? []) {
+        if (tb.note) {
+          const snippet = `${tb.name}: ${(tb.summary ?? tb.input ?? '').slice(0, 160)}`
+          out.push({ kind: 'tool', messageId: m.id, blockId: tb.id, context: snippet, note: tb.note })
+        }
+      }
+      for (const tk of m.thinkingBlocks ?? []) {
+        if (tk.note) {
+          const snippet = tk.content.slice(0, 200)
+          out.push({ kind: 'thinking', messageId: m.id, blockId: tk.id, context: snippet, note: tk.note })
+        }
+      }
+    }
+    return out
+  }, [messages])
+
+  /** Copies a Markdown-formatted export of all attached notes to the clipboard. */
+  const exportNotesToClipboard = useCallback(async () => {
+    const notes = collectAllNotes()
+    if (notes.length === 0) {
+      try { await navigator.clipboard.writeText('# Chat notes\n\n_No notes yet._') } catch { /* ignore */ }
+      return
+    }
+    const lines = ['# Chat notes', '']
+    for (const entry of notes) {
+      const header = entry.kind === 'message'
+        ? `## ${entry.role ?? 'message'}`
+        : entry.kind === 'tool'
+          ? '## tool call'
+          : '## thinking'
+      lines.push(header)
+      lines.push(`> ${entry.context.replace(/\n/g, ' ')}`)
+      lines.push('')
+      lines.push(entry.note.text)
+      lines.push('')
+    }
+    const payload = lines.join('\n')
+    try { await navigator.clipboard.writeText(payload) } catch { /* ignore */ }
+  }, [collectAllNotes])
 
   // Stream listener -- handles all rich event types from Claude Agent SDK
   useEffect(() => {
@@ -3099,8 +3502,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [])
 
   const handleTileDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
-    // During dragover, getData() is restricted — check types instead for internal drags
+    // Ignore our own internal drags (queued-turn reorder, etc.) — they
+    // advertise themselves via a custom mime type so we don't mistake the
+    // drag for a file drop and trigger the attachment overlay.
     const dt = e.dataTransfer
+    if (dt.types.includes('application/x-codesurf-queued-turn')) return
     const hasFiles = dt.types.includes('Files')
     const hasUri = dt.types.includes('text/uri-list')
     const hasPlain = dt.types.includes('text/plain')
@@ -3118,6 +3524,13 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [])
 
   const handleTileDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    // Bail out of file-attachment handling when this is an internal drag
+    // (queued-turn reorder). The inner handlers already did the work and
+    // the text/plain payload is a queue id, not a path.
+    if (e.dataTransfer.types.includes('application/x-codesurf-queued-turn')) {
+      setIsDropTarget(false)
+      return
+    }
     e.preventDefault()
     e.stopPropagation()
     setIsDropTarget(false)
@@ -3269,6 +3682,110 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
   }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, persistLatestState])
 
+  const logQueueEvent = useCallback((
+    type: 'enqueue' | 'dispatch' | 'delete' | 'complete' | 'clear' | 'reorder',
+    details?: { queueId?: string; content?: string; preview?: string; attachmentCount?: number; createdAt?: number; draggedId?: string; targetId?: string; mode?: string; newParentId?: string | null },
+  ) => {
+    try {
+      // Best-effort append to the queued-message event log. Tolerate two
+      // failure modes that shouldn't surface as uncaught rejections:
+      //   1) IPC API missing entirely (preload hasn't injected yet)
+      //   2) Handler not yet registered on the main process (early-boot race)
+      // The optional-chain handles (1); the .catch handles (2) and any
+      // transient IPC failure. These events are advisory — losing one is
+      // acceptable and must never bubble up as a promise rejection.
+      const result = (window.electron as any)?.canvas?.queuedMessages?.append?.({
+        type,
+        at: Date.now(),
+        workspaceId,
+        tileId,
+        ...(details ?? {}),
+      })
+      if (result && typeof result.catch === 'function') {
+        result.catch(() => { /* best-effort; swallow */ })
+      }
+    } catch { /* best effort */ }
+  }, [workspaceId, tileId])
+
+  const flushQueueStateNow = useCallback((nextQueue: QueuedChatTurn[]) => {
+    // Bypass the debounced persistLatestState so the tile-state JSON on disk
+    // has the very latest queue before any possible crash or restart.
+    const base = latestStateRef.current
+    if (!base) return
+    persistLatestState({ ...base, queuedTurns: nextQueue })
+  }, [persistLatestState])
+
+  // Reorder / re-parent a queued turn in response to a drag-drop gesture.
+  // Supports three drop modes relative to the target row:
+  //   'before' → sibling of target, inserted at the target's slot
+  //   'after'  → sibling of target, inserted just after target (+ its kids)
+  //   'into'   → nested under target as a child (flattened to one level)
+  // Children of the dragged item are orphaned to the top level when the
+  // dragged row moves — we intentionally keep the tree shallow (one level
+  // of nesting) so the queue stays legible at a glance.
+  const reorderQueuedTurn = useCallback((
+    draggedId: string,
+    targetId: string,
+    mode: 'before' | 'after' | 'into',
+  ) => {
+    if (draggedId === targetId) return
+    const prev = queuedTurns
+    const draggedIdx = prev.findIndex(t => t.id === draggedId)
+    const targetIdx = prev.findIndex(t => t.id === targetId)
+    if (draggedIdx < 0 || targetIdx < 0) return
+    const dragged = prev[draggedIdx]
+
+    // Orphan any children of dragged (they become top-level), and remove
+    // dragged itself so we can re-insert it at the new location.
+    const orphaned = prev.map(t =>
+      t.parentId === draggedId ? { ...t, parentId: null } : t
+    )
+    const without = orphaned.filter(t => t.id !== draggedId)
+    const newTargetIdx = without.findIndex(t => t.id === targetId)
+    if (newTargetIdx < 0) return
+    const target = without[newTargetIdx]
+
+    let newParentId: string | null = null
+    let insertIdx = newTargetIdx
+
+    if (mode === 'into') {
+      // Only nest one level deep. If the target is already a child, treat
+      // the drop as a sibling 'after' target.
+      if (target.parentId) {
+        newParentId = target.parentId
+        insertIdx = newTargetIdx + 1
+      } else {
+        newParentId = target.id
+        const childCount = without.filter(t => t.parentId === target.id).length
+        insertIdx = newTargetIdx + 1 + childCount
+      }
+    } else if (mode === 'before') {
+      newParentId = target.parentId ?? null
+      insertIdx = newTargetIdx
+    } else {
+      // 'after'
+      newParentId = target.parentId ?? null
+      if (!target.parentId) {
+        // Insert after target AND its existing children so we don't split
+        // the visual group.
+        const childCount = without.filter(t => t.parentId === target.id).length
+        insertIdx = newTargetIdx + 1 + childCount
+      } else {
+        insertIdx = newTargetIdx + 1
+      }
+    }
+
+    const nextDragged: QueuedChatTurn = { ...dragged, parentId: newParentId }
+    const result = [
+      ...without.slice(0, insertIdx),
+      nextDragged,
+      ...without.slice(insertIdx),
+    ]
+    setQueuedTurns(result)
+    flushQueueStateNow(result)
+    logQueueEvent('reorder', { draggedId, targetId, mode, newParentId })
+  }, [queuedTurns, flushQueueStateNow, logQueueEvent])
+
   const queueCurrentDraft = useCallback(() => {
     const messageContent = buildOutgoingMessageContent(input, attachments)
     if (!messageContent) return false
@@ -3282,7 +3799,16 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
 
     setPreserveSessionSummary(false)
-    setQueuedTurns(prev => [...prev, queuedTurn])
+    const nextQueue = [...queuedTurns, queuedTurn]
+    setQueuedTurns(nextQueue)
+    flushQueueStateNow(nextQueue)
+    logQueueEvent('enqueue', {
+      queueId: queuedTurn.id,
+      content: queuedTurn.content,
+      preview: queuedTurn.preview,
+      attachmentCount: queuedTurn.attachmentCount,
+      createdAt: queuedTurn.createdAt,
+    })
     setInput('')
     setAttachments([])
     setAcType(null)
@@ -3290,7 +3816,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     focusComposer()
     return true
-  }, [input, attachments, focusComposer])
+  }, [input, attachments, focusComposer, queuedTurns, flushQueueStateNow, logQueueEvent])
 
   const sendMessage = useCallback(async () => {
     if (isStreaming) {
@@ -3301,6 +3827,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const messageContent = buildOutgoingMessageContent(input, attachments)
     if (!messageContent) return
 
+    // Local-only slash commands — handled client-side, never dispatched to
+    // the model. `/export-notes` copies every attached BlockNote (message,
+    // tool, thinking) into the clipboard as a Markdown report.
+    if (messageContent.trim() === '/export-notes') {
+      setInput('')
+      setAcType(null)
+      setAcQuery('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      await exportNotesToClipboard()
+      return
+    }
+
     setInput('')
     setAcType(null)
     setAcQuery('')
@@ -3308,7 +3846,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     await dispatchMessageContent(messageContent)
-  }, [isStreaming, input, attachments, queueCurrentDraft, dispatchMessageContent])
+  }, [isStreaming, input, attachments, queueCurrentDraft, dispatchMessageContent, exportNotesToClipboard])
 
   const stopStreaming = useCallback(() => {
     window.electron?.chat?.stop?.(tileId)
@@ -3323,13 +3861,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setMessagesSafe([])
     setAttachments([])
     setQueuedTurns([])
+    flushQueueStateNow([])
+    logQueueEvent('clear')
     setPreserveSessionSummary(false)
     setSessionId(null)
     setJobId(null)
     setJobSequence(0)
     lastJobSequenceRef.current = 0
     window.electron?.chat?.clearSession?.(tileId)
-  }, [isStreaming, tileId])
+  }, [isStreaming, tileId, flushQueueStateNow, logQueueEvent])
 
   useEffect(() => {
     if (isStreaming || queuedTurns.length === 0 || isFlushingQueuedTurnRef.current) return
@@ -3339,16 +3879,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
     void (async () => {
       const sent = await dispatchMessageContent(nextTurn.content)
-      if (sent) {
-        setQueuedTurns(prev => prev.filter(turn => turn.id !== nextTurn.id))
-      } else {
-        setQueuedTurns(prev => prev.filter(turn => turn.id !== nextTurn.id))
+      const remaining = queuedTurns.filter(turn => turn.id !== nextTurn.id)
+      setQueuedTurns(remaining)
+      flushQueueStateNow(remaining)
+      logQueueEvent('dispatch', { queueId: nextTurn.id })
+      if (!sent) {
         setInput(current => current.trim() ? current : nextTurn.content)
       }
     })().finally(() => {
       isFlushingQueuedTurnRef.current = false
     })
-  }, [isStreaming, queuedTurns, dispatchMessageContent])
+  }, [isStreaming, queuedTurns, dispatchMessageContent, flushQueueStateNow, logQueueEvent])
 
   const selectAcItem = useCallback((item: AutocompleteItem) => {
     const ta = textareaRef.current
@@ -3526,11 +4067,237 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             </div>
           )}
  
-          {renderedMessages.map(msg => {
-            const visibleToolBlocks = msg.toolBlocks?.filter(shouldRenderToolBlock) ?? []
-            const hasVisibleToolBlocks = visibleToolBlocks.length > 0
-            return (
-              <div key={msg.id} style={{
+          {(() => {
+            // Walk the message list and group *consecutive* chip-only
+            // assistant messages (thinking + tool calls, no prose text)
+            // into a single visual cluster so their chips all live in one
+            // wrapping row. The Claude Agent SDK emits a separate assistant
+            // message per tool-round, so without this grouping each round
+            // would render on its own line and waste horizontal space.
+            //
+            // Additionally, once a cluster grows past a threshold, older
+            // completed tool chips progressively fold into a single "Called
+            // N tools" summary — see applyLiveCollapse below. A grace period
+            // keeps each freshly-finished chip readable for a few seconds
+            // before it tucks into the summary, so the user can click it
+            // while it's still fresh.
+            const nodes: JSX.Element[] = []
+            // Read activityTick so the 500ms tick re-runs this memoless
+            // builder and the time-based collapse settles without new
+            // message mutations.
+            void activityTick
+
+            // Progressive-collapse tuning. Deliberately conservative so
+            // short focused turns don't collapse at all.
+            const COLLAPSE_MIN_ITEMS = 5   // cluster must have ≥ this to collapse
+            const COLLAPSE_TAIL_SIZE = 2   // always keep at least this many expanded
+            const COLLAPSE_GRACE_MS = 5000 // don't fold a chip until this long after it completes
+
+            // Typed item used to represent one chip slot between extraction
+            // and final render. Carries enough data for both live-collapse
+            // decisions and the React render step.
+            type ChipItem =
+              | { kind: 'thinking'; key: string; block: ThinkingBlock }
+              | { kind: 'tool-single'; key: string; block: ToolBlock }
+              | { kind: 'tool-group-same'; key: string; blocks: ToolBlock[] }
+              | { kind: 'tool-group-mixed'; key: string; blocks: ToolBlock[] }
+
+            let clusterItems: ChipItem[] = []
+            let clusterStartKey: string | null = null
+            let clusterMsgIds: string[] = []
+
+            // Extract chip items (thinking + tool groups) from a single
+            // message's contentBlocks. Text blocks are ignored — callers
+            // only invoke this on chip-only messages.
+            const extractChipsFromMessage = (msg: ChatMessage): ChipItem[] => {
+              const items: ChipItem[] = []
+              const blocks = msg.contentBlocks ?? []
+              let i = 0
+              while (i < blocks.length) {
+                const block = blocks[i]
+                if (block.type === 'thinking') {
+                  const tb = msg.thinkingBlocks?.find(t => t.id === block.thinkingId)
+                  if (tb) items.push({
+                    kind: 'thinking',
+                    key: `${msg.id}-think-${block.thinkingId}`,
+                    block: tb,
+                  })
+                  i++; continue
+                }
+                if (block.type === 'tool') {
+                  const rawTools: ToolBlock[] = []
+                  while (i < blocks.length) {
+                    const cb = blocks[i]
+                    if (cb.type !== 'tool') break
+                    const tb = msg.toolBlocks?.find(t => t.id === cb.toolId)
+                    if (tb && shouldRenderToolBlock(tb)) rawTools.push(tb)
+                    i++
+                  }
+                  const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length))
+                  const collapsibleIds = new Set(collapsibleTools.map(t => t.id))
+                  const uniqueNames = new Set(collapsibleTools.map(t => t.name))
+                  const useSameNameGroup = collapsibleTools.length >= 3 && uniqueNames.size === 1
+                  const useMixedGroup = collapsibleTools.length >= 3 && uniqueNames.size > 1
+                  let groupEmitted = false
+                  for (const tb of rawTools) {
+                    if (collapsibleIds.has(tb.id) && (useSameNameGroup || useMixedGroup)) {
+                      if (!groupEmitted) {
+                        groupEmitted = true
+                        if (useSameNameGroup) items.push({
+                          kind: 'tool-group-same',
+                          key: `${msg.id}-grp-${tb.id}`,
+                          blocks: collapsibleTools,
+                        })
+                        else items.push({
+                          kind: 'tool-group-mixed',
+                          key: `${msg.id}-mgrp-${tb.id}`,
+                          blocks: collapsibleTools,
+                        })
+                      }
+                      continue
+                    }
+                    items.push({
+                      kind: 'tool-single',
+                      key: `${msg.id}-${tb.id}`,
+                      block: tb,
+                    })
+                  }
+                  continue
+                }
+                i++
+              }
+              return items
+            }
+
+            const renderChipItem = (item: ChipItem): JSX.Element => {
+              if (item.kind === 'thinking') {
+                return <ThinkingBlockView key={item.key} thinking={item.block} />
+              }
+              if (item.kind === 'tool-single') {
+                return <ToolBlockView key={item.key} block={item.block} />
+              }
+              if (item.kind === 'tool-group-same') {
+                return <CollapsedToolGroup key={item.key} name={item.blocks[0]?.name ?? ''} blocks={item.blocks} />
+              }
+              return <MixedToolGroup key={item.key} blocks={item.blocks} />
+            }
+
+            // Progressive collapse: walk the cluster's item list, figure out
+            // how much of the tail should stay expanded (all items that are
+            // running, or completed within the grace window, plus at least
+            // COLLAPSE_TAIL_SIZE items), and fold everything before that into
+            // a single synthetic "Called N tools" summary chip. Does nothing
+            // when the cluster is short, or when the foldable prefix has
+            // fewer than 2 items (a 1-item summary is pointless noise).
+            const applyLiveCollapse = (items: ChipItem[]): ChipItem[] => {
+              if (items.length < COLLAPSE_MIN_ITEMS) return items
+              const now = Date.now()
+              const isEligibleToFold = (item: ChipItem): boolean => {
+                if (item.kind === 'thinking') return item.block.done
+                if (item.kind === 'tool-single') {
+                  if (item.block.status !== 'done') return false
+                  const at = toolCompletedAtRef.current.get(item.block.id) ?? now
+                  return now - at >= COLLAPSE_GRACE_MS
+                }
+                return true // already-grouped chips are always foldable
+              }
+              // Start by keeping the last COLLAPSE_TAIL_SIZE items, then
+              // extend the tail backward across any non-eligible items.
+              let cut = Math.max(items.length - COLLAPSE_TAIL_SIZE, 0)
+              while (cut > 0 && !isEligibleToFold(items[cut - 1])) cut -= 1
+              const head = items.slice(0, cut)
+              const tail = items.slice(cut)
+              if (head.length < 2) return items
+              // Flatten head items into a ToolBlock[] for the summary.
+              // Thinking chips don't contribute to the tool count but we
+              // still fold them away (their timing is already summarized).
+              const folded: ToolBlock[] = []
+              for (const item of head) {
+                if (item.kind === 'tool-single') folded.push(item.block)
+                else if (item.kind === 'tool-group-same' || item.kind === 'tool-group-mixed') {
+                  folded.push(...item.blocks)
+                }
+              }
+              if (folded.length === 0) return items
+              const summary: ChipItem = {
+                kind: 'tool-group-mixed',
+                key: `live-collapse-${head[0].key}`,
+                blocks: folded,
+              }
+              return [summary, ...tail]
+            }
+
+            // A message qualifies for clustering only when it is an assistant
+            // turn that is pure chip content — any prose text (content or a
+            // 'text' contentBlock) breaks the cluster so prose lines keep
+            // their normal bubble rendering.
+            const isChipOnly = (msg: ChatMessage): boolean => {
+              if (msg.role !== 'assistant') return false
+              const blocks = msg.contentBlocks ?? []
+              if (blocks.length === 0) return false
+              if (blocks.some(b => b.type === 'text')) return false
+              if ((msg.content ?? '').trim().length > 0) return false
+              return blocks.some(b => b.type === 'tool' || b.type === 'thinking')
+            }
+
+            const flushCluster = () => {
+              if (clusterItems.length === 0) return
+              const lastId = clusterMsgIds[clusterMsgIds.length - 1]
+              const lastMsg = renderedMessages.find(m => m.id === lastId)
+              const clusterId = clusterStartKey ?? 'cluster'
+              const finalItems = applyLiveCollapse(clusterItems)
+              nodes.push(
+                <BlockNoteAffordance
+                  key={`cluster-${clusterId}`}
+                  note={lastMsg?.note}
+                  side="right"
+                  onComposerActiveChange={setAnnotationComposerActive}
+                  onUpdateNote={(text) => updateBlockNote({ kind: 'message', messageId: lastId }, text)}
+                >
+                  <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: 10,
+                    alignItems: 'flex-start',
+                    alignContent: 'flex-start',
+                    width: '100%',
+                    minWidth: 0,
+                  }}>
+                    {finalItems.map(renderChipItem)}
+                  </div>
+                </BlockNoteAffordance>
+              )
+              clusterItems = []
+              clusterStartKey = null
+              clusterMsgIds = []
+            }
+
+            for (const msg of renderedMessages) {
+              if (isChipOnly(msg)) {
+                const items = extractChipsFromMessage(msg)
+                if (clusterItems.length === 0) clusterStartKey = msg.id
+                clusterItems.push(...items)
+                clusterMsgIds.push(msg.id)
+                continue
+              }
+              flushCluster()
+              const visibleToolBlocks = msg.toolBlocks?.filter(shouldRenderToolBlock) ?? []
+              const hasVisibleToolBlocks = visibleToolBlocks.length > 0
+              // Smart-side: user bubbles are right-aligned, so the annotation
+              // icon sits on their LEFT where the gutter is; for assistant /
+              // tool / thinking content that's left-aligned, the icon sits on
+              // the RIGHT. This gives symmetrical "note in the empty space"
+              // behaviour without the user having to choose a side.
+              const annotationSide: 'left' | 'right' = msg.role === 'user' ? 'left' : 'right'
+              nodes.push(
+              <BlockNoteAffordance
+                key={msg.id}
+                note={msg.note}
+                side={annotationSide}
+                onComposerActiveChange={setAnnotationComposerActive}
+                onUpdateNote={(text) => updateBlockNote({ kind: 'message', messageId: msg.id }, text)}
+              >
+              <div style={{
                 display: 'flex', flexDirection: 'column',
                 alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
                 width: msg.role === 'user' ? 'auto' : '100%',
@@ -3558,17 +4325,43 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       const elements: JSX.Element[] = []
                       const blocks = msg.contentBlocks!
                       let i = 0
+                      // Accumulator for a contiguous run of "chip-row" content
+                      // (thinking + tool blocks). Text blocks break the run and
+                      // cause the accumulator to flush into a single flex
+                      // container so thinking chips sit inline with tool chips
+                      // on the same wrapping row.
+                      let chipRow: JSX.Element[] = []
+                      let chipRowStartIdx = i
+                      const flushChipRow = () => {
+                        if (chipRow.length === 0) return
+                        elements.push(
+                          <div key={`chiprow-${chipRowStartIdx}`} style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: 10,
+                            alignItems: 'flex-start',
+                            alignContent: 'flex-start',
+                            width: '100%',
+                            minWidth: 0,
+                          }}>
+                            {chipRow}
+                          </div>
+                        )
+                        chipRow = []
+                      }
                       while (i < blocks.length) {
                         const block = blocks[i]
                         if (block.type === 'thinking') {
+                          if (chipRow.length === 0) chipRowStartIdx = i
                           const tb = msg.thinkingBlocks?.find(t => t.id === block.thinkingId)
                           if (tb) {
-                            elements.push(<ThinkingBlockView key={`think-${block.thinkingId}`} thinking={tb} />)
+                            chipRow.push(<ThinkingBlockView key={`think-${block.thinkingId}`} thinking={tb} />)
                           }
                           i++
                           continue
                         }
                         if (block.type === 'tool') {
+                          if (chipRow.length === 0) chipRowStartIdx = i
                           // Collect consecutive tool blocks, then sub-group same-name completed ones
                           const rawTools: ToolBlock[] = []
                           while (i < blocks.length) {
@@ -3578,43 +4371,37 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                             if (tb && shouldRenderToolBlock(tb)) rawTools.push(tb)
                             i++
                           }
-                          // Group same-name collapsible tools together, even when not
-                          // consecutive. Groups render at the first-occurrence position;
-                          // non-collapsible tools (running / file-changes) stay inline so
-                          // their narrative position isn't lost.
-                          const toolGroup: JSX.Element[] = []
-                          const collapsibleByName = new Map<string, ToolBlock[]>()
+                          // Grouping rules:
+                          //   - 3+ collapsible tool blocks all with the same name → "Read x6" chip.
+                          //   - 3+ collapsible tool blocks with mixed names → "Called N tools" chip.
+                          //   - Otherwise each chip renders inline.
+                          //   - Non-collapsible tools (running / file-change) always stay inline.
+                          const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length))
+                          const collapsibleIds = new Set(collapsibleTools.map(t => t.id))
+                          const uniqueNames = new Set(collapsibleTools.map(t => t.name))
+                          const useSameNameGroup = collapsibleTools.length >= 3 && uniqueNames.size === 1
+                          const useMixedGroup = collapsibleTools.length >= 3 && uniqueNames.size > 1
+                          let groupEmitted = false
                           for (const tb of rawTools) {
-                            if (tb.status === 'done' && !(tb.fileChanges?.length)) {
-                              const bucket = collapsibleByName.get(tb.name)
-                              if (bucket) bucket.push(tb)
-                              else collapsibleByName.set(tb.name, [tb])
-                            }
-                          }
-                          const emittedNames = new Set<string>()
-                          for (const tb of rawTools) {
-                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
-                            if (canCollapse) {
-                              if (emittedNames.has(tb.name)) continue
-                              emittedNames.add(tb.name)
-                              const bucket = collapsibleByName.get(tb.name) ?? [tb]
-                              if (bucket.length >= 3) {
-                                toolGroup.push(<CollapsedToolGroup key={`grp-${bucket[0].id}`} name={tb.name} blocks={bucket} />)
-                              } else {
-                                bucket.forEach(b => toolGroup.push(<ToolBlockView key={b.id} block={b} />))
+                            if (collapsibleIds.has(tb.id) && (useSameNameGroup || useMixedGroup)) {
+                              if (!groupEmitted) {
+                                groupEmitted = true
+                                if (useSameNameGroup) {
+                                  chipRow.push(<CollapsedToolGroup key={`grp-${tb.id}`} name={tb.name} blocks={collapsibleTools} />)
+                                } else {
+                                  chipRow.push(<MixedToolGroup key={`mgrp-${tb.id}`} blocks={collapsibleTools} />)
+                                }
                               }
-                            } else {
-                              toolGroup.push(<ToolBlockView key={tb.id} block={tb} />)
+                              continue
                             }
+                            chipRow.push(<ToolBlockView key={tb.id} block={tb} />)
                           }
-                          if (toolGroup.length > 0) {
-                            elements.push(
-                              <div key={`tools-${i}`} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
-                                {toolGroup}
-                              </div>
-                            )
-                          }
-                        } else {
+                          continue
+                        }
+                        {
+                          // Any non-chip block (text) flushes the pending chip row
+                          // first, then renders itself at block level.
+                          flushChipRow()
                           const isLastBlock = i === blocks.length - 1
                           elements.push(
                             <div key={`text-${i}`} style={{
@@ -3627,12 +4414,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                               color: theme.chat.text, position: 'relative',
                               width: '100%', minWidth: 0, overflow: 'hidden',
                             }}>
-                              <ChatMessageContent text={block.text} isStreaming={msg.isStreaming && isLastBlock} isUser={msg.role === 'user'} />
+                              <ChatMessageContent text={block.text} isStreaming={msg.isStreaming && isLastBlock} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
                             </div>
                           )
                           i++
                         }
                       }
+                      // Flush any trailing chip row (e.g. stream ended on a
+                      // thinking or tool block without a subsequent text block).
+                      flushChipRow()
                       return elements
                     })()}
                   </>
@@ -3643,29 +4433,25 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
                         {(() => {
                           const out: JSX.Element[] = []
-                          const collapsibleByName = new Map<string, ToolBlock[]>()
+                          const collapsibleTools = visibleToolBlocks.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length))
+                          const collapsibleIds = new Set(collapsibleTools.map(t => t.id))
+                          const uniqueNames = new Set(collapsibleTools.map(t => t.name))
+                          const useSameNameGroup = collapsibleTools.length >= 3 && uniqueNames.size === 1
+                          const useMixedGroup = collapsibleTools.length >= 3 && uniqueNames.size > 1
+                          let groupEmitted = false
                           for (const tb of visibleToolBlocks) {
-                            if (tb.status === 'done' && !(tb.fileChanges?.length)) {
-                              const bucket = collapsibleByName.get(tb.name)
-                              if (bucket) bucket.push(tb)
-                              else collapsibleByName.set(tb.name, [tb])
-                            }
-                          }
-                          const emittedNames = new Set<string>()
-                          for (const tb of visibleToolBlocks) {
-                            const canCollapse = tb.status === 'done' && !(tb.fileChanges?.length)
-                            if (canCollapse) {
-                              if (emittedNames.has(tb.name)) continue
-                              emittedNames.add(tb.name)
-                              const bucket = collapsibleByName.get(tb.name) ?? [tb]
-                              if (bucket.length >= 3) {
-                                out.push(<CollapsedToolGroup key={`grp-${bucket[0].id}`} name={tb.name} blocks={bucket} />)
-                              } else {
-                                bucket.forEach(b => out.push(<ToolBlockView key={b.id} block={b} />))
+                            if (collapsibleIds.has(tb.id) && (useSameNameGroup || useMixedGroup)) {
+                              if (!groupEmitted) {
+                                groupEmitted = true
+                                if (useSameNameGroup) {
+                                  out.push(<CollapsedToolGroup key={`grp-${tb.id}`} name={tb.name} blocks={collapsibleTools} />)
+                                } else {
+                                  out.push(<MixedToolGroup key={`mgrp-${tb.id}`} blocks={collapsibleTools} />)
+                                }
                               }
-                            } else {
-                              out.push(<ToolBlockView key={tb.id} block={tb} />)
+                              continue
                             }
+                            out.push(<ToolBlockView key={tb.id} block={tb} />)
                           }
                           return out
                         })()}
@@ -3682,7 +4468,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                         color: theme.chat.text, position: 'relative',
                         width: '100%', minWidth: 0, overflow: 'hidden',
                       }}>
-                        <ChatMessageContent text={msg.content} isStreaming={msg.isStreaming} isUser={msg.role === 'user'} />
+                        <ChatMessageContent text={msg.content} isStreaming={msg.isStreaming} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
                         {msg.isStreaming && msg.content.length === 0 && !hasVisibleToolBlocks && (
                           <WorkingDots />
                         )}
@@ -3694,8 +4480,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 {!msg.isStreaming && msg.role === 'assistant' && msg.cost != null && (
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 8,
-                    fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
+                    fontSize: monoSize - 1, color: theme.chat.muted, fontFamily: fontMono,
                     padding: '0 4px',
+                    marginTop: -5,
                   }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <DollarSign size={9} /> ${msg.cost.toFixed(4)}
@@ -3709,15 +4496,21 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 {/* User message time footer */}
                 {!msg.isStreaming && msg.role === 'user' && (
                   <div style={{
-                    fontSize: monoSize - 3, color: theme.chat.muted, fontFamily: fontMono,
+                    fontSize: monoSize - 1, color: theme.chat.muted, fontFamily: fontMono,
                     padding: '0 4px', textAlign: 'right',
+                    marginTop: -5,
                   }}>
                     {relativeTime(msg.timestamp)}
                   </div>
                 )}
 
               </div>
-          )})}
+              </BlockNoteAffordance>
+              )
+            }
+            flushCluster()
+            return nodes
+          })()}
         </div>
       </div>
 
@@ -3827,7 +4620,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           </div>
         )}
 
-        {queuedTurns.length > 0 && (
+        {queuedTurns.length > 0 && (() => {
+          // Count crash/error-looking items once per render so the summary
+          // row can call them out in red — urgent rows are rendered with a
+          // red left-bar when expanded, but when collapsed the only tell
+          // is the "N errors" suffix in the summary row.
+          const urgentCount = queuedTurns.filter(t => isUrgentQueuedContent(t.content)).length
+          const showCollapsed = queueCollapsed && queuedTurns.length >= 3
+          return (
           <div style={{
             flexShrink: 0,
             // Match the "changes" drawer's indent + tucks the bottom edge under
@@ -3839,46 +4639,258 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             borderTop: latestChangeSummary ? 'none' : `1px solid ${theme.chat.divider}`,
             borderBottom: 'none',
             borderRadius: latestChangeSummary ? 0 : '14px 14px 0 0',
-            background: theme.surface.panelMuted,
+            // Collapsed summary row uses the darkest chat surface so it reads
+            // as a compacted tray tucked behind the composer; expanded uses
+            // the lighter muted surface so individual rows remain legible.
+            background: showCollapsed ? theme.chat.background : theme.surface.panelMuted,
             boxShadow: theme.shadow.panel,
             overflow: 'hidden',
             position: 'relative',
             zIndex: 0,
-            paddingBottom: 12,
+            paddingBottom: showCollapsed ? 0 : 12,
           }}>
-            {queuedTurns.map((turn, index) => (
+            {/* Header / summary row. When collapsed it's the ONLY visible
+                row and clicking anywhere on it expands. When expanded it
+                becomes a compact toggle at the top so the user can tuck the
+                queue back away. */}
+            {queuedTurns.length >= 3 && (
+              <button
+                type="button"
+                onClick={() => setQueueCollapsed(v => !v)}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: showCollapsed ? '6px 14px' : '6px 14px',
+                  border: 'none',
+                  borderBottom: showCollapsed ? 'none' : `1px solid ${theme.chat.divider}`,
+                  background: 'transparent',
+                  color: theme.chat.textSecondary,
+                  cursor: 'pointer',
+                  fontFamily: fontSans,
+                  // Pin text to 11px regardless of the user's chat font —
+                  // this is UI chrome, not conversation content, so it should
+                  // match the composer toolbar pills rather than message body.
+                  fontSize: 11,
+                  // Tight line-height so the text's visual centre lines up
+                  // with the 14px icons on the same row (avoids the baseline
+                  // hang we had at 1.35).
+                  lineHeight: 1,
+                  textAlign: 'left',
+                  ...NON_SELECTABLE_UI_STYLE,
+                }}
+                title={showCollapsed ? 'Expand queued messages' : 'Collapse queued messages'}
+              >
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 14,
+                  height: 14,
+                  color: theme.chat.muted,
+                  flexShrink: 0,
+                }}>
+                  {showCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                </span>
+                <span style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 14,
+                  height: 14,
+                  color: urgentCount > 0 ? theme.status.danger : theme.chat.muted,
+                  flexShrink: 0,
+                }}>
+                  {urgentCount > 0 ? <AlertTriangle size={12} /> : <MessageSquare size={12} />}
+                </span>
+                <span style={{
+                  flex: 1, minWidth: 0,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  lineHeight: 1,
+                }}>
+                  <span style={{ fontWeight: 600 }}>
+                    {queuedTurns.length} queued {queuedTurns.length === 1 ? 'message' : 'messages'}
+                  </span>
+                  {urgentCount > 0 && (
+                    <>
+                      <span style={{ color: theme.chat.muted }}>, </span>
+                      <span style={{ color: theme.status.danger, fontWeight: 600 }}>
+                        {urgentCount} {urgentCount === 1 ? 'error' : 'errors'}
+                      </span>
+                    </>
+                  )}
+                </span>
+              </button>
+            )}
+            {!showCollapsed && queuedTurns.map((turn, index) => {
+              const depth = turn.parentId ? 1 : 0
+              const isDraggingThis = draggingTurnId === turn.id
+              const dropHere = dragOverTurn?.id === turn.id ? dragOverTurn.mode : null
+              // Flag pasted error/warning/stack-trace dumps so the row can
+              // render with a red tint — makes it obvious at a glance that
+              // this queued turn is a crash report rather than a normal prompt.
+              const isUrgent = isUrgentQueuedContent(turn.content)
+              return (
               <div
                 key={turn.id}
+                onDragOver={(ev) => {
+                  // Only accept our own internal queue-turn drags. The
+                  // custom mime type is set in onDragStart below.
+                  if (!ev.dataTransfer.types.includes('application/x-codesurf-queued-turn')) return
+                  if (draggingTurnId === turn.id) return
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  ev.dataTransfer.dropEffect = 'move'
+                  const rect = ev.currentTarget.getBoundingClientRect()
+                  const y = ev.clientY - rect.top
+                  const h = rect.height
+                  // Zone thresholds: top quarter → before, middle half → into,
+                  // bottom quarter → after. Child rows can't be nested further,
+                  // so dropping onto a child collapses to sibling mode.
+                  let mode: 'before' | 'after' | 'into'
+                  if (y < h * 0.25) mode = 'before'
+                  else if (y > h * 0.75) mode = 'after'
+                  else mode = turn.parentId ? 'after' : 'into'
+                  if (dragOverTurn?.id !== turn.id || dragOverTurn.mode !== mode) {
+                    setDragOverTurn({ id: turn.id, mode })
+                  }
+                }}
+                onDragLeave={(ev) => {
+                  // Only clear if the pointer actually left this row (not
+                  // just moved to a child element).
+                  const related = ev.relatedTarget as Node | null
+                  if (related && ev.currentTarget.contains(related)) return
+                  if (dragOverTurn?.id === turn.id) setDragOverTurn(null)
+                }}
+                onDrop={(ev) => {
+                  // Source-of-truth is the dataTransfer payload plus the
+                  // row's own id (from closure) and the cursor position —
+                  // NOT React state. Some browsers fire a dragleave between
+                  // the last dragover and drop, which would clear the
+                  // dragOverTurn state and leave us unable to reorder. The
+                  // data-transfer + geometry approach is immune to that.
+                  const draggedId = ev.dataTransfer.getData('application/x-codesurf-queued-turn')
+                    || ev.dataTransfer.getData('text/plain')
+                  if (!draggedId || draggedId === turn.id) return
+                  ev.preventDefault()
+                  ev.stopPropagation()
+                  const rect = ev.currentTarget.getBoundingClientRect()
+                  const y = ev.clientY - rect.top
+                  const h = rect.height
+                  let mode: 'before' | 'after' | 'into'
+                  if (y < h * 0.25) mode = 'before'
+                  else if (y > h * 0.75) mode = 'after'
+                  else mode = turn.parentId ? 'after' : 'into'
+                  reorderQueuedTurn(draggedId, turn.id, mode)
+                  setDragOverTurn(null)
+                  setDraggingTurnId(null)
+                }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: 12,
                   padding: '6px 14px',
+                  paddingLeft: 14 + depth * 22,
                   borderTop: index > 0 ? `1px solid ${theme.chat.divider}` : undefined,
+                  background: dropHere === 'into'
+                    ? theme.surface.hover
+                    : (isDraggingThis
+                      ? theme.surface.selection
+                      // Urgent rows get a soft red tint so a pasted crash/error
+                      // log stands out without drowning the rest of the queue.
+                      : (isUrgent ? 'rgba(220, 60, 60, 0.14)' : 'transparent')),
+                  // Top/bottom indicator lines for before/after drop zones.
+                  // Urgent rows additionally get a left accent bar in danger
+                  // color; if a drop indicator is active, it takes precedence.
+                  boxShadow: dropHere === 'before'
+                    ? `inset 0 2px 0 0 ${theme.accent.base}`
+                    : dropHere === 'after'
+                      ? `inset 0 -2px 0 0 ${theme.accent.base}`
+                      : (isUrgent ? `inset 3px 0 0 0 ${theme.status.danger}` : undefined),
+                  opacity: isDraggingThis ? 0.5 : 1,
+                  transition: 'background 0.12s, opacity 0.12s',
+                  position: 'relative',
                 }}
               >
+                {/* Drag handle — native HTML5 DnD is initiated here; setting
+                    draggable on the row itself would steal text selection.
+                    Hit area is deliberately generous (24×24) with the grip
+                    icon visually centered, so users don't have to aim at
+                    the 14px glyph precisely. */}
+                <div
+                  draggable
+                  onDragStart={(ev) => {
+                    ev.stopPropagation()
+                    ev.dataTransfer.effectAllowed = 'move'
+                    // Custom mime type marks this as an internal queue-turn
+                    // drag so tile-level file-drop handlers can ignore it.
+                    // Keep text/plain for backwards compat and because some
+                    // drop targets only read text/plain.
+                    try {
+                      ev.dataTransfer.setData('application/x-codesurf-queued-turn', turn.id)
+                    } catch { /* older browsers reject custom types silently */ }
+                    ev.dataTransfer.setData('text/plain', turn.id)
+                    setDraggingTurnId(turn.id)
+                  }}
+                  onDragEnd={() => {
+                    setDraggingTurnId(null)
+                    setDragOverTurn(null)
+                  }}
+                  title="Drag to reorder — drop on a row to nest as a sub-item"
+                  style={{
+                    width: 24,
+                    height: 24,
+                    marginLeft: -4,
+                    marginRight: -4,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: theme.chat.muted,
+                    cursor: 'grab',
+                    flexShrink: 0,
+                    opacity: 0.6,
+                    borderRadius: 4,
+                    ...NON_SELECTABLE_UI_STYLE,
+                  }}
+                  onMouseEnter={(ev) => {
+                    ev.currentTarget.style.opacity = '1'
+                    ev.currentTarget.style.background = theme.surface.hover
+                  }}
+                  onMouseLeave={(ev) => {
+                    ev.currentTarget.style.opacity = '0.6'
+                    ev.currentTarget.style.background = 'transparent'
+                  }}
+                >
+                  <GripVertical size={14} />
+                </div>
                 <div style={{
                   width: 18,
                   height: 18,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: theme.chat.muted,
+                  color: isUrgent ? theme.status.danger : theme.chat.muted,
                   flexShrink: 0,
                   ...NON_SELECTABLE_UI_STYLE,
                 }}>
-                  <MessageSquare size={14} />
+                  {isUrgent ? <AlertTriangle size={14} /> : <MessageSquare size={14} />}
                 </div>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{
-                    color: theme.chat.textSecondary,
-                    fontSize: Math.max(13, fontSize + 1),
-                    fontFamily: fontSans,
-                    lineHeight: 1.35,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}>
+                  <div
+                    title={isUrgent ? 'This queued message looks like a pasted error/crash log' : undefined}
+                    style={{
+                      color: isUrgent ? theme.status.danger : theme.chat.textSecondary,
+                      fontWeight: isUrgent ? 600 : undefined,
+                      fontSize: Math.max(12, fontSize),
+                      fontFamily: fontSans,
+                      lineHeight: 1.35,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
                     {turn.preview}
                   </div>
                 </div>
@@ -3886,7 +4898,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   type="button"
                   onClick={() => {
                     if (isStreaming) return
-                    setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))
+                    const remaining = queuedTurns.filter(item => item.id !== turn.id)
+                    setQueuedTurns(remaining)
+                    flushQueueStateNow(remaining)
+                    logQueueEvent('dispatch', { queueId: turn.id })
                     void dispatchMessageContent(turn.content)
                   }}
                   disabled={isStreaming}
@@ -3894,7 +4909,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     border: 'none',
                     background: 'transparent',
                     color: isStreaming ? theme.chat.muted : theme.chat.textSecondary,
-                    fontSize: 13,
+                    fontSize: 12,
                     fontFamily: fontSans,
                     cursor: isStreaming ? 'default' : 'pointer',
                     display: 'flex',
@@ -3911,7 +4926,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 </button>
                 <button
                   type="button"
-                  onClick={() => setQueuedTurns(prev => prev.filter(item => item.id !== turn.id))}
+                  onClick={() => {
+                    const remaining = queuedTurns.filter(item => item.id !== turn.id)
+                    setQueuedTurns(remaining)
+                    flushQueueStateNow(remaining)
+                    logQueueEvent('delete', { queueId: turn.id })
+                  }}
                   style={{
                     border: 'none',
                     background: 'transparent',
@@ -3929,9 +4949,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   <Trash2 size={14} />
                 </button>
               </div>
-            ))}
+              )
+            })}
           </div>
-        )}
+          )
+        })()}
 
         {/* Input bar */}
         <div style={{
@@ -4229,6 +5251,49 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           </div>
 
           <div style={{ flex: 1 }} />
+
+          {/* Subtle liveness indicator — a breathing dot that sits next to the
+              Stop button while streaming. If the server has been quiet for
+              >2.5s we also surface a tiny "Xs" counter so the user knows the
+              turn is still alive even when nothing visible has changed. */}
+          {isStreaming && (() => {
+            // activityTick is read so the elapsed value recomputes every 500ms.
+            void activityTick
+            const quietMs = Date.now() - lastActivityAtRef.current
+            const showCounter = quietMs > 2500
+            const elapsedSec = Math.floor(quietMs / 1000)
+            return (
+              <div
+                title={showCounter
+                  ? `Waiting on server — ${elapsedSec}s since last update`
+                  : 'Working…'}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  marginRight: 4,
+                  color: theme.chat.muted,
+                  fontSize: 10.5,
+                  fontFamily: fontSans,
+                  lineHeight: 1,
+                  userSelect: 'none',
+                  flexShrink: 0,
+                }}
+              >
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: showCounter ? theme.status.warning : theme.accent.base,
+                  animation: 'chat-pulse 1.6s ease-in-out infinite',
+                  display: 'inline-block',
+                }} />
+                {showCounter && (
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {elapsedSec}s
+                  </span>
+                )}
+              </div>
+            )
+          })()}
 
           {/* Stop / Send */}
           {isStreaming ? (
@@ -4554,7 +5619,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               )}
             </div>
 
-            <div ref={contextMenuRef} style={{ position: 'relative' }}>
+            {/* Context indicator sits in a 28×28 hit-box so its centre-line
+                aligns with the Stop/Send button in the primary toolbar above
+                (both buttons are now 28px wide with matching 8px container
+                padding → same centre X). The 18×18 visible dial is centred
+                inside via flex alignment. */}
+            <div ref={contextMenuRef} style={{ position: 'relative', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <button
                 type="button"
                 title="Context window"
@@ -4604,6 +5674,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     <div style={{ fontSize: 12, color: theme.chat.textSecondary, fontFamily: fontSans, marginBottom: 10 }}>
                       {estimatedContextTokens.toLocaleString()} / {contextWindowLimit.toLocaleString()} tokens used
                     </div>
+                    <div style={{ fontSize: 11, lineHeight: 1.5, color: theme.chat.muted, fontFamily: fontSans, marginBottom: 8 }}>
+                      Includes ~{systemOverheadTokens.toLocaleString()} tokens of system&nbsp;prompt&nbsp;+&nbsp;tool&nbsp;schemas.
+                    </div>
                     <div style={{ fontSize: 11, lineHeight: 1.5, color: theme.chat.muted, fontFamily: fontSans }}>
                       CodeSurf automatically compacts its context.
                     </div>
@@ -4631,6 +5704,34 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
   const isActive = !thinking.done
   const hasContent = thinking.content.length > 0
 
+  // Track elapsed thinking time so we can show "Thought for Xs"
+  const startTimeRef = useRef<number | null>(null)
+  const finalElapsedRef = useRef<number | null>(null)
+  const [elapsedSec, setElapsedSec] = useState(0)
+
+  if (startTimeRef.current == null && isActive) {
+    startTimeRef.current = Date.now()
+  }
+
+  useEffect(() => {
+    if (!isActive) return
+    const id = setInterval(() => {
+      if (startTimeRef.current != null) {
+        setElapsedSec(Math.floor((Date.now() - startTimeRef.current) / 1000))
+      }
+    }, 250)
+    return () => clearInterval(id)
+  }, [isActive])
+
+  useEffect(() => {
+    if (thinking.done && finalElapsedRef.current == null) {
+      const start = startTimeRef.current ?? Date.now()
+      const finalSec = Math.max(1, Math.round((Date.now() - start) / 1000))
+      finalElapsedRef.current = finalSec
+      setElapsedSec(finalSec)
+    }
+  }, [thinking.done])
+
   // Auto-expand when content starts arriving, auto-collapse when done
   useEffect(() => {
     if (hasContent && isActive) setExpanded(true)
@@ -4643,37 +5744,56 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
     }
   }, [thinking.done])
 
+  const displayedElapsed = finalElapsedRef.current ?? elapsedSec
+
+  // Styled to mirror the tool chip (CollapsedToolGroup / ToolBlockView) so it
+  // can sit inline in the same chip row without breaking the visual rhythm.
+  // The outer container is a column so the expanded quote content can still
+  // render underneath the chip in full width when opened.
   return (
-    <div style={{ overflow: 'hidden', width: '100%' }}>
-      {/* Compact inline badge */}
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'flex-start',
+      gap: expanded ? 6 : 0,
+      width: 'fit-content',
+      maxWidth: '100%',
+      minWidth: 0,
+    }}>
+      {/* Chip — matches tool chip sizing, border, and padding */}
       <button
         onClick={() => hasContent && setExpanded(e => !e)}
         style={{
-          display: 'inline-flex', alignItems: 'center', gap: 6,
-          padding: '2px 0',
-          background: 'transparent',
-          border: 'none',
+          background: theme.chat.assistantBubble,
+          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          borderRadius: 8,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '0 8px',
+          minHeight: 22,
+          boxSizing: 'border-box',
           cursor: hasContent ? 'pointer' : 'default',
           color: isActive ? theme.accent.hover : theme.chat.muted,
-          fontSize: 12, fontFamily: fonts.sans, fontWeight: 500,
-          borderRadius: 0,
+          fontSize: 10.5,
+          fontFamily: fonts.sans,
+          fontWeight: 500,
           lineHeight: 1,
-          backdropFilter: 'none',
+          width: 'fit-content',
         }}
       >
-        <Brain size={11} style={{ opacity: isActive ? 0.8 : 0.4, flexShrink: 0 }} />
+        <Brain size={11} style={{ opacity: isActive ? 0.9 : 0.5, flexShrink: 0 }} />
         {isActive ? (
-          <ShimmerText baseColor={theme.accent.hover} style={{ fontSize: 12, fontWeight: 500 }}>
-            Thinking
+          <ShimmerText baseColor={theme.accent.hover} style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
+            {`Thinking for ${elapsedSec}s`}
           </ShimmerText>
         ) : (
-          <span style={{ opacity: 0.6, fontSize: 12, fontWeight: 500 }}>Thought</span>
-        )}
-        {isActive && !hasContent && (
-          <WorkingDots color={theme.accent.hover} size={3} />
+          <span style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
+            {`Thought for ${displayedElapsed}s`}
+          </span>
         )}
         {hasContent && (
-          <ChevronRight size={10} style={{
+          <ChevronRight size={12} style={{
             transform: expanded ? 'rotate(90deg)' : 'none',
             transition: 'transform 0.15s',
             opacity: 0.4, flexShrink: 0,
@@ -4681,15 +5801,19 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
         )}
       </button>
 
-      {/* Expanded thinking content */}
+      {/* Expanded thinking content — quote-indent style, no background.
+          Rendered on its own row beneath the chip when expanded. */}
       {expanded && hasContent && (
         <div style={{
-          padding: '8px 0 2px',
-          fontSize: 12, lineHeight: fonts.lineHeight, color: theme.accent.hover,
+          marginLeft: 6,
+          paddingLeft: 10,
+          paddingTop: 2,
+          paddingBottom: 2,
+          borderLeft: `2px solid ${theme.chat.muted}`,
+          fontSize: 12, lineHeight: fonts.lineHeight, color: theme.chat.muted,
           whiteSpace: 'pre-wrap', wordBreak: 'break-word',
           fontFamily: fonts.sans, maxHeight: 200, overflowY: 'auto',
           background: 'transparent',
-          border: 'none',
           borderRadius: 0,
           backdropFilter: 'none',
           opacity: 0.85,
@@ -4699,7 +5823,7 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
             <span style={{
               display: 'inline-block', width: 5, height: 12,
               marginLeft: 2, verticalAlign: 'text-bottom',
-              background: theme.accent.hover, borderRadius: 1,
+              background: theme.chat.muted, borderRadius: 1,
               animation: 'chat-pulse 1s ease-in-out infinite',
             }} />
           )}
@@ -4709,7 +5833,89 @@ function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Eleme
   )
 }
 
+/**
+ * Collapses a mixed-name run of completed tool blocks into a single
+ * "Called N tools" chip that expands horizontally to reveal the originals.
+ */
+function MixedToolGroup({ blocks }: { blocks: ToolBlock[] }): JSX.Element {
+  const fonts = useFonts()
+  const theme = useTheme()
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+      <div
+        onClick={() => setExpanded(e => !e)}
+        style={{
+          background: theme.chat.assistantBubble,
+          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          borderRadius: 8,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 5,
+          padding: '0 8px',
+          minHeight: 22,
+          boxSizing: 'border-box',
+          cursor: 'pointer',
+          color: theme.chat.muted,
+          fontSize: 10,
+          fontFamily: fonts.sans,
+          lineHeight: 1,
+          width: 'fit-content',
+          maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
+        }}
+      >
+        <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
+        <span style={{ fontWeight: 500, fontSize: 10.5, lineHeight: 1 }}>
+          Called {blocks.length} tools
+        </span>
+        <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
+        <ChevronRight size={12} style={{
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.15s',
+          opacity: 0.4,
+          flexShrink: 0,
+        }} />
+      </div>
+      {expanded && blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
+    </div>
+  )
+}
+
 /** Collapses consecutive same-name completed tool chips into "Read x6" style. */
+/**
+ * Human-friendly label for a collapsed group of same-tool calls.
+ * Falls back to "Ran N <tool> calls" for unrecognised tools so the chip
+ * still reads as a past-tense summary instead of raw tool-name + ×N badge.
+ */
+function getGroupedToolLabel(name: string, count: number): string {
+  switch (name) {
+    case 'Edit':
+    case 'MultiEdit':
+      return `Edited ${count} file${count === 1 ? '' : 's'}`
+    case 'Write':
+      return `Wrote ${count} file${count === 1 ? '' : 's'}`
+    case 'Read':
+      return `Read ${count} file${count === 1 ? '' : 's'}`
+    case 'Bash':
+      return `Ran ${count} command${count === 1 ? '' : 's'}`
+    case 'Grep':
+      return `Searched ${count} time${count === 1 ? '' : 's'}`
+    case 'Glob':
+      return `Matched ${count} pattern${count === 1 ? '' : 's'}`
+    case 'WebFetch':
+      return `Fetched ${count} URL${count === 1 ? '' : 's'}`
+    case 'WebSearch':
+      return `Searched the web ${count} time${count === 1 ? '' : 's'}`
+    case 'TodoWrite':
+      return `Updated todos ${count} time${count === 1 ? '' : 's'}`
+    case 'Task':
+      return `Ran ${count} sub-agent${count === 1 ? '' : 's'}`
+    default:
+      return `Used ${name} ${count} time${count === 1 ? '' : 's'}`
+  }
+}
+
 function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[] }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
@@ -4726,7 +5932,9 @@ function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[
           display: 'flex',
           alignItems: 'center',
           gap: 5,
-          padding: '5px 6px',
+          padding: '0 8px',
+          minHeight: 22,
+          boxSizing: 'border-box',
           cursor: 'pointer',
           color: theme.chat.muted,
           fontSize: 10,
@@ -4737,18 +5945,8 @@ function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[
         }}
       >
         <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
-        <span style={{ fontWeight: 500, fontSize: 10.5 }}>{name}</span>
-        <span style={{
-          fontSize: 9,
-          fontWeight: 600,
-          color: theme.accent.base,
-          background: theme.accent.soft,
-          borderRadius: 6,
-          padding: '1px 5px',
-          lineHeight: '14px',
-          flexShrink: 0,
-        }}>
-          x{blocks.length}
+        <span style={{ fontWeight: 500, fontSize: 10.5, lineHeight: 1 }}>
+          {getGroupedToolLabel(name, blocks.length)}
         </span>
         <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
         <ChevronRight size={12} style={{
@@ -4829,7 +6027,15 @@ function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
           gap: 5,
           width: '100%',
           maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-          padding: isFileChangeBlock ? '12px 16px' : '5px 6px', background: 'none', border: 'none',
+          padding: isFileChangeBlock ? '12px 16px' : '0 8px',
+          // ToolBlockView is a nested chip: the outer <div> carries the 1px
+          // border, so we shave 2px off the inner button's minHeight to land
+          // at an outer rendered height of 22px — matching the single-layer
+          // ThinkingBlockView / CollapsedToolGroup / MixedToolGroup chips so
+          // they line up on a shared chip row.
+          minHeight: isFileChangeBlock ? undefined : 20,
+          boxSizing: 'border-box',
+          background: 'none', border: 'none',
           cursor: 'pointer', color: isRunning ? theme.chat.textSecondary : theme.chat.muted,
           fontSize: 10, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
         }}
@@ -5141,10 +6347,15 @@ function ToolInputView({ toolName, input, codePanelFontSize }: {
   const { notice, body } = splitMemoryGuard(input)
   const parsed = tryParseToolInput(body)
 
+  // Tool-input payloads are often dense — force a tighter font than the
+  // general code-panel size so long Edit/Write payloads don't dominate the
+  // chat. Cap at 11px to match our Streamdown code-block font; small
+  // reductions from the caller's font-size still apply below 11px.
+  const toolInputFontSize = Math.min(11, codePanelFontSize)
   const codeStyle: React.CSSProperties = {
     margin: 0, padding: 8, borderRadius: 6,
     background: theme.surface.panelMuted, color: theme.chat.textSecondary,
-    fontSize: codePanelFontSize, lineHeight: fonts.monoLineHeight,
+    fontSize: toolInputFontSize, lineHeight: 1.45,
     fontFamily: fonts.mono, fontWeight: fonts.monoWeight,
     whiteSpace: 'pre-wrap', wordBreak: 'break-word',
     maxHeight: 240, overflowY: 'auto',
@@ -5155,7 +6366,7 @@ function ToolInputView({ toolName, input, codePanelFontSize }: {
     textTransform: 'uppercase', marginBottom: 3,
   }
   const pathStyle: React.CSSProperties = {
-    fontSize: codePanelFontSize, fontFamily: fonts.mono,
+    fontSize: toolInputFontSize, fontFamily: fonts.mono,
     color: theme.chat.text, wordBreak: 'break-all', padding: '2px 0',
   }
   const diffBlockStyle = (kind: 'add' | 'del'): React.CSSProperties => ({
@@ -5371,11 +6582,43 @@ function ToolInputView({ toolName, input, codePanelFontSize }: {
     )
   }
 
+  // Shape-based fallback: some providers emit tool calls whose toolName
+  // doesn't match our exact whitelist above (e.g. "str_replace_based_edit_tool"
+  // instead of "Edit"), but the payload shape is recognisable. Detect by keys
+  // so we still render the pretty diff layout instead of a raw JSON dump.
+  if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>
+    const looksLikeEdit = typeof obj.old_string === 'string' && typeof obj.new_string === 'string'
+    if (looksLikeEdit) {
+      const filePath = getStr(parsed, 'file_path')
+      const oldStr = getStr(parsed, 'old_string') ?? ''
+      const newStr = getStr(parsed, 'new_string') ?? ''
+      const replaceAll = getBool(parsed, 'replace_all')
+      return (
+        <>
+          {noticeBanner}
+          {filePath && renderKeyValue('File', filePath)}
+          {replaceAll && (
+            <div style={{ ...labelStyle, color: theme.status.warning, marginBottom: 4 }}>Replace all occurrences</div>
+          )}
+          <div style={labelStyle}>Old</div>
+          <pre style={diffBlockStyle('del')}>{oldStr}</pre>
+          <div style={{ ...labelStyle, marginTop: 6 }}>New</div>
+          <pre style={diffBlockStyle('add')}>{newStr}</pre>
+        </>
+      )
+    }
+  }
+
   // Fallback: unescape JSON strings so embedded newlines render as actual line
   // breaks instead of literal "\n" sequences, and drop the memory-guard banner.
+  // Unescaping is applied EVEN when parsing failed — some providers emit
+  // slightly malformed JSON (trailing comma, unquoted key) but the string
+  // is still readable once \n / \" / \t are decoded.
+  const unescape = (s: string): string => s.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, '\t')
   const prettyFallback = parsed != null
-    ? JSON.stringify(parsed, null, 2).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, '\t')
-    : body
+    ? unescape(JSON.stringify(parsed, null, 2))
+    : unescape(body)
   return (
     <>
       {noticeBanner}

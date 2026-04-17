@@ -57,7 +57,7 @@ export function ensureShimmerStyles(): void {
 // Bump this version suffix whenever the injected CSS below changes so that
 // Vite HMR re-injects a fresh <style> tag instead of short-circuiting on the
 // stale one left behind from a previous build.
-const CODE_LAYOUT_STYLE_VERSION = 'v4'
+const CODE_LAYOUT_STYLE_VERSION = 'v6'
 const CODE_LAYOUT_STYLE_ID = `shared-streamdown-code-layout-${CODE_LAYOUT_STYLE_VERSION}`
 
 export function ensureCodeBlockLayoutStyles(): void {
@@ -72,22 +72,31 @@ export function ensureCodeBlockLayoutStyles(): void {
   // happens after usePatchCodeBlocks' useEffect runs and wipes inline styles).
   style.textContent = `
     /* Outer code-block: kill streamdown's intrinsic-size placeholder that
-       leaves a huge empty gap before async Shiki layout finishes. */
+       leaves a huge empty gap before async Shiki layout finishes. We use a
+       plain block (NOT flex) because flex column layout was reserving empty
+       space above the code body — likely a streamdown-default min-height on
+       one of the children that participated in flex sizing. Block layout
+       sidesteps the issue entirely. */
     [data-streamdown="code-block"] {
-      display: flex !important;
-      flex-direction: column !important;
+      display: block !important;
       content-visibility: visible !important;
       contain-intrinsic-size: auto !important;
+      contain: none !important;
+      min-height: 0 !important;
+      height: auto !important;
       margin: 6px 0 !important;
       border-radius: 6px !important;
     }
     /* Inner body: flatten streamdown's default rounded border, tighten padding,
        and force a small monospace font so we don't get huge Shiki defaults. */
     [data-streamdown="code-block-body"] {
+      display: block !important;
       overflow-x: auto !important;
       border: none !important;
       border-radius: 0 !important;
       min-width: 0;
+      min-height: 0 !important;
+      height: auto !important;
       padding: 6px 10px !important;
       font-size: 11px !important;
       line-height: 1.45 !important;
@@ -119,9 +128,50 @@ export function ensureCodeBlockLayoutStyles(): void {
     [data-streamdown="code-block-header"] {
       height: 22px !important;
       min-height: 22px !important;
+      max-height: 22px !important;
       font-size: 10px !important;
       padding: 0 8px !important;
       line-height: 22px !important;
+      display: flex !important;
+      align-items: center !important;
+      box-sizing: border-box !important;
+    }
+    /* Pin the copy/actions cluster to the top-right corner of the block so
+       it shares the header row regardless of where streamdown places it in
+       the sibling tree. The previous negative-margin overlay trick broke
+       whenever the actions wrapper wasn't a direct sibling of the header,
+       leaving a tall empty band above the code. */
+    [data-streamdown="code-block"] {
+      position: relative !important;
+    }
+    [data-streamdown="code-block-actions"] {
+      position: absolute !important;
+      top: 0 !important;
+      right: 0 !important;
+      height: 22px !important;
+      display: flex !important;
+      align-items: center !important;
+      padding: 0 4px !important;
+      margin: 0 !important;
+      z-index: 5 !important;
+      background: transparent !important;
+    }
+    [data-streamdown="code-block-actions"] button {
+      width: 18px !important;
+      height: 18px !important;
+      padding: 1px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+    }
+    /* Kill any wrapper a future streamdown version might put around the
+       actions cluster so it can't add extra vertical height of its own. */
+    [data-streamdown="code-block"] > div:has(> [data-streamdown="code-block-actions"]) {
+      position: static !important;
+      height: 0 !important;
+      min-height: 0 !important;
+      margin: 0 !important;
+      padding: 0 !important;
     }
   `
   document.head.appendChild(style)
@@ -192,18 +242,30 @@ export function usePatchCodeBlocks(
     // Code blocks
     const blocks = el.querySelectorAll<HTMLElement>('[data-streamdown="code-block"]')
     blocks.forEach(block => {
-      block.style.cssText = `padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;max-width:100%!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
+      // `position:relative` is critical — the actions cluster is pinned
+      // absolutely against this box, so we establish the containing block
+      // here and keep `overflow:hidden` to clip to the rounded corners.
+      block.style.cssText = `display:block!important;position:relative!important;padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;max-width:100%!important;min-height:0!important;height:auto!important;contain:none!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
       const header = block.querySelector<HTMLElement>('[data-streamdown="code-block-header"]')
       if (header) {
-        header.style.cssText = `height:22px!important;font-size:10px!important;padding:0 8px!important;background:${headerBackground}!important;color:${headerColor}!important;border-bottom:1px solid ${theme.border.subtle}!important`
+        // Reserve space on the right so the language label doesn't collide
+        // with the absolutely-positioned actions cluster (~56px covers a
+        // typical copy + expand button pair).
+        header.style.cssText = `height:22px!important;min-height:22px!important;max-height:22px!important;font-size:10px!important;padding:0 60px 0 8px!important;background:${headerBackground}!important;color:${headerColor}!important;border-bottom:1px solid ${theme.border.subtle}!important;display:flex!important;align-items:center!important;box-sizing:border-box!important`
       }
+      // Flatten any wrapper streamdown puts around the actions cluster so
+      // it can't inject its own vertical height above the code body.
       const actionsWrapper = block.querySelector<HTMLElement>('[data-streamdown="code-block-actions"]')?.parentElement
-      if (actionsWrapper) actionsWrapper.style.cssText = 'margin-top:-22px!important;height:22px!important;pointer-events:none;position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:flex-end'
+      if (actionsWrapper && actionsWrapper !== block) {
+        actionsWrapper.style.cssText = 'position:static!important;height:0!important;min-height:0!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important'
+      }
       const actions = block.querySelector<HTMLElement>('[data-streamdown="code-block-actions"]')
       if (actions) {
-        actions.style.cssText = 'padding:1px 4px!important;pointer-events:auto'
+        // Pin to the top-right of the block so the copy button always
+        // shares the header row with the language label.
+        actions.style.cssText = 'position:absolute!important;top:0!important;right:0!important;height:22px!important;display:flex!important;align-items:center!important;padding:0 4px!important;margin:0!important;z-index:5;background:transparent!important;pointer-events:auto'
         actions.querySelectorAll<HTMLElement>('button').forEach(btn => {
-          btn.style.cssText = 'width:18px!important;height:18px!important;padding:1px!important'
+          btn.style.cssText = 'width:18px!important;height:18px!important;padding:1px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important'
         })
         actions.querySelectorAll<SVGElement>('svg').forEach(svg => {
           svg.setAttribute('width', '11')
@@ -212,7 +274,7 @@ export function usePatchCodeBlocks(
       }
       const body = block.querySelector<HTMLElement>('[data-streamdown="code-block-body"]')
       if (body) {
-        body.style.cssText = `padding:6px 10px!important;font-size:${fontSize}px!important;line-height:1.45!important;border:none!important;border-radius:0!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
+        body.style.cssText = `display:block!important;padding:6px 10px!important;font-size:${fontSize}px!important;line-height:1.45!important;border:none!important;border-radius:0!important;min-height:0!important;height:auto!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
       }
       block.querySelectorAll<HTMLElement>('pre').forEach(pre => {
         pre.style.cssText += `;font-size:${fontSize}px!important;line-height:1.45!important;margin:0!important;padding:0!important;border-radius:0!important;white-space:pre!important;background:${bodyBackground}!important;color:${theme.text.primary}!important`
@@ -231,11 +293,11 @@ export function usePatchCodeBlocks(
     // Tables
     const tables = el.querySelectorAll<HTMLElement>('[data-streamdown="table-wrapper"]')
     tables.forEach(wrapper => {
-      wrapper.style.cssText = `margin:8px 0!important;padding:8px!important;gap:0!important;border-radius:8px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;background:${tableShellBackground}!important;color:${theme.text.primary}!important`
+      wrapper.style.cssText = `margin:8px 0!important;padding:0!important;gap:0!important;border-radius:8px!important;overflow:hidden!important;border:none!important;background:transparent!important;color:${theme.text.primary}!important`
 
       const scroller = wrapper.querySelector<HTMLElement>('[data-streamdown="table"]')?.parentElement
       if (scroller) {
-        scroller.style.cssText = `border:1px solid ${theme.border.subtle}!important;border-radius:6px!important;overflow:auto!important;background:${tableInnerBackground}!important`
+        scroller.style.cssText = `border:1px solid ${theme.border.subtle}!important;border-radius:8px!important;overflow:auto!important;background:${tableInnerBackground}!important`
       }
 
       const table = wrapper.querySelector<HTMLElement>('[data-streamdown="table"]')

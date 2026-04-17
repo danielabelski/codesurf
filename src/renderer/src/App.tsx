@@ -3640,7 +3640,12 @@ function App(): JSX.Element {
   const sidebarFooterHeight = 42
   const sidebarToFooterGap = 8
   const sidebarPanelBottomOffset = sidebarFooterBottom + sidebarFooterHeight - 12
-  const mainPanelBottomInset = sidebarPanelBottomOffset
+  // Panel bottom meets the footer/status-bar top flush. MainStatusBar's visible
+  // content is pushed down by translateY(5), so its apparent top sits at vh-37
+  // while its DOM box starts at vh-42 — setting the inset to sidebarFooterHeight
+  // (42) means the panel's bottom edge lands right at the footer top with no
+  // blank gap above the footer and no overlap with the status-bar's visible text.
+  const mainPanelBottomInset = sidebarFooterHeight
   const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
   const openSidebarPillLeft = sidebarWidth - 5
@@ -3658,7 +3663,10 @@ function App(): JSX.Element {
   const sidebarScrollIndicatorTop = sidebarScrollMetrics.hasOverflow
     ? `${sidebarScrollMetrics.topRatio * (1 - sidebarScrollIndicatorRatio) * 100}%`
     : `calc(50% - ${collapsedSidebarPillHeight / 2}px)`
-  const expandedLayoutLeft = sidebarWidth + 2
+  // Sidebar's absolute wrapper sits at left: 6 with width sidebarWidth, so its
+  // right edge is at (6 + sidebarWidth). Adding 12 here puts the main-panel
+  // left edge 6px to the right of the sidebar — a visible 6px gap.
+  const expandedLayoutLeft = sidebarWidth + 12
   const discoveryHighlightZIndex = 0
   const discoveryGlowZIndex = 0
   const discoveryPillZIndex = 99997
@@ -3729,9 +3737,9 @@ function App(): JSX.Element {
       {/* Sidebar inset panel — floats over the canvas */}
       <div style={{
         position: 'absolute',
-        top: sidebarPanelTop,
-        left: 0,
-        bottom: 0,
+        top: 39,
+        left: 6,
+        bottom: mainPanelBottomInset,
         padding: '0px',
         width: sidebarCollapsed ? 0 : sidebarWidth,
         flexShrink: 0,
@@ -3749,9 +3757,9 @@ function App(): JSX.Element {
           background: theme.surface.sidebarOverlay,
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
-          borderRadius: 0,
-          border: 'none',
-          paddingTop: window.electron.platform === 'darwin' ? 40 : 38,
+          borderRadius: 12,
+          border: `0.5px solid ${theme.border.default}`,
+          paddingTop: 8,
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
@@ -5169,15 +5177,31 @@ function App(): JSX.Element {
               position: 'absolute',
               top: 39,
               left: sidebarCollapsed ? 2 : expandedLayoutLeft,
-              right: 0,
-              bottom: 0,
+              right: 6,
+              // Match the sidebar ("left panel") geometry: absolute wrapper reserves the
+              // bottom-inset so the whole frame sits clear of MainStatusBar, and an
+              // inner rounded bordered div draws the edge exactly as the sidebar does.
+              bottom: mainPanelBottomInset,
               zIndex: 50,
               transition: 'left 0.15s ease',
+            }}>
+            <div style={{
+              width: '100%',
+              height: '100%',
+              borderRadius: 12,
+              border: `0.5px solid ${theme.border.default}`,
+              overflow: 'hidden',
+              position: 'relative',
+              // Transparent interior so the 6px gutter between split leaves
+              // reveals the app background, letting each LeafPanel's own
+              // borderRadius render as visible rounded corners.
+              background: 'transparent',
+              boxSizing: 'border-box',
             }}>
             <Suspense fallback={null}>
               <LazyPanelLayout
                 root={panelLayout}
-                insetBottom={mainPanelBottomInset}
+                insetBottom={0}
                 getTileLabel={getPanelTileLabel}
                 renderTile={(tileId) => {
                   const t = tiles.find(ti => ti.id === tileId)
@@ -5217,6 +5241,7 @@ function App(): JSX.Element {
                 onLaunchTemplate={handleLaunchTemplate}
               />
             </Suspense>
+            </div>
             </div>
           )}
 

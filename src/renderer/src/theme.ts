@@ -139,10 +139,10 @@ const THEMES: Record<string, AppTheme> = {
       accentSoft: 'rgba(122,162,255,0.16)',
     },
     border: {
-      subtle: 'rgba(255,255,255,0.05)',
-      default: 'rgba(255,255,255,0.08)',
-      strong: 'rgba(255,255,255,0.14)',
-      accent: 'rgba(122,162,255,0.35)',
+      subtle: 'rgba(255,255,255,0.09)',
+      default: 'rgba(255,255,255,0.20)',
+      strong: 'rgba(255,255,255,0.30)',
+      accent: 'rgba(122,162,255,0.5)',
     },
     text: {
       primary: '#e7eaf0',
@@ -210,7 +210,7 @@ const THEMES: Record<string, AppTheme> = {
     extension: {
       background: '#111317',
       panel: '#1b1e24',
-      border: 'rgba(255,255,255,0.08)',
+      border: 'rgba(255,255,255,0.18)',
       text: '#e7eaf0',
       muted: '#88909c',
       accent: '#7aa2ff',
@@ -248,10 +248,10 @@ const THEMES: Record<string, AppTheme> = {
       accentSoft: 'rgba(143,151,165,0.18)',
     },
     border: {
-      subtle: 'rgba(255,255,255,0.05)',
-      default: 'rgba(255,255,255,0.08)',
-      strong: 'rgba(255,255,255,0.13)',
-      accent: 'rgba(143,151,165,0.28)',
+      subtle: 'rgba(255,255,255,0.09)',
+      default: 'rgba(255,255,255,0.20)',
+      strong: 'rgba(255,255,255,0.30)',
+      accent: 'rgba(143,151,165,0.45)',
     },
     text: {
       primary: '#ededed',
@@ -319,7 +319,7 @@ const THEMES: Record<string, AppTheme> = {
     extension: {
       background: '#151515',
       panel: '#202020',
-      border: 'rgba(255,255,255,0.08)',
+      border: 'rgba(255,255,255,0.18)',
       text: '#ededed',
       muted: '#9a9a9a',
       accent: '#8f96a0',
@@ -357,10 +357,10 @@ const THEMES: Record<string, AppTheme> = {
       accentSoft: 'rgba(131,139,255,0.18)',
     },
     border: {
-      subtle: 'rgba(199,207,255,0.06)',
-      default: 'rgba(199,207,255,0.1)',
-      strong: 'rgba(199,207,255,0.16)',
-      accent: 'rgba(131,139,255,0.34)',
+      subtle: 'rgba(199,207,255,0.10)',
+      default: 'rgba(199,207,255,0.24)',
+      strong: 'rgba(199,207,255,0.34)',
+      accent: 'rgba(131,139,255,0.5)',
     },
     text: {
       primary: '#edf1ff',
@@ -428,7 +428,7 @@ const THEMES: Record<string, AppTheme> = {
     extension: {
       background: '#111521',
       panel: '#202638',
-      border: 'rgba(199,207,255,0.1)',
+      border: 'rgba(199,207,255,0.22)',
       text: '#edf1ff',
       muted: '#8a93b3',
       accent: '#838bff',
@@ -467,10 +467,10 @@ const THEMES: Record<string, AppTheme> = {
       accentSoft: 'rgba(184,119,79,0.18)',
     },
     border: {
-      subtle: 'rgba(255,255,255,0.05)',
-      default: 'rgba(255,255,255,0.08)',
-      strong: 'rgba(255,255,255,0.14)',
-      accent: 'rgba(209,145,101,0.4)',
+      subtle: 'rgba(255,255,255,0.09)',
+      default: 'rgba(255,255,255,0.20)',
+      strong: 'rgba(255,255,255,0.30)',
+      accent: 'rgba(209,145,101,0.55)',
     },
     text: {
       primary: '#f3f1ea',
@@ -538,7 +538,7 @@ const THEMES: Record<string, AppTheme> = {
     extension: {
       background: '#141414',
       panel: '#1d1d1d',
-      border: '#353535',
+      border: '#4a4a4a',
       text: '#f3f1ea',
       muted: '#b4aea5',
       accent: '#b8774f',
@@ -685,10 +685,10 @@ const THEMES: Record<string, AppTheme> = {
       accentSoft: 'rgba(200,214,78,0.12)',
     },
     border: {
-      subtle: 'rgba(200,214,78,0.06)',
-      default: 'rgba(200,214,78,0.10)',
-      strong: 'rgba(200,214,78,0.18)',
-      accent: 'rgba(200,214,78,0.30)',
+      subtle: 'rgba(200,214,78,0.10)',
+      default: 'rgba(200,214,78,0.24)',
+      strong: 'rgba(200,214,78,0.36)',
+      accent: 'rgba(200,214,78,0.48)',
     },
     text: {
       primary: '#e8e6e0',
@@ -756,7 +756,7 @@ const THEMES: Record<string, AppTheme> = {
     extension: {
       background: '#1a1a1e',
       panel: '#24242a',
-      border: 'rgba(200,214,78,0.10)',
+      border: 'rgba(200,214,78,0.24)',
       text: '#e8e6e0',
       muted: '#8a877e',
       accent: '#c8d64e',

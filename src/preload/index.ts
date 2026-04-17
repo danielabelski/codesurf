@@ -102,6 +102,10 @@ contextBridge.exposeInMainWorld('electron', {
     getSessionState: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:getSessionState', workspaceId, sessionEntryId),
     deleteSession: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:deleteSession', workspaceId, sessionEntryId),
     renameSession: (workspaceId: string, sessionEntryId: string, title: string) => ipcRenderer.invoke('canvas:renameSession', workspaceId, sessionEntryId, title),
+    queuedMessages: {
+      append: (event: unknown) => ipcRenderer.invoke('canvas:queuedMessages:append', event),
+      listActive: () => ipcRenderer.invoke('canvas:queuedMessages:listActive'),
+    },
   },
 
   // Thread index diagnostics + manual reseed (phase 2 local-SQLite index).

@@ -130,3 +130,29 @@ export function getApproxContextWindowTokens(providerId: string, modelId: string
   if (normalizedProvider === 'codex') return 258_000
   return 128_000
 }
+
+/**
+ * Rough estimate of the "invisible" tokens each provider's harness loads into
+ * context before any user messages — system prompt, tool schemas, injected
+ * safety reminders, MCP tool definitions, etc.
+ *
+ * These numbers are deliberately conservative approximations based on
+ * measured payloads (e.g. the Claude Code binary ships a ~27k system prompt
+ * plus tool schemas, so ~32k is a reasonable floor). They let the context
+ * usage indicator reflect real utilisation instead of only counting the
+ * user-visible turn content.
+ */
+export function getApproxSystemOverheadTokens(providerId: string, modelId: string): number {
+  const normalizedProvider = providerId.toLowerCase()
+  const normalizedModel = modelId.toLowerCase()
+
+  // Claude Code harness: ~27k system prompt + ~5k tool schemas + reminders.
+  if (normalizedProvider === 'claude' || normalizedModel.includes('claude')) return 32_000
+  // Codex CLI harness: comparable footprint, slightly leaner tool schemas.
+  if (normalizedProvider === 'codex' || normalizedModel.includes('gpt-5')) return 18_000
+  // OpenCode / OpenClaw / Hermes — lighter harnesses.
+  if (normalizedProvider === 'opencode') return 12_000
+  if (normalizedProvider === 'openclaw') return 12_000
+  if (normalizedProvider === 'hermes') return 8_000
+  return 6_000
+}

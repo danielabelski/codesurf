@@ -1,6 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
+import { ListTodo } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
 
 // ─── Panel tree types ────────────────────────────────────────────────────────
 
@@ -270,7 +272,9 @@ function ResizeHandle({ direction, onResize, onInteractionChange }: { direction:
       onMouseDown={onMouseDown}
       style={{
         flexShrink: 0,
-        [isHorizontal ? 'width' : 'height']: 4,
+        // 6px gutter between split leaves — lets each leaf's borderRadius
+        // show as rounded corners, matching the sidebar↔main-panel gap.
+        [isHorizontal ? 'width' : 'height']: 6,
         cursor: isHorizontal ? 'col-resize' : 'row-resize',
         background: 'transparent',
         position: 'relative',
@@ -399,6 +403,13 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
         })}
       </div>
 
+      {/* Todo-list affordance: shown when the active tab is a chat tile that
+          has published a TodoWrite list. Click to open a popover with the
+          full list. Mirrors the tile/block todo icon pattern used elsewhere. */}
+      <TabBarTodoButton
+        activeTab={activeTab}
+        isChat={getTileType(activeTab) === 'chat'}
+      />
 
       {/* Context menu — position: fixed to escape overflow clipping */}
       {ctxMenu && (
@@ -428,6 +439,150 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
           <CtxItem label="Close to Right" onClick={() => { onCloseToRight(panelId, ctxMenu.tileId); setCtxMenu(null) }} disabled={!hasTabsToRight} />
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * Todo-list affordance for the tab bar. Subscribes to the `tileTodosStore`
+ * for the active chat tile and, when a list is available, renders a small
+ * icon button with a completion-count badge. Clicking it opens a floating
+ * popover rendering the same ✓/▸/○ glyph pattern used inside the ChatTile's
+ * inline TodoWrite rendering.
+ *
+ * Rendered outside the scrollable tab strip so it stays pinned to the
+ * right edge even when many tabs are open.
+ */
+function TabBarTodoButton({ activeTab, isChat }: { activeTab: string; isChat: boolean }): JSX.Element | null {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const todos = useTileTodos(isChat ? activeTab : null)
+  const [open, setOpen] = useState(false)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [popoverPos, setPopoverPos] = useState<{ top: number; right: number } | null>(null)
+  const [hover, setHover] = useState(false)
+
+  // Close the popover when clicking outside.
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (e: MouseEvent) => {
+      const target = e.target as Node | null
+      if (btnRef.current && target && btnRef.current.contains(target)) return
+      const popover = document.getElementById('tabbar-todo-popover')
+      if (popover && target && popover.contains(target)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', dismiss)
+    return () => document.removeEventListener('mousedown', dismiss)
+  }, [open])
+
+  // Recalculate popover position when opened or when the active tab changes.
+  useEffect(() => {
+    if (!open || !btnRef.current) return
+    const r = btnRef.current.getBoundingClientRect()
+    setPopoverPos({ top: r.bottom + 4, right: window.innerWidth - r.right })
+  }, [open, activeTab])
+
+  // Auto-close if the todo list goes away (e.g. tile closed or list cleared).
+  useEffect(() => {
+    if (!todos || todos.length === 0) setOpen(false)
+  }, [todos])
+
+  if (!isChat || !todos || todos.length === 0) return null
+
+  const completed = todos.filter(t => t.status === 'completed').length
+  const total = todos.length
+  const inProgress = todos.some(t => t.status === 'in_progress')
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onMouseDown={e => e.stopPropagation()}
+        onClick={e => { e.stopPropagation(); setOpen(o => !o) }}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title={`Todo list (${completed}/${total})`}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          flexShrink: 0,
+          height: 21,
+          padding: '0 6px',
+          marginLeft: 6, marginRight: 2, marginBottom: 3,
+          background: open ? theme.surface.hover : (hover ? theme.surface.panelMuted : 'transparent'),
+          border: '1px solid transparent',
+          borderRadius: 4,
+          cursor: 'pointer',
+          color: inProgress ? theme.accent.base : theme.text.secondary,
+          fontSize: 10,
+          fontFamily: fonts.primary,
+          fontWeight: 500,
+          letterSpacing: 0.3,
+          transition: 'color 0.15s, background 0.15s',
+        }}
+      >
+        <ListTodo size={12} />
+        <span style={{ opacity: 0.85 }}>{completed}/{total}</span>
+      </button>
+      {open && popoverPos && (
+        <TabBarTodoPopover todos={todos} top={popoverPos.top} right={popoverPos.right} />
+      )}
+    </>
+  )
+}
+
+function TabBarTodoPopover({ todos, top, right }: { todos: TileTodoItem[]; top: number; right: number }): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  return (
+    <div
+      id="tabbar-todo-popover"
+      onMouseDown={e => e.stopPropagation()}
+      style={{
+        position: 'fixed', top, right,
+        background: theme.surface.panelElevated,
+        border: `1px solid ${theme.border.default}`,
+        borderRadius: 8, padding: 10,
+        minWidth: 280, maxWidth: 420,
+        maxHeight: 480, overflowY: 'auto',
+        zIndex: 999999,
+        boxShadow: theme.shadow.panel,
+        display: 'flex', flexDirection: 'column', gap: 4,
+        fontFamily: fonts.primary,
+      }}
+    >
+      <div style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
+        color: theme.text.muted, marginBottom: 4,
+      }}>
+        Agent todos
+      </div>
+      {todos.map((todo, i) => {
+        const status = todo.status
+        const color = status === 'completed'
+          ? theme.status.success
+          : status === 'in_progress'
+            ? theme.status.warning
+            : theme.text.muted
+        return (
+          <div key={i} style={{
+            display: 'flex', gap: 8, alignItems: 'flex-start',
+            fontSize: 11, color: theme.text.primary,
+            lineHeight: 1.35,
+          }}>
+            <span style={{ color, fontWeight: 700, flexShrink: 0, marginTop: 1, minWidth: 10 }}>
+              {status === 'completed' ? '\u2713' : status === 'in_progress' ? '\u25B8' : '\u25CB'}
+            </span>
+            <span style={{
+              textDecoration: status === 'completed' ? 'line-through' : undefined,
+              opacity: status === 'completed' ? 0.65 : 1,
+              wordBreak: 'break-word',
+            }}>
+              {status === 'in_progress' && todo.activeForm ? todo.activeForm : todo.content}
+            </span>
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -571,7 +726,11 @@ function LeafPanel({ leaf, getTileLabel, renderTile, isInteracting, onActivate, 
         borderRadius: 12,
         overflow: 'hidden',
         background: theme.surface.panel,
-        border: `1px solid ${theme.border.default}`,
+        // The outer PanelLayout frame in App.tsx owns the visible edge; keep the
+        // per-leaf border transparent so we don't draw a second line on top of it.
+        // Split dividers between sibling leaves are drawn by ResizeHandle.
+        border: `0.5px solid transparent`,
+        boxSizing: 'border-box',
       }}
       onClick={() => onPanelFocus(leaf.id)}
     >
@@ -813,7 +972,7 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
 
   return (
     <div
-      style={{ position: 'absolute', top: 0, right: 6, bottom: insetBottom, left: 4, zIndex: 99990, background: 'transparent', display: 'flex', flexDirection: 'column', overflow: 'hidden', border: 'none' }}
+      style={{ position: 'absolute', top: 0, right: 0, bottom: insetBottom, left: 0, zIndex: 99990, background: 'transparent', display: 'flex', flexDirection: 'column', overflow: 'hidden', border: 'none' }}
       onMouseDown={e => e.stopPropagation()}
       onWheel={e => e.stopPropagation()}
     >

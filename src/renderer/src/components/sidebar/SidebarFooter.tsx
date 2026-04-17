@@ -58,7 +58,7 @@ export function SidebarFooter({
             display: 'inline-flex',
             alignItems: 'center',
             gap: 5,
-            height: 24,
+            height: 22,
             padding: '0 9px',
             borderRadius: 6,
             border: `1px solid ${theme.accent.base}`,

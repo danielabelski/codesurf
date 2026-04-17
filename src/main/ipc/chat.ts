@@ -11,7 +11,7 @@ import { query, type Query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import { spawn, ChildProcess, execFileSync, execFile } from 'child_process'
 import * as http from 'http'
 import * as net from 'net'
-import { promises as fs } from 'fs'
+import { promises as fs, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
@@ -1204,12 +1204,32 @@ function chatClaude(req: ChatRequest): void {
               for (let idx = 0; idx < message.content.length; idx++) {
                 const block = message.content[idx]
                 if (block.type === 'tool_use') {
+                  const toolInputStr = JSON.stringify(block.input, null, 2)
                   sendStream(req.cardId, {
                     type: 'tool_use',
                     toolName: block.name,
                     toolId: block.id,
-                    toolInput: JSON.stringify(block.input, null, 2),
+                    toolInput: toolInputStr,
                   })
+                  // Emit fileChanges alongside tool_use for Edit/Write/MultiEdit/
+                  // NotebookEdit so the "Review changes" drawer works on the
+                  // Anthropic path (Codex parity). The Claude Agent SDK runs
+                  // the tool before we see this assistant message, so emitting
+                  // a tool_summary here is safe — if the tool actually failed,
+                  // a subsequent tool_result would correct the status.
+                  const fileChanges = buildAnthropicFileChanges(
+                    block.name,
+                    toolInputStr,
+                    req.workspaceDir,
+                  )
+                  if (fileChanges.length > 0) {
+                    sendStream(req.cardId, {
+                      type: 'tool_summary',
+                      toolId: block.id,
+                      toolName: block.name,
+                      fileChanges,
+                    })
+                  }
                 } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
                   const key = `${streamTurn}:${idx}`
                   const alreadyStreamed = streamedTextByIndex.get(key) ?? ''
@@ -1300,6 +1320,149 @@ function buildExploreToolName(entries: StreamToolCommandEntry[]): string {
 
 function buildEditedToolName(fileChanges: StreamToolFileChange[]): string {
   return `Edited ${fileChanges.length} file${fileChanges.length === 1 ? '' : 's'}`
+}
+
+// Compute approximate FileChange summaries from Anthropic/Claude tool inputs.
+// The Claude Agent SDK executes Edit/Write/MultiEdit internally and we never
+// see pre/post file snapshots, but the tool input itself carries enough info
+// to produce accurate additions/deletions counts and a readable diff blob.
+// This brings the "N files changed +X -Y" review-changes drawer to parity
+// with the Codex path (which emits fileChanges via summarizeCodexFileChanges).
+function displayPathForWorkspace(absPath: string, workspaceDir: string | null | undefined): string {
+  if (!absPath) return ''
+  if (!workspaceDir) return absPath
+  const ws = workspaceDir.replace(/\/$/, '')
+  if (absPath === ws) return ''
+  if (absPath.startsWith(ws + '/')) return absPath.slice(ws.length + 1)
+  return absPath
+}
+
+function countLines(s: string): number {
+  if (!s) return 0
+  // Trailing-newline-insensitive count so "a\nb" and "a\nb\n" both report 2.
+  const trimmed = s.replace(/\n$/, '')
+  if (trimmed === '') return 0
+  return trimmed.split('\n').length
+}
+
+function makeEditDiff(oldStr: string, newStr: string): string {
+  const oldLines = oldStr.split('\n')
+  const newLines = newStr.split('\n')
+  const chunks: string[] = []
+  for (const line of oldLines) chunks.push('-' + line)
+  for (const line of newLines) chunks.push('+' + line)
+  return chunks.join('\n')
+}
+
+function makeWholeFileDiff(content: string, kind: 'add' | 'del'): string {
+  const marker = kind === 'add' ? '+' : '-'
+  return content.split('\n').map(line => marker + line).join('\n')
+}
+
+function buildAnthropicFileChanges(
+  toolName: string,
+  rawInput: string,
+  workspaceDir: string | null | undefined,
+): StreamToolFileChange[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(rawInput) } catch { return [] }
+  if (!parsed || typeof parsed !== 'object') return []
+  const obj = parsed as Record<string, unknown>
+
+  const getStr = (k: string): string | null => typeof obj[k] === 'string' ? (obj[k] as string) : null
+
+  // Edit: exact-match substitution. additions = lines in new_string,
+  // deletions = lines in old_string. changeType is always 'update' because
+  // Edit requires the file to already exist.
+  if (toolName === 'Edit') {
+    const filePath = getStr('file_path') ?? ''
+    if (!filePath) return []
+    const oldStr = getStr('old_string') ?? ''
+    const newStr = getStr('new_string') ?? ''
+    const diff = makeEditDiff(oldStr, newStr)
+    return [{
+      path: displayPathForWorkspace(filePath, workspaceDir),
+      changeType: 'update',
+      additions: countLines(newStr),
+      deletions: countLines(oldStr),
+      diff,
+    }]
+  }
+
+  // MultiEdit: aggregate counts across all edits for a single file. We still
+  // emit one FileChange (not one per edit) because they all target the same
+  // file and the drawer groups by path anyway.
+  if (toolName === 'MultiEdit') {
+    const filePath = getStr('file_path') ?? ''
+    if (!filePath) return []
+    const edits = Array.isArray(obj.edits) ? obj.edits as unknown[] : []
+    let additions = 0
+    let deletions = 0
+    const diffChunks: string[] = []
+    for (const edit of edits) {
+      if (!edit || typeof edit !== 'object') continue
+      const e = edit as Record<string, unknown>
+      const oldStr = typeof e.old_string === 'string' ? e.old_string : ''
+      const newStr = typeof e.new_string === 'string' ? e.new_string : ''
+      additions += countLines(newStr)
+      deletions += countLines(oldStr)
+      diffChunks.push(makeEditDiff(oldStr, newStr))
+    }
+    if (additions === 0 && deletions === 0) return []
+    return [{
+      path: displayPathForWorkspace(filePath, workspaceDir),
+      changeType: 'update',
+      additions,
+      deletions,
+      diff: diffChunks.join('\n'),
+    }]
+  }
+
+  // Write: creates or overwrites a file. We detect add vs update by checking
+  // the filesystem synchronously — the Claude SDK already wrote the file by
+  // the time we process the assistant message, so a successful Write always
+  // leaves the file present; a pre-existing stat is what we need.
+  // Rather than stat (which tells us "exists NOW"), we best-effort pretend
+  // it's an update — counting prior lines would require a snapshot we don't
+  // have. For a fresh create, `deletions` will just be 0, which is correct.
+  if (toolName === 'Write') {
+    const filePath = getStr('file_path') ?? ''
+    if (!filePath) return []
+    const content = getStr('content') ?? ''
+    // The Claude SDK emits the assistant message AFTER tool execution, so
+    // fs.existsSync tells us "the file exists now" — true for both new
+    // creates and updates. We can't distinguish add-vs-update without a
+    // pre-execution snapshot; default to 'update' since that's the vastly
+    // more common case and the drawer aggregates across change types.
+    const priorExisted = (() => {
+      try { return existsSync(filePath) } catch { return true }
+    })()
+    return [{
+      path: displayPathForWorkspace(filePath, workspaceDir),
+      changeType: priorExisted ? 'update' : 'add',
+      additions: countLines(content),
+      deletions: 0,
+      diff: makeWholeFileDiff(content, 'add'),
+    }]
+  }
+
+  // NotebookEdit: treat new_source as the replacement content. We don't try
+  // to tease apart which cell changed — same rationale as MultiEdit.
+  if (toolName === 'NotebookEdit') {
+    const filePath = getStr('notebook_path') ?? getStr('file_path') ?? ''
+    if (!filePath) return []
+    const newSource = getStr('new_source') ?? ''
+    if (!newSource) return []
+    return [{
+      path: displayPathForWorkspace(filePath, workspaceDir),
+      changeType: 'update',
+      additions: countLines(newSource),
+      deletions: 0,
+      diff: makeWholeFileDiff(newSource, 'add'),
+    }]
+  }
+
+  return []
 }
 
 function countDiffStats(diff: string): { additions: number; deletions: number } {
