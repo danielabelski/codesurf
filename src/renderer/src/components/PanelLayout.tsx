@@ -974,7 +974,7 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
 
   return (
     <div
-      style={{ position: 'absolute', top: 0, right: 0, bottom: insetBottom, left: 0, zIndex: 99990, background: 'transparent', display: 'flex', flexDirection: 'column', overflow: 'hidden', border: 'none' }}
+      style={{ position: 'absolute', top: 0, right: 0, bottom: insetBottom, left: 0, zIndex: 99990, background: 'transparent', display: 'flex', flexDirection: 'column', border: 'none' }}
       onMouseDown={e => e.stopPropagation()}
       onWheel={e => e.stopPropagation()}
     >

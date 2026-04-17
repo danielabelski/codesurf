@@ -3627,12 +3627,9 @@ function App(): JSX.Element {
   const sidebarFooterHeight = 42
   const sidebarToFooterGap = 8
   const sidebarPanelBottomOffset = sidebarFooterBottom + sidebarFooterHeight - 12
-  // Panel bottom meets the footer/status-bar top flush. MainStatusBar's visible
-  // content is pushed down by translateY(5), so its apparent top sits at vh-37
-  // while its DOM box starts at vh-42 — setting the inset to sidebarFooterHeight
-  // (42) means the panel's bottom edge lands right at the footer top with no
-  // blank gap above the footer and no overlap with the status-bar's visible text.
-  const mainPanelBottomInset = sidebarFooterHeight
+  // 6px bottom margin between the main panel's bottom edge and the footer top —
+  // mirrors the 6px left/right insets for consistent spacing on all sides.
+  const mainPanelBottomInset = sidebarFooterHeight + 6
   const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
   const openSidebarPillLeft = sidebarWidth - 5
@@ -3874,7 +3871,7 @@ function App(): JSX.Element {
         <div
           className="flex items-center flex-shrink-0"
           style={{
-            height: 38,
+            height: 38,            
             // @ts-ignore
             WebkitAppRegion: 'drag',
             paddingLeft: sidebarCollapsed ? 78 : sidebarWidth + 4,
