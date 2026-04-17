@@ -5163,27 +5163,14 @@ function App(): JSX.Element {
             <div style={{
               position: 'absolute',
               top: 39,
-              left: sidebarCollapsed ? 2 : expandedLayoutLeft,
+              left: sidebarCollapsed ? 6 : expandedLayoutLeft,
               right: 6,
-              // Match the sidebar ("left panel") geometry: absolute wrapper reserves the
-              // bottom-inset so the whole frame sits clear of MainStatusBar, and an
-              // inner rounded bordered div draws the edge exactly as the sidebar does.
+              // Wrapper reserves geometry only; each LeafPanel draws its own
+              // 0.5px edge so splits appear as individually-rounded tiles with
+              // the app background visible in the 6px gutters between them.
               bottom: mainPanelBottomInset,
               zIndex: 50,
               transition: 'left 0.15s ease',
-            }}>
-            <div style={{
-              width: '100%',
-              height: '100%',
-              borderRadius: 12,
-              border: `0.5px solid ${theme.border.default}`,
-              overflow: 'hidden',
-              position: 'relative',
-              // Transparent interior so the 6px gutter between split leaves
-              // reveals the app background, letting each LeafPanel's own
-              // borderRadius render as visible rounded corners.
-              background: 'transparent',
-              boxSizing: 'border-box',
             }}>
             <Suspense fallback={null}>
               <LazyPanelLayout
@@ -5228,7 +5215,6 @@ function App(): JSX.Element {
                 onLaunchTemplate={handleLaunchTemplate}
               />
             </Suspense>
-            </div>
             </div>
           )}
 

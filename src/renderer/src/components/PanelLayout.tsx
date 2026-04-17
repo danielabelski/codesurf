@@ -726,10 +726,10 @@ function LeafPanel({ leaf, getTileLabel, renderTile, isInteracting, onActivate, 
         borderRadius: 12,
         overflow: 'hidden',
         background: theme.surface.panel,
-        // The outer PanelLayout frame in App.tsx owns the visible edge; keep the
-        // per-leaf border transparent so we don't draw a second line on top of it.
-        // Split dividers between sibling leaves are drawn by ResizeHandle.
-        border: `0.5px solid transparent`,
+        // 0.5px hairline edge (1 physical pixel on retina). The flex-item
+        // wrapper above no longer has overflow:hidden, so Chromium can keep
+        // the sub-pixel bottom row on every side.
+        border: `0.5px solid ${theme.border.default}`,
         boxSizing: 'border-box',
       }}
       onClick={() => onPanelFocus(leaf.id)}
@@ -949,7 +949,9 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
               minHeight: 0,
               display: 'flex',
               flexDirection: 'column',
-              overflow: 'hidden',
+              // No overflow:hidden here — the inner LeafPanel already clips its
+              // own content, and hiding overflow on this flex-item wrapper was
+              // dropping the LeafPanel's 1px bottom border on Chromium.
             }}>
               {renderNode(child)}
             </div>
