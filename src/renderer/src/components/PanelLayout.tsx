@@ -402,9 +402,24 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
               <span
                 onMouseDown={e => e.stopPropagation()}
                 onClick={e => { e.stopPropagation(); onClose(tab.id) }}
-                style={{ width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, lineHeight: 1, color: isActive ? theme.text.secondary : theme.text.disabled, flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s' }}
+                style={{
+                  width: 15, height: 15,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 15, lineHeight: 1,
+                  // Always dimmed — matches the muted × on the main tile
+                  // chrome close at the top. No active/inactive variation
+                  // so the × never competes with the tab label.
+                  color: theme.text.disabled,
+                  flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s',
+                  // × is always rendered at normal weight — a bold × reads
+                  // as a heavy close target on the active tab. Keep the
+                  // active/inactive vertical nudges so both glyphs stay on
+                  // the label's optical centre-line.
+                  fontWeight: 400,
+                  marginTop: isActive ? -3 : 3,
+                }}
                 onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                onMouseLeave={e => { e.currentTarget.style.color = isActive ? theme.text.secondary : theme.text.disabled }}
+                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
               >
                 ×
               </span>

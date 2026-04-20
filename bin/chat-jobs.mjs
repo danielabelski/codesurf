@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import { buildInstructionPrompt, loadInstructionContext } from './instruction-context.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -388,16 +389,23 @@ function buildAsyncExecutionPrompt(asyncExecution) {
   return lines.join('\n')
 }
 
-function buildClaudeAgentPrompt(peers, asyncExecution) {
-  const peerPrompt = buildClaudeSystemPrompt(peers)
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  if (peerPrompt && asyncPrompt) return `${peerPrompt}\n\n${asyncPrompt}`
-  return peerPrompt ?? asyncPrompt
+function joinPromptSections(...sections) {
+  const normalized = sections
+    .map(section => String(section ?? '').trim())
+    .filter(Boolean)
+  return normalized.length > 0 ? normalized.join('\n\n') : undefined
 }
 
-function buildCodexPrompt(userText, asyncExecution) {
+function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt) {
+  const peerPrompt = buildClaudeSystemPrompt(peers)
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  return asyncPrompt ? `${asyncPrompt}\n\n## User Request\n${userText}` : userText
+  return joinPromptSections(peerPrompt, instructionPrompt, asyncPrompt)
+}
+
+function buildCodexPrompt(userText, asyncExecution, instructionPrompt) {
+  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
+  const preamble = joinPromptSections(instructionPrompt, asyncPrompt)
+  return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
 function writeSseEvent(res, payload) {
@@ -482,7 +490,7 @@ export function createChatJobManager({ homeDir }) {
     return payload
   }
 
-  async function runClaudeJob(job, request, workspaceDir) {
+  async function runClaudeJob(job, request, workspaceDir, instructionPrompt) {
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(message => message.role === 'user')
     if (!lastUserMsg) {
       await appendEvent(job.id, { type: 'error', error: 'No user message' })
@@ -535,7 +543,7 @@ export function createChatJobManager({ homeDir }) {
       ...(request.sessionId ? { resume: request.sessionId } : {}),
     }
 
-    const systemPrompt = buildClaudeAgentPrompt(request.peers, request.asyncExecution)
+    const systemPrompt = buildClaudeAgentPrompt(request.peers, request.asyncExecution, instructionPrompt)
     if (systemPrompt) {
       options.agent = 'contex'
       options.agents = {
@@ -629,7 +637,7 @@ export function createChatJobManager({ homeDir }) {
     }
   }
 
-  async function runCodexJob(job, request, workspaceDir) {
+  async function runCodexJob(job, request, workspaceDir, instructionPrompt) {
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(message => message.role === 'user')
     if (!lastUserMsg) {
       await appendEvent(job.id, { type: 'error', error: 'No user message' })
@@ -645,7 +653,7 @@ export function createChatJobManager({ homeDir }) {
       '--dangerously-bypass-approvals-and-sandbox',
       '--skip-git-repo-check',
       ...(workspaceDir ? ['-C', workspaceDir] : []),
-      buildCodexPrompt(lastUserMsg.content, request.asyncExecution),
+      buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt),
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
@@ -801,10 +809,17 @@ export function createChatJobManager({ homeDir }) {
 
   async function runJob(job, request, workspaceDir) {
     try {
+      const instructionContext = await loadInstructionContext({
+        homeDir,
+        workspaceDir,
+        executionTarget: request.executionTarget ?? 'local',
+      })
+      const instructionPrompt = buildInstructionPrompt(instructionContext)
+
       if (request.provider === 'claude') {
-        await runClaudeJob(job, request, workspaceDir)
+        await runClaudeJob(job, request, workspaceDir, instructionPrompt)
       } else if (request.provider === 'codex') {
-        await runCodexJob(job, request, workspaceDir)
+        await runCodexJob(job, request, workspaceDir, instructionPrompt)
       } else {
         await appendEvent(job.id, { type: 'error', error: `Daemon execution is only implemented for Claude and Codex right now. Requested: ${request.provider}` })
         await appendEvent(job.id, { type: 'done' })
