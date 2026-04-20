@@ -64,6 +64,25 @@ contextBridge.exposeInMainWorld('electron', {
     selectDir: () => ipcRenderer.invoke('workspace:openFolder'),
   },
 
+  // .skill bundle install (zip archives containing <name>/SKILL.md + assets).
+  // `inspect` peeks at the archive for preview metadata without touching disk.
+  // `install` extracts into the Claude skills directory (or a supplied one).
+  // `onFileOpened` fires when the user double-clicks a .skill in Finder or
+  // passes one on the command line — main forwards the path here so the UI
+  // can pop the install-confirmation modal.
+  skills: {
+    inspect: (zipPath: string) => ipcRenderer.invoke('skills:inspect', zipPath),
+    install: (args: { zipPath: string; targetDir?: string; overwrite?: boolean }) =>
+      ipcRenderer.invoke('skills:install', args),
+    getDefaultTargetDir: () => ipcRenderer.invoke('skills:getDefaultTargetDir') as Promise<string>,
+    ready: () => ipcRenderer.invoke('skills:rendererReady'),
+    onFileOpened: (callback: (payload: { path: string }) => void) => {
+      const handler = (_: unknown, payload: { path: string }) => callback(payload)
+      ipcRenderer.on('skill:file-opened', handler)
+      return () => { ipcRenderer.removeListener('skill:file-opened', handler) }
+    },
+  },
+
   // Tile context (ctx: key-value store)
   tileContext: {
     get: (workspaceId: string, tileId: string, key?: string) => ipcRenderer.invoke('tileContext:get', workspaceId, tileId, key),
@@ -205,6 +224,14 @@ contextBridge.exposeInMainWorld('electron', {
       answers: Record<string, string>
       annotations?: Record<string, { notes?: string; preview?: string }>
     }) => ipcRenderer.invoke('chat:answerUserQuestion', payload) as Promise<{ ok: boolean; error?: string }>,
+    answerToolPermission: (payload: {
+      cardId: string
+      toolId: string | null
+      // `never` persists a deny-grant so subsequent calls auto-reject.
+      decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
+    }) => ipcRenderer.invoke('chat:answerToolPermission', payload) as Promise<{ ok: boolean; error?: string }>,
+    setPermissionMode: (payload: { cardId: string; mode: string }) =>
+      ipcRenderer.invoke('chat:setPermissionMode', payload) as Promise<{ ok: boolean; error?: string }>,
   },
 
   // Agent streaming (SSE/NDJSON parsers for Claude, Codex, Pi)

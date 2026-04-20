@@ -681,12 +681,25 @@ async function listClaudeSessions(workspacePath: string | null): Promise<Aggrega
   const entries = await Promise.all(recent.map(async ({ filePath, stat }) => {
     let lastMessage: string | null = null
     let messageCount = 0
+    let projectPath: string | null = null
 
     try {
       await scanJsonlFile(filePath, (line) => {
         messageCount += 1
         try {
           const evt = JSON.parse(line)
+          // Claude emits the session root in several shapes depending on
+          // version — pick the first one that looks like an absolute path.
+          if (!projectPath) {
+            const candidate = typeof evt?.cwd === 'string' ? evt.cwd
+              : typeof evt?.workingDirectory === 'string' ? evt.workingDirectory
+              : typeof evt?.projectPath === 'string' ? evt.projectPath
+              : typeof evt?.project?.path === 'string' ? evt.project.path
+              : typeof evt?.meta?.cwd === 'string' ? evt.meta.cwd
+              : typeof evt?.session?.cwd === 'string' ? evt.session.cwd
+              : null
+            if (candidate && candidate.startsWith('/')) projectPath = candidate
+          }
           if (typeof evt?.content === 'string' && evt.content.trim()) {
             lastMessage = truncate(evt.content)
           }
@@ -701,7 +714,7 @@ async function listClaudeSessions(workspacePath: string | null): Promise<Aggrega
     return {
       id: `claude:${filePath}`,
       source: 'claude' as const,
-      scope: pathScope(workspacePath, null, 'user'),
+      scope: pathScope(workspacePath, projectPath, 'user'),
       tileId: null,
       sessionId: basename(filePath, '.jsonl'),
       provider: 'claude',
@@ -711,7 +724,7 @@ async function listClaudeSessions(workspacePath: string | null): Promise<Aggrega
       updatedAt: stat?.mtimeMs ?? 0,
       filePath,
       title: sessionTitleFromText('Claude session', lastMessage),
-      projectPath: null,
+      projectPath,
       sourceLabel: 'Claude',
       sourceDetail: 'Transcript',
       canOpenInChat: true,
@@ -883,10 +896,14 @@ async function listOpenClawSessions(workspacePath: string | null): Promise<Aggre
       const updatedAt = typeof meta?.updatedAt === 'number' ? meta.updatedAt : 0
       const sessionFile = typeof meta?.sessionFile === 'string' ? meta.sessionFile : undefined
       const label = formatOpenClawTitle(agentId, key, meta)
+      const projectPath = typeof meta?.cwd === 'string' && meta.cwd.startsWith('/') ? meta.cwd
+        : typeof meta?.projectPath === 'string' && meta.projectPath.startsWith('/') ? meta.projectPath
+        : typeof meta?.workingDirectory === 'string' && meta.workingDirectory.startsWith('/') ? meta.workingDirectory
+        : null
       entries.push({
         id: `openclaw:${agentId}:${key}`,
         source: 'openclaw',
-        scope: pathScope(workspacePath, null, 'user'),
+        scope: pathScope(workspacePath, projectPath, 'user'),
         tileId: null,
         sessionId: typeof meta?.sessionId === 'string' ? meta.sessionId : null,
         provider: 'openclaw',
@@ -896,7 +913,7 @@ async function listOpenClawSessions(workspacePath: string | null): Promise<Aggre
         updatedAt,
         filePath: sessionFile,
         title: label.title,
-        projectPath: null,
+        projectPath,
         sourceLabel: 'OpenClaw',
         sourceDetail: label.detail,
         canOpenInChat: Boolean(sessionFile),

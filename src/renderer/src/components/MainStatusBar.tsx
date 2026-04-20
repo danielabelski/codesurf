@@ -587,15 +587,16 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
               maxWidth={320}
               delay={150}
               content={
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
-                  <div style={{ fontWeight: 700, letterSpacing: 0.5, color: '#fff' }}>MEMORY HEALTH</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220, color: theme.text.primary }}>
+                  <div style={{ fontWeight: 700, letterSpacing: 0.5, color: theme.text.primary }}>MEMORY HEALTH</div>
                   <div
                     style={{
                       position: 'relative',
                       height: 6,
                       borderRadius: 999,
                       overflow: 'hidden',
-                      background: 'rgba(255,255,255,0.08)',
+                      background: theme.surface.panelMuted,
+                      border: `1px solid ${theme.border.subtle}`,
                     }}
                   >
                     <div
@@ -605,7 +606,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                         top: 0,
                         bottom: 0,
                         width: `${usage.committedRatio * 100}%`,
-                        background: 'rgba(255,255,255,0.18)',
+                        background: theme.border.default,
                       }}
                     />
                     <div
@@ -620,13 +621,13 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                     />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', columnGap: 10, rowGap: 2, fontVariantNumeric: 'tabular-nums' }}>
-                    <span style={{ color: '#888' }}>Heap</span>
+                    <span style={{ color: theme.text.muted }}>Heap</span>
                     <span>{formatBytes(usage.heapUsed)} / {formatBytes(usage.heapLimit || usage.heapTotal)} ({Math.round(usage.ratio * 100)}%)</span>
-                    <span style={{ color: '#888' }}>Committed</span>
+                    <span style={{ color: theme.text.muted }}>Committed</span>
                     <span>{formatBytes(usage.heapTotal)}</span>
-                    <span style={{ color: '#888' }}>RSS</span>
+                    <span style={{ color: theme.text.muted }}>RSS</span>
                     <span>{formatBytes(stats?.rss ?? 0)}</span>
-                    <span style={{ color: '#888' }}>External</span>
+                    <span style={{ color: theme.text.muted }}>External</span>
                     <span>{formatBytes(stats?.external ?? 0)}</span>
                   </div>
                 </div>

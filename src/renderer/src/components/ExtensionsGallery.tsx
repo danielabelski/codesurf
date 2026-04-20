@@ -40,6 +40,11 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
   const [busyId, setBusyId] = useState<string | null>(null)
   const [extensionsGloballyDisabled, setExtensionsGloballyDisabled] = useState(false)
   const [enablingGlobal, setEnablingGlobal] = useState(false)
+  // `ready` stays false until the first extension list resolves, so the
+  // dialog can fade in at its final size instead of snapping larger once
+  // content arrives. Backdrop still renders immediately so the user gets
+  // instant feedback when they click the menu item.
+  const [ready, setReady] = useState(false)
 
   const refreshGlobalFlag = useCallback(async () => {
     try {
@@ -71,6 +76,10 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
+      // Defer one frame so the initial render (opacity 0) commits before
+      // we flip to opacity 1 — otherwise the CSS transition has nothing
+      // to animate from.
+      requestAnimationFrame(() => setReady(true))
     }
   }, [workspacePath])
 
@@ -157,12 +166,18 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(0,0,0,0.55)',
+        // Match SettingsPanel backdrop so both modals feel identical
+        // when opened from different entry points.
+        background: theme.mode === 'light' ? 'rgba(15,23,42,0.18)' : 'rgba(0,0,0,0.7)',
+        backdropFilter: 'blur(4px)',
+        WebkitBackdropFilter: 'blur(4px)',
         zIndex: 1000,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: 40,
+        opacity: ready ? 1 : 0,
+        transition: 'opacity 160ms ease-out',
       }}
     >
       <div
@@ -170,8 +185,11 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
         role="dialog"
         aria-label="Extensions Gallery"
         style={{
+          // Fixed footprint so the dialog doesn't snap to a larger size
+          // the moment the first `extensions.list()` call resolves.
           width: 'min(920px, 100%)',
-          maxHeight: '85vh',
+          height: '85vh',
+          maxHeight: 780,
           background: theme.surface.panel,
           border: `1px solid ${theme.border.default}`,
           borderRadius: 14,
@@ -181,6 +199,8 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
           overflow: 'hidden',
           fontFamily: fonts.primary,
           color: theme.text.primary,
+          transform: ready ? 'scale(1)' : 'scale(0.98)',
+          transition: 'transform 160ms ease-out',
         }}
       >
         {/* Header */}

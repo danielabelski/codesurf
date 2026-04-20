@@ -25,7 +25,13 @@ import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
 import { readSettingsSync } from './workspace'
-import { requestToolPermission } from '../permissions'
+import {
+  requestToolPermissionDetailed,
+  resolveStoredPermission,
+  storeSessionGrant,
+  persistGrant,
+  type ToolPermissionRequest,
+} from '../permissions'
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
 // externalizeDepsPlugin converts dynamic import() to require() which can't
 // resolve ESM-only exports — wrap in try/catch so the app still starts.
@@ -109,6 +115,9 @@ function sendStream(cardId: string, event: Record<string, unknown>): void {
 
 // Active Claude SDK queries
 const activeQueries = new Map<string, Query>()
+// Live permission mode per card, so mid-thread mode switches (e.g. Default -> Bypass)
+// propagate into the running canUseTool closure. Keyed by cardId.
+const cardPermissionModes = new Map<string, string>()
 // Active CLI subprocesses (codex)
 const activeProcesses = new Map<string, ChildProcess>()
 // Active HTTP requests (proxy-backed providers)
@@ -190,6 +199,71 @@ function cancelPendingAskUserQuestionsForCard(cardId: string, reason: string = '
   for (const [key, pending] of pendingAskUserQuestions.entries()) {
     if (key.startsWith(prefix)) {
       pendingAskUserQuestions.delete(key)
+      try { pending.reject(new Error(reason)) } catch { /* noop */ }
+    }
+  }
+}
+
+// --- Tool permission prompts (inline UI, mirrors AskUserQuestion pattern) -----
+
+export type ToolPermissionDecision = 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
+
+interface PendingToolPermission {
+  resolve: (decision: ToolPermissionDecision) => void
+  reject: (err: Error) => void
+}
+
+// Keyed by `${cardId}::${toolUseID}` so we can address the exact tool_use.
+const pendingToolPermissions = new Map<string, PendingToolPermission>()
+
+function toolPermissionKey(cardId: string, toolUseID: string | null | undefined): string {
+  return `${cardId}::${toolUseID ?? ''}`
+}
+
+function awaitToolPermissionAnswer(
+  cardId: string,
+  toolUseID: string | null,
+  request: ToolPermissionRequest,
+): Promise<ToolPermissionDecision> {
+  const key = toolPermissionKey(cardId, toolUseID)
+  const prior = pendingToolPermissions.get(key)
+  if (prior) {
+    try { prior.reject(new Error('Tool permission superseded')) } catch { /* noop */ }
+    pendingToolPermissions.delete(key)
+  }
+  return new Promise<ToolPermissionDecision>((resolve, reject) => {
+    pendingToolPermissions.set(key, { resolve, reject })
+    sendStream(cardId, {
+      type: 'tool_permission_request',
+      toolId: toolUseID,
+      provider: request.provider,
+      toolName: request.toolName,
+      title: request.title ?? null,
+      description: request.description ?? null,
+      blockedPath: request.blockedPath ?? null,
+      workspaceDir: request.workspaceDir ?? null,
+    })
+  })
+}
+
+function resolvePendingToolPermission(
+  cardId: string,
+  toolUseID: string | null | undefined,
+  decision: ToolPermissionDecision,
+): boolean {
+  const key = toolPermissionKey(cardId, toolUseID)
+  const pending = pendingToolPermissions.get(key)
+  if (!pending) return false
+  pendingToolPermissions.delete(key)
+  pending.resolve(decision)
+  return true
+}
+
+function cancelPendingToolPermissionsForCard(cardId: string, reason: string = 'Cancelled'): void {
+  const prefix = `${cardId}::`
+  for (const [key, pending] of pendingToolPermissions.entries()) {
+    if (key.startsWith(prefix)) {
+      pendingToolPermissions.delete(key)
       try { pending.reject(new Error(reason)) } catch { /* noop */ }
     }
   }
@@ -966,6 +1040,9 @@ function chatClaude(req: ChatRequest): void {
     bypassPermissions: 'bypassPermissions',
   }
   const permMode = modeMap[req.mode ?? ''] ?? 'default'
+  // Seed live mode map so mid-thread switches can override it without waiting
+  // for the next turn.
+  cardPermissionModes.set(req.cardId, permMode)
 
   // Map thinking option from UI to SDK thinking config
   const thinkingMap: Record<string, { type: string; budget_tokens?: number }> = {
@@ -1095,28 +1172,91 @@ function chatClaude(req: ChatRequest): void {
         return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
       }
 
-      if (permMode === 'bypassPermissions') {
+      // Read the live mode so mid-thread switches take effect immediately.
+      const currentMode = cardPermissionModes.get(req.cardId) ?? permMode
+      if (currentMode === 'bypassPermissions') {
         return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
       }
 
-      const allowed = await requestToolPermission({
+      const permissionRequest: ToolPermissionRequest = {
         provider: 'claude',
         toolName,
         title: typeof toolOptions?.title === 'string' ? toolOptions.title : null,
         description: typeof toolOptions?.description === 'string' ? toolOptions.description : null,
         blockedPath: typeof toolOptions?.blockedPath === 'string' ? toolOptions.blockedPath : null,
         workspaceDir: req.workspaceDir,
-      }, true)
+      }
 
-      if (allowed) {
+      // Stored grant? Short-circuit without prompting the user.
+      //   'allow' → allow session/today/forever grant matches
+      //   'deny'  → `never` (persistent deny) — reject silently
+      const storedDecision = resolveStoredPermission(permissionRequest)
+      if (storedDecision === 'allow') {
         return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
       }
-
-      return {
-        behavior: 'deny',
-        message: 'Tool permission denied by the user.',
-        toolUseID: toolOptions?.toolUseID,
+      if (storedDecision === 'deny') {
+        // Surface the resolved state in the stream so the renderer can
+        // render a "Blocked" card rather than leaving the tool pending.
+        sendStream(req.cardId, {
+          type: 'tool_permission_resolved',
+          toolId: typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null,
+          toolName,
+          decision: 'never',
+        })
+        return {
+          behavior: 'deny',
+          message: 'Tool permission permanently denied (Never). Clear it in Settings → Permissions to re-enable prompts.',
+          toolUseID: toolOptions?.toolUseID,
+        }
       }
+
+      // Ask the renderer inline — same pattern as AskUserQuestion.
+      const toolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
+      let decision: ToolPermissionDecision
+      try {
+        decision = await awaitToolPermissionAnswer(req.cardId, toolUseID, permissionRequest)
+      } catch (err) {
+        log('tool permission await error:', (err as Error).message)
+        return {
+          behavior: 'deny',
+          message: 'Tool permission request was cancelled.',
+          toolUseID: toolOptions?.toolUseID,
+        }
+      }
+
+      // Tell the renderer the prompt is resolved so the UI can collapse it.
+      sendStream(req.cardId, {
+        type: 'tool_permission_resolved',
+        toolId: toolUseID,
+        toolName,
+        decision,
+      })
+
+      if (decision === 'deny' || decision === 'never') {
+        // Persist the "never" choice as a deny-grant so the next call is
+        // auto-rejected without another prompt. `deny` is one-shot.
+        if (decision === 'never') {
+          try { persistGrant(permissionRequest, 'never') }
+          catch (err) { log('tool permission persist (never) error:', (err as Error).message) }
+        }
+        return {
+          behavior: 'deny',
+          message: decision === 'never'
+            ? 'Tool permission permanently denied. Future calls will be auto-rejected.'
+            : 'Tool permission denied by the user.',
+          toolUseID: toolOptions?.toolUseID,
+        }
+      }
+
+      // Persist grant scope so future calls skip the prompt.
+      try {
+        if (decision === 'session') storeSessionGrant(permissionRequest)
+        else if (decision === 'today' || decision === 'forever') persistGrant(permissionRequest, decision)
+      } catch (err) {
+        log('tool permission persist error:', (err as Error).message)
+      }
+
+      return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
     },
     ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
     // Use detected system binary, not the SDK's bundled cli.js
@@ -2048,20 +2188,36 @@ function chatOpencode(req: ChatRequest): void {
               const permReq = props as any
               log('opencode permission asked:', permReq.permission, 'id:', permReq.id)
               try {
-                const allowed = await requestToolPermission({
+                const outcome = await requestToolPermissionDetailed({
                   provider: 'opencode',
                   toolName: typeof permReq.permission === 'string' ? permReq.permission : 'tool',
+                  // Prefer a structured summary if OpenCode supplies one —
+                  // falls back to empty so the modal's default "provider
+                  // wants to run tool" message still reads sensibly.
                   title: typeof permReq.title === 'string' ? permReq.title : null,
-                  description: typeof permReq.description === 'string' ? permReq.description : null,
+                  description: typeof permReq.description === 'string'
+                    ? permReq.description
+                    : (typeof permReq.command === 'string' ? permReq.command : null),
                   blockedPath: typeof permReq.path === 'string' ? permReq.path : null,
                   workspaceDir: req.workspaceDir,
                 }, true)
+                // Map our richer scope model to OpenCode's three-value enum.
+                //   forever        → 'always'   (persistent approval; OpenCode's own state mirrors ours)
+                //   today/session/once → 'once' (auto-approved but per-call on OpenCode side; our own
+                //                                 grant store still short-circuits subsequent calls)
+                //   deny / never   → 'reject'  (never also persists a deny-grant so future calls
+                //                                 are auto-rejected via stored lookup)
+                const reply: 'once' | 'always' | 'reject' = outcome.allowed
+                  ? (outcome.scope === 'forever' ? 'always' : 'once')
+                  : 'reject'
                 await client.permission.reply({
                   requestID: permReq.id,
-                  reply: allowed ? 'once' : 'reject',
-                  ...(allowed ? {} : { message: 'Tool permission denied by the user.' }),
+                  reply,
+                  ...(outcome.allowed ? {} : { message: outcome.scope === 'never'
+                    ? 'Tool permission permanently denied. Future calls will be auto-rejected.'
+                    : 'Tool permission denied by the user.' }),
                 })
-                log('opencode permission decision:', permReq.id, allowed ? 'allow' : 'reject')
+                log('opencode permission decision:', permReq.id, reply, outcome.scope ? `(scope=${outcome.scope})` : '')
               } catch (permErr: any) {
                 log('opencode permission reply error:', permErr.message)
               }
@@ -2557,6 +2713,8 @@ export function registerChatIPC(): void {
     }
     await cancelChatDaemonJob(cardId)
     cancelPendingAskUserQuestionsForCard(cardId, 'Chat stopped')
+    cancelPendingToolPermissionsForCard(cardId, 'Chat stopped')
+    cardPermissionModes.delete(cardId)
     // Abort any active OpenCode session
     const ocSessionId = opencodeSessionIds.get(cardId)
     if (ocSessionId) {
@@ -2583,7 +2741,96 @@ export function registerChatIPC(): void {
     openclawSessionIds.delete(cardId)
     hermesSessionIds.delete(cardId)
     cancelPendingAskUserQuestionsForCard(cardId, 'Session cleared')
+    cancelPendingToolPermissionsForCard(cardId, 'Session cleared')
+    cardPermissionModes.delete(cardId)
     log('session cleared for card', cardId)
+    return { ok: true }
+  })
+
+  // Change the Claude SDK permission mode mid-thread. This lets the user flip
+  // from Default -> Bypass (or vice versa) without ending the current turn.
+  // If switching TO bypass, any pending permission prompts auto-resolve as
+  // "once" (allow) so the agent stops waiting on the UI.
+  ipcMain.handle('chat:setPermissionMode', async (_, payload: {
+    cardId: string
+    mode: string
+  }) => {
+    if (!payload || typeof payload.cardId !== 'string') {
+      return { ok: false, error: 'invalid payload' }
+    }
+    const sdkModeMap: Record<string, string> = {
+      default: 'default',
+      acceptEdits: 'acceptEdits',
+      plan: 'plan',
+      bypassPermissions: 'bypassPermissions',
+    }
+    const sdkMode = sdkModeMap[payload.mode ?? '']
+    if (!sdkMode) {
+      return { ok: false, error: `unknown mode: ${payload.mode}` }
+    }
+
+    const previous = cardPermissionModes.get(payload.cardId) ?? 'default'
+    cardPermissionModes.set(payload.cardId, sdkMode)
+
+    // Tell the SDK too, so any internal gating (hooks, agents) uses the new
+    // mode. Swallow errors — the query may have already closed.
+    const activeQuery = activeQueries.get(payload.cardId)
+    if (activeQuery) {
+      try {
+        await activeQuery.setPermissionMode(sdkMode as any)
+      } catch (err) {
+        log('setPermissionMode SDK call failed:', (err as Error).message)
+      }
+    }
+
+    // Auto-resolve pending prompts when flipping to bypass so the agent
+    // unblocks immediately.
+    if (sdkMode === 'bypassPermissions') {
+      const prefix = `${payload.cardId}::`
+      for (const [key, pending] of pendingToolPermissions.entries()) {
+        if (key.startsWith(prefix)) {
+          pendingToolPermissions.delete(key)
+          try { pending.resolve('once') } catch { /* noop */ }
+          // Tell the UI the pending chip is gone.
+          const toolUseID = key.slice(prefix.length) || null
+          sendStream(payload.cardId, {
+            type: 'tool_permission_resolved',
+            toolId: toolUseID,
+            decision: 'once',
+            reason: 'mode_change',
+          })
+        }
+      }
+    }
+
+    sendStream(payload.cardId, {
+      type: 'permission_mode_changed',
+      mode: sdkMode,
+      previous,
+    })
+
+    return { ok: true }
+  })
+
+  // Tool permission — receive the user's decision from the renderer and resolve
+  // the pending canUseTool promise so the agent can continue (or halt).
+  ipcMain.handle('chat:answerToolPermission', async (_, payload: {
+    cardId: string
+    toolId: string | null
+    decision: ToolPermissionDecision
+  }) => {
+    if (!payload || typeof payload.cardId !== 'string') {
+      return { ok: false, error: 'invalid payload' }
+    }
+    const validDecisions: ToolPermissionDecision[] = ['deny', 'never', 'once', 'session', 'today', 'forever']
+    if (!validDecisions.includes(payload.decision)) {
+      return { ok: false, error: 'invalid decision' }
+    }
+    const delivered = resolvePendingToolPermission(payload.cardId, payload.toolId ?? null, payload.decision)
+    if (!delivered) {
+      log('chat:answerToolPermission: no pending request for', payload.cardId, payload.toolId)
+      return { ok: false, error: 'no pending request' }
+    }
     return { ok: true }
   })
 

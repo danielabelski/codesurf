@@ -45,8 +45,13 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
     includePartialMessages: false,
     ...(claudePermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
     ...(claudePermissionMode !== 'bypassPermissions' ? {
+      // Background relay has no UI, so we can only consult the persisted
+      // permission store — any tool without a standing allow-grant is
+      // rejected. A `never` (persistent deny) grant now produces a
+      // distinct, clearer message so the user knows why calls keep
+      // failing and where to clear it.
       canUseTool: async (toolName: string, _input: Record<string, unknown>, toolOptions: any) => {
-        const allowed = resolveStoredPermission({
+        const decision = resolveStoredPermission({
           provider: 'claude',
           toolName,
           title: typeof toolOptions?.title === 'string' ? toolOptions.title : null,
@@ -55,8 +60,15 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
           workspaceDir,
         })
 
-        if (allowed) {
+        if (decision === 'allow') {
           return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        }
+        if (decision === 'deny') {
+          return {
+            behavior: 'deny',
+            message: `Permission for ${toolName} is set to Never. Clear it in Settings → Permissions to re-enable prompts.`,
+            toolUseID: toolOptions?.toolUseID,
+          }
         }
 
         return {

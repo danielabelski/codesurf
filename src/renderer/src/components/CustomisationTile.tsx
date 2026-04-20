@@ -16,6 +16,24 @@ interface Props {
 
 // ─── Persistence helpers ─────────────────────────────────────────────────────
 
+export const CUSTOMISATION_LOCATIONS_CHANGED_EVENT = 'customisation:locations-changed'
+
+export interface CustomisationLocationsChangedDetail {
+  kind: 'prompts' | 'skills' | 'agents'
+  workspacePath: string
+}
+
+function emitLocationsChanged(kind: CustomisationLocationsChangedDetail['kind'], workspacePath: string): void {
+  try {
+    window.dispatchEvent(new CustomEvent<CustomisationLocationsChangedDetail>(
+      CUSTOMISATION_LOCATIONS_CHANGED_EVENT,
+      { detail: { kind, workspacePath } },
+    ))
+  } catch {
+    // Ignore dispatch failures (e.g. in non-browser environments/tests)
+  }
+}
+
 function dataDir(workspacePath: string): string {
   return `${workspacePath}/.contex/customisation`
 }
@@ -110,6 +128,17 @@ function LocationsPanel({ title, value, onChange, onClose }: {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [draft, setDraft] = useState(value)
+  // Keep the textarea in sync with the persisted value when the parent
+  // finishes loading locations-*.json after the panel has already mounted.
+  // Without this, the panel shows the initial default and overwrites the
+  // saved value on Save.
+  const lastSyncedValueRef = useRef(value)
+  useEffect(() => {
+    if (lastSyncedValueRef.current !== value) {
+      lastSyncedValueRef.current = value
+      setDraft(value)
+    }
+  }, [value])
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: theme.surface.base, borderRadius: 8, overflow: 'hidden', border: `1px solid ${theme.border.default}` }}>
       {/* Title bar */}
@@ -269,10 +298,25 @@ const DEFAULT_AGENT_LOCATIONS = [
   '$WORKSPACE/.continue/agents',
 ].join('\n')
 
+// Strip optional surrounding quotes and convert shell-style escapes (e.g.
+// `Application\ Support`) into the literal characters the filesystem API
+// expects. Users often paste paths with backslash-escaped spaces copied from
+// a shell; without this fix `readDir` gets a path containing an actual
+// backslash and silently fails.
+function normaliseLocationLine(line: string): string {
+  let l = line.trim()
+  if (!l) return ''
+  if ((l.startsWith('"') && l.endsWith('"')) || (l.startsWith("'") && l.endsWith("'"))) {
+    l = l.slice(1, -1)
+  }
+  l = l.replace(/\\([ \t()'"\\])/g, '$1')
+  return l
+}
+
 function resolveLocations(raw: string, homePath: string, workspacePath: string): string[] {
   return raw
     .split('\n')
-    .map(l => l.trim())
+    .map(normaliseLocationLine)
     .filter(Boolean)
     .map(l => l.replace(/^\$HOME/, homePath).replace(/^\$WORKSPACE/, workspacePath))
 }
@@ -289,10 +333,26 @@ export function PromptsSection({ workspacePath, hideHeaderText = false }: { work
 
   const file = `${dataDir(workspacePath)}/prompts.json`
   const locFile = `${dataDir(workspacePath)}/locations-prompts.json`
-  useEffect(() => { loadJson<PromptTemplate[]>(file, []).then(setItems) }, [file])
+  // Only persisted user-authored prompts are loaded from disk; discovered
+  // entries are rebuilt each mount by the scan effect below. Without this
+  // filter a stale persisted copy can race ahead of the scan and hide
+  // freshly-discovered prompts from newly-added locations.
+  useEffect(() => {
+    loadJson<PromptTemplate[]>(file, []).then(loaded => {
+      setItems(loaded.filter(p => !p.id.startsWith('discovered-')))
+    })
+  }, [file])
   useEffect(() => { loadJson<string>(locFile, DEFAULT_PROMPT_LOCATIONS).then(setLocationText) }, [locFile])
-  const save = useCallback((next: PromptTemplate[]) => { setItems(next); saveJson(file, next) }, [file])
-  const saveLocations = useCallback((text: string) => { setLocationText(text); saveJson(locFile, text) }, [locFile])
+  // Persist only user-authored prompts — discovered ones are sourced from
+  // scan locations on every mount.
+  const save = useCallback((next: PromptTemplate[]) => {
+    setItems(next)
+    saveJson(file, next.filter(p => !p.id.startsWith('discovered-')))
+  }, [file])
+  const saveLocations = useCallback((text: string) => {
+    setLocationText(text)
+    saveJson(locFile, text).then(() => emitLocationsChanged('prompts', workspacePath))
+  }, [locFile, workspacePath])
 
   const handleSave = useCallback((item: PromptTemplate) => {
     const exists = items.find(i => i.id === item.id)
@@ -333,13 +393,14 @@ export function PromptsSection({ workspacePath, hideHeaderText = false }: { work
         if (!content) continue
         discovered.push({ id: `discovered-${path}`, name, description: `From ${label} configuration`, template: content, fields: [], tags: [label] })
       }
-      if (discovered.length > 0) {
-        setItems(prev => {
-          const existing = new Set(prev.map(p => p.name))
-          const newOnes = discovered.filter(p => !existing.has(p.name))
-          return newOnes.length > 0 ? [...prev, ...newOnes] : prev
-        })
-      }
+      // Replace previously-discovered prompts so stale entries from removed
+      // locations go away; preserve user-authored prompts untouched.
+      setItems(prev => {
+        const userAuthored = prev.filter(p => !p.id.startsWith('discovered-'))
+        const userNames = new Set(userAuthored.map(p => p.name))
+        const freshDiscovered = discovered.filter(p => !userNames.has(p.name))
+        return [...userAuthored, ...freshDiscovered]
+      })
     }
     scanDirs()
   }, [workspacePath, locationText])
@@ -446,10 +507,30 @@ export function SkillsSection({ workspacePath, hideHeaderText = false }: { works
 
   const file = `${dataDir(workspacePath)}/skills.json`
   const locFile = `${dataDir(workspacePath)}/locations-skills.json`
-  useEffect(() => { loadJson<SkillDefinition[]>(file, []).then(setItems) }, [file])
+  const hiddenFile = `${dataDir(workspacePath)}/skills-hidden.json`
+  const [hiddenPaths, setHiddenPaths] = useState<string[]>([])
+  // Only persisted user-authored skills are loaded from disk; discovered
+  // entries are rebuilt each mount by the scan effect below. Without this
+  // filter a stale persisted copy can race ahead of the scan and hide
+  // freshly-discovered skills from newly-added locations.
+  useEffect(() => {
+    loadJson<SkillDefinition[]>(file, []).then(loaded => {
+      setItems(loaded.filter(s => !s.id.startsWith('discovered-')))
+    })
+  }, [file])
   useEffect(() => { loadJson<string>(locFile, DEFAULT_SKILL_LOCATIONS).then(setLocationText) }, [locFile])
-  const save = useCallback((next: SkillDefinition[]) => { setItems(next); saveJson(file, next) }, [file])
-  const saveLocations = useCallback((text: string) => { setLocationText(text); saveJson(locFile, text) }, [locFile])
+  useEffect(() => { loadJson<string[]>(hiddenFile, []).then(setHiddenPaths) }, [hiddenFile])
+  // Persist only user-authored skills — discovered ones are sourced from
+  // scan locations on every mount.
+  const save = useCallback((next: SkillDefinition[]) => {
+    setItems(next)
+    saveJson(file, next.filter(s => !s.id.startsWith('discovered-')))
+  }, [file])
+  const saveLocations = useCallback((text: string) => {
+    setLocationText(text)
+    saveJson(locFile, text).then(() => emitLocationsChanged('skills', workspacePath))
+  }, [locFile, workspacePath])
+  const saveHidden = useCallback((next: string[]) => { setHiddenPaths(next); saveJson(hiddenFile, next) }, [hiddenFile])
 
   const handleSave = useCallback((item: SkillDefinition) => {
     const exists = items.find(i => i.id === item.id)
@@ -458,42 +539,79 @@ export function SkillsSection({ workspacePath, hideHeaderText = false }: { works
     setSelected(item)
   }, [items, save])
 
+  // Delete a skill. For user-created skills (no `discovered-` id prefix) we
+  // just drop the registry entry. For discovered skills we also attempt to
+  // remove the source file on disk; the path is always tombstoned so that
+  // the scanner below skips it on the next mount even if the file delete
+  // fails (e.g. read-only bundled locations).
+  const handleDelete = useCallback(async (item: SkillDefinition) => {
+    if (item.id.startsWith('discovered-')) {
+      const sourcePath = item.id.slice('discovered-'.length)
+      await window.electron.fs.deleteFile(sourcePath).catch(() => {})
+      if (!hiddenPaths.includes(sourcePath)) {
+        saveHidden([...hiddenPaths, sourcePath])
+      }
+    }
+    save(items.filter(i => i.id !== item.id))
+    setSelected(null)
+  }, [items, save, hiddenPaths, saveHidden])
+
   // Auto-discover skills from configured scan locations
   useEffect(() => {
     const scanDirs = async () => {
       const homePath = window.electron.homedir
       const dirs = resolveLocations(locationText, homePath, workspacePath)
+      const hiddenSet = new Set(hiddenPaths)
       const discovered: SkillDefinition[] = []
+      // Claude-format skills live as sub-folders each containing `SKILL.md`
+      // (sometimes `skill.md`). Other tools drop a single `.md`/`.txt`/`.mdc`
+      // file. Support both: for each entry, treat a matching file as the skill
+      // body, otherwise descend one level to look for a SKILL.md.
+      const registerFromFile = (filePath: string, fallbackName: string, content: string, dir: string) => {
+        if (hiddenSet.has(filePath)) return
+        const nameMatch = content.match(/^---[\s\S]*?name:\s*(.+?)$/m)
+        const descMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m)
+        const name = nameMatch?.[1]?.trim() ?? fallbackName
+        if (discovered.find(s => s.name === name)) return
+        discovered.push({
+          id: `discovered-${filePath}`,
+          name,
+          description: descMatch?.[1]?.trim() ?? `From ${dir}`,
+          content,
+          command: name,
+        })
+      }
       for (const dir of dirs) {
         const entries: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(dir).catch(() => [])
         for (const f of entries) {
-          if (f.isDir || (f.ext !== '.md' && f.ext !== '.txt' && f.ext !== '.mdc')) continue
+          if (f.isDir) {
+            // Folder-style skill: look for SKILL.md / skill.md inside.
+            const sub: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(f.path).catch(() => [])
+            const skillFile = sub.find(e => !e.isDir && /^skill\.md$/i.test(e.name))
+              ?? sub.find(e => !e.isDir && /^skill\.(txt|mdc)$/i.test(e.name))
+            if (!skillFile) continue
+            const content = await readTextIfExists(skillFile.path)
+            if (!content) continue
+            registerFromFile(skillFile.path, f.name, content, dir)
+            continue
+          }
+          if (f.ext !== '.md' && f.ext !== '.txt' && f.ext !== '.mdc') continue
           const content = await readTextIfExists(f.path)
           if (!content) continue
-          const nameMatch = content.match(/^---[\s\S]*?name:\s*(.+?)$/m)
-          const name = nameMatch?.[1]?.trim() ?? f.name.replace(/\.(md|txt|mdc)$/, '')
-          const descMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m)
-          if (!discovered.find(s => s.name === name)) {
-            discovered.push({
-              id: `discovered-${f.path}`,
-              name,
-              description: descMatch?.[1]?.trim() ?? `From ${dir}`,
-              content,
-              command: name,
-            })
-          }
+          registerFromFile(f.path, f.name.replace(/\.(md|txt|mdc)$/, ''), content, dir)
         }
       }
-      if (discovered.length > 0) {
-        setItems(prev => {
-          const existing = new Set(prev.map(s => s.name))
-          const newOnes = discovered.filter(s => !existing.has(s.name))
-          return newOnes.length > 0 ? [...prev, ...newOnes] : prev
-        })
-      }
+      // Replace previously-discovered skills so stale entries from removed
+      // locations go away; preserve user-authored skills untouched.
+      setItems(prev => {
+        const userAuthored = prev.filter(s => !s.id.startsWith('discovered-'))
+        const userNames = new Set(userAuthored.map(s => s.name))
+        const freshDiscovered = discovered.filter(s => !userNames.has(s.name))
+        return [...userAuthored, ...freshDiscovered]
+      })
     }
     scanDirs()
-  }, [workspacePath, locationText])
+  }, [workspacePath, locationText, hiddenPaths])
 
   if (editing) return <SkillEditor item={editing} onSave={handleSave} onCancel={() => setEditing(null)} />
   if (locationsOpen) return (
@@ -540,7 +658,7 @@ export function SkillsSection({ workspacePath, hideHeaderText = false }: { works
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: fonts.size, fontWeight: 600, color: theme.text.primary, flex: 1 }}>{selected.name}</span>
               <button onClick={() => setEditing(selected)} style={{ fontSize: fonts.secondarySize, padding: '4px 10px', borderRadius: 5, border: `1px solid ${theme.border.default}`, background: 'transparent', color: theme.text.muted, cursor: 'pointer' }}>Edit</button>
-              <button onClick={() => { save(items.filter(i => i.id !== selected.id)); setSelected(null) }} style={{ fontSize: fonts.secondarySize, padding: '4px 10px', borderRadius: 5, border: `1px solid ${theme.border.default}`, background: 'transparent', color: theme.status.danger, cursor: 'pointer' }}>Delete</button>
+              <button onClick={() => { handleDelete(selected) }} style={{ fontSize: fonts.secondarySize, padding: '4px 10px', borderRadius: 5, border: `1px solid ${theme.border.default}`, background: 'transparent', color: theme.status.danger, cursor: 'pointer' }}>Delete</button>
             </div>
             {selected.description && <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, lineHeight: 1.5 }}>{selected.description}</div>}
             <div style={{ display: 'flex', gap: 4 }}>
@@ -915,9 +1033,13 @@ export function AgentsSection({ workspacePath, hideHeaderText = false }: { works
   const locFile = `${dataDir(workspacePath)}/locations-agents.json`
   useEffect(() => {
     loadJson<AgentMode[]>(file, []).then(loaded => {
-      // Merge with defaults
+      // Merge with defaults. Drop any previously-persisted `discovered-*`
+      // entries — those are rebuilt each mount by the scan effect below, so
+      // keeping them here causes stale entries to race ahead of the scan and
+      // mask freshly-discovered agents from newly-added locations.
       const merged = [...DEFAULT_MODES]
       for (const item of loaded) {
+        if (item.id.startsWith('discovered-')) continue
         const idx = merged.findIndex(m => m.id === item.id)
         if (idx >= 0) merged[idx] = { ...merged[idx], ...item }
         else merged.push(item)
@@ -926,12 +1048,20 @@ export function AgentsSection({ workspacePath, hideHeaderText = false }: { works
     })
   }, [file])
   useEffect(() => { loadJson<string>(locFile, DEFAULT_AGENT_LOCATIONS).then(setLocationText) }, [locFile])
-  const saveLocations = useCallback((text: string) => { setLocationText(text); saveJson(locFile, text) }, [locFile])
+  const saveLocations = useCallback((text: string) => {
+    setLocationText(text)
+    saveJson(locFile, text).then(() => emitLocationsChanged('agents', workspacePath))
+  }, [locFile, workspacePath])
 
   const save = useCallback((next: AgentMode[]) => {
     setItems(next)
-    // Only persist non-default or modified items
-    saveJson(file, next.filter(m => !m.isBuiltin || DEFAULT_MODES.find(d => d.id === m.id && JSON.stringify(d) !== JSON.stringify(m))))
+    // Only persist non-default or modified items. Also exclude discovered-*
+    // entries — discovery rebuilds those on every mount, so persisting them
+    // would cause stale copies to race ahead of a fresh scan.
+    saveJson(file, next.filter(m =>
+      !m.id.startsWith('discovered-')
+      && (!m.isBuiltin || DEFAULT_MODES.find(d => d.id === m.id && JSON.stringify(d) !== JSON.stringify(m)))
+    ))
   }, [file])
 
   const handleSave = useCallback((item: AgentMode) => {
@@ -989,13 +1119,14 @@ export function AgentsSection({ workspacePath, hideHeaderText = false }: { works
           }
         }
       }
-      if (discovered.length > 0) {
-        setItems(prev => {
-          const existing = new Set(prev.map(a => a.name))
-          const newOnes = discovered.filter(a => !existing.has(a.name))
-          return newOnes.length > 0 ? [...prev, ...newOnes] : prev
-        })
-      }
+      // Replace previously-discovered agents so stale entries from removed
+      // locations go away; preserve built-ins and user-authored agents.
+      setItems(prev => {
+        const keepers = prev.filter(a => a.isBuiltin || !a.id.startsWith('discovered-'))
+        const keeperNames = new Set(keepers.map(a => a.name))
+        const freshDiscovered = discovered.filter(a => !keeperNames.has(a.name))
+        return [...keepers, ...freshDiscovered]
+      })
     }
     scanDirs()
   }, [workspacePath, locationText])

@@ -52,6 +52,7 @@ const LazyClusoWidgetMount = React.lazy(() =>
     .catch(() => ({ default: () => null as React.ReactNode }))
 )
 const LazyAgentSetup = React.lazy(() => import('./components/AgentSetup').then(m => ({ default: m.AgentSetup })))
+const LazySkillInstallModal = React.lazy(() => import('./components/SkillInstallModal').then(m => ({ default: m.SkillInstallModal })))
 
 type DragState =
   | { type: null }
@@ -758,6 +759,10 @@ function App(): JSX.Element {
   const [guides, setGuides] = useState<{ x?: number; y?: number }[]>([])
   const [discoveryPulses, setDiscoveryPulses] = useState<DiscoveryPulse[]>([])
   const [showAgentSetup, setShowAgentSetup] = useState(false)
+  // .skill install dialog — populated when user drops a .skill file on the
+  // canvas or double-clicks one in Finder (forwarded via `skill:file-opened`
+  // from the main process).
+  const [skillInstallPath, setSkillInstallPath] = useState<string | null>(null)
   const { extensionTiles, extensionEntries } = useExtensions(
     workspace?.path ?? null,
     !settings.extensionsDisabled,
@@ -1097,6 +1102,76 @@ function App(): JSX.Element {
       window.localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(settings))
     } catch {}
   }, [settings])
+
+  // Listen for .skill files opened via Finder / file-association / argv. Also
+  // signal `skills:rendererReady` so main can flush any paths queued before
+  // the renderer was mounted.
+  //
+  // Additionally install a window-level drop listener so `.skill` bundles can
+  // be dropped anywhere in the app — full-screen chat / panel layout / expanded
+  // tiles — not just the canvas. Only files with the `.skill` extension are
+  // intercepted; all other drags fall through to their local handlers.
+  useEffect(() => {
+    const api = window.electron?.skills
+    const unsubList: Array<() => void> = []
+    if (api) {
+      const unsub = api.onFileOpened(({ path }) => {
+        if (path && path.toLowerCase().endsWith('.skill')) {
+          setSkillInstallPath(path)
+        }
+      })
+      void api.ready().catch(() => {})
+      unsubList.push(() => { try { unsub() } catch {} })
+    }
+
+    // Detect whether a drag contains OS files. `types` is the only reliable
+    // signal available during dragover — the actual file list is opaque until
+    // drop fires, per the HTML5 DnD spec.
+    const dragHasFiles = (dt: DataTransfer | null): boolean => {
+      if (!dt) return false
+      const types = dt.types
+      if (!types) return false
+      for (let i = 0; i < types.length; i++) {
+        if (types[i] === 'Files' || types[i] === 'application/x-moz-file') return true
+      }
+      return false
+    }
+
+    const onWindowDragOver = (e: DragEvent): void => {
+      // Only enable drops where the default drop target is normally rejected
+      // (outside the canvas). The canvas already preventDefaults on its own,
+      // so calling it again here is harmless. We gate on Files so internal
+      // HTML drags (text selections, etc.) are untouched.
+      if (dragHasFiles(e.dataTransfer)) {
+        e.preventDefault()
+      }
+    }
+
+    const onWindowDrop = (e: DragEvent): void => {
+      if (!dragHasFiles(e.dataTransfer)) return
+      const paths = getDroppedPaths(e.dataTransfer)
+      const skillPath = paths.find(p => p.toLowerCase().endsWith('.skill'))
+      if (!skillPath) return
+      // `.skill` bundles are always consumed by the install modal regardless
+      // of which view is active. Stop propagation so no tile-level handler
+      // interprets the path as a regular file drop.
+      e.preventDefault()
+      e.stopPropagation()
+      setSkillInstallPath(skillPath)
+    }
+
+    window.addEventListener('dragover', onWindowDragOver)
+    // Capture phase so we reach the handler before tile-level listeners that
+    // might try to swallow the drop.
+    window.addEventListener('drop', onWindowDrop, true)
+
+    unsubList.push(() => {
+      window.removeEventListener('dragover', onWindowDragOver)
+      window.removeEventListener('drop', onWindowDrop, true)
+    })
+
+    return () => { for (const fn of unsubList) fn() }
+  }, [])
 
   const updateAppSettings = useCallback((patch: Partial<AppSettings> | ((current: AppSettings) => Partial<AppSettings>)) => {
     setSettings(current => {
@@ -4301,6 +4376,13 @@ function App(): JSX.Element {
             // Files dropped from OS or sidebar
             const droppedPaths = getDroppedPaths(e.dataTransfer)
             if (droppedPaths.length > 0) {
+              // Check for .skill first (Claude skill bundle — zip archive).
+              // Opens the install-confirmation modal.
+              const skillPath = droppedPaths.find(p => p.toLowerCase().endsWith('.skill'))
+              if (skillPath) {
+                setSkillInstallPath(skillPath)
+                return
+              }
               // Check for .vsix first
               const vsixPath = droppedPaths.find(p => p.endsWith('.vsix'))
               if (vsixPath) {
@@ -4326,6 +4408,10 @@ function App(): JSX.Element {
             // File from sidebar (text/plain fallback)
             const filePath = e.dataTransfer.getData('text/plain')
             if (filePath) {
+              if (filePath.toLowerCase().endsWith('.skill')) {
+                setSkillInstallPath(filePath)
+                return
+              }
               void resolveFileTileType(filePath).then(type => addTile(type, filePath, world))
             }
           }}
@@ -5320,6 +5406,14 @@ function App(): JSX.Element {
       {showAgentSetup && (
         <Suspense fallback={null}>
           <LazyAgentSetup onComplete={() => setShowAgentSetup(false)} />
+        </Suspense>
+      )}
+      {skillInstallPath && (
+        <Suspense fallback={null}>
+          <LazySkillInstallModal
+            zipPath={skillInstallPath}
+            onClose={() => setSkillInstallPath(null)}
+          />
         </Suspense>
       )}
     </div>

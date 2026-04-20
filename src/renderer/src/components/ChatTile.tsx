@@ -31,10 +31,18 @@ import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote } f
 import { BlockNoteAffordance } from './chat/BlockNoteAffordance'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
 import { setTileTodos, clearTileTodos, useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
+import { CUSTOMISATION_LOCATIONS_CHANGED_EVENT, type CustomisationLocationsChangedDetail } from './CustomisationTile'
 import { PlanCard } from './chat/PlanCard'
 import { PlanPane } from './chat/PlanPane'
 import { PlanChip } from './chat/PlanChip'
 import { JSXPreview, JSXPreviewContent, JSXPreviewError } from './ai-elements/JSXPreview'
+import {
+  ToolPermissionCard,
+  ToolPermissionProvider,
+  useToolPermissionContext,
+  type ToolPermissionDecision,
+  type ToolPermissionRequest,
+} from './ai-elements/ToolPermission'
 
 const CHAT_SLASH_COMMANDS = [
   { value: '/compact', description: 'Compact conversation' },
@@ -60,7 +68,15 @@ const CHAT_DEFAULT_SKILL_LOCATIONS = [
 function resolveChatSkillLocations(raw: string, homePath: string, workspacePath: string | null): string[] {
   return raw
     .split('\n')
-    .map(line => line.trim())
+    .map(line => {
+      // Strip optional surrounding quotes and convert shell-style escapes
+      // (e.g. `Application\ Support`) into literal characters. Without this
+      // a pasted shell path silently fails the `readDir` lookup.
+      let l = line.trim()
+      if (!l) return ''
+      if ((l.startsWith('"') && l.endsWith('"')) || (l.startsWith("'") && l.endsWith("'"))) l = l.slice(1, -1)
+      return l.replace(/\\([ \t()'"\\])/g, '$1')
+    })
     .filter(Boolean)
     .filter(line => workspacePath || !line.startsWith('$WORKSPACE'))
     .map(line => line.replace(/^\$HOME/, homePath).replace(/^\$WORKSPACE/, workspacePath ?? ''))
@@ -698,6 +714,7 @@ function AskUserQuestionChip({ block, payload }: { block: ToolBlock; payload: As
     </div>
   )
 }
+
 
 // --- Font defaults (used when no settings are provided) --------------------------
 
@@ -1646,18 +1663,19 @@ const ChatMessageContent = React.memo(({
   const { bodyText, attachmentPaths } = useMemo(() => splitMessageAttachmentPaths(text), [text])
   // JSX preview disabled — was causing render lockups on message history load
   // const bodySegments = useMemo(() => splitRenderableMessageSegments(bodyText, isStreaming), [bodyText, isStreaming])
-  const chipBackground = isUser
-    ? 'rgba(255,255,255,0.1)'
-    : theme.surface.panelMuted
-  const chipBorder = isUser
-    ? 'rgba(255,255,255,0.18)'
-    : theme.border.subtle
-  const chipText = isUser
-    ? '#f8fbff'
-    : theme.text.primary
-  const chipMeta = isUser
-    ? 'rgba(255,255,255,0.72)'
-    : theme.text.disabled
+  // Chip colors must stay legible regardless of whether the parent message
+  // bubble is dark (dark theme user bubble) or light (light theme user
+  // bubble). In light mode we pick an explicitly-white chip surface with a
+  // strong border and a forced-dark text colour so we don't blend into the
+  // pale user bubble — previously `theme.surface.panelElevated` was nearly
+  // identical to the bubble and child text colours were inheriting light
+  // values from elsewhere, producing a "ghost chip" effect.
+  void isUser
+  const isLight = theme.mode === 'light'
+  const chipBackground = isLight ? '#ffffff' : theme.surface.panelElevated
+  const chipBorder = isLight ? 'rgba(15,23,42,0.18)' : theme.border.default
+  const chipText = isLight ? '#1b2430' : theme.text.primary
+  const chipMeta = isLight ? '#2d3748' : theme.text.secondary
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: bodyText && attachmentPaths.length > 0 ? 12 : 0, minWidth: 0, width: '100%' }}>
@@ -1679,6 +1697,7 @@ const ChatMessageContent = React.memo(({
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minWidth: 0 }}>
             {attachmentPaths.map(path => {
               const wasRead = readAttachmentPaths?.has(path) === true
+              const isImage = isImagePath(path)
               return (
                 <button
                   key={path}
@@ -1688,18 +1707,34 @@ const ChatMessageContent = React.memo(({
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
-                    gap: 5,
+                    gap: 6,
                     minWidth: 0,
                     maxWidth: '100%',
                     borderRadius: 6,
                     border: `1px solid ${chipBorder}`,
                     background: chipBackground,
                     color: chipText,
-                    padding: '3px 7px',
+                    padding: isImage ? 3 : '3px 7px',
                     cursor: 'pointer',
                   }}
                 >
-                  <FileText size={10} style={{ flexShrink: 0, opacity: 0.8 }} />
+                  {isImage ? (
+                    <img
+                      src={`contex-file://${encodeURI(path).replace(/#/g, '%23')}`}
+                      alt={basename(path)}
+                      style={{
+                        width: 28,
+                        height: 28,
+                        objectFit: 'cover',
+                        borderRadius: 4,
+                        flexShrink: 0,
+                        display: 'block',
+                        background: isLight ? '#f5f7fb' : 'rgba(255,255,255,0.04)',
+                      }}
+                    />
+                  ) : (
+                    <FileText size={10} color={chipText} style={{ flexShrink: 0, opacity: 0.85 }} />
+                  )}
                   <span
                     style={{
                       minWidth: 0,
@@ -1709,6 +1744,8 @@ const ChatMessageContent = React.memo(({
                       whiteSpace: 'nowrap',
                       fontSize: Math.max(10, fonts.size - 2),
                       lineHeight: 1.2,
+                      color: chipText,
+                      paddingRight: isImage ? 6 : 0,
                     }}
                   >
                     {basename(path)}
@@ -1717,7 +1754,7 @@ const ChatMessageContent = React.memo(({
                     <Check
                       size={10}
                       color={theme.status.success}
-                      style={{ flexShrink: 0 }}
+                      style={{ flexShrink: 0, marginRight: isImage ? 4 : 0 }}
                       aria-label="Read by the model"
                     />
                   )}
@@ -1937,6 +1974,16 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   // before they get tucked into "Called N tools"). Populated by an effect
   // that walks messages; cleared when the chip is gone from state.
   const toolCompletedAtRef = useRef<Map<string, number>>(new Map())
+  // Inline tool-permission prompts. Keyed by tool_use id.
+  // `pending` holds active requests awaiting a user decision.
+  // `resolved` holds recently-answered ones so the chip collapses gracefully
+  // instead of vanishing the moment the user clicks.
+  const [pendingToolPermissions, setPendingToolPermissions] = useState<Map<string, ToolPermissionRequest>>(() => new Map())
+  const [resolvedToolPermissions, setResolvedToolPermissions] = useState<Map<string, ToolPermissionDecision>>(() => new Map())
+  const handleToolPermissionDecision = useCallback(async (args: { cardId: string; toolId: string; decision: ToolPermissionDecision }) => {
+    const res = await window.electron?.chat?.answerToolPermission?.(args)
+    return res ?? { ok: true }
+  }, [])
   const [executionTarget, setExecutionTarget] = useState<'local' | 'cloud'>(() => initialExecutionTarget)
   const [cloudHostId, setCloudHostId] = useState<string | null>(() => initialCloudHostId)
   const [provider, setProvider] = useState<string>(() => initialProvider)
@@ -2118,6 +2165,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     return () => { for (const u of unsubs) u() }
   }, [connectedPeerSignature, tileId])
   const [mode, setMode] = useState(() => initialMode)
+  // Tracks the permission mode we last pushed to the running Claude query so
+  // user-initiated mid-stream mode switches (Default -> Bypass etc.) propagate
+  // into the active canUseTool closure via chat:setPermissionMode.
+  const lastPushedModeRef = useRef<string>(initialMode)
   const [thinking, setThinking] = useState(() => initialRuntimeStateRef.current?.thinking ?? 'adaptive')
   const [autoAgentMode, setAutoAgentMode] = useState(() => initialRuntimeStateRef.current?.autoAgentMode ?? false)
   const effectiveAgentMode = Boolean(isConnected || isAutoConnected || autoAgentMode)
@@ -2312,12 +2363,33 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
   useEffect(() => { ensureChatMdStyle() }, [])
 
+  // Bumped whenever CustomisationTile saves a new set of skill/prompt
+  // locations, so the skill-discovery effect below re-runs and picks up new
+  // folders (or drops skills from removed folders).
+  const [skillLocationsVersion, setSkillLocationsVersion] = useState(0)
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<CustomisationLocationsChangedDetail>).detail
+      if (!detail) return
+      if (detail.kind !== 'skills' && detail.kind !== 'prompts') return
+      const currentWorkspace = _workspaceDir?.trim() || null
+      if (currentWorkspace && detail.workspacePath && detail.workspacePath !== currentWorkspace) return
+      setSkillLocationsVersion(v => v + 1)
+    }
+    window.addEventListener(CUSTOMISATION_LOCATIONS_CHANGED_EVENT, handler as EventListener)
+    return () => window.removeEventListener(CUSTOMISATION_LOCATIONS_CHANGED_EVENT, handler as EventListener)
+  }, [_workspaceDir])
+
   useEffect(() => {
     let cancelled = false
     const workspacePath = _workspaceDir?.trim() || null
     const homePath = window.electron.homedir ?? ''
     const skillsPath = workspacePath ? `${workspacePath}/.contex/customisation/skills.json` : null
     const locationsPath = workspacePath ? `${workspacePath}/.contex/customisation/locations-skills.json` : null
+    // Commands are conceptually prompts — the Prompts locations panel is the
+    // canonical place users add slash-command folders. Merge both lists so any
+    // folder added under Prompts OR Skills gets scanned for chat skills.
+    const promptLocationsPath = workspacePath ? `${workspacePath}/.contex/customisation/locations-prompts.json` : null
 
     ;(async () => {
       const discovered = new Map<string, SkillDefinition>()
@@ -2352,36 +2424,63 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         }
       }
 
-      let rawLocations = CHAT_DEFAULT_SKILL_LOCATIONS
-      if (locationsPath) {
-        const locationsRaw = await window.electron.fs.readFile(locationsPath).catch(() => '')
-        if (locationsRaw) {
-          try {
-            const parsed = JSON.parse(locationsRaw)
-            if (typeof parsed === 'string' && parsed.trim()) rawLocations = parsed
-          } catch {
-            if (locationsRaw.trim()) rawLocations = locationsRaw
-          }
+      const readLocationsFile = async (path: string | null): Promise<string> => {
+        if (!path) return ''
+        const raw = await window.electron.fs.readFile(path).catch(() => '')
+        if (!raw) return ''
+        try {
+          const parsed = JSON.parse(raw)
+          if (typeof parsed === 'string') return parsed
+        } catch {
+          return raw
         }
+        return ''
       }
 
-      const dirs = resolveChatSkillLocations(rawLocations, homePath, workspacePath)
+      const skillsLocationsText = await readLocationsFile(locationsPath)
+      const promptsLocationsText = await readLocationsFile(promptLocationsPath)
+      const mergedSources = [skillsLocationsText, promptsLocationsText].filter(s => s && s.trim()).join('\n')
+      const rawLocations = mergedSources.trim() ? mergedSources : CHAT_DEFAULT_SKILL_LOCATIONS
+
+      const seenDirs = new Set<string>()
+      const dirs = resolveChatSkillLocations(rawLocations, homePath, workspacePath).filter(d => {
+        if (seenDirs.has(d)) return false
+        seenDirs.add(d)
+        return true
+      })
+      // Claude-format skills are sub-folders containing `SKILL.md`. Other
+      // tools drop a single `.md`/`.txt`/`.mdc` file at the top level. Support
+      // both so e.g. `~/Library/Application Support/Claude/skills/foo/SKILL.md`
+      // is picked up as skill "foo".
+      const registerDiscoveredSkill = (filePath: string, fallbackName: string, content: string, dir: string): void => {
+        const nameMatch = content.match(/^---[\s\S]*?name:\s*(.+?)$/m)
+        const descriptionMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m)
+        const name = nameMatch?.[1]?.trim() ?? fallbackName
+        registerSkill({
+          id: `discovered-${filePath}`,
+          name,
+          description: descriptionMatch?.[1]?.trim() ?? `From ${dir}`,
+          content,
+          command: name,
+        })
+      }
       for (const dir of dirs) {
         const entries: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(dir).catch(() => [])
         for (const entry of entries) {
-          if (entry.isDir || (entry.ext !== '.md' && entry.ext !== '.txt' && entry.ext !== '.mdc')) continue
+          if (entry.isDir) {
+            const sub: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(entry.path).catch(() => [])
+            const skillFile = sub.find(e => !e.isDir && /^skill\.md$/i.test(e.name))
+              ?? sub.find(e => !e.isDir && /^skill\.(txt|mdc)$/i.test(e.name))
+            if (!skillFile) continue
+            const content = await window.electron.fs.readFile(skillFile.path).catch(() => '')
+            if (!content) continue
+            registerDiscoveredSkill(skillFile.path, entry.name, content, dir)
+            continue
+          }
+          if (entry.ext !== '.md' && entry.ext !== '.txt' && entry.ext !== '.mdc') continue
           const content = await window.electron.fs.readFile(entry.path).catch(() => '')
           if (!content) continue
-          const nameMatch = content.match(/^---[\s\S]*?name:\s*(.+?)$/m)
-          const descriptionMatch = content.match(/^---[\s\S]*?description:\s*(.+?)$/m)
-          const name = nameMatch?.[1]?.trim() ?? entry.name.replace(/\.(md|txt|mdc)$/i, '')
-          registerSkill({
-            id: `discovered-${entry.path}`,
-            name,
-            description: descriptionMatch?.[1]?.trim() ?? `From ${dir}`,
-            content,
-            command: name,
-          })
+          registerDiscoveredSkill(entry.path, entry.name.replace(/\.(md|txt|mdc)$/i, ''), content, dir)
         }
       }
 
@@ -2392,7 +2491,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     })
 
     return () => { cancelled = true }
-  }, [_workspaceDir])
+  }, [_workspaceDir, skillLocationsVersion])
 
   useEffect(() => {
     window.electron?.bus?.publish(`tile:${tileId}`, 'tool_inventory', `chat:${tileId}`, {
@@ -2571,17 +2670,25 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   // progressive-collapse logic (applyLiveCollapse below) can apply a grace
   // period before folding a freshly-finished chip into the group summary.
   // Also prune entries for tool ids that no longer exist in state.
+  const toolStampInitialRunRef = useRef(true)
   useEffect(() => {
     const seen = new Set<string>()
     const now = Date.now()
+    // On first run (history load) stamp already-done tools as if they
+    // completed before the grace window so they're immediately eligible
+    // to fold. Subsequent runs stamp freshly-completed tools with `now`
+    // so live streaming still gets the full grace period.
+    const initialRun = toolStampInitialRunRef.current
+    const stampValue = initialRun ? 0 : now
     for (const msg of messages) {
       for (const tb of msg.toolBlocks ?? []) {
         seen.add(tb.id)
         if (tb.status === 'done' && !toolCompletedAtRef.current.has(tb.id)) {
-          toolCompletedAtRef.current.set(tb.id, now)
+          toolCompletedAtRef.current.set(tb.id, stampValue)
         }
       }
     }
+    toolStampInitialRunRef.current = false
     // Drop stale entries for tool blocks that got removed (e.g. conversation
     // cleared / message regenerated).
     for (const id of Array.from(toolCompletedAtRef.current.keys())) {
@@ -2688,6 +2795,22 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (!isStreaming) return
     lastActivityAtRef.current = Date.now()
   }, [messages, isStreaming])
+
+  // Push permission-mode changes into the running Claude query. Only fires
+  // when mode actually changed during an active stream — initial mount and
+  // stream start re-baseline the ref so the next user-initiated switch gets
+  // detected. Only Claude's SDK supports runtime mode changes; other providers
+  // will need a per-turn restart (out of scope).
+  useEffect(() => {
+    if (!isStreaming) {
+      lastPushedModeRef.current = mode
+      return
+    }
+    if (provider !== 'claude') return
+    if (lastPushedModeRef.current === mode) return
+    lastPushedModeRef.current = mode
+    void window.electron?.chat?.setPermissionMode?.({ cardId: tileId, mode })
+  }, [mode, isStreaming, provider, tileId])
 
   // Tick every 500ms while streaming (and for ~7s afterwards) so time-based
   // UI can recompute: the quiet-indicator's "quiet for Xs" counter, and the
@@ -3467,6 +3590,59 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           })
           break
 
+        case 'tool_permission_request': {
+          const pid = typeof event.toolId === 'string' ? event.toolId : null
+          if (!pid) break
+          const request: ToolPermissionRequest = {
+            toolId: pid,
+            toolName: typeof event.toolName === 'string' ? event.toolName : 'tool',
+            provider: typeof event.provider === 'string' ? event.provider : 'claude',
+            title: typeof event.title === 'string' ? event.title : null,
+            description: typeof event.description === 'string' ? event.description : null,
+            blockedPath: typeof event.blockedPath === 'string' ? event.blockedPath : null,
+            workspaceDir: typeof event.workspaceDir === 'string' ? event.workspaceDir : null,
+          }
+          setPendingToolPermissions(prev => {
+            const next = new Map(prev)
+            next.set(pid, request)
+            return next
+          })
+          setResolvedToolPermissions(prev => {
+            if (!prev.has(pid)) return prev
+            const next = new Map(prev)
+            next.delete(pid)
+            return next
+          })
+          break
+        }
+
+        case 'tool_permission_resolved': {
+          const pid = typeof event.toolId === 'string' ? event.toolId : null
+          if (!pid) break
+          const decision: ToolPermissionDecision =
+            event.decision === 'deny' || event.decision === 'once' || event.decision === 'session'
+              || event.decision === 'today' || event.decision === 'forever'
+              ? event.decision
+              : 'once'
+          setPendingToolPermissions(prev => {
+            if (!prev.has(pid)) return prev
+            const next = new Map(prev)
+            next.delete(pid)
+            return next
+          })
+          // Only persist a visible "resolved" banner for denials — allowed
+          // tools let the normal chip render the tool result. Denials need a
+          // permanent explanation since no tool_result follows.
+          if (decision === 'deny') {
+            setResolvedToolPermissions(prev => {
+              const next = new Map(prev)
+              next.set(pid, decision)
+              return next
+            })
+          }
+          break
+        }
+
         case 'tool_progress':
           updateLast(m => {
             const blocks = [...(m.toolBlocks ?? [])]
@@ -3528,28 +3704,45 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     return cleanup
   }, [tileId])
 
-  // Subscribe to incoming MCP peer commands on this tile's bus channel
+  // Subscribe to incoming MCP peer commands on this tile's bus channel.
+  // Strict gating so broadcasts from editor/extension peers don't spam every
+  // chat tile: the command must target THIS tileId explicitly, and the
+  // injected message id is a content hash so replays dedup instead of piling
+  // up identical `[App.tsx] …` noise lines.
   useEffect(() => {
     if (!window.electron?.bus) return
+    const seenPeerIds = new Set<string>()
     const unsubscribe = window.electron.bus.subscribe(`tile:${tileId}`, `chat:${tileId}:mcp`, (evt: any) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
       const command = typeof payload.command === 'string' ? payload.command : ''
-      if (!command) return
+      if (command !== 'chat_send_message' && command !== 'chat_acknowledge') return
 
-      if (command === 'chat_send_message' || command === 'chat_acknowledge') {
-        const text = typeof payload.message === 'string' ? payload.message : ''
-        if (!text) return
-        const prefix = command === 'chat_acknowledge' ? '🤝 ' : '📨 '
-        const incomingMsg: ChatMessage = {
-          id: `peer-${Date.now()}`,
-          role: 'user',
-          content: `${prefix}${text}`,
-          timestamp: Date.now(),
-          isStreaming: false,
-        }
-        setMessagesSafe(prev => [...prev, incomingMsg])
+      const targetCardId = typeof payload.cardId === 'string' ? payload.cardId
+        : typeof payload.tileId === 'string' ? payload.tileId
+        : null
+      // Reject broadcasts that don't explicitly target this tile.
+      if (!targetCardId || targetCardId !== tileId) return
+
+      const text = typeof payload.message === 'string' ? payload.message.trim() : ''
+      if (!text) return
+
+      const sig = `${evt.source ?? 'peer'}::${command}::${text}`
+      let hash = 0
+      for (let i = 0; i < sig.length; i++) hash = (hash * 31 + sig.charCodeAt(i)) | 0
+      const peerMsgId = `peer-${Math.abs(hash).toString(36)}`
+      if (seenPeerIds.has(peerMsgId)) return
+      seenPeerIds.add(peerMsgId)
+
+      const prefix = command === 'chat_acknowledge' ? '🤝 ' : '📨 '
+      const incomingMsg: ChatMessage = {
+        id: peerMsgId,
+        role: 'user',
+        content: `${prefix}${text}`,
+        timestamp: Date.now(),
+        isStreaming: false,
       }
+      setMessagesSafe(prev => (prev.some(m => m.id === peerMsgId) ? prev : [...prev, incomingMsg]))
     })
     return () => unsubscribe?.()
   }, [tileId])
@@ -4281,6 +4474,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     <ChatDispatchCtx.Provider value={chatDispatchValue}>
     <FontCtx.Provider value={fontCtxValue}>
     <AskUserQuestionContext.Provider value={{ cardId: tileId }}>
+    <ToolPermissionProvider
+      cardId={tileId}
+      pending={pendingToolPermissions}
+      resolved={resolvedToolPermissions}
+      onDecide={handleToolPermissionDecision}
+    >
     <div
       onDragOver={handleTileDragOver}
       onDragLeave={handleTileDragLeave}
@@ -6063,6 +6262,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       )}
       </div>
     </div>
+    </ToolPermissionProvider>
     </AskUserQuestionContext.Provider>
     </FontCtx.Provider>
     </ChatDispatchCtx.Provider>
@@ -6454,6 +6654,25 @@ const ToolBlockView = React.memo(function ToolBlockView({ block }: { block: Tool
   const theme = useTheme()
   const codePanelFontSize = Math.max(11, fonts.size - 1)
   const isFileChangeBlock = (block.fileChanges?.length ?? 0) > 0
+
+  // Intercept tool-permission requests — when the agent needs user approval for
+  // this tool call, show an inline Allow/Deny prompt instead of (or alongside)
+  // the raw tool chip. Mirrors the AskUserQuestion pattern.
+  const permissionCtx = useToolPermissionContext()
+  const permissionRequest = permissionCtx?.pending.get(block.id) ?? null
+  const resolvedDecision = permissionCtx?.resolved.get(block.id) ?? null
+  if (permissionRequest || resolvedDecision) {
+    return (
+      <ToolPermissionCard
+        toolId={block.id}
+        fallbackToolName={block.name}
+        request={permissionRequest}
+        resolvedDecision={resolvedDecision}
+        theme={theme}
+        fonts={{ sans: fonts.sans, mono: fonts.mono }}
+      />
+    )
+  }
 
   // Intercept AskUserQuestion tool blocks: render an interactive form so the user
   // can actually answer the question instead of seeing a raw JSON chip.

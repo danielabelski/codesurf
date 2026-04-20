@@ -1674,8 +1674,11 @@ function listDaemonWorkspaceSessions(workspaceId, existingEntries) {
   const seenSessionIds = new Set(existingEntries.map(entry => entry.sessionId).filter(Boolean))
   const seenTileIds = new Set(existingEntries.map(entry => entry.tileId).filter(Boolean))
   const liveJobIds = new Set(chatJobs.listLiveJobIds())
-  const jobs = readDaemonJobRecords(200, liveJobIds)
-  const now = Date.now()
+  // Return every persisted daemon job for this workspace — the sidebar
+  // handles visual paging via "Load more" and searches across the full
+  // result set. A hard cap or recency cutoff here would silently hide
+  // older conversations from both listing and search.
+  const jobs = readDaemonJobRecords(Number.MAX_SAFE_INTEGER, liveJobIds)
 
   return jobs
     .filter(job => {
@@ -1685,9 +1688,7 @@ function listDaemonWorkspaceSessions(workspaceId, existingEntries) {
       if (job.cardId && seenTileIds.has(job.cardId)) return false
       if (job.sessionId && seenSessionIds.has(job.sessionId)) return false
       if (job.status === 'cancelled') return false
-      if (isActiveJobStatus(job.status) || job.status === 'lost') return true
-      const updatedAt = job.updatedAt ? Date.parse(job.updatedAt) : 0
-      return updatedAt > 0 && (now - updatedAt) <= 24 * 60 * 60 * 1000
+      return true
     })
     .map(job => applyLocalSessionTitleOverride(workspaceId, {
       id: `codesurf-job:${job.id}`,

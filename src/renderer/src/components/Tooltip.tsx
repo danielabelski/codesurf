@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react'
+import { useTheme } from '../ThemeContext'
 
 interface Props {
   /** Simple single-line label. Ignored if `content` is provided. */
@@ -24,6 +25,8 @@ export function Tooltip({
   delay = 400,
   maxWidth = 320,
 }: Props): JSX.Element {
+  const theme = useTheme()
+  const isLight = theme.mode === 'light'
   const [visible, setVisible] = useState(false)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -59,17 +62,19 @@ export function Tooltip({
             ...alignStyles,
             marginTop: side === 'bottom' ? 5 : undefined,
             marginBottom: side === 'top' ? 5 : undefined,
-            background: '#1a1a1a',
-            border: '1px solid #333',
+            background: theme.surface.panelElevated,
+            border: `1px solid ${theme.border.default}`,
             borderRadius: 4,
             padding: isRich ? '8px 10px' : '3px 7px',
             fontSize: 11,
-            color: '#ccc',
+            color: theme.text.secondary,
             whiteSpace: isRich ? 'normal' : 'nowrap',
             maxWidth: isRich ? maxWidth : undefined,
             pointerEvents: 'none',
             zIndex: 99999,
-            boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+            boxShadow: isLight
+              ? '0 4px 14px rgba(15, 23, 42, 0.12)'
+              : '0 2px 8px rgba(0,0,0,0.4)',
           }}
         >
           {isRich ? content : label}

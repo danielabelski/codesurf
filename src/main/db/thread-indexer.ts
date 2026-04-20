@@ -93,17 +93,38 @@ function rowToEntry(row: Record<string, unknown>): AggregatedSessionEntry {
 // ─── Read ─────────────────────────────────────────────────────────────────
 
 /**
- * Return every live index row whose project_path matches the given workspace
- * path, plus user-scope entries (no project) that belong to every workspace.
+ * Return index rows that belong to the given workspace. A row belongs when:
+ *   - project_path matches the workspace path exactly, OR
+ *   - project_path is a descendant of the workspace path
+ *     (e.g. session started from a subfolder still shows under the workspace).
+ *
+ * User-scope entries with NO project_path (generic transcripts) are explicitly
+ * NOT returned here — they used to flood every workspace. If the caller wants
+ * the global "all sessions" list they should pass workspacePath=null, which
+ * returns everything ordered by recency.
  */
 export function listThreadsFromDb(workspacePath: string | null): AggregatedSessionEntry[] {
   const db = getDb()
+  if (!workspacePath) {
+    const rows = db.prepare(`
+      SELECT * FROM thread_index
+       WHERE deleted_at IS NULL
+       ORDER BY source_updated_ms DESC
+    `).all() as Record<string, unknown>[]
+    return rows.map(rowToEntry)
+  }
+  // Normalise a trailing slash so `${ws}/...` LIKE matches subpaths cleanly.
+  const wsPrefix = workspacePath.endsWith('/') ? workspacePath : `${workspacePath}/`
   const rows = db.prepare(`
     SELECT * FROM thread_index
      WHERE deleted_at IS NULL
-       AND (project_path IS @workspace_path OR scope = 'user')
+       AND project_path IS NOT NULL
+       AND (project_path = @workspace_path OR project_path LIKE @workspace_prefix)
      ORDER BY source_updated_ms DESC
-  `).all({ workspace_path: workspacePath }) as Record<string, unknown>[]
+  `).all({
+    workspace_path: workspacePath,
+    workspace_prefix: `${wsPrefix}%`,
+  }) as Record<string, unknown>[]
   return rows.map(rowToEntry)
 }
 
@@ -152,11 +173,19 @@ async function runScan(): Promise<void> {
     const now = nowIso()
 
     // Snapshot the current index keyed by entry_id.
-    const existing = new Map<string, { source_mtime_ms: number; source_size_bytes: number }>()
+    const existing = new Map<string, {
+      source_mtime_ms: number
+      source_size_bytes: number
+      project_path: string | null
+    }>()
     for (const row of db.prepare(
-      `SELECT entry_id, source_mtime_ms, source_size_bytes FROM thread_index WHERE deleted_at IS NULL`,
-    ).all() as Array<{ entry_id: string; source_mtime_ms: number; source_size_bytes: number }>) {
-      existing.set(row.entry_id, { source_mtime_ms: row.source_mtime_ms, source_size_bytes: row.source_size_bytes })
+      `SELECT entry_id, source_mtime_ms, source_size_bytes, project_path FROM thread_index WHERE deleted_at IS NULL`,
+    ).all() as Array<{ entry_id: string; source_mtime_ms: number; source_size_bytes: number; project_path: string | null }>) {
+      existing.set(row.entry_id, {
+        source_mtime_ms: row.source_mtime_ms,
+        source_size_bytes: row.source_size_bytes,
+        project_path: row.project_path,
+      })
     }
 
     const insert = db.prepare(`
@@ -251,7 +280,13 @@ async function runScan(): Promise<void> {
         if (!prev) {
           insert.run(params)
           inserts += 1
-        } else if (prev.source_mtime_ms !== mtime) {
+        } else if (
+          prev.source_mtime_ms !== mtime
+          // Also refresh when project_path derivation has changed (e.g. we
+          // started parsing cwd from Claude transcripts) so rows that were
+          // previously globally-scoped get pinned to the right workspace.
+          || (prev.project_path ?? null) !== (entry.projectPath ?? null)
+        ) {
           update.run(params)
           updates += 1
         } else {

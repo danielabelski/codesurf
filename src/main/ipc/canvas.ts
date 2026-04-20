@@ -24,8 +24,7 @@ import { broadcastToRenderer } from '../utils/broadcast'
 import { isRelayHostActive } from '../relay/registration'
 import { syncWorkspaceRelayParticipants } from '../relay/service'
 import { daemonClient } from '../daemon/client'
-import { readSettingsSync } from './workspace'
-import { ensureInitialIndex, getIndexerStatus, indexAllSources, listThreadsFromDb } from '../db/thread-indexer'
+import { getIndexerStatus, indexAllSources } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
 
 interface TileSessionSummary {
@@ -318,35 +317,21 @@ export function registerCanvasIPC(): void {
     broadcastSessionsChanged(workspaceId)
   })
 
-  // List all chat sessions for a workspace by combining local CodeSurf tile sessions with
-  // project/user .codesurf sessions and external provider session stores.
-  ipcMain.handle('canvas:listSessions', async (_, workspaceId: string, forceRefresh = false) => {
+  // List chat sessions for a workspace. The sidebar only surfaces conversations
+  // that actually belong to a chat block in this workspace — i.e. the local
+  // daemon-owned tile sessions. External provider transcripts (Claude CLI,
+  // Codex rollouts, Cursor chats, OpenClaw, OpenCode) are intentionally NOT
+  // listed here: they're not chat-block conversations and kept bleeding into
+  // the wrong workspaces.
+  ipcMain.handle('canvas:listSessions', async (_, workspaceId: string, _forceRefresh = false) => {
     assertSafeWorkspaceArtifactId(workspaceId)
     const workspacePath = await getWorkspacePathById(workspaceId)
-    const useIndex = readSettingsSync().storage?.threadIndex !== false
 
-    // Local (daemon-owned) sessions always come straight from the daemon.
     const localSessions: AggregatedSessionEntry[] = await daemonClient.listLocalSessions(workspaceId).catch(() => [])
     for (const session of localSessions) {
       if (!session.projectPath) session.projectPath = workspacePath
     }
-
-    if (useIndex) {
-      // Pure-read fast path. Never triggers a filesystem walk from here.
-      //
-      // The index is populated on first launch via ensureInitialIndex (kicked
-      // off from main/index.ts) and updated on demand via threads:reindex or
-      // automatically when the renderer calls forceRefresh (below).
-      if (forceRefresh) await indexAllSources()
-      else void ensureInitialIndex() // no-op after first populate
-      const indexed = listThreadsFromDb(workspacePath)
-      return [...localSessions, ...indexed].sort((a, b) => b.updatedAt - a.updatedAt)
-    }
-
-    // Slow (legacy) fallback: walk the five filesystem trees synchronously.
-    console.log('[threads] listSessions using LEGACY walker (storage.threadIndex = false)')
-    const external = await daemonClient.listExternalSessions(workspacePath, forceRefresh).catch(() => [])
-    return [...localSessions, ...external].sort((a, b) => b.updatedAt - a.updatedAt)
+    return localSessions.sort((a, b) => b.updatedAt - a.updatedAt)
   })
 
   ipcMain.handle('threads:indexStatus', () => {

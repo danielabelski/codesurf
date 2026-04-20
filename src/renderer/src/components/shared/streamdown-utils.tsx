@@ -57,7 +57,7 @@ export function ensureShimmerStyles(): void {
 // Bump this version suffix whenever the injected CSS below changes so that
 // Vite HMR re-injects a fresh <style> tag instead of short-circuiting on the
 // stale one left behind from a previous build.
-const CODE_LAYOUT_STYLE_VERSION = 'v8'
+const CODE_LAYOUT_STYLE_VERSION = 'v9'
 const CODE_LAYOUT_STYLE_ID = `shared-streamdown-code-layout-${CODE_LAYOUT_STYLE_VERSION}`
 
 export function ensureCodeBlockLayoutStyles(): void {
@@ -90,6 +90,11 @@ export function ensureCodeBlockLayoutStyles(): void {
          async DOM replacement inlines its own (dark) bg. ChatMarkdown root
          sets --chat-code-{shell,body,header}-bg on the container. */
       background: var(--chat-code-shell-bg, transparent) !important;
+      /* Subtle themed border — in light mode this gives the slab a crisp
+         edge against white prose. In dark mode the var resolves to
+         transparent so the block still reads as a flat panel. */
+      border: 1px solid var(--chat-code-border, transparent) !important;
+      overflow: hidden !important;
     }
     /* Inner body: flatten streamdown's default rounded border, tighten padding,
        and force a small monospace font so we don't get huge Shiki defaults. */
@@ -147,6 +152,12 @@ export function ensureCodeBlockLayoutStyles(): void {
       box-sizing: border-box !important;
       background: var(--chat-code-header-bg, transparent) !important;
       color: var(--chat-code-header-color, inherit) !important;
+      /* Thin divider under the language-label strip so the header reads as a
+         distinct row in light mode. Transparent in dark themes. */
+      border-bottom: 1px solid var(--chat-code-border, transparent) !important;
+      font-weight: 500 !important;
+      letter-spacing: 0.3px !important;
+      text-transform: lowercase !important;
     }
     /* Pin the copy/actions cluster to the top-right corner of the block so
        it shares the header row regardless of where streamdown places it in
@@ -241,6 +252,20 @@ export function ensureCodeBlockLayoutStyles(): void {
       padding: 8px 12px !important;
       vertical-align: middle !important;
     }
+
+    /* Inline code pills — consistent with the block palette so inline
+       <code> and fenced blocks read as a single design system. Previously
+       inline pills used a different (lighter) grey than the block, which
+       looked disjointed in light mode. */
+    .chat-md :not(pre) > code {
+      background: var(--chat-code-inline-bg, rgba(127,127,127,0.12)) !important;
+      color: var(--chat-code-inline-color, inherit) !important;
+      border: 1px solid var(--chat-code-inline-border, transparent) !important;
+      padding: 1px 5px !important;
+      border-radius: 4px !important;
+      font-size: 0.92em !important;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace !important;
+    }
   `
   document.head.appendChild(style)
 }
@@ -301,7 +326,13 @@ export function usePatchCodeBlocks(
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    const { shellBackground, bodyBackground, headerBackground, headerColor } = tokens.code
+    const { shellBackground, bodyBackground, headerBackground, headerColor, borderColor } = tokens.code
+    // In dark themes `borderColor` is 'transparent' so we fall back to the
+    // existing themed border for visible definition. In light mode the
+    // dedicated code border (#d7dde4) wins — gives the slab a clean edge
+    // against white prose without picking up the accent-tinted app border.
+    const blockBorder = borderColor === 'transparent' ? theme.border.default : borderColor
+    const headerBorder = borderColor === 'transparent' ? theme.border.subtle : borderColor
     // Keep JS path matching the CSS rules in ensureCodeBlockLayoutStyles so
     // both paths converge on the same compact rendering.
     const fontSize = 11
@@ -312,13 +343,13 @@ export function usePatchCodeBlocks(
       // `position:relative` is critical — the actions cluster is pinned
       // absolutely against this box, so we establish the containing block
       // here and keep `overflow:hidden` to clip to the rounded corners.
-      block.style.cssText = `display:block!important;position:relative!important;padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${theme.border.default}!important;max-width:100%!important;min-height:0!important;height:auto!important;contain:none!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
+      block.style.cssText = `display:block!important;position:relative!important;padding:0!important;gap:0!important;margin:6px 0!important;border-radius:6px!important;overflow:hidden!important;border:1px solid ${blockBorder}!important;max-width:100%!important;min-height:0!important;height:auto!important;contain:none!important;background:${shellBackground}!important;color:${theme.text.primary}!important`
       const header = block.querySelector<HTMLElement>('[data-streamdown="code-block-header"]')
       if (header) {
         // Reserve space on the right so the language label doesn't collide
         // with the absolutely-positioned actions cluster (~56px covers a
         // typical copy + expand button pair).
-        header.style.cssText = `height:22px!important;min-height:22px!important;max-height:22px!important;font-size:10px!important;padding:0 60px 0 8px!important;background:${headerBackground}!important;color:${headerColor}!important;border-bottom:1px solid ${theme.border.subtle}!important;display:flex!important;align-items:center!important;box-sizing:border-box!important`
+        header.style.cssText = `height:22px!important;min-height:22px!important;max-height:22px!important;font-size:10px!important;padding:0 60px 0 8px!important;background:${headerBackground}!important;color:${headerColor}!important;border-bottom:1px solid ${headerBorder}!important;display:flex!important;align-items:center!important;box-sizing:border-box!important;font-weight:500!important;letter-spacing:0.3px!important`
       }
       // Flatten any wrapper streamdown puts around the actions cluster so
       // it can't inject its own vertical height above the code body.
@@ -476,6 +507,10 @@ export const ChatMarkdown = React.memo(({ text, isStreaming, className }: {
         ['--chat-code-header-bg' as string]: tokens.code.headerBackground,
         ['--chat-code-header-color' as string]: tokens.code.headerColor,
         ['--chat-code-fg' as string]: theme.text.primary,
+        ['--chat-code-border' as string]: tokens.code.borderColor,
+        ['--chat-code-inline-bg' as string]: tokens.code.inlineBackground,
+        ['--chat-code-inline-color' as string]: tokens.code.inlineColor,
+        ['--chat-code-inline-border' as string]: tokens.code.inlineBorderColor,
       }}
     >
       <ChatStreamdown text={text} isStreaming={isStreaming} className={className} />

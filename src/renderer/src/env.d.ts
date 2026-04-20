@@ -78,6 +78,13 @@ interface ElectronAPI {
       answers: Record<string, string>
       annotations?: Record<string, { notes?: string; preview?: string }>
     }): Promise<{ ok: boolean; error?: string }>
+    answerToolPermission(payload: {
+      cardId: string
+      toolId: string | null
+      // `never` persists a deny-grant so subsequent calls auto-reject.
+      decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
+    }): Promise<{ ok: boolean; error?: string }>
+    setPermissionMode(payload: { cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
   }
   shell?: {
     openExternal(url: string): Promise<void>
@@ -267,6 +274,26 @@ interface ElectronAPI {
     searchHistory(profileDir: string, query: string, limit?: number): Promise<Array<{ url: string; title: string; visitCount: number; lastVisitTime: number }>>
   }
   homedir: string
+  skills: {
+    inspect(zipPath: string): Promise<{
+      name: string
+      description: string
+      topFolder: string
+      entryCount: number
+      hasSkillMd: boolean
+      preview: string
+      zipPath: string
+      sizeBytes: number
+    }>
+    install(args: { zipPath: string; targetDir?: string; overwrite?: boolean }): Promise<{
+      installedPath: string
+      entries: string[]
+      targetDir: string
+    }>
+    getDefaultTargetDir(): Promise<string>
+    ready(): Promise<boolean>
+    onFileOpened(callback: (payload: { path: string }) => void): () => void
+  }
   bus: {
     publish(channel: string, type: string, source: string, payload: Record<string, unknown>): Promise<import('../../shared/types').BusEvent>
     subscribe(channel: string, subscriberId: string, callback: (event: import('../../shared/types').BusEvent) => void): () => void
