@@ -7,6 +7,7 @@ import { dirname, basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { findSessionEntryById, getExternalSessionChatState, invalidateExternalSessionCache, listExternalSessionEntries } from './session-index.mjs'
 import { createChatJobManager } from './chat-jobs.mjs'
+import { createCheckpointStore } from './checkpoints.mjs'
 
 const HOME = process.env.CODESURF_HOME || join(homedir(), '.codesurf')
 const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'pid.json')
@@ -23,6 +24,15 @@ const SESSION_TITLE_OVERRIDES_FILE = join(HOME, 'session-title-overrides.json')
 const AUTH_TOKEN = randomUUID()
 const SESSION_TEXT_LIMIT = 120
 const chatJobs = createChatJobManager({ homeDir: HOME })
+const checkpointStore = createCheckpointStore({
+  assertSafeId,
+  atomicWriteJson,
+  materializeWorkspace,
+  readJsonFile,
+  readWorkspaceState,
+  runtimeSessionStatePath,
+  workspaceContexDir,
+})
 
 function ensureDir(dirPath) {
   mkdirSync(dirPath, { recursive: true })
@@ -1334,6 +1344,7 @@ function extractRuntimeSessionSummary(tileId, state) {
   const executionTarget = record.executionTarget === 'cloud' ? 'cloud' : 'local'
   const cloudHostId = typeof record.cloudHostId === 'string' ? record.cloudHostId : null
   const isStreaming = record.isStreaming === true
+  const checkpointCount = Number(record?.checkpoints?.count ?? 0) || 0
 
   let lastMessage = null
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1360,6 +1371,7 @@ function extractRuntimeSessionSummary(tileId, state) {
     executionTarget,
     cloudHostId,
     isStreaming,
+    checkpointCount,
     messageCount: messages.length,
     lastMessage,
     title,
@@ -1377,13 +1389,15 @@ function upsertRuntimeSessionState(workspaceId, tileId, state) {
   if (!state || typeof state !== 'object') return { ok: false, error: 'state is required' }
   const summary = extractRuntimeSessionSummary(tileId, state)
   if (!summary) return { ok: false, error: 'state did not contain a valid session payload' }
+  const existingState = readJsonFile(runtimeSessionStatePath(workspaceId, tileId), null)
   const nextState = {
+    ...((existingState && typeof existingState === 'object') ? existingState : {}),
     ...state,
     updatedAt: summary.updatedAt,
     title: summary.title,
   }
   atomicWriteJson(runtimeSessionStatePath(workspaceId, tileId), nextState)
-  return { ok: true, summary }
+  return { ok: true, summary: extractRuntimeSessionSummary(tileId, nextState) }
 }
 
 function moveFileToDeleted(filePath) {
@@ -2253,6 +2267,49 @@ const server = createServer(async (req, res) => {
         return
       }
       sendJson(res, 200, upsertRuntimeSessionState(workspaceId, cardId, body.state))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/create') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim()
+      if (!workspaceId || !sessionEntryId) {
+        sendJson(res, 400, { error: 'workspaceId and sessionEntryId are required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.createCheckpoint(workspaceId, sessionEntryId, {
+        label: body?.label,
+        reason: body?.reason,
+        files: body?.files,
+        metadata: body?.metadata,
+        source: body?.source,
+      }))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/list') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim() || null
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.listCheckpoints(workspaceId, sessionEntryId))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/restore') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const checkpointId = String(body?.checkpointId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim() || null
+      if (!workspaceId || !checkpointId) {
+        sendJson(res, 400, { error: 'workspaceId and checkpointId are required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.restoreCheckpoint(workspaceId, checkpointId, { sessionEntryId }))
       return
     }
 

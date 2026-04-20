@@ -137,6 +137,92 @@ function cloneChatMessages(messages: ChatMessage[]): ChatMessage[] {
   }))
 }
 
+function buildRuntimeSessionEntryId(req: ChatRequest): string {
+  return `codesurf-runtime:${req.cardId}`
+}
+
+function buildCheckpointLabel(toolName: string, filePaths: string[], workspaceDir?: string): string {
+  if (filePaths.length === 0) return `Before ${toolName}`
+  if (filePaths.length === 1) return `Before ${toolName} ${getDisplayPath(filePaths[0], workspaceDir)}`
+  return `Before ${toolName} (${filePaths.length} files)`
+}
+
+function extractAnthropicCheckpointPaths(toolName: string, input: Record<string, unknown>, workspaceDir?: string): string[] {
+  const resolveFile = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !value.trim()) return null
+    return resolveCodexFilePath(value, workspaceDir)
+  }
+
+  if (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write') {
+    const filePath = resolveFile(input.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  if (toolName === 'NotebookEdit') {
+    const filePath = resolveFile(input.notebook_path) ?? resolveFile(input.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  return []
+}
+
+async function createRuntimeCheckpoint(
+  req: ChatRequest,
+  toolName: string,
+  filePaths: string[],
+  metadata: Record<string, unknown> = {},
+): Promise<{ ok: boolean; checkpointId?: string; skipped?: boolean; error?: string }> {
+  if (filePaths.length === 0) return { ok: true, skipped: true }
+  if (!req.workspaceId) return { ok: true, skipped: true }
+
+  try {
+    const response = await daemonClient.createCheckpoint(req.workspaceId, buildRuntimeSessionEntryId(req), {
+      label: buildCheckpointLabel(toolName, filePaths, req.workspaceDir),
+      reason: `tool:${toolName}`,
+      files: filePaths,
+      metadata: {
+        provider: req.provider,
+        model: req.model,
+        toolName,
+        cardId: req.cardId,
+        ...metadata,
+      },
+      source: 'main-ipc-chat',
+    })
+    if (!response.ok) {
+      return { ok: false, error: response.error ?? `Failed to create checkpoint for ${toolName}` }
+    }
+    return { ok: true, checkpointId: response.checkpoint?.id }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log('createRuntimeCheckpoint error', req.cardId, toolName, message)
+    return { ok: false, error: message }
+  }
+}
+
+type ToolCheckpointPermissionResult =
+  | { behavior: 'allow'; toolUseID?: string }
+  | { behavior: 'deny'; message: string; toolUseID?: string }
+
+async function allowToolWithCheckpoint(
+  req: ChatRequest,
+  toolName: string,
+  input: Record<string, unknown>,
+  toolOptions: any,
+): Promise<ToolCheckpointPermissionResult> {
+  const checkpoint = await createRuntimeCheckpoint(req, toolName, extractAnthropicCheckpointPaths(toolName, input, req.workspaceDir), {
+    toolUseID: typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null,
+  })
+  if (!checkpoint.ok) {
+    return {
+      behavior: 'deny',
+      message: `Checkpoint creation failed before ${toolName}: ${checkpoint.error ?? 'unknown error'}`,
+      toolUseID: toolOptions?.toolUseID,
+    }
+  }
+  return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+}
+
 async function upsertRuntimeSessionState(req: ChatRequest, state: RuntimeChatSessionState): Promise<void> {
   if (!req.workspaceId) return
   try {
@@ -1235,7 +1321,7 @@ function chatClaude(req: ChatRequest): void {
       // Read the live mode so mid-thread switches take effect immediately.
       const currentMode = cardPermissionModes.get(req.cardId) ?? permMode
       if (currentMode === 'bypassPermissions') {
-        return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
       }
 
       const permissionRequest: ToolPermissionRequest = {
@@ -1252,7 +1338,7 @@ function chatClaude(req: ChatRequest): void {
       //   'deny'  → `never` (persistent deny) — reject silently
       const storedDecision = resolveStoredPermission(permissionRequest)
       if (storedDecision === 'allow') {
-        return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
       }
       if (storedDecision === 'deny') {
         // Surface the resolved state in the stream so the renderer can
@@ -1316,7 +1402,7 @@ function chatClaude(req: ChatRequest): void {
         log('tool permission persist error:', (err as Error).message)
       }
 
-      return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+      return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
     },
     ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
     // Use detected system binary, not the SDK's bundled cli.js
@@ -1902,6 +1988,19 @@ function chatCodex(req: ChatRequest): void {
     if (evt.type === 'item.started') {
       const item = evt.item
       if (item?.type === 'file_change' && Array.isArray(item.changes)) {
+        const checkpointPaths = item.changes
+          .map((change: { path?: unknown }) => typeof change?.path === 'string'
+            ? resolveCodexFilePath(change.path, req.workspaceDir)
+            : null)
+          .filter((value: string | null): value is string => Boolean(value))
+        const checkpoint = await createRuntimeCheckpoint(req, 'CodexFileChange', checkpointPaths, {
+          changeKinds: item.changes.map((change: { kind?: unknown }) => String(change?.kind ?? 'update')),
+        })
+        if (!checkpoint.ok) {
+          proc.kill('SIGTERM')
+          sendStream(req.cardId, { type: 'error', error: `Checkpoint creation failed before Codex file changes: ${checkpoint.error ?? 'unknown error'}` })
+          return
+        }
         for (const change of item.changes) {
           if (typeof change?.path !== 'string') continue
           const resolvedPath = resolveCodexFilePath(change.path, req.workspaceDir)
