@@ -22,6 +22,7 @@ import { runMigrations, type Migration } from './migrations'
 import { migration001Bootstrap } from './migrations/001_bootstrap'
 import { migration002Threads } from './migrations/002_threads'
 import { migration003ThreadIndex } from './migrations/003_thread_index'
+import { migration004JobIndex } from './migrations/004_job_index'
 
 type DBHandle = ReturnType<typeof DatabaseCtor>
 
@@ -29,9 +30,10 @@ const ALL_MIGRATIONS: Migration[] = [
   migration001Bootstrap,
   migration002Threads,
   migration003ThreadIndex,
+  migration004JobIndex,
   // Future phases append here:
-  //   migration004Canvas,
-  //   migration005Kanban,
+  //   migration005Canvas,
+  //   migration006Kanban,
   //   ...
 ]
 

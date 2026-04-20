@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { homedir } from 'os'
 import type { AggregatedSessionEntry } from '../shared/session-types'
+import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
 
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true
@@ -308,6 +309,11 @@ contextBridge.exposeInMainWorld('electron', {
     list: () => ipcRenderer.invoke('permissions:list'),
     clear: (id: string) => ipcRenderer.invoke('permissions:clear', id),
     clearAll: () => ipcRenderer.invoke('permissions:clearAll'),
+  },
+
+  jobs: {
+    recent: (req?: RecentJobsRequest): Promise<RecentJobsResponse> =>
+      ipcRenderer.invoke('jobs:recent', req ?? {}),
   },
 
   // Update checker

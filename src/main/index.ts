@@ -19,6 +19,7 @@ import { registerTileContextIPC } from './ipc/tile-context'
 import { registerSystemIPC } from './ipc/system'
 import { registerExecutionIPC } from './ipc/execution'
 import { registerPermissionsIPC } from './ipc/permissions'
+import { registerJobsIPC } from './ipc/jobs'
 import { registerFileProtocol } from './file-protocol'
 import { flushAll as flushActivityStore } from './activity-store'
 import { initializeAgentPathsCache, registerAgentPathsIPC } from './agent-paths'
@@ -32,6 +33,7 @@ import { migrateLegacyStorage } from './migration'
 import { APP_ID, APP_NAME, CONTEX_HOME } from './paths'
 import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
+import { ensureInitialJobIndex } from './db/job-indexer'
 import { stopAllRelayServices } from './relay/service'
 // browserTile BrowserView IPC was removed — renderer uses <webview> tag directly
 
@@ -273,6 +275,12 @@ app.whenReady().then(async () => {
     console.warn('[threads] initial index failed:', err)
   })
 
+  // Same pattern for the job + timeline index.
+  void ensureInitialJobIndex().catch(err => {
+    // eslint-disable-next-line no-console
+    console.warn('[jobs] initial index failed:', err)
+  })
+
   // Init workspace dirs + register all IPC handlers
   await initWorkspaces()
   registerWorkspaceIPC()
@@ -290,6 +298,7 @@ app.whenReady().then(async () => {
   registerSystemIPC()
   registerExecutionIPC()
   registerPermissionsIPC()
+  registerJobsIPC()
   registerFileProtocol()
   registerAgentPathsIPC()
   registerChromeSyncIPC()
