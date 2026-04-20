@@ -64,6 +64,20 @@ function resolveBundledExtensionDirs(): string[] {
   return [...new Set(candidates.filter(candidate => existsSync(candidate)))]
 }
 
+/**
+ * Catalog directories — extensions scanned from these paths appear in the
+ * gallery as available-to-install entries but default to DISABLED so their
+ * power-tier main scripts don't execute until the user clicks Add.
+ */
+function resolveCatalogExtensionDirs(): string[] {
+  const candidates = [
+    join(app.getAppPath(), 'examples', 'extensions'),
+    join(app.getAppPath(), 'resources', 'examples', 'extensions'),
+    join(process.resourcesPath, 'examples', 'extensions'),
+  ]
+  return [...new Set(candidates.filter(candidate => existsSync(candidate)))]
+}
+
 function resolveAppIconPath(): string | null {
   const candidates = [
     join(process.resourcesPath, 'icon.png'),
@@ -306,7 +320,10 @@ app.whenReady().then(async () => {
 
   // Keep the extension system fully lazy. Do not scan or boot extension hosts
   // at startup; load them only when an extension tile or explicit management UI asks.
-  extensionRegistry = new ExtensionRegistry({ bundledDirs: resolveBundledExtensionDirs() })
+  extensionRegistry = new ExtensionRegistry({
+    bundledDirs: resolveBundledExtensionDirs(),
+    catalogDirs: resolveCatalogExtensionDirs(),
+  })
   registerExtensionProtocol(extensionRegistry)
   registerExtensionIPC(extensionRegistry)
   setExtensionRegistryProvider(() => extensionRegistry)

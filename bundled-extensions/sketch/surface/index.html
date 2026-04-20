@@ -1,0 +1,579 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Sketch</title>
+  <style>
+    html,body { height: 100%; margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    body {
+      display: flex;
+      flex-direction: column;
+      font-family: var(--ct-font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
+      color: var(--ct-text, #111);
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--ct-border, rgba(0,0,0,.12));
+      flex-wrap: wrap;
+    }
+    .toolbar button {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--ct-muted, #666);
+      border-radius: 6px;
+      width: 26px;
+      height: 26px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      padding: 0;
+      font-size: 13px;
+      transition: background 0.1s, color 0.1s, border-color 0.1s;
+    }
+    .toolbar button:hover {
+      background: var(--ct-hover, rgba(0,0,0,.06));
+      color: var(--ct-text, #111);
+    }
+    .toolbar button[aria-pressed="true"] {
+      background: var(--ct-accent-s, rgba(79,70,229,.12));
+      color: var(--ct-accent, #4f46e5);
+      border-color: var(--ct-accent, #4f46e5);
+    }
+    .toolbar .sep {
+      width: 1px;
+      height: 16px;
+      background: var(--ct-border, rgba(0,0,0,.12));
+      margin: 0 4px;
+    }
+    .toolbar .thickness {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 0 4px;
+    }
+    .toolbar .thickness input[type=range] {
+      width: 64px;
+      padding: 0;
+      border: none;
+      background: transparent;
+    }
+    .toolbar .swatch {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid var(--ct-border, rgba(0,0,0,.18));
+      cursor: pointer;
+      padding: 0;
+    }
+    .toolbar .swatch[aria-pressed="true"] {
+      box-shadow: 0 0 0 2px var(--ct-accent, #4f46e5);
+      border-color: transparent;
+    }
+    .canvas-wrap {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      background: var(--ct-bg, #fff);
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    .status {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      font-size: 10px;
+      color: var(--ct-dim, #999);
+      font-family: var(--ct-font-mono, ui-monospace, SFMono-Regular, monospace);
+      pointer-events: none;
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="toolbar" id="toolbar">
+    <button data-tool="pen" aria-pressed="true" title="Pen">&#9998;</button>
+    <button data-tool="rect" title="Rectangle">&#9645;</button>
+    <button data-tool="ellipse" title="Ellipse">&#9675;</button>
+    <button data-tool="line" title="Line">&#9585;</button>
+    <button data-tool="arrow" title="Arrow">&#8594;</button>
+    <button data-tool="eraser" title="Eraser">&#9866;</button>
+    <button data-tool="select" title="Select / Move">&#9974;</button>
+
+    <div class="sep"></div>
+
+    <div class="thickness" title="Stroke thickness">
+      <span style="font-size:10px;color:var(--ct-dim,#999)">px</span>
+      <input type="range" id="thickness" min="1" max="24" value="3" />
+    </div>
+
+    <div class="sep"></div>
+
+    <button class="swatch" data-color="#111111" aria-pressed="true" style="background:#111"></button>
+    <button class="swatch" data-color="#dc2626" style="background:#dc2626"></button>
+    <button class="swatch" data-color="#2563eb" style="background:#2563eb"></button>
+    <button class="swatch" data-color="#16a34a" style="background:#16a34a"></button>
+    <button class="swatch" data-color="#f59e0b" style="background:#f59e0b"></button>
+    <button class="swatch" data-color="#7c3aed" style="background:#7c3aed"></button>
+    <button class="swatch" data-color="#ffffff" style="background:#fff;border-color:var(--ct-border,rgba(0,0,0,.25))"></button>
+
+    <div class="sep"></div>
+
+    <button id="undo" title="Undo">&#8630;</button>
+    <button id="redo" title="Redo">&#8631;</button>
+    <button id="delete" title="Delete selection">&#128465;</button>
+    <button id="clear" title="Clear all">&#10060;</button>
+  </div>
+  <div class="canvas-wrap">
+    <canvas id="c"></canvas>
+    <div class="status" id="status"></div>
+  </div>
+
+  <script>
+    (function () {
+      const canvas = document.getElementById('c')
+      const ctx = canvas.getContext('2d')
+      const wrap = canvas.parentElement
+      const toolbar = document.getElementById('toolbar')
+      const thicknessEl = document.getElementById('thickness')
+      const statusEl = document.getElementById('status')
+
+      // ── State ────────────────────────────────────────────────────────────
+      let tool = 'pen'
+      let color = '#111111'
+      let thickness = 3
+      /** @type {Array<Shape>} */
+      let shapes = []
+      /** @type {Array<Array<Shape>>} */
+      const undoStack = []
+      const redoStack = []
+      /** Temp live shape while dragging. */
+      let drafting = null
+      /** Selected shape index. */
+      let selectedIdx = -1
+      /** Drag offset for moving. */
+      let dragOffset = null
+
+      // Shape = { type, color, width, points?, x?,y?,w?,h?,x2?,y2? }
+      // points: array of {x,y}
+
+      // ── Canvas sizing ────────────────────────────────────────────────────
+      let dpr = window.devicePixelRatio || 1
+      function resize() {
+        dpr = window.devicePixelRatio || 1
+        const rect = wrap.getBoundingClientRect()
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr))
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr))
+        canvas.style.width = rect.width + 'px'
+        canvas.style.height = rect.height + 'px'
+        render()
+      }
+      new ResizeObserver(resize).observe(wrap)
+      resize()
+
+      // ── Render ───────────────────────────────────────────────────────────
+      function setStroke(s) {
+        ctx.strokeStyle = s.color
+        ctx.fillStyle = s.color
+        ctx.lineWidth = (s.width || 2) * dpr
+        ctx.lineJoin = 'round'
+        ctx.lineCap = 'round'
+      }
+      function drawShape(s) {
+        setStroke(s)
+        ctx.beginPath()
+        if (s.type === 'pen' || s.type === 'eraser') {
+          if (!s.points || s.points.length < 1) return
+          if (s.type === 'eraser') ctx.globalCompositeOperation = 'destination-out'
+          ctx.moveTo(s.points[0].x * dpr, s.points[0].y * dpr)
+          for (let i = 1; i < s.points.length; i++) {
+            ctx.lineTo(s.points[i].x * dpr, s.points[i].y * dpr)
+          }
+          if (s.points.length === 1) {
+            // Single tap — draw a dot
+            ctx.arc(s.points[0].x * dpr, s.points[0].y * dpr, Math.max(1, s.width/2) * dpr, 0, Math.PI*2)
+            ctx.fill()
+          }
+          ctx.stroke()
+          ctx.globalCompositeOperation = 'source-over'
+        } else if (s.type === 'rect') {
+          ctx.rect(s.x * dpr, s.y * dpr, s.w * dpr, s.h * dpr)
+          ctx.stroke()
+        } else if (s.type === 'ellipse') {
+          const cx = (s.x + s.w/2) * dpr
+          const cy = (s.y + s.h/2) * dpr
+          ctx.ellipse(cx, cy, Math.abs(s.w/2) * dpr, Math.abs(s.h/2) * dpr, 0, 0, Math.PI*2)
+          ctx.stroke()
+        } else if (s.type === 'line') {
+          ctx.moveTo(s.x * dpr, s.y * dpr)
+          ctx.lineTo(s.x2 * dpr, s.y2 * dpr)
+          ctx.stroke()
+        } else if (s.type === 'arrow') {
+          const x1 = s.x * dpr, y1 = s.y * dpr, x2 = s.x2 * dpr, y2 = s.y2 * dpr
+          ctx.moveTo(x1, y1)
+          ctx.lineTo(x2, y2)
+          ctx.stroke()
+          const angle = Math.atan2(y2 - y1, x2 - x1)
+          const head = Math.max(8, s.width * 3) * dpr
+          ctx.beginPath()
+          ctx.moveTo(x2, y2)
+          ctx.lineTo(x2 - head * Math.cos(angle - Math.PI/6), y2 - head * Math.sin(angle - Math.PI/6))
+          ctx.lineTo(x2 - head * Math.cos(angle + Math.PI/6), y2 - head * Math.sin(angle + Math.PI/6))
+          ctx.closePath()
+          ctx.fill()
+        }
+      }
+      function render() {
+        ctx.save()
+        ctx.setTransform(1,0,0,1,0,0)
+        ctx.clearRect(0,0,canvas.width, canvas.height)
+        for (const s of shapes) drawShape(s)
+        if (drafting) drawShape(drafting)
+        if (selectedIdx >= 0 && selectedIdx < shapes.length) {
+          const b = boundsOf(shapes[selectedIdx])
+          if (b) {
+            ctx.strokeStyle = 'rgba(79,70,229,0.9)'
+            ctx.setLineDash([6,4])
+            ctx.lineWidth = 1 * dpr
+            ctx.strokeRect((b.x - 4) * dpr, (b.y - 4) * dpr, (b.w + 8) * dpr, (b.h + 8) * dpr)
+            ctx.setLineDash([])
+          }
+        }
+        ctx.restore()
+        flushStatus()
+        notifyPayload()
+      }
+
+      function boundsOf(s) {
+        if (s.type === 'pen' || s.type === 'eraser') {
+          if (!s.points || s.points.length === 0) return null
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+          for (const p of s.points) {
+            if (p.x < minX) minX = p.x
+            if (p.y < minY) minY = p.y
+            if (p.x > maxX) maxX = p.x
+            if (p.y > maxY) maxY = p.y
+          }
+          return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+        }
+        if (s.type === 'rect' || s.type === 'ellipse') {
+          const x = Math.min(s.x, s.x + s.w)
+          const y = Math.min(s.y, s.y + s.h)
+          return { x, y, w: Math.abs(s.w), h: Math.abs(s.h) }
+        }
+        if (s.type === 'line' || s.type === 'arrow') {
+          const x = Math.min(s.x, s.x2)
+          const y = Math.min(s.y, s.y2)
+          return { x, y, w: Math.abs(s.x2 - s.x), h: Math.abs(s.y2 - s.y) }
+        }
+        return null
+      }
+
+      function hitTest(x, y) {
+        // Top-down (last drawn = on top)
+        for (let i = shapes.length - 1; i >= 0; i--) {
+          const b = boundsOf(shapes[i])
+          if (!b) continue
+          if (x >= b.x - 6 && x <= b.x + b.w + 6 && y >= b.y - 6 && y <= b.y + b.h + 6) {
+            return i
+          }
+        }
+        return -1
+      }
+
+      function translateShape(s, dx, dy) {
+        if (s.type === 'pen' || s.type === 'eraser') {
+          s.points = s.points.map(p => ({ x: p.x + dx, y: p.y + dy }))
+        } else if (s.type === 'rect' || s.type === 'ellipse') {
+          s.x += dx; s.y += dy
+        } else if (s.type === 'line' || s.type === 'arrow') {
+          s.x += dx; s.y += dy; s.x2 += dx; s.y2 += dy
+        }
+      }
+
+      // ── Input ────────────────────────────────────────────────────────────
+      let drawing = false
+      let startPt = null
+
+      function pointFromEvent(e) {
+        const rect = canvas.getBoundingClientRect()
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+      }
+
+      canvas.addEventListener('pointerdown', (e) => {
+        canvas.setPointerCapture(e.pointerId)
+        const p = pointFromEvent(e)
+        if (tool === 'select') {
+          const idx = hitTest(p.x, p.y)
+          selectedIdx = idx
+          if (idx >= 0) {
+            dragOffset = { x: p.x, y: p.y }
+          } else {
+            dragOffset = null
+          }
+          render()
+          return
+        }
+        drawing = true
+        startPt = p
+        pushUndo()
+        if (tool === 'pen' || tool === 'eraser') {
+          drafting = { type: tool, color, width: thickness, points: [p] }
+        } else {
+          drafting = { type: tool, color, width: thickness, x: p.x, y: p.y, x2: p.x, y2: p.y, w: 0, h: 0 }
+        }
+        render()
+      })
+
+      canvas.addEventListener('pointermove', (e) => {
+        const p = pointFromEvent(e)
+        if (tool === 'select' && dragOffset && selectedIdx >= 0) {
+          const dx = p.x - dragOffset.x
+          const dy = p.y - dragOffset.y
+          dragOffset = p
+          translateShape(shapes[selectedIdx], dx, dy)
+          render()
+          return
+        }
+        if (!drawing || !drafting) return
+        if (drafting.type === 'pen' || drafting.type === 'eraser') {
+          drafting.points.push(p)
+        } else if (drafting.type === 'rect' || drafting.type === 'ellipse') {
+          drafting.w = p.x - startPt.x
+          drafting.h = p.y - startPt.y
+        } else {
+          drafting.x2 = p.x
+          drafting.y2 = p.y
+        }
+        render()
+      })
+
+      function endDraw() {
+        if (tool === 'select') {
+          dragOffset = null
+          return
+        }
+        if (!drawing) return
+        drawing = false
+        if (drafting) {
+          // Commit if it has any footprint
+          const b = boundsOf(drafting)
+          if (b && (b.w > 0 || b.h > 0 || (drafting.points && drafting.points.length > 0))) {
+            shapes.push(drafting)
+          }
+          drafting = null
+          render()
+        }
+      }
+      canvas.addEventListener('pointerup', endDraw)
+      canvas.addEventListener('pointercancel', endDraw)
+      canvas.addEventListener('pointerleave', endDraw)
+
+      // ── Toolbar ──────────────────────────────────────────────────────────
+      toolbar.addEventListener('click', (e) => {
+        const btn = e.target.closest('button')
+        if (!btn) return
+        if (btn.dataset.tool) {
+          tool = btn.dataset.tool
+          for (const b of toolbar.querySelectorAll('button[data-tool]')) {
+            b.setAttribute('aria-pressed', String(b === btn))
+          }
+          canvas.style.cursor = tool === 'select' ? 'default' : (tool === 'eraser' ? 'cell' : 'crosshair')
+          return
+        }
+        if (btn.dataset.color) {
+          color = btn.dataset.color
+          for (const b of toolbar.querySelectorAll('.swatch')) {
+            b.setAttribute('aria-pressed', String(b === btn))
+          }
+          return
+        }
+        if (btn.id === 'undo') { doUndo(); return }
+        if (btn.id === 'redo') { doRedo(); return }
+        if (btn.id === 'delete') {
+          if (selectedIdx >= 0) {
+            pushUndo()
+            shapes.splice(selectedIdx, 1)
+            selectedIdx = -1
+            render()
+          }
+          return
+        }
+        if (btn.id === 'clear') {
+          pushUndo()
+          shapes = []
+          selectedIdx = -1
+          render()
+          return
+        }
+      })
+
+      thicknessEl.addEventListener('input', () => {
+        thickness = parseInt(thicknessEl.value, 10) || 2
+      })
+
+      function pushUndo() {
+        undoStack.push(JSON.parse(JSON.stringify(shapes)))
+        if (undoStack.length > 50) undoStack.shift()
+        redoStack.length = 0
+      }
+      function doUndo() {
+        if (undoStack.length === 0) return
+        redoStack.push(JSON.parse(JSON.stringify(shapes)))
+        shapes = undoStack.pop()
+        selectedIdx = -1
+        render()
+      }
+      function doRedo() {
+        if (redoStack.length === 0) return
+        undoStack.push(JSON.parse(JSON.stringify(shapes)))
+        shapes = redoStack.pop()
+        selectedIdx = -1
+        render()
+      }
+
+      window.addEventListener('keydown', (e) => {
+        const isMod = e.metaKey || e.ctrlKey
+        if (isMod && e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); doUndo() }
+        else if (isMod && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); doRedo() }
+        else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIdx >= 0) {
+          e.preventDefault()
+          pushUndo()
+          shapes.splice(selectedIdx, 1)
+          selectedIdx = -1
+          render()
+        }
+      })
+
+      // ── Status ───────────────────────────────────────────────────────────
+      function flushStatus() {
+        statusEl.textContent = shapes.length === 0 ? 'empty' : (shapes.length + ' shape' + (shapes.length === 1 ? '' : 's'))
+      }
+
+      // ── Host bridge ──────────────────────────────────────────────────────
+      // The host pushes `surface.requestFlush` just before sending. We keep
+      // the payload fresh after every render so it's always ready.
+      function exportPng() {
+        if (shapes.length === 0) return null
+        // Compute a tight crop of drawn content
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+        for (const s of shapes) {
+          const b = boundsOf(s)
+          if (!b) continue
+          const pad = (s.width || 2) + 2
+          if (b.x - pad < minX) minX = b.x - pad
+          if (b.y - pad < minY) minY = b.y - pad
+          if (b.x + b.w + pad > maxX) maxX = b.x + b.w + pad
+          if (b.y + b.h + pad > maxY) maxY = b.y + b.h + pad
+        }
+        if (!isFinite(minX) || !isFinite(minY)) return null
+        const w = Math.max(1, Math.ceil(maxX - minX))
+        const h = Math.max(1, Math.ceil(maxY - minY))
+        const off = document.createElement('canvas')
+        off.width = Math.ceil(w * dpr)
+        off.height = Math.ceil(h * dpr)
+        const octx = off.getContext('2d')
+        // white background so transparent pen strokes are visible in the attached image
+        octx.fillStyle = '#ffffff'
+        octx.fillRect(0, 0, off.width, off.height)
+        octx.translate(-minX * dpr, -minY * dpr)
+        // Reuse the main draw routine by swapping ctx references
+        const savedCtx = ctx
+        // eslint-disable-next-line no-global-assign
+        window._activeCtx = octx
+        // Temporarily point our drawShape's ctx at off-screen by monkey-patching
+        const origStroke = ctx.stroke
+        const origFill = ctx.fill
+        // Simpler: re-implement minimal draw using octx
+        for (const s of shapes) {
+          octx.save()
+          octx.strokeStyle = s.color
+          octx.fillStyle = s.color
+          octx.lineWidth = (s.width || 2) * dpr
+          octx.lineJoin = 'round'
+          octx.lineCap = 'round'
+          octx.beginPath()
+          if (s.type === 'pen' || s.type === 'eraser') {
+            if (s.type === 'eraser') octx.globalCompositeOperation = 'destination-out'
+            if (s.points.length > 0) {
+              octx.moveTo(s.points[0].x * dpr, s.points[0].y * dpr)
+              for (let i = 1; i < s.points.length; i++) octx.lineTo(s.points[i].x * dpr, s.points[i].y * dpr)
+              if (s.points.length === 1) {
+                octx.arc(s.points[0].x * dpr, s.points[0].y * dpr, Math.max(1, s.width/2) * dpr, 0, Math.PI*2)
+                octx.fill()
+              }
+            }
+            octx.stroke()
+            octx.globalCompositeOperation = 'source-over'
+          } else if (s.type === 'rect') {
+            octx.rect(s.x * dpr, s.y * dpr, s.w * dpr, s.h * dpr); octx.stroke()
+          } else if (s.type === 'ellipse') {
+            octx.ellipse((s.x + s.w/2)*dpr, (s.y + s.h/2)*dpr, Math.abs(s.w/2)*dpr, Math.abs(s.h/2)*dpr, 0, 0, Math.PI*2); octx.stroke()
+          } else if (s.type === 'line') {
+            octx.moveTo(s.x*dpr, s.y*dpr); octx.lineTo(s.x2*dpr, s.y2*dpr); octx.stroke()
+          } else if (s.type === 'arrow') {
+            const x1 = s.x*dpr, y1 = s.y*dpr, x2 = s.x2*dpr, y2 = s.y2*dpr
+            octx.moveTo(x1, y1); octx.lineTo(x2, y2); octx.stroke()
+            const angle = Math.atan2(y2-y1, x2-x1)
+            const head = Math.max(8, s.width*3) * dpr
+            octx.beginPath()
+            octx.moveTo(x2, y2)
+            octx.lineTo(x2 - head*Math.cos(angle - Math.PI/6), y2 - head*Math.sin(angle - Math.PI/6))
+            octx.lineTo(x2 - head*Math.cos(angle + Math.PI/6), y2 - head*Math.sin(angle + Math.PI/6))
+            octx.closePath(); octx.fill()
+          }
+          octx.restore()
+        }
+        return off.toDataURL('image/png')
+      }
+
+      function notifyPayload() {
+        try {
+          if (!window.contex || !window.contex.surface) return
+          const dataUrl = exportPng()
+          if (!dataUrl) {
+            window.contex.surface.clear()
+            return
+          }
+          const base64 = dataUrl.replace(/^data:image\/png;base64,/, '')
+          window.contex.surface.setPayload({
+            kind: 'image',
+            data: base64,
+            mime: 'image/png',
+            ext: 'png',
+          })
+        } catch (_) { /* ignore */ }
+      }
+
+      // When the host requests a flush right before sending, make sure the
+      // very latest canvas state is pushed. notifyPayload already runs on
+      // every render; respond idempotently so the host's ack handler fires.
+      function waitForBridge(cb) {
+        if (window.contex && window.contex.surface) return cb()
+        const iv = setInterval(() => {
+          if (window.contex && window.contex.surface) { clearInterval(iv); cb() }
+        }, 50)
+      }
+      waitForBridge(() => {
+        window.contex.surface.onRequestFlush(() => {
+          notifyPayload()
+        })
+        window.contex.surface.onClear(() => {
+          pushUndo()
+          shapes = []
+          selectedIdx = -1
+          render()
+        })
+      })
+    })()
+  </script>
+</body>
+</html>

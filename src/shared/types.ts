@@ -158,6 +158,7 @@ export interface ExtensionManifest {
   ui?: ExtensionUIContrib
   contributes?: {
     tiles?: ExtensionTileEntry[]
+    chatSurfaces?: ExtensionChatSurfaceEntry[]
     mcpTools?: ExtensionMCPToolContrib[]
     contextMenu?: ExtensionContextMenuContrib[]
     settings?: ExtensionSettingContrib[]
@@ -181,6 +182,24 @@ export interface ExtensionTileEntry {
 }
 
 export interface ExtensionTileContrib extends ExtensionTileEntry {
+  extId: string
+  uiMode?: 'native' | 'custom'
+}
+
+export interface ExtensionChatSurfaceEntry {
+  id: string
+  label: string
+  description?: string
+  icon?: string
+  entry: string
+  /** What the surface produces when flushed. Defaults to 'image'. */
+  emits?: 'image' | 'text'
+  /** Preferred panel height in px when mounted above the composer. */
+  defaultHeight?: number
+  minHeight?: number
+}
+
+export interface ExtensionChatSurfaceContrib extends ExtensionChatSurfaceEntry {
   extId: string
   uiMode?: 'native' | 'custom'
 }

@@ -197,6 +197,8 @@ contextBridge.exposeInMainWorld('electron', {
     },
     openclawAgents: () => ipcRenderer.invoke('chat:openclawAgents'),
     selectFiles: () => ipcRenderer.invoke('chat:selectFiles') as Promise<string[]>,
+    writeTempAttachment: (payload: { data: string; mime?: string; ext?: string; filenameHint?: string }) =>
+      ipcRenderer.invoke('chat:writeTempAttachment', payload) as Promise<{ ok: true; path: string } | { ok: false; error: string }>,
     answerUserQuestion: (payload: {
       cardId: string
       toolId: string | null
@@ -437,7 +439,9 @@ contextBridge.exposeInMainWorld('electron', {
     list: () => ipcRenderer.invoke('ext:list'),
     listSidebar: (workspacePath?: string | null) => ipcRenderer.invoke('ext:list-sidebar', workspacePath),
     listTiles: () => ipcRenderer.invoke('ext:list-tiles'),
+    listChatSurfaces: () => ipcRenderer.invoke('ext:list-chat-surfaces'),
     tileEntry: (extId: string, tileType: string, tileId?: string) => ipcRenderer.invoke('ext:tile-entry', extId, tileType, tileId),
+    chatSurfaceEntry: (extId: string, surfaceId: string, instanceId?: string) => ipcRenderer.invoke('ext:chat-surface-entry', extId, surfaceId, instanceId),
     getBridgeScript: (tileId: string, extId: string) => ipcRenderer.invoke('ext:get-bridge-script', tileId, extId),
     enable: (extId: string) => ipcRenderer.invoke('ext:enable', extId),
     disable: (extId: string) => ipcRenderer.invoke('ext:disable', extId),

@@ -119,7 +119,9 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
 
       if (/\.html?$/i.test(filePath)) {
         const raw = await fs.readFile(filePath, 'utf8')
-        const tileId = url.searchParams.get('tileId')
+        // Chat surfaces route through the same bridge — use the surface instance
+        // id as the bridge's tileId so host-side RPC routing stays uniform.
+        const tileId = url.searchParams.get('tileId') || url.searchParams.get('surfaceId')
         const html = tileId ? injectBridge(raw, getBridgeScript(tileId, extId)) : raw
         return new Response(html, {
           status: 200,

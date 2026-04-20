@@ -5302,7 +5302,11 @@ function App(): JSX.Element {
       )}
       {showExtensionsGallery && (
         <Suspense fallback={null}>
-          <LazyExtensionsGallery onClose={() => setShowExtensionsGallery(false)} workspacePath={workspace?.path ?? null} />
+          <LazyExtensionsGallery
+            onClose={() => setShowExtensionsGallery(false)}
+            workspacePath={workspace?.path ?? null}
+            onSettingsChange={s => setSettings(withDefaultSettings(s))}
+          />
         </Suspense>
       )}
       {ctxMenu && (

@@ -2647,6 +2647,36 @@ export function registerChatIPC(): void {
     return { agents }
   })
 
+  // Write a renderer-supplied payload (e.g. a sketch image produced by a chat-surface extension)
+  // to a temp file and return its absolute path so the standard path-based attachment pipeline
+  // can pick it up.
+  ipcMain.handle('chat:writeTempAttachment', async (_, payload: {
+    data: string            // base64 (no data-URL prefix)
+    mime?: string           // e.g. 'image/png'
+    ext?: string            // e.g. 'png'
+    filenameHint?: string   // optional, no path components
+  }) => {
+    try {
+      if (!payload || typeof payload.data !== 'string' || !payload.data) {
+        return { ok: false, error: 'missing data' }
+      }
+      const ext = (payload.ext || (payload.mime?.split('/')[1]) || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png'
+      const safeHint = (payload.filenameHint || 'sketch')
+        .replace(/[\\/:*?"<>|]/g, '_')
+        .replace(/\s+/g, '-')
+        .slice(0, 40) || 'sketch'
+      const dir = join(tmpdir(), 'contex-chat-attach')
+      await fs.mkdir(dir, { recursive: true })
+      const filename = `${safeHint}-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}.${ext}`
+      const dest = join(dir, filename)
+      const buf = Buffer.from(payload.data, 'base64')
+      await fs.writeFile(dest, buf)
+      return { ok: true, path: dest }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle('chat:opencodeModels', async () => {
     const isFresh = cachedOpenCodeModels.length > 0 && (Date.now() - cachedOpenCodeModelsAt) < OPEN_CODE_MODELS_CACHE_MS
     if (!isFresh) void refreshOpenCodeModelsInBackground()

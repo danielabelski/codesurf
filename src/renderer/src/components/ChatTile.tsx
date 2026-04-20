@@ -13,7 +13,7 @@ import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, Cog, DollarSign,
-  FileText, Folder, GripVertical, Lock, Paperclip, Plus, Trash2, Wrench
+  FileText, Folder, GripVertical, Lock, Paperclip, Pencil, Plus, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
 import { useAppFonts } from '../FontContext'
@@ -202,6 +202,41 @@ function isUrgentQueuedContent(text: string): boolean {
 interface PendingAttachment {
   path: string
   kind: 'image' | 'file'
+}
+
+/**
+ * Chat-surface extension mounted above the composer (e.g. Sketch).
+ * Only one active at a time per chat tile. The host caches the latest
+ * payload via an RPC message from the extension and flushes it to a
+ * temp file on send.
+ */
+interface ActiveChatSurface {
+  extId: string
+  surfaceId: string
+  label: string
+  instanceId: string
+  entryUrl: string
+  emits: 'image' | 'text'
+  height: number
+  minHeight: number
+  /** Last payload pushed up from the iframe via surface.setPayload */
+  payload: null | {
+    kind: 'image' | 'text'
+    data: string
+    mime?: string
+    ext?: string
+  }
+}
+
+interface ChatSurfaceMenuEntry {
+  extId: string
+  surfaceId: string
+  label: string
+  description?: string
+  icon?: string
+  emits: 'image' | 'text'
+  defaultHeight: number
+  minHeight: number
 }
 
 interface QueuedChatTurn {
@@ -2104,6 +2139,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [openclawAgents, setOpenclawAgents] = useState<ModelOption[]>(DEFAULT_MODELS.openclaw)
   const [modelFilter, setModelFilter] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>(() => initialRuntimeStateRef.current?.attachments ?? [])
+  // Chat-surface extensions (e.g. Sketch) mounted above the composer. One at a time.
+  const [activeChatSurface, setActiveChatSurface] = useState<ActiveChatSurface | null>(null)
+  const [chatSurfaceMenu, setChatSurfaceMenu] = useState<ChatSurfaceMenuEntry[]>([])
+  const activeChatSurfaceRef = useRef<ActiveChatSurface | null>(null)
+  useEffect(() => { activeChatSurfaceRef.current = activeChatSurface }, [activeChatSurface])
+  const chatSurfaceIframeRef = useRef<HTMLIFrameElement | null>(null)
   const [queuedTurns, setQueuedTurns] = useState<QueuedChatTurn[]>(() => initialRuntimeStateRef.current?.queuedTurns ?? [])
   // Drag-reorder state for the queued-turn list. A row can be dropped above
   // ('before'), below ('after'), or onto ('into') another row — the last case
@@ -3565,6 +3606,115 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     requestAnimationFrame(() => textareaRef.current?.focus())
   }, [])
 
+  // ── Chat-surface extensions (e.g. Sketch) ─────────────────────────────────
+  // Re-query whenever extensions are enabled/disabled or the global
+  // extensions switch is flipped, so newly-installed chat surfaces (Sketch
+  // etc.) appear in the composer `+` menu without requiring a tile reload.
+  useEffect(() => {
+    let cancelled = false
+    const extensionsApi = (window.electron as unknown as { extensions?: { listChatSurfaces?: () => Promise<ChatSurfaceMenuEntry[] & Array<any>> } })?.extensions
+    const fetchMenu = () => {
+      if (!extensionsApi?.listChatSurfaces) {
+        setChatSurfaceMenu([])
+        return
+      }
+      extensionsApi.listChatSurfaces().then((entries: any[]) => {
+        if (cancelled) return
+        setChatSurfaceMenu((entries ?? []).map(e => ({
+          extId: String(e.extId),
+          surfaceId: String(e.id),
+          label: String(e.label ?? e.id),
+          description: e.description ? String(e.description) : undefined,
+          icon: e.icon ? String(e.icon) : undefined,
+          emits: e.emits === 'text' ? 'text' : 'image',
+          defaultHeight: Number.isFinite(e.defaultHeight) ? Number(e.defaultHeight) : 260,
+          minHeight: Number.isFinite(e.minHeight) ? Number(e.minHeight) : 160,
+        })))
+      }).catch(() => { if (!cancelled) setChatSurfaceMenu([]) })
+    }
+    fetchMenu()
+    const onChanged = () => fetchMenu()
+    window.addEventListener('codesurf:extensions-changed', onChanged)
+    return () => {
+      cancelled = true
+      window.removeEventListener('codesurf:extensions-changed', onChanged)
+    }
+  }, [])
+
+  const openChatSurface = useCallback(async (entry: ChatSurfaceMenuEntry) => {
+    setShowInsertMenu(false)
+    const instanceId = `surf-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
+    const extensionsApi = (window.electron as unknown as { extensions?: { chatSurfaceEntry?: (ext: string, id: string, inst: string) => Promise<string | null> } })?.extensions
+    const url = extensionsApi?.chatSurfaceEntry
+      ? await extensionsApi.chatSurfaceEntry(entry.extId, entry.surfaceId, instanceId).catch(() => null)
+      : null
+    if (!url) {
+      // Surface could not be resolved (extension missing / disabled).
+      return
+    }
+    setActiveChatSurface({
+      extId: entry.extId,
+      surfaceId: entry.surfaceId,
+      label: entry.label,
+      instanceId,
+      entryUrl: url,
+      emits: entry.emits,
+      height: Math.max(entry.minHeight, entry.defaultHeight),
+      minHeight: entry.minHeight,
+      payload: null,
+    })
+  }, [])
+
+  const closeChatSurface = useCallback(() => {
+    setActiveChatSurface(null)
+  }, [])
+
+  // Listen for messages from the chat-surface iframe. We handle one method:
+  //   surface.setPayload  — caches the latest payload on the host.
+  // Other RPC methods fall through (the standard ExtensionTile bridge will
+  // answer them when/if the surface is promoted to a tile-style extension).
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      const msg = e.data
+      if (!msg || typeof msg !== 'object') return
+      const surface = activeChatSurfaceRef.current
+      if (!surface) return
+      if (msg.type !== 'contex-rpc') return
+      if (msg.tileId !== surface.instanceId) return
+
+      const reply = (result: unknown, error?: string) => {
+        const win = chatSurfaceIframeRef.current?.contentWindow
+        if (!win) return
+        win.postMessage({ type: 'contex-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
+      }
+
+      if (msg.method === 'surface.setPayload') {
+        const payload = msg.params?.payload ?? null
+        setActiveChatSurface(prev => prev ? { ...prev, payload: payload && typeof payload === 'object' ? {
+          kind: payload.kind === 'text' ? 'text' : 'image',
+          data: String(payload.data ?? ''),
+          mime: typeof payload.mime === 'string' ? payload.mime : undefined,
+          ext: typeof payload.ext === 'string' ? payload.ext : undefined,
+        } : null } : prev)
+        reply(true)
+        return
+      }
+
+      // Minimal theme/meta support so extensions can still call these.
+      if (msg.method === 'tile.getMeta') {
+        reply({ tileId: surface.instanceId, extId: surface.extId, surfaceId: surface.surfaceId, kind: 'chat-surface' })
+        return
+      }
+      if (msg.method === 'theme.getColors') {
+        reply({})
+        return
+      }
+    }
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [])
+  // ──────────────────────────────────────────────────────────────────────────
+
   const handleTileDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     // Ignore our own internal drags (queued-turn reorder, etc.) — they
     // advertise themselves via a custom mime type so we don't mistake the
@@ -3895,7 +4045,53 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       return
     }
 
-    const messageContent = buildOutgoingMessageContent(input, attachments)
+    // Flush any active chat-surface (e.g. Sketch) to a temp file and attach
+    // it before composing the outgoing message. Give the extension up to
+    // ~1s to respond to the requestFlush event with an updated payload.
+    let flushedAttachments = attachments
+    const surface = activeChatSurfaceRef.current
+    if (surface) {
+      try {
+        await new Promise<void>((resolve) => {
+          let done = false
+          const ack = () => { if (done) return; done = true; resolve() }
+          const timeout = setTimeout(ack, 1200)
+          const onceAck = (e: MessageEvent) => {
+            const msg = e.data
+            if (!msg || typeof msg !== 'object') return
+            if (msg.type === 'contex-rpc' && msg.method === 'surface.setPayload' && msg.tileId === surface.instanceId) {
+              window.removeEventListener('message', onceAck)
+              clearTimeout(timeout)
+              ack()
+            }
+          }
+          window.addEventListener('message', onceAck)
+          const iframe = chatSurfaceIframeRef.current
+          iframe?.contentWindow?.postMessage({ type: 'contex-event', event: 'surface.requestFlush', data: {} }, '*')
+        })
+      } catch { /* best-effort */ }
+
+      const latest = activeChatSurfaceRef.current
+      const payload = latest?.payload
+      if (payload && payload.kind === 'image' && payload.data) {
+        try {
+          const chatApi = (window.electron as unknown as { chat?: { writeTempAttachment?: (p: { data: string; mime?: string; ext?: string; filenameHint?: string }) => Promise<{ ok: true; path: string } | { ok: false; error: string }> } }).chat
+          if (chatApi?.writeTempAttachment) {
+            const r = await chatApi.writeTempAttachment({
+              data: payload.data,
+              mime: payload.mime,
+              ext: payload.ext,
+              filenameHint: surface.label.toLowerCase().replace(/\s+/g, '-'),
+            })
+            if (r.ok) {
+              flushedAttachments = [...attachments, { path: r.path, kind: 'image' }]
+            }
+          }
+        } catch { /* best-effort */ }
+      }
+    }
+
+    const messageContent = buildOutgoingMessageContent(input, flushedAttachments)
     if (!messageContent) return
 
     // Local-only slash commands — handled client-side, never dispatched to
@@ -3914,6 +4110,13 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setAcType(null)
     setAcQuery('')
     setAttachments([])
+
+    // Tell the surface to clear itself for the next turn, then dismount.
+    if (surface) {
+      const iframe = chatSurfaceIframeRef.current
+      iframe?.contentWindow?.postMessage({ type: 'contex-event', event: 'surface.clear', data: {} }, '*')
+      setActiveChatSurface(null)
+    }
 
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     await dispatchMessageContent(messageContent)
@@ -5134,6 +5337,53 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           </div>
         )}
 
+        {activeChatSurface && (
+          <div style={{
+            padding: '8px 14px 0 14px',
+          }}>
+            <div style={{
+              position: 'relative',
+              width: '100%',
+              height: activeChatSurface.height,
+              borderRadius: 12,
+              border: `1px solid ${dropdownBorder}`,
+              background: theme.surface.panelElevated,
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '6px 10px',
+                borderBottom: `1px solid ${theme.border.subtle}`,
+                background: theme.surface.overlay,
+                fontSize: 11, fontFamily: fontMono, color: theme.chat.muted,
+              }}>
+                <span>{activeChatSurface.label}</span>
+                <button
+                  onClick={closeChatSurface}
+                  aria-label="Close"
+                  style={{
+                    width: 18, height: 18, borderRadius: 4,
+                    border: `1px solid ${theme.border.default}`, background: 'transparent',
+                    color: theme.chat.muted, cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                    padding: 0, fontSize: 11, lineHeight: 1,
+                  }}
+                >×</button>
+              </div>
+              <iframe
+                key={activeChatSurface.instanceId}
+                ref={chatSurfaceIframeRef}
+                src={activeChatSurface.entryUrl}
+                title={activeChatSurface.label}
+                style={{ flex: 1, width: '100%', border: 'none', background: 'transparent' }}
+                sandbox="allow-scripts allow-same-origin"
+              />
+            </div>
+          </div>
+        )}
+
         {attachments.length > 0 && (
           <div style={{
             display: 'block', gap: 8, padding: '8px 14px 4px 14px',
@@ -5263,33 +5513,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   disabledServers={disabledServers}
                   setDisabledServers={setDisabledServers}
                   peerToolNames={peerToolNames}
+                  chatSurfaces={chatSurfaceMenu}
+                  activeChatSurfaceId={activeChatSurface ? `${activeChatSurface.extId}:${activeChatSurface.surfaceId}` : null}
+                  onOpenChatSurface={openChatSurface}
                 />
-              </MenuPortal>
-            )}
-          </div>
-
-          {/* Thinking — brain + signal bars icon, label in dropdown */}
-          <div ref={thinkingMenuRef} style={{ position: 'relative' }}>
-            <ToolbarBtn
-              icon={<ThinkingIcon level={thinking} />}
-              tooltip={`Thinking: ${THINKING_OPTIONS.find(t => t.id === thinking)?.label ?? 'Adaptive'}`}
-              color={thinking === 'none' ? theme.chat.muted : theme.chat.textSecondary}
-              onClick={() => toggleMenu('thinking')}
-            />
-            {showThinkingMenu && (
-              <MenuPortal anchorRef={thinkingMenuRef}>
-                <Dropdown>
-                  {THINKING_OPTIONS.map(t => (
-                    <DropdownItem
-                      key={t.id}
-                      icon={<Brain size={11} />}
-                      label={t.label}
-                      sublabel={t.description}
-                      active={thinking === t.id}
-                      onClick={() => { setThinking(t.id); setShowThinkingMenu(false) }}
-                    />
-                  ))}
-                </Dropdown>
               </MenuPortal>
             )}
           </div>
@@ -5347,6 +5574,32 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   noun={optionNoun}
                   onSelect={(id) => { setModel(id); setShowModelMenu(false); setModelFilter('') }}
                 />
+              </MenuPortal>
+            )}
+          </div>
+
+          {/* Thinking — brain + signal bars icon, label in dropdown */}
+          <div ref={thinkingMenuRef} style={{ position: 'relative' }}>
+            <ToolbarBtn
+              icon={<ThinkingIcon level={thinking} />}
+              tooltip={`Thinking: ${THINKING_OPTIONS.find(t => t.id === thinking)?.label ?? 'Adaptive'}`}
+              color={thinking === 'none' ? theme.chat.muted : theme.chat.textSecondary}
+              onClick={() => toggleMenu('thinking')}
+            />
+            {showThinkingMenu && (
+              <MenuPortal anchorRef={thinkingMenuRef}>
+                <Dropdown>
+                  {THINKING_OPTIONS.map(t => (
+                    <DropdownItem
+                      key={t.id}
+                      icon={<Brain size={11} />}
+                      label={t.label}
+                      sublabel={t.description}
+                      active={thinking === t.id}
+                      onClick={() => { setThinking(t.id); setShowThinkingMenu(false) }}
+                    />
+                  ))}
+                </Dropdown>
               </MenuPortal>
             )}
           </div>
@@ -6989,6 +7242,9 @@ function ComposerInsertMenu({
   disabledServers,
   setDisabledServers,
   peerToolNames,
+  chatSurfaces,
+  activeChatSurfaceId,
+  onOpenChatSurface,
 }: {
   onAttachFiles: () => void
   mcpEnabled: boolean
@@ -6997,6 +7253,9 @@ function ComposerInsertMenu({
   disabledServers: Set<string>
   setDisabledServers: React.Dispatch<React.SetStateAction<Set<string>>>
   peerToolNames: string[]
+  chatSurfaces: ChatSurfaceMenuEntry[]
+  activeChatSurfaceId: string | null
+  onOpenChatSurface: (entry: ChatSurfaceMenuEntry) => void
 }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
@@ -7106,6 +7365,30 @@ function ComposerInsertMenu({
             </div>
           )}
         </div>
+
+        {chatSurfaces.length > 0 && (
+          <>
+            <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
+            {chatSurfaces.map(entry => {
+              const id = `${entry.extId}:${entry.surfaceId}`
+              const active = activeChatSurfaceId === id
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => onOpenChatSurface(entry)}
+                  style={itemStyle(active)}
+                  onMouseEnter={e => { e.currentTarget.style.background = theme.chat.dropdownHoverBackground }}
+                  onMouseLeave={e => { e.currentTarget.style.background = active ? theme.chat.dropdownHoverBackground : 'transparent' }}
+                  title={entry.description ?? entry.label}
+                >
+                  <Pencil size={14} color={theme.chat.muted} />
+                  <span style={{ fontSize: 12, fontFamily: fonts.sans }}>Add {entry.label}</span>
+                </button>
+              )
+            })}
+          </>
+        )}
       </Dropdown>
     </div>
   )

@@ -1,0 +1,21 @@
+{
+  "id": "sketch",
+  "name": "Sketch",
+  "version": "1.0.0",
+  "description": "Quick drawing pad that mounts above the chat composer. Sketch an idea with pen, shapes, or eraser and send it as an image attachment.",
+  "author": "contex",
+  "tier": "safe",
+  "ui": { "mode": "native" },
+  "contributes": {
+    "chatSurfaces": [{
+      "id": "sketch",
+      "label": "Sketch",
+      "description": "Draw a quick sketch and attach it to your next message.",
+      "icon": "pencil",
+      "entry": "surface/index.html",
+      "emits": "image",
+      "defaultHeight": 280,
+      "minHeight": 180
+    }]
+  }
+}

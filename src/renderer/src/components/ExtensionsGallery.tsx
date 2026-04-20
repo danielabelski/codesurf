@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
-import { Package, Search, Star, X, Check, Plus } from 'lucide-react'
+import { Package, Search, Star, X, Check, Plus, AlertTriangle } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 
@@ -23,9 +23,13 @@ type Tab = 'recent' | 'popular' | 'installed'
 interface Props {
   onClose: () => void
   workspacePath?: string | null
+  /** Called after any settings mutation performed by the gallery (e.g. the
+   *  "Enable extensions" banner flipping `extensionsDisabled`) so the parent
+   *  (App.tsx) can keep its in-memory settings state in sync with disk. */
+  onSettingsChange?: (settings: import('../../../shared/types').AppSettings) => void
 }
 
-export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.Element {
+export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: Props): React.JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [tab, setTab] = useState<Tab>('popular')
@@ -34,23 +38,73 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [extensionsGloballyDisabled, setExtensionsGloballyDisabled] = useState(false)
+  const [enablingGlobal, setEnablingGlobal] = useState(false)
 
-  const load = useCallback(async () => {
+  const refreshGlobalFlag = useCallback(async () => {
+    try {
+      const s = await window.electron.settings?.get?.()
+      setExtensionsGloballyDisabled(Boolean((s as { extensionsDisabled?: boolean } | null)?.extensionsDisabled))
+    } catch { /* ignore */ }
+  }, [])
+
+  const load = useCallback(async (opts?: { force?: boolean }) => {
     setLoading(true)
     setError(null)
     try {
-      const list = await window.electron.extensions.list()
-      setEntries(list as ExtensionListEntry[])
+      // Force-refresh on open so bundled extensions are picked up even if an
+      // earlier scan happened while `extensionsDisabled` was flipped. We fall
+      // back to `list()` when refresh isn't available or errors out.
+      let list: unknown[] | null = null
+      if (opts?.force && window.electron.extensions.refresh) {
+        try {
+          list = (await window.electron.extensions.refresh(workspacePath ?? null)) as unknown[]
+        } catch {
+          list = null
+        }
+      }
+      if (!list) {
+        list = (await window.electron.extensions.list()) as unknown[]
+      }
+      setEntries((list ?? []) as ExtensionListEntry[])
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [workspacePath])
+
+  const enableExtensionsGlobally = useCallback(async () => {
+    setEnablingGlobal(true)
+    try {
+      const current = await window.electron.settings?.get?.()
+      if (current) {
+        const next = await window.electron.settings?.set?.({ ...current, extensionsDisabled: false })
+        // Propagate to App.tsx so `settings.extensionsDisabled` state flips
+        // there too — otherwise sidebar `useExtensions` stays disabled and
+        // won't react to the EXTENSIONS_CHANGED_EVENT below.
+        if (next && onSettingsChange) onSettingsChange(next)
+      }
+      setExtensionsGloballyDisabled(false)
+      // Now force a rescan + reload so the gallery populates.
+      await load({ force: true })
+      // Notify the rest of the renderer (sidebar, chat composer `+` menu,
+      // etc.) so they re-query their lists instead of showing the stale
+      // "disabled" view captured when the app started.
+      notify()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setEnablingGlobal(false)
+    }
+  }, [load, onSettingsChange])
 
   useEffect(() => {
-    load()
-  }, [load])
+    // Force a rescan when the gallery opens so bundled extensions and any
+    // newly-installed ones appear without requiring an app restart.
+    refreshGlobalFlag()
+    load({ force: true })
+  }, [load, refreshGlobalFlag])
 
   // Close on Escape
   useEffect(() => {
@@ -78,16 +132,9 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    let list = entries
-    if (tab === 'installed') {
-      list = list.filter(e => e.enabled)
-    } else if (tab === 'recent') {
-      // Sort by id desc as a proxy for install order until a real "addedAt" exists
-      list = [...list].reverse()
-    } else {
-      // Popular: alphabetical by name as a stable placeholder
-      list = [...list].sort((a, b) => a.name.localeCompare(b.name))
-    }
+    // Popular now lists everything — installed + available — sorted
+    // alphabetically. Filters only narrow by the search query.
+    let list = [...entries].sort((a, b) => a.name.localeCompare(b.name))
     if (q) {
       list = list.filter(e =>
         e.name.toLowerCase().includes(q)
@@ -96,7 +143,7 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
       )
     }
     return list
-  }, [entries, tab, query])
+  }, [entries, query])
 
   const counts = useMemo(() => ({
     recent: entries.length,
@@ -177,9 +224,7 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
         }}>
           <div style={{ display: 'flex', gap: 2 }}>
             {([
-              { id: 'recent', label: 'Recent' },
               { id: 'popular', label: 'Popular' },
-              { id: 'installed', label: 'Installed' },
             ] as { id: Tab; label: string }[]).map(t => {
               const active = tab === t.id
               return (
@@ -243,6 +288,46 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
 
         {/* Body */}
         <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+          {extensionsGloballyDisabled && (
+            <div style={{
+              padding: '10px 12px',
+              marginBottom: 12,
+              background: `${theme.status.warning}18`,
+              border: `1px solid ${theme.status.warning}55`,
+              borderRadius: 8,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              fontSize: fonts.size,
+              color: theme.text.primary,
+            }}>
+              <AlertTriangle size={15} style={{ color: theme.status.warning, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600 }}>Extensions are globally disabled</div>
+                <div style={{ fontSize: fonts.secondarySize, color: theme.text.secondary }}>
+                  Turn them back on to browse, add, and use available extensions.
+                </div>
+              </div>
+              <button
+                onClick={enableExtensionsGlobally}
+                disabled={enablingGlobal}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  border: `1px solid ${theme.accent.base}`,
+                  background: theme.accent.base,
+                  color: theme.text.inverse,
+                  fontSize: fonts.size,
+                  fontWeight: 600,
+                  cursor: enablingGlobal ? 'progress' : 'pointer',
+                  opacity: enablingGlobal ? 0.7 : 1,
+                }}
+              >
+                {enablingGlobal ? 'Enabling…' : 'Enable extensions'}
+              </button>
+            </div>
+          )}
+
           {error && (
             <div style={{
               padding: 10,
@@ -263,9 +348,7 @@ export function ExtensionsGallery({ onClose, workspacePath }: Props): React.JSX.
             </div>
           ) : filtered.length === 0 ? (
             <div style={{ color: theme.text.disabled, fontSize: fonts.size, textAlign: 'center', padding: 40 }}>
-              {query ? 'No extensions match your search.'
-                : tab === 'installed' ? 'No extensions installed yet. Browse Popular or Recent to add some.'
-                : 'No extensions available.'}
+              {query ? 'No extensions match your search.' : 'No extensions available.'}
             </div>
           ) : (
             <div style={{

@@ -71,6 +71,7 @@ interface ElectronAPI {
     onOpencodeModelsUpdated(cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void): () => void
     openclawAgents(): Promise<{ agents: Array<{ id: string; label: string; description?: string }> }>
     selectFiles(): Promise<string[]>
+    writeTempAttachment(payload: { data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; path: string } | { ok: false; error: string }>
     answerUserQuestion(payload: {
       cardId: string
       toolId: string | null
@@ -235,7 +236,20 @@ interface ElectronAPI {
       tiles: import('../../shared/types').ExtensionTileContrib[]
     }>
     listTiles(): Promise<import('../../shared/types').ExtensionTileContrib[]>
+    listChatSurfaces(): Promise<Array<{
+      extId: string
+      id: string
+      label: string
+      description?: string
+      icon?: string
+      entry: string
+      emits: 'image' | 'text'
+      defaultHeight: number
+      minHeight: number
+      uiMode?: 'native' | 'custom'
+    }>>
     tileEntry(extId: string, tileType: string, tileId?: string): Promise<string | null>
+    chatSurfaceEntry(extId: string, surfaceId: string, instanceId?: string): Promise<string | null>
     getBridgeScript(tileId: string, extId: string): Promise<string>
     enable(extId: string): Promise<boolean>
     disable(extId: string): Promise<boolean>

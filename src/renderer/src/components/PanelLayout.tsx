@@ -330,7 +330,7 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
 
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', height: 34,
+      display: 'flex', alignItems: 'flex-end', height: 34,
       background: theme.surface.panel, borderBottom: `1px solid ${theme.border.subtle}`,
       overflow: 'hidden', flexShrink: 0, zIndex: 1,
       padding: '0 8px',
@@ -366,7 +366,7 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                 fontSize: 10, color: isActive ? theme.text.primary : theme.text.muted,
                 background: 'transparent',
                 border: '1px solid transparent',
-                marginBottom: 0,
+                marginBottom: 3,
                 borderRadius: 0,
                 transition: 'color 0.15s, border-color 0.15s',
                 flexShrink: 0, maxWidth: 200,
@@ -394,7 +394,7 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                   textDecorationLine: isActive ? 'underline' : 'none',
                   textDecorationColor: isActive ? theme.accent.base : 'transparent',
                   textDecorationThickness: 1,
-                  textUnderlineOffset: 5,
+                  textUnderlineOffset: 8,
                 }}
               >
                 {tab.label}

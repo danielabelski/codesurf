@@ -208,6 +208,21 @@ export function getBridgeScript(tileId: string, extId: string): string {
       onChanged: (cb) => _on('context.changed', cb),
       onPeerContextChanged: (cb) => _on('context.peerChanged', cb),
     },
+
+    // Chat surface API — extensions that contribute a "chatSurfaces" entry
+    // mount above the chat composer. setPayload caches the current payload
+    // with the host; when the user sends, the host emits 'surface.requestFlush'
+    // and the extension should respond with setPayload({ kind, data, ... }).
+    surface: {
+      /**
+       * Cache the current outgoing payload on the host.
+       *   payload = { kind: 'image'|'text', data: base64-or-string, mime?: string, ext?: string }
+       */
+      setPayload: (payload) => _rpc('surface.setPayload', { payload: payload || null }),
+      clear: () => _rpc('surface.setPayload', { payload: null }),
+      onRequestFlush: (cb) => _on('surface.requestFlush', cb),
+      onClear: (cb) => _on('surface.clear', cb),
+    },
   };
 
   // Inject base component stylesheet (uses --ct-* vars; structural styles baked in at load time)

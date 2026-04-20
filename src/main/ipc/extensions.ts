@@ -131,17 +131,40 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
     return url
   })
 
+  // List contributed chat-surface contributions for the composer `+` menu
+  ipcMain.handle('ext:list-chat-surfaces', async () => {
+    await ensureLoaded()
+    return registry.getChatSurfaces().map(s => ({
+      extId: s.extId,
+      id: s.id,
+      label: s.label,
+      description: s.description,
+      icon: s.icon,
+      entry: s.entry,
+      emits: s.emits ?? 'image',
+      defaultHeight: s.defaultHeight ?? 260,
+      minHeight: s.minHeight ?? 160,
+      uiMode: s.uiMode,
+    }))
+  })
+
+  // Resolve the custom-protocol URL for an active chat-surface instance
+  ipcMain.handle('ext:chat-surface-entry', async (_, extId: string, surfaceId: string, instanceId?: string) => {
+    await ensureLoaded()
+    return registry.getChatSurfaceEntry(extId, surfaceId, instanceId)
+  })
+
   // Get the bridge script to inject into extension iframes
   ipcMain.handle('ext:get-bridge-script', (_, tileId: string, extId: string) => {
     return getBridgeScript(tileId, extId)
   })
 
   // Enable/disable an extension
-  ipcMain.handle('ext:enable', (_, extId: string) => {
+  ipcMain.handle('ext:enable', async (_, extId: string) => {
     return registry.enable(extId)
   })
 
-  ipcMain.handle('ext:disable', (_, extId: string) => {
+  ipcMain.handle('ext:disable', async (_, extId: string) => {
     return registry.disable(extId)
   })
 
