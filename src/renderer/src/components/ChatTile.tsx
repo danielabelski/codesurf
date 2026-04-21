@@ -1984,6 +1984,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     danger: theme.status.danger,
   }), [theme])
   const chatSurfaceThemeVars = useMemo(() => ({
+    '--ct-mode': theme.mode,
     '--ct-bg': 'transparent',
     '--ct-panel': theme.surface.panelElevated,
     '--ct-panel-2': theme.surface.overlay,

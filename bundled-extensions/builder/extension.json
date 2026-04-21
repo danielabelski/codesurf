@@ -2,21 +2,38 @@
   "id": "builder",
   "name": "Builder",
   "version": "1.0.0",
-  "description": "Artifact builder for sketch enhancement and variant generation. Lives in chat as a tabbed surface beside Sketch.",
+  "description": "Simple chat-native variant builder that replaces the old Artifact Builder.",
   "author": "contex",
   "tier": "safe",
-  "ui": { "mode": "custom" },
+  "ui": { "mode": "native" },
   "contributes": {
+    "tiles": [
+      {
+        "type": "builder",
+        "label": "Builder",
+        "icon": "sparkles",
+        "entry": "surface/index.html",
+        "defaultSize": { "w": 760, "h": 540 },
+        "minSize": { "w": 520, "h": 360 }
+      }
+    ],
     "chatSurfaces": [
       {
         "id": "builder",
         "label": "Builder",
-        "description": "Generate and iterate on HTML artifacts inside chat.",
+        "description": "Prompt input plus 1, 2, or 3 generated variants in chat.",
         "icon": "sparkles",
         "entry": "surface/index.html",
         "emits": "text",
-        "defaultHeight": 360,
+        "defaultHeight": 320,
         "minHeight": 220
+      }
+    ],
+    "contextMenu": [
+      {
+        "label": "New Builder",
+        "action": "createTile",
+        "tileType": "ext:builder"
       }
     ],
     "settings": [
@@ -29,9 +46,9 @@
       "consumes": ["ctx:design", "ctx:code", "ctx:research", "ctx:web", "ctx:sketch"]
     },
     "actions": [
-      { "name": "generate", "description": "Generate a builder artifact from a prompt. Params: { prompt: string }" },
+      { "name": "generate", "description": "Generate builder variants from a prompt. Params: { prompt: string, variantCount?: 1|2|3 }" },
       { "name": "setHtml", "description": "Set the current builder HTML directly. Params: { html: string }" },
-      { "name": "getHtml", "description": "Get the current builder HTML" },
+      { "name": "getHtml", "description": "Get the selected builder HTML" },
       { "name": "getStatus", "description": "Get current builder generation status" },
       { "name": "setPrompt", "description": "Set the current builder prompt without generating. Params: { prompt: string }" },
       { "name": "setSettings", "description": "Update builder API settings. Params: { model?: string, baseUrl?: string, apiKey?: string }" }
