@@ -663,6 +663,37 @@ test('daemon refreshes cached external transcript state when the source file cha
   assert.equal(response.payload.messages[0].content, 'updated prompt')
 })
 
+test('daemon trims oversized Claude transcripts to recent history for faster loading', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const transcriptPath = join(daemon.homeDir, '.claude', 'transcripts', 'huge-session.jsonl')
+  await mkdir(dirname(transcriptPath), { recursive: true })
+
+  const filler = 'x'.repeat(800)
+  const lines = Array.from({ length: 9000 }, (_, index) => JSON.stringify({
+    type: index % 2 === 0 ? 'user' : 'assistant',
+    content: index === 0 ? 'first prompt' : index === 8999 ? 'latest reply' : `line-${index}-${filler}`,
+    timestamp: `2026-04-21T12:${String(Math.floor(index / 60) % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+  }))
+  await writeFile(transcriptPath, `${lines.join('\n')}\n`, 'utf8')
+
+  let response = await daemon.request('/session/external/list')
+  assert.equal(response.status, 200)
+  const entry = response.payload.find(item => item.id === `claude:${transcriptPath}`)
+  assert.ok(entry)
+
+  response = await daemon.request(`/session/external/state?sessionEntryId=${encodeURIComponent(entry.id)}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.provider, 'claude')
+  assert.equal(response.payload.messages[0].content, 'first prompt')
+  assert.match(response.payload.messages[1].content, /trimmed for faster loading/i)
+  assert.equal(response.payload.messages.at(-1).content, 'latest reply')
+  assert.ok(response.payload.messages.length < 9000)
+})
+
 test('daemon validates local session route inputs', async t => {
   const daemon = await startDaemon()
   t.after(async () => {

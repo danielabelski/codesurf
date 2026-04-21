@@ -7,6 +7,9 @@ import Database from 'better-sqlite3'
 const STANDARD_CODESURF_SUBDIRS = ['sessions', 'agents', 'skills', 'tools', 'plugins', 'extensions']
 const EXTERNAL_SESSION_CACHE_MS = 30_000
 const EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES = 64
+const LARGE_EXTERNAL_SESSION_BYTES = 6 * 1024 * 1024
+const EXTERNAL_SESSION_HEAD_SAMPLE_BYTES = 128 * 1024
+const EXTERNAL_SESSION_TAIL_SAMPLE_BYTES = 4 * 1024 * 1024
 const MAX_SESSION_LISTING_JSON_BYTES = 2 * 1024 * 1024
 const MAX_SESSION_LISTING_TEXT_SAMPLE_BYTES = 16 * 1024
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
@@ -100,6 +103,30 @@ async function readTextPreviewSafe(path, maxBytes = MAX_SESSION_LISTING_TEXT_SAM
       const buffer = Buffer.alloc(maxBytes)
       const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0)
       return buffer.toString('utf8', 0, bytesRead)
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+async function readTextTailSafe(path, maxBytes) {
+  try {
+    const stat = await fs.stat(path)
+    if (!stat.isFile()) return null
+    const start = Math.max(0, stat.size - maxBytes)
+    const length = stat.size - start
+    const handle = await fs.open(path, 'r')
+    try {
+      const buffer = Buffer.alloc(length)
+      const { bytesRead } = await handle.read(buffer, 0, length, start)
+      let text = buffer.toString('utf8', 0, bytesRead)
+      if (start > 0) {
+        const firstNewline = text.indexOf('\n')
+        text = firstNewline === -1 ? '' : text.slice(firstNewline + 1)
+      }
+      return text
     } finally {
       await handle.close()
     }
@@ -217,6 +244,58 @@ function extractTextParts(content) {
     if (typeof content.value === 'string') return content.value
   }
   return ''
+}
+
+function makeTranscriptTruncationMessage(provider, fileSizeBytes) {
+  const sizeMb = Math.max(1, Math.round(fileSizeBytes / (1024 * 1024)))
+  const label = provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude' : 'CLI'
+  return {
+    id: `${provider}-truncated-notice`,
+    role: 'system',
+    content: `${label} transcript trimmed for faster loading. Showing the start of the conversation and recent activity from a ${sizeMb} MB session.`,
+    timestamp: Date.now(),
+  }
+}
+
+function dedupeImportedMessages(messages) {
+  const out = []
+  const seen = new Set()
+  for (const message of messages) {
+    const key = `${message.role}::${message.timestamp}::${message.content}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(message)
+  }
+  return out
+}
+
+function parseJsonlLines(raw) {
+  return String(raw ?? '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+}
+
+function parseClaudeLine(line, index) {
+  try {
+    const evt = JSON.parse(line)
+    const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
+    if (!role || typeof evt?.content !== 'string') return null
+    return makeImportedMessage(
+      `claude-${index}`,
+      role,
+      evt.content,
+      Date.parse(evt?.timestamp ?? '') || Date.now() + index,
+    )
+  } catch {
+    return null
+  }
+}
+
+function parseClaudeMessagesFromLines(lines, offset = 0) {
+  return lines
+    .map((line, index) => parseClaudeLine(line, offset + index))
+    .filter(Boolean)
 }
 
 function roleFromUnknown(value) {
@@ -1012,6 +1091,33 @@ async function parseCodeSurfChatState(filePath) {
 }
 
 async function parseClaudeChatState(filePath, entry) {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) return null
+
+  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
+      readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
+    ])
+
+    const headMessages = parseClaudeMessagesFromLines(parseJsonlLines(headRaw), 0)
+    const tailLines = parseJsonlLines(tailRaw)
+    const tailMessages = parseClaudeMessagesFromLines(tailLines, 0)
+    const firstMessage = headMessages.find(message => message.role !== 'system') ?? headMessages[0] ?? null
+    const messages = dedupeImportedMessages([
+      ...(firstMessage ? [firstMessage] : []),
+      makeTranscriptTruncationMessage('claude', stat.size),
+      ...tailMessages,
+    ])
+
+    return {
+      provider: 'claude',
+      model: entry.model,
+      sessionId: entry.sessionId,
+      messages,
+    }
+  }
+
   const messages = []
 
   try {
@@ -1041,7 +1147,7 @@ async function parseClaudeChatState(filePath, entry) {
   }
 }
 
-async function parseCodexChatState(filePath, entry) {
+function parseCodexChatStateFromLines(lines, entry, offset = 0) {
   const messages = []
   const pendingToolCalls = new Map()
   let pendingThinking = []
@@ -1064,68 +1170,65 @@ async function parseCodexChatState(filePath, entry) {
     pendingToolCalls.clear()
   }
 
-  let lastLineNumber = 0
-  try {
-    await scanJsonlFile(filePath, (line, lineNumber) => {
-      lastLineNumber = lineNumber
-      try {
-        const evt = JSON.parse(line)
-        const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + lineNumber
-        const payload = evt?.payload
+  let lastIndex = offset
+  lines.forEach((line, index) => {
+    const absoluteIndex = offset + index
+    lastIndex = absoluteIndex
+    try {
+      const evt = JSON.parse(line)
+      const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + absoluteIndex
+      const payload = evt?.payload
 
-        if (!model && typeof payload?.model === 'string') model = payload.model
-        if (!sessionId && typeof payload?.id === 'string') sessionId = payload.id
+      if (!model && typeof payload?.model === 'string') model = payload.model
+      if (!sessionId && typeof payload?.id === 'string') sessionId = payload.id
 
-        if (evt?.type !== 'response_item') return
+      if (evt?.type !== 'response_item') return
 
-        if (payload?.type === 'reasoning') {
-          const summary = extractReasoningSummary(payload)
-          if (summary) pendingThinking.push(summary)
-          return
-        }
+      if (payload?.type === 'reasoning') {
+        const summary = extractReasoningSummary(payload)
+        if (summary) pendingThinking.push(summary)
+        return
+      }
 
-        if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') {
-          const call = parseCodexToolCall(payload)
-          if (!call) return
-          pendingToolCalls.set(call.id, call)
-          pendingCalls.push(call)
-          return
-        }
+      if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') {
+        const call = parseCodexToolCall(payload)
+        if (!call) return
+        pendingToolCalls.set(call.id, call)
+        pendingCalls.push(call)
+        return
+      }
 
-        if (payload?.type === 'function_call_output') {
-          const callId = typeof payload?.call_id === 'string' ? payload.call_id : null
-          if (!callId) return
-          const existing = pendingToolCalls.get(callId)
-          if (!existing) return
-          existing.output = sanitizeToolOutputText(typeof payload?.output === 'string' ? payload.output : '')
-          if (existing.commandEntry) existing.commandEntry.output = existing.output
-          return
-        }
+      if (payload?.type === 'function_call_output') {
+        const callId = typeof payload?.call_id === 'string' ? payload.call_id : null
+        if (!callId) return
+        const existing = pendingToolCalls.get(callId)
+        if (!existing) return
+        existing.output = sanitizeToolOutputText(typeof payload?.output === 'string' ? payload.output : '')
+        if (existing.commandEntry) existing.commandEntry.output = existing.output
+        return
+      }
 
-        if (payload?.type !== 'message') return
-        const role = roleFromUnknown(payload?.role)
-        if (!role) return
+      if (payload?.type !== 'message') return
+      const role = roleFromUnknown(payload?.role)
+      if (!role) return
 
-        const content = extractTextParts(payload.content)
-        if (role === 'assistant') {
-          flushAssistantArtifacts(lineNumber - 1, timestamp, content)
-          return
-        }
+      const content = extractTextParts(payload.content)
+      if (role === 'assistant') {
+        flushAssistantArtifacts(absoluteIndex, timestamp, content)
+        return
+      }
 
-        if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-          flushAssistantArtifacts(lineNumber - 1, timestamp, '')
-        }
+      if (pendingThinking.length > 0 || pendingCalls.length > 0) {
+        flushAssistantArtifacts(absoluteIndex, timestamp, '')
+      }
 
-        const message = makeImportedMessage(`codex-${lineNumber - 1}`, role, content, timestamp)
-        if (message) messages.push(message)
-      } catch {}
-    })
-  } catch {
-    return null
-  }
+      const message = makeImportedMessage(`codex-${absoluteIndex}`, role, content, timestamp)
+      if (message) messages.push(message)
+    } catch {}
+  })
 
   if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-    flushAssistantArtifacts(lastLineNumber, Date.now())
+    flushAssistantArtifacts(lastIndex + 1, Date.now())
   }
 
   return {
@@ -1134,6 +1237,44 @@ async function parseCodexChatState(filePath, entry) {
     sessionId,
     messages,
   }
+}
+
+async function parseCodexChatState(filePath, entry) {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) return null
+
+  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
+      readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
+    ])
+    const headLines = parseJsonlLines(headRaw)
+    const tailLines = parseJsonlLines(tailRaw)
+    const firstChunk = parseCodexChatStateFromLines(headLines, entry, 0)
+    const recentChunk = parseCodexChatStateFromLines(tailLines, entry, Math.max(10_000, tailLines.length))
+    const firstMessage = firstChunk.messages.find(message => message.role === 'user') ?? firstChunk.messages[0] ?? null
+    const messages = dedupeImportedMessages([
+      ...(firstMessage ? [firstMessage] : []),
+      makeTranscriptTruncationMessage('codex', stat.size),
+      ...recentChunk.messages,
+    ])
+    return {
+      provider: 'codex',
+      model: recentChunk.model || firstChunk.model,
+      sessionId: recentChunk.sessionId ?? firstChunk.sessionId,
+      messages,
+    }
+  }
+
+  const lines = []
+  try {
+    await scanJsonlFile(filePath, line => {
+      lines.push(line)
+    })
+  } catch {
+    return null
+  }
+  return parseCodexChatStateFromLines(lines, entry, 0)
 }
 
 async function parseOpenClawChatState(filePath, entry) {
