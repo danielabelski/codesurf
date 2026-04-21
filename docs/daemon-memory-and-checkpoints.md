@@ -122,8 +122,24 @@ The loader strips `@import ...` lines from the section body and emits imported f
   - `importedFrom`
   - `content`
 - `prompt`
+- `contextBuckets`
+  - `version`
+  - `includedBuckets`
+  - `buckets[]`
+    - `bucket`
+    - `included`
+    - `sectionCount`
+    - `sections[]`
+      - `scope`
+      - `displayPath`
+      - `importedFrom`
+  - `inspect`
+    - `summary`
+    - `input`
 
 The prompt is the already-layered markdown block used for provider injection.
+
+`contextBuckets` is the inspectable outbound bundle summary used by runtime and daemon-backed chat to render the existing `Workspace Instructions` tool/status chip consistently.
 
 ## Memory APIs
 
@@ -152,20 +168,23 @@ Behavior:
 
 `src/main/ipc/chat.ts` now calls daemon memory loading before provider execution.
 
-That memory prompt is then injected into:
+That daemon-authored memory result includes the exact `prompt` plus an inspectable `contextBuckets` bundle.
+
+Those values are then injected into:
 
 - Claude system prompt assembly
 - Codex prompt preamble
+- the existing `Workspace Instructions` tool/status chip
 
-So local runtime chat now uses the same daemon-owned AGENTS / CLAUDE loader as daemon-backed chat.
+So local runtime chat now uses the same daemon-owned AGENTS / CLAUDE loader and the same bucket vocabulary as daemon-backed chat.
 
 ### Daemon-backed chat
 
-`src/main/ipc/chat.ts` now forwards `memoryPrompt` when routing to a daemon host.
+`src/main/ipc/chat.ts` now forwards both `memoryPrompt` and `contextBuckets` when routing to a daemon host.
 
-`bin/codesurfd.mjs` also backfills `memoryPrompt` at `/chat/job/start` if the request only contains `workspaceId` and not a prebuilt prompt.
+`bin/codesurfd.mjs` also backfills both fields at `/chat/job/start` if the request only contains `workspaceId` and not a prebuilt bundle.
 
-`bin/chat-jobs.mjs` prefers `request.memoryPrompt` and falls back to loading memory itself.
+`bin/chat-jobs.mjs` prefers the forwarded bundle and falls back to loading memory itself.
 
 That means:
 
@@ -282,7 +301,7 @@ These systems manifest through existing UI primitives:
 Implemented now:
 
 - memory loading emits a normal `Workspace Instructions` tool chip at the start of local and daemon-backed chat turns
-- expanding that chip now shows the exact layered instruction prompt that was injected for the run, so the user can inspect what AGENTS / CLAUDE content was actually read
+- expanding that chip now shows the explicit outbound bucket manifest (`local-only` vs `remote-safe`) followed by the exact layered instruction prompt that was injected for the run, so the user can inspect both the bucket breakdown and the final AGENTS / CLAUDE payload
 - checkpoint creation emits a normal `Checkpoint saved` tool chip before risky local runtime edits
 - runtime session rows expose checkpoint count through their existing tooltip text
 - runtime session context menus expose `Restore Latest Checkpoint`
@@ -293,6 +312,7 @@ See `docs/chat-ui-manifest.md` for the renderer-specific mapping.
 
 ### Daemon/backend
 
+- `bin/context-buckets.mjs`
 - `bin/memory-loader.mjs`
 - `bin/checkpoints.mjs`
 - `bin/codesurfd.mjs`

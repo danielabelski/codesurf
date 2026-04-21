@@ -159,12 +159,6 @@ export const daemonClient = {
   removeProjectFolder(workspaceId: string, folderPath: string): Promise<Workspace | null> {
     return daemonRequest('/workspace/remove-project-folder', { body: { workspaceId, folderPath } })
   },
-  renameProject(args: { projectId?: string; projectPath?: string; name: string }): Promise<{ ok: boolean; error?: string; project?: { id: string; name: string; path: string } }> {
-    return daemonRequest('/workspace/project/rename', { body: args })
-  },
-  createProjectWorktree(args: { projectId?: string; projectPath?: string; name: string; branch?: string }): Promise<{ ok: boolean; error?: string; project?: { id: string; name: string; path: string }; path?: string; branch?: string }> {
-    return daemonRequest('/workspace/project/worktree', { body: args })
-  },
   setActiveWorkspace(id: string): Promise<{ ok: true }> {
     return daemonRequest('/workspace/set-active', { body: { id } })
   },
@@ -231,6 +225,24 @@ export const daemonClient = {
       content: string
     }>
     prompt?: string
+    contextBuckets?: {
+      version: number
+      includedBuckets: string[]
+      buckets: Array<{
+        bucket: string
+        included: boolean
+        sectionCount: number
+        sections: Array<{
+          scope: string
+          displayPath: string
+          importedFrom?: string | null
+        }>
+      }>
+      inspect?: {
+        summary?: string
+        input?: string
+      }
+    }
   }> {
     return daemonRequest(`/memory/load?workspaceId=${encodeURIComponent(workspaceId)}&executionTarget=${encodeURIComponent(executionTarget)}`)
   },
@@ -264,6 +276,32 @@ export const daemonClient = {
     cardId?: string | null
   }): Promise<{ ok: boolean; scope: 'global' | 'workspace'; targetRoot: string; installedPath: string; skill: DaemonSkillEntry }> {
     return daemonRequest('/skills/install', { body: args })
+  },
+  expandFileReferences(payload: {
+    message: string
+    workspaceId?: string | null
+    workspaceDir?: string | null
+    executionTarget?: 'local' | 'cloud'
+  }): Promise<{
+    changed: boolean
+    message: string
+    references: Array<{
+      source: string
+      displayPath: string
+      byteCount: number
+      truncated: boolean
+    }>
+    summaryText?: string
+    inputText?: string
+  }> {
+    return daemonRequest('/file-references/expand', {
+      body: {
+        message: payload.message,
+        workspaceId: String(payload.workspaceId ?? '').trim() || null,
+        workspaceDir: String(payload.workspaceDir ?? '').trim() || null,
+        executionTarget: payload.executionTarget === 'cloud' ? 'cloud' : 'local',
+      },
+    })
   },
   listExternalSessions(workspacePath: string | null, force = false): Promise<AggregatedSessionEntry[]> {
     const normalizedPath = String(workspacePath ?? '').trim()

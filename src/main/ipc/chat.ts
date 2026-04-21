@@ -81,6 +81,7 @@ interface ChatRequest {
   provider: string
   model: string
   messages: ChatMessage[]
+  expandedMessages?: ChatMessage[]
   mode?: string
   thinking?: string
   workspaceDir?: string
@@ -106,7 +107,33 @@ interface ChatRequest {
   memoryPrompt?: string
   skillsPrompt?: string
   skillsSummary?: string | null
+  contextBuckets?: ChatContextBucketBundle
 }
+
+interface ChatContextBucketSection {
+  scope: string
+  displayPath: string
+  importedFrom?: string | null
+}
+
+interface ChatContextBucketRecord {
+  bucket: string
+  included: boolean
+  sectionCount: number
+  sections: ChatContextBucketSection[]
+}
+
+interface ChatContextBucketBundle {
+  version: number
+  includedBuckets: string[]
+  buckets: ChatContextBucketRecord[]
+  inspect?: {
+    summary?: string
+    input?: string
+  }
+}
+
+type LoadedMemoryContext = Awaited<ReturnType<typeof daemonClient.loadMemoryContext>>
 
 function log(...args: unknown[]): void {
   console.log('[Chat]', ...args)
@@ -138,6 +165,68 @@ function cloneChatMessages(messages: ChatMessage[]): ChatMessage[] {
     role: message.role,
     content: String(message.content ?? ''),
   }))
+}
+
+function getPreparedMessages(req: ChatRequest): ChatMessage[] {
+  return Array.isArray(req.expandedMessages) && req.expandedMessages.length > 0
+    ? req.expandedMessages
+    : req.messages
+}
+
+function mayContainFileReferences(text: string): boolean {
+  return text.includes('@') || text.includes('Attached file paths:')
+}
+
+async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
+  request: ChatRequest
+  expansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null
+}> {
+  if (!req.workspaceId && !req.workspaceDir) {
+    return { request: req, expansion: null }
+  }
+
+  const preparedMessages = getPreparedMessages(req)
+  let lastUserIndex = -1
+  for (let index = preparedMessages.length - 1; index >= 0; index -= 1) {
+    if (preparedMessages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+
+  if (lastUserIndex < 0) {
+    return { request: req, expansion: null }
+  }
+
+  const lastUserMessage = preparedMessages[lastUserIndex]
+  if (!mayContainFileReferences(String(lastUserMessage?.content ?? ''))) {
+    return { request: req, expansion: null }
+  }
+
+  const expansion = await daemonClient.expandFileReferences({
+    message: lastUserMessage.content,
+    workspaceId: req.workspaceId ?? null,
+    workspaceDir: req.workspaceDir ?? null,
+    executionTarget: req.executionTarget === 'cloud' ? 'cloud' : 'local',
+  })
+
+  if (!expansion.changed) {
+    return { request: req, expansion: null }
+  }
+
+  const expandedMessages = cloneChatMessages(preparedMessages)
+  expandedMessages[lastUserIndex] = {
+    ...expandedMessages[lastUserIndex],
+    content: expansion.message,
+  }
+
+  return {
+    request: {
+      ...req,
+      expandedMessages,
+    },
+    expansion,
+  }
 }
 
 function buildRuntimeSessionEntryId(req: ChatRequest): string {
@@ -617,22 +706,110 @@ function buildCodexPrompt(
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
-function summarizeMemoryContext(context: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null | undefined): string | undefined {
+function normalizeContextBucketBundle(context: LoadedMemoryContext | null | undefined): ChatContextBucketBundle | undefined {
+  if (context?.contextBuckets && Array.isArray(context.contextBuckets.buckets)) {
+    return context.contextBuckets
+  }
   if (!context) return undefined
-  const sections = Array.isArray(context.sections)
-    ? context.sections.filter(section => context.includedBuckets.includes(section.bucket))
+
+  const includedBuckets = Array.isArray(context.includedBuckets)
+    ? context.includedBuckets.filter((bucket): bucket is string => typeof bucket === 'string' && bucket.trim().length > 0)
     : []
+  const sections = Array.isArray(context.sections)
+    ? context.sections.filter(section => includedBuckets.includes(section.bucket))
+    : []
+  const bucketOrder = Array.from(new Set(['local-only', 'remote-safe', ...includedBuckets, ...sections.map(section => section.bucket)]))
+
+  return {
+    version: 1,
+    includedBuckets,
+    buckets: bucketOrder.map(bucket => {
+      const bucketSections = sections
+        .filter(section => section.bucket === bucket)
+        .map(section => ({
+          scope: section.scope,
+          displayPath: section.displayPath,
+          importedFrom: section.importedFrom ?? null,
+        }))
+      return {
+        bucket,
+        included: includedBuckets.includes(bucket),
+        sectionCount: bucketSections.length,
+        sections: bucketSections,
+      }
+    }),
+  }
+}
+
+function summarizeContextBucketBundle(bundle: ChatContextBucketBundle | undefined): string | undefined {
+  const inspectSummary = String(bundle?.inspect?.summary ?? '').trim()
+  if (inspectSummary) return inspectSummary
+  if (!bundle) return undefined
+
+  const sections = bundle.buckets
+    .filter(bucket => bucket.included)
+    .flatMap(bucket => bucket.sections)
   if (sections.length === 0) return undefined
+
   const paths = sections.slice(0, 3).map(section => section.displayPath)
   const suffix = sections.length > 3 ? ` +${sections.length - 3} more` : ''
-  return `Loaded ${sections.length} instruction section${sections.length === 1 ? '' : 's'} (${context.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}`
+  const bucketSummary = bundle.buckets
+    .filter(bucket => bucket.included)
+    .map(bucket => `${bucket.bucket}: ${bucket.sectionCount}`)
+    .join(', ')
+  return `Loaded ${sections.length} instruction section${sections.length === 1 ? '' : 's'} [${bucketSummary}]: ${paths.join(', ')}${suffix}`
 }
 
-function buildMemoryContextInput(context: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null | undefined): string | undefined {
-  return String(context?.prompt ?? '').trim() || undefined
+function buildContextBucketInput(bundle: ChatContextBucketBundle | undefined, prompt: string | undefined): string | undefined {
+  const inspectInput = String(bundle?.inspect?.input ?? '').trim()
+  if (inspectInput) return inspectInput
+
+  const promptText = String(prompt ?? '').trim() || undefined
+  if (!bundle) return promptText
+
+  const lines = [
+    '## Outbound Context Buckets',
+    `Included buckets: ${bundle.includedBuckets.length > 0 ? bundle.includedBuckets.join(', ') : 'none'}`,
+    '',
+  ]
+
+  for (const bucket of bundle.buckets) {
+    if (bucket.included) {
+      lines.push(`### ${bucket.bucket}`)
+      if (bucket.sections.length === 0) {
+        lines.push('- no sections')
+      } else {
+        for (const section of bucket.sections) {
+          lines.push(`- ${section.displayPath}${section.importedFrom ? ` (imported from ${section.importedFrom})` : ''}`)
+        }
+      }
+    } else {
+      lines.push(`### ${bucket.bucket} (omitted from outbound bundle)`)
+      lines.push('- omitted from outbound bundle')
+    }
+    lines.push('')
+  }
+
+  if (promptText) {
+    lines.push('## Injected Prompt')
+    lines.push(promptText)
+  }
+
+  return lines.join('\n').trim() || undefined
 }
 
-function emitMemoryContextLoaded(cardId: string, context: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null | undefined): void {
+function summarizeMemoryContext(context: LoadedMemoryContext | null | undefined): string | undefined {
+  return summarizeContextBucketBundle(normalizeContextBucketBundle(context))
+}
+
+function buildMemoryContextInput(context: LoadedMemoryContext | null | undefined): string | undefined {
+  return buildContextBucketInput(
+    normalizeContextBucketBundle(context),
+    String(context?.prompt ?? '').trim() || undefined,
+  )
+}
+
+function emitMemoryContextLoaded(cardId: string, context: LoadedMemoryContext | null | undefined): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
   const toolId = `codesurf-memory-${Date.now()}`
@@ -664,7 +841,22 @@ function emitSelectedSkillsLoaded(cardId: string, index: Awaited<ReturnType<type
   sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
 }
 
-async function loadRuntimeMemoryContext(req: ChatRequest): Promise<Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null> {
+function emitFileReferenceExpansion(
+  cardId: string,
+  expansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null | undefined,
+): void {
+  const summary = String(expansion?.summaryText ?? '').trim()
+  if (!summary) return
+  const toolId = `codesurf-file-refs-${Date.now()}`
+  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace File References' })
+  const input = String(expansion?.inputText ?? '').trim()
+  if (input) {
+    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+  }
+  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace File References', text: summary })
+}
+
+async function loadRuntimeMemoryContext(req: ChatRequest): Promise<LoadedMemoryContext | null> {
   if (!req.workspaceId) return null
   return await daemonClient.loadMemoryContext(
     req.workspaceId,
@@ -845,6 +1037,7 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
     body: {
       request: {
         ...req,
+        messages: getPreparedMessages(req),
         projectContext,
       },
     },
@@ -935,7 +1128,7 @@ function chatLocalProxy(req: ChatRequest): void {
       model: req.model,
       stream: true,
       max_tokens: 4096,
-      messages: req.messages.map(message => ({
+      messages: getPreparedMessages(req).map(message => ({
         role: message.role,
         content: message.content,
       })),
@@ -1247,7 +1440,7 @@ async function fetchOpenCodeModels(): Promise<Array<{ id: string; label: string;
 // --- Claude via Agent SDK --------------------------------------------------------
 
 function chatClaude(req: ChatRequest): void {
-  const lastUserMsg = [...req.messages].reverse().find(m => m.role === 'user')
+  const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(req.cardId, { type: 'error', error: 'No user message' })
     return
@@ -2033,7 +2226,7 @@ async function summarizeCodexFileChanges(
 }
 
 function chatCodex(req: ChatRequest): void {
-  const lastUserMsg = [...req.messages].reverse().find(m => m.role === 'user')
+  const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(req.cardId, { type: 'error', error: 'No user message' })
     return
@@ -2273,7 +2466,7 @@ async function getOrCreateOpencodeClient(): Promise<{ client: any; url: string }
 }
 
 function chatOpencode(req: ChatRequest): void {
-  const lastUserMsg = [...req.messages].reverse().find(m => m.role === 'user')
+  const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(req.cardId, { type: 'error', error: 'No user message' })
     return
@@ -2684,7 +2877,7 @@ function extractOpenClawTextPayload(payload: any): string {
 }
 
 function chatOpenclaw(req: ChatRequest): void {
-  const lastUserMsg = [...req.messages].reverse().find(m => m.role === 'user')
+  const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(req.cardId, { type: 'error', error: 'No user message' })
     return
@@ -2817,7 +3010,7 @@ function resolveHermesBinary(): string | null {
 }
 
 function chatHermes(req: ChatRequest): void {
-  const lastUserMsg = [...req.messages].reverse().find(m => m.role === 'user')
+  const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(req.cardId, { type: 'error', error: 'No user message' })
     return
@@ -3004,8 +3197,26 @@ export function registerChatIPC(): void {
     const requestWithContext: ChatRequest = {
       ...effectiveRequest,
       ...(memoryPrompt ? { memoryPrompt } : {}),
+      ...(memoryContext?.contextBuckets ? { contextBuckets: memoryContext.contextBuckets } : {}),
       ...(skillsPrompt ? { skillsPrompt, skillsSummary } : {}),
     }
+
+    let requestWithFileReferences: ChatRequest = requestWithContext
+    let fileReferenceExpansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null = null
+    try {
+      const expanded = await expandLatestUserFileReferences(requestWithContext)
+      requestWithFileReferences = expanded.request
+      fileReferenceExpansion = expanded.expansion
+    } catch (error) {
+      sendStream(req.cardId, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(req.cardId, { type: 'done' })
+      return { ok: false }
+    }
+
+    emitFileReferenceExpansion(req.cardId, fileReferenceExpansion)
 
     if (daemonHost) {
       log('chat execution route', {
@@ -3019,7 +3230,7 @@ export function registerChatIPC(): void {
         hostId: daemonHost.id,
         hostType: daemonHost.type,
       })
-      return await sendChatToDaemon(requestWithContext, daemonHost)
+      return await sendChatToDaemon(requestWithFileReferences, daemonHost)
     }
 
     emitMemoryContextLoaded(req.cardId, memoryContext)
@@ -3044,18 +3255,18 @@ export function registerChatIPC(): void {
       backend: 'runtime',
     })
 
-    switch (requestWithContext.provider) {
-      case 'claude': chatClaude(requestWithContext); break
-      case 'codex': chatCodex(requestWithContext); break
-      case 'opencode': chatOpencode(requestWithContext); break
-      case 'openclaw': chatOpenclaw(requestWithContext); break
-      case 'hermes': chatHermes(requestWithContext); break
+    switch (requestWithFileReferences.provider) {
+      case 'claude': chatClaude(requestWithFileReferences); break
+      case 'codex': chatCodex(requestWithFileReferences); break
+      case 'opencode': chatOpencode(requestWithFileReferences); break
+      case 'openclaw': chatOpenclaw(requestWithFileReferences); break
+      case 'hermes': chatHermes(requestWithFileReferences); break
       default:
-        if (requestWithContext.providerTransport?.type === 'local-proxy') {
-          chatLocalProxy(requestWithContext)
+        if (requestWithFileReferences.providerTransport?.type === 'local-proxy') {
+          chatLocalProxy(requestWithFileReferences)
         } else {
-          sendStream(requestWithContext.cardId, { type: 'error', error: `Unsupported provider: ${requestWithContext.provider}` })
-          sendStream(requestWithContext.cardId, { type: 'done' })
+          sendStream(requestWithFileReferences.cardId, { type: 'error', error: `Unsupported provider: ${requestWithFileReferences.provider}` })
+          sendStream(requestWithFileReferences.cardId, { type: 'done' })
         }
     }
 

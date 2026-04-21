@@ -779,7 +779,6 @@ test('daemon runs a persisted chat job timeline and replays events for completed
   assert.equal(state.status, 200)
   assert.equal(state.payload.id, jobId)
   assert.equal(state.payload.status, 'failed')
-  assert.equal(state.payload.lastSequence, 2)
   assert.match(state.payload.error, /only implemented for Claude and Codex/i)
 
   const timelineResponse = await fetch(`http://127.0.0.1:${daemon.pidInfo.port}/chat/job/events?jobId=${encodeURIComponent(jobId)}&since=0`, {
@@ -799,14 +798,20 @@ test('daemon runs a persisted chat job timeline and replays events for completed
     .filter(Boolean)
     .map(line => JSON.parse(line))
 
-  assert.equal(replayedEvents.length, 2)
-  assert.equal(replayedEvents[0].jobId, jobId)
-  assert.equal(replayedEvents[0].sequence, 1)
-  assert.equal(replayedEvents[0].type, 'error')
-  assert.match(replayedEvents[0].error, /only implemented for Claude and Codex/i)
-  assert.equal(replayedEvents[1].jobId, jobId)
-  assert.equal(replayedEvents[1].sequence, 2)
-  assert.equal(replayedEvents[1].type, 'done')
+  assert.ok(replayedEvents.length >= 2)
+  assert.equal(state.payload.lastSequence, replayedEvents.at(-1)?.sequence)
+
+  const workspaceInstructionSummary = replayedEvents.find(event => event.type === 'tool_summary' && event.toolName === 'Workspace Instructions')
+  assert.ok(workspaceInstructionSummary)
+
+  const errorEvent = replayedEvents.at(-2)
+  assert.equal(errorEvent?.jobId, jobId)
+  assert.equal(errorEvent?.type, 'error')
+  assert.match(errorEvent?.error ?? '', /only implemented for Claude and Codex/i)
+
+  const doneEvent = replayedEvents.at(-1)
+  assert.equal(doneEvent?.jobId, jobId)
+  assert.equal(doneEvent?.type, 'done')
 
   const timelineFile = join(daemon.homeDir, 'timelines', `${jobId}.jsonl`)
   const metadataFile = join(daemon.homeDir, 'jobs', `${jobId}.json`)

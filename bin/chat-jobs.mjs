@@ -6,7 +6,8 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
-import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } from './memory-loader.mjs'
+import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
+import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -396,12 +397,12 @@ function joinPromptSections(...sections) {
   return normalized.length > 0 ? normalized.join('\n\n') : undefined
 }
 
-function summarizeMemoryContext(memoryContext, instructionPrompt) {
-  return describeMemoryContextForTool(memoryContext, instructionPrompt).summary
+function summarizeMemoryContext(contextBuckets, instructionPrompt) {
+  return describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
 }
 
-function buildMemoryContextInput(memoryContext, instructionPrompt) {
-  return describeMemoryContextForTool(memoryContext, instructionPrompt).input
+function buildMemoryContextInput(contextBuckets, instructionPrompt) {
+  return describeContextBucketsForTool(contextBuckets, instructionPrompt).input
 }
 
 function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skillsPrompt) {
@@ -824,8 +825,9 @@ export function createChatJobManager({ homeDir }) {
         executionTarget: request.executionTarget ?? 'local',
       })
       const instructionPrompt = String(request.memoryPrompt ?? '').trim() || buildMemoryPrompt(memoryContext)
-      const memorySummary = summarizeMemoryContext(memoryContext, instructionPrompt)
-      const memoryInput = buildMemoryContextInput(memoryContext, instructionPrompt)
+      const contextBuckets = buildContextBucketBundle(request.contextBuckets ?? memoryContext, instructionPrompt)
+      const memorySummary = summarizeMemoryContext(contextBuckets, instructionPrompt)
+      const memoryInput = buildMemoryContextInput(contextBuckets, instructionPrompt)
       if (memorySummary) {
         await appendEvent(job.id, {
           type: 'tool_start',

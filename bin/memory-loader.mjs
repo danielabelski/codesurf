@@ -1,5 +1,6 @@
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
+import { buildContextBucketBundle, getIncludedContextBuckets } from './context-buckets.mjs'
 
 export async function loadMemoryContext({
   homeDir,
@@ -22,18 +23,22 @@ export async function loadMemoryContext({
     if (loaded.length > 0) sections.push(...loaded)
   }
 
-  const includedBuckets = executionTarget === 'cloud'
-    ? ['remote-safe']
-    : ['local-only', 'remote-safe']
+  const includedBuckets = getIncludedContextBuckets(executionTarget)
   const prompt = buildMemoryPrompt({
     sections: sections.filter(section => includedBuckets.includes(section.bucket)),
   })
+  const contextBuckets = buildContextBucketBundle({
+    executionTarget,
+    includedBuckets,
+    sections,
+  }, prompt)
 
   return {
     executionTarget,
     includedBuckets,
     sections,
     prompt,
+    contextBuckets,
   }
 }
 
