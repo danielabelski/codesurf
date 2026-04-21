@@ -25,6 +25,12 @@ export interface ImportedChatState {
   messages: ImportedChatMessage[]
 }
 
+interface CachedExternalSessionState {
+  mtimeMs: number
+  size: number
+  state: ImportedChatState | null
+}
+
 export interface ImportedThinkingBlock {
   content: string
   done: boolean
@@ -63,9 +69,14 @@ export type ImportedContentBlock =
 
 const STANDARD_CODESURF_SUBDIRS = ['sessions', 'agents', 'skills', 'tools', 'plugins', 'extensions'] as const
 const EXTERNAL_SESSION_CACHE_MS = 30_000
+const EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES = 64
+const LARGE_EXTERNAL_SESSION_BYTES = 6 * 1024 * 1024
+const EXTERNAL_SESSION_HEAD_SAMPLE_BYTES = 128 * 1024
+const EXTERNAL_SESSION_TAIL_SAMPLE_BYTES = 4 * 1024 * 1024
 const MAX_SESSION_LISTING_JSON_BYTES = 2 * 1024 * 1024
 const MAX_SESSION_LISTING_TEXT_SAMPLE_BYTES = 16 * 1024
 const externalSessionCache = new Map<string, { at: number; entries: AggregatedSessionEntry[] }>()
+const externalSessionStateCache = new Map<string, CachedExternalSessionState>()
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
 
 function getProjectCodeSurfDir(workspacePath: string): string {
@@ -131,12 +142,71 @@ async function readTextPreviewSafe(path: string, maxBytes = MAX_SESSION_LISTING_
   }
 }
 
+async function readTextTailSafe(path: string, maxBytes: number): Promise<string | null> {
+  try {
+    const stat = await fs.stat(path)
+    if (!stat.isFile()) return null
+    const start = Math.max(0, stat.size - maxBytes)
+    const length = stat.size - start
+    const handle = await fs.open(path, 'r')
+    try {
+      const buffer = Buffer.alloc(length)
+      const { bytesRead } = await handle.read(buffer, 0, length, start)
+      let text = buffer.toString('utf8', 0, bytesRead)
+      if (start > 0) {
+        const firstNewline = text.indexOf('\n')
+        text = firstNewline === -1 ? '' : text.slice(firstNewline + 1)
+      }
+      return text
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return null
+  }
+}
+
 async function statSafe(path: string): Promise<import('fs').Stats | null> {
   try {
     return await fs.stat(path)
   } catch {
     return null
   }
+}
+
+function touchExternalSessionStateCache(key: string, value: CachedExternalSessionState): ImportedChatState | null {
+  externalSessionStateCache.delete(key)
+  externalSessionStateCache.set(key, value)
+  while (externalSessionStateCache.size > EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES) {
+    const oldestKey = externalSessionStateCache.keys().next().value
+    if (!oldestKey) break
+    externalSessionStateCache.delete(oldestKey)
+  }
+  return value.state
+}
+
+async function getCachedExternalSessionChatState(
+  cacheKey: string,
+  filePath: string,
+  load: () => Promise<ImportedChatState | null>,
+): Promise<ImportedChatState | null> {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) {
+    externalSessionStateCache.delete(cacheKey)
+    return null
+  }
+
+  const cached = externalSessionStateCache.get(cacheKey)
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return touchExternalSessionStateCache(cacheKey, cached)
+  }
+
+  const state = await load()
+  return touchExternalSessionStateCache(cacheKey, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    state,
+  })
 }
 
 async function scanJsonlFile(
@@ -256,6 +326,58 @@ function extractTextParts(content: unknown): string {
     if (typeof (content as any).value === 'string') return (content as any).value
   }
   return ''
+}
+
+function makeTranscriptTruncationMessage(provider: string, fileSizeBytes: number): ImportedChatMessage {
+  const sizeMb = Math.max(1, Math.round(fileSizeBytes / (1024 * 1024)))
+  const label = provider === 'codex' ? 'Codex' : provider === 'claude' ? 'Claude' : 'CLI'
+  return {
+    id: `${provider}-truncated-notice`,
+    role: 'system',
+    content: `${label} transcript trimmed for faster loading. Showing the start of the conversation and recent activity from a ${sizeMb} MB session.`,
+    timestamp: Date.now(),
+  }
+}
+
+function dedupeImportedMessages(messages: ImportedChatMessage[]): ImportedChatMessage[] {
+  const out: ImportedChatMessage[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    const key = `${message.role}::${message.timestamp}::${message.content}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(message)
+  }
+  return out
+}
+
+function parseJsonlLines(raw: string): string[] {
+  return raw
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+}
+
+function parseClaudeLine(line: string, index: number): ImportedChatMessage | null {
+  try {
+    const evt = JSON.parse(line)
+    const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
+    if (!role || typeof evt?.content !== 'string') return null
+    return makeImportedMessage(
+      `claude-${index}`,
+      role,
+      evt.content,
+      Date.parse(evt?.timestamp ?? '') || Date.now() + index,
+    )
+  } catch {
+    return null
+  }
+}
+
+function parseClaudeMessagesFromLines(lines: string[], offset = 0): ImportedChatMessage[] {
+  return lines
+    .map((line, index) => parseClaudeLine(line, offset + index))
+    .filter(Boolean) as ImportedChatMessage[]
 }
 
 function truncateToolPreview(text: string | null | undefined, length = 800): string {
@@ -1056,21 +1178,55 @@ async function parseCodeSurfChatState(filePath: string): Promise<ImportedChatSta
 }
 
 async function parseClaudeChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
-  const raw = await readTextSafe(filePath)
-  if (!raw) return null
-  const messages = raw.split(/\r?\n/)
-    .filter(Boolean)
-    .map((line, index) => {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) return null
+
+  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
+      readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
+    ])
+
+    const headMessages = parseClaudeMessagesFromLines(parseJsonlLines(headRaw ?? ''), 0)
+    const tailLines = parseJsonlLines(tailRaw ?? '')
+    const tailMessages = parseClaudeMessagesFromLines(tailLines, Math.max(0, tailLines.length * -1))
+    const firstMessage = headMessages.find(message => message.role !== 'system') ?? headMessages[0] ?? null
+    const messages = dedupeImportedMessages([
+      ...(firstMessage ? [firstMessage] : []),
+      makeTranscriptTruncationMessage('claude', stat.size),
+      ...tailMessages,
+    ])
+
+    return {
+      provider: 'claude',
+      model: entry.model,
+      sessionId: entry.sessionId,
+      messages,
+    }
+  }
+
+  const messages: ImportedChatMessage[] = []
+
+  try {
+    await scanJsonlFile(filePath, (line, lineNumber) => {
       try {
         const evt = JSON.parse(line)
         const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
-        if (!role || typeof evt?.content !== 'string') return null
-        return makeImportedMessage(`claude-${index}`, role, evt.content, Date.parse(evt?.timestamp ?? '') || Date.now() + index)
+        if (!role || typeof evt?.content !== 'string') return
+        const message = makeImportedMessage(
+          `claude-${lineNumber - 1}`,
+          role,
+          evt.content,
+          Date.parse(evt?.timestamp ?? '') || Date.now() + lineNumber,
+        )
+        if (message) messages.push(message)
       } catch {
-        return null
+        // ignore malformed transcript lines
       }
     })
-    .filter(Boolean) as ImportedChatMessage[]
+  } catch {
+    return null
+  }
 
   return {
     provider: 'claude',
@@ -1080,13 +1236,13 @@ async function parseClaudeChatState(filePath: string, entry: AggregatedSessionEn
   }
 }
 
-async function parseCodexChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
-  const raw = await readTextSafe(filePath)
-  if (!raw) return null
+function parseCodexChatStateFromLines(lines: string[], entry: AggregatedSessionEntry, offset = 0): ImportedChatState {
   const messages: ImportedChatMessage[] = []
   const pendingToolCalls = new Map<string, PendingImportedToolCall>()
   let pendingThinking: string[] = []
   let pendingCalls: PendingImportedToolCall[] = []
+  let model = entry.model
+  let sessionId = entry.sessionId
 
   const flushAssistantArtifacts = (index: number, timestamp: number, content = '') => {
     const next = makeImportedRichMessage({
@@ -1103,14 +1259,19 @@ async function parseCodexChatState(filePath: string, entry: AggregatedSessionEnt
     pendingToolCalls.clear()
   }
 
-  const lines = raw.split(/\r?\n/).filter(Boolean)
+  let lastIndex = offset
   lines.forEach((line, index) => {
+    const absoluteIndex = offset + index
+    lastIndex = absoluteIndex
     try {
       const evt = JSON.parse(line)
-      const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + index
+      const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + absoluteIndex
+      const payload = evt?.payload
+
+      if (!model && typeof payload?.model === 'string') model = payload.model
+      if (!sessionId && typeof payload?.id === 'string') sessionId = payload.id
 
       if (evt?.type !== 'response_item') return
-      const payload = evt?.payload
 
       if (payload?.type === 'reasoning') {
         const summary = extractReasoningSummary(payload)
@@ -1142,15 +1303,15 @@ async function parseCodexChatState(filePath: string, entry: AggregatedSessionEnt
 
       const content = extractTextParts(payload.content)
       if (role === 'assistant') {
-        flushAssistantArtifacts(index, timestamp, content)
+        flushAssistantArtifacts(absoluteIndex, timestamp, content)
         return
       }
 
       if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-        flushAssistantArtifacts(index, timestamp, '')
+        flushAssistantArtifacts(absoluteIndex, timestamp, '')
       }
 
-      const message = makeImportedMessage(`codex-${index}`, role, content, timestamp)
+      const message = makeImportedMessage(`codex-${absoluteIndex}`, role, content, timestamp)
       if (message) messages.push(message)
     } catch {
       // ignore malformed session lines
@@ -1158,15 +1319,53 @@ async function parseCodexChatState(filePath: string, entry: AggregatedSessionEnt
   })
 
   if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-    flushAssistantArtifacts(lines.length, Date.now())
+    flushAssistantArtifacts(lastIndex + 1, Date.now())
   }
 
   return {
     provider: 'codex',
-    model: entry.model,
-    sessionId: entry.sessionId,
+    model,
+    sessionId,
     messages,
   }
+}
+
+async function parseCodexChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) return null
+
+  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
+      readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
+    ])
+    const headLines = parseJsonlLines(headRaw ?? '')
+    const tailLines = parseJsonlLines(tailRaw ?? '')
+    const firstChunk = parseCodexChatStateFromLines(headLines, entry, 0)
+    const recentChunk = parseCodexChatStateFromLines(tailLines, entry, Math.max(10_000, tailLines.length))
+    const firstMessage = firstChunk.messages.find(message => message.role === 'user') ?? firstChunk.messages[0] ?? null
+    const messages = dedupeImportedMessages([
+      ...(firstMessage ? [firstMessage] : []),
+      makeTranscriptTruncationMessage('codex', stat.size),
+      ...recentChunk.messages,
+    ])
+    return {
+      provider: 'codex',
+      model: recentChunk.model || firstChunk.model,
+      sessionId: recentChunk.sessionId ?? firstChunk.sessionId,
+      messages,
+    }
+  }
+
+  const lines: string[] = []
+  try {
+    await scanJsonlFile(filePath, line => {
+      lines.push(line)
+    })
+  } catch {
+    return null
+  }
+  return parseCodexChatStateFromLines(lines, entry, 0)
 }
 
 async function parseOpenClawChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
@@ -1217,19 +1416,26 @@ async function parseOpenCodeChatState(filePath: string, entry: AggregatedSession
 export function invalidateExternalSessionCache(workspacePath?: string | null): void {
   if (workspacePath) {
     externalSessionCache.delete(workspacePath)
+    for (const key of externalSessionStateCache.keys()) {
+      if (key.startsWith(`${workspacePath}::`)) externalSessionStateCache.delete(key)
+    }
     return
   }
   externalSessionCache.clear()
+  externalSessionStateCache.clear()
 }
 
 export async function getExternalSessionChatState(workspacePath: string | null, id: string): Promise<ImportedChatState | null> {
   const entry = await findSessionEntryById(workspacePath, id)
   if (!entry?.filePath || !entry.canOpenInChat) return null
+  const cacheKey = `${workspacePath ?? '__no_workspace__'}::${entry.source}::${entry.filePath}`
 
-  if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath)
-  if (entry.source === 'claude') return parseClaudeChatState(entry.filePath, entry)
-  if (entry.source === 'codex') return parseCodexChatState(entry.filePath, entry)
-  if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath, entry)
-  if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath, entry)
-  return null
+  return await getCachedExternalSessionChatState(cacheKey, entry.filePath, async () => {
+    if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath)
+    if (entry.source === 'claude') return parseClaudeChatState(entry.filePath, entry)
+    if (entry.source === 'codex') return parseCodexChatState(entry.filePath, entry)
+    if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath, entry)
+    if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath, entry)
+    return null
+  })
 }

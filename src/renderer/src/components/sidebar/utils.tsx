@@ -27,6 +27,26 @@ export function sessionMetaText(session: SessionEntry): string {
   return `${session.title} ${session.sourceLabel} ${session.sourceDetail ?? ''}`.toLowerCase()
 }
 
+function stripMarkdownTitleSyntax(title: string): string {
+  return title
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+}
+
+function normalizeSessionTitle(title: string): string {
+  let next = stripMarkdownTitleSyntax(String(title ?? '').replace(/\r\n/g, '\n'))
+    .split(/\r?\n/, 1)[0]
+    .trim()
+
+  next = next.replace(/^[-*+]\s+/, '')
+  next = next.replace(/^\[[ xX]\]\s+/, '')
+  next = next.replace(/^\d+\.\s+/, '')
+  next = next.replace(/^#+\s+/, '')
+  next = next.replace(/\s+/g, ' ').trim()
+
+  return next
+}
+
 /**
  * Conversation-title display policy for the sidebar.
  *
@@ -40,7 +60,7 @@ export function sessionMetaText(session: SessionEntry): string {
  * the row's `title` tooltip.
  */
 export function formatSessionTitleForSidebar(title: string, hardCap = 160): string {
-  const clean = (title ?? '').replace(/\s+/g, ' ').trim()
+  const clean = normalizeSessionTitle(title)
   return clean.length > hardCap ? `${clean.slice(0, hardCap).trimEnd()}…` : clean
 }
 
@@ -78,6 +98,22 @@ export function isCronSession(session: SessionEntry): boolean {
 export function isSubagentSession(session: SessionEntry): boolean {
   if ((session.nestingLevel ?? 0) > 0) return true
   return sessionMetaText(session).includes('subagent')
+}
+
+export function getSessionAgentKey(session: SessionEntry): string {
+  const provider = String(session.provider ?? '').trim().toLowerCase()
+  if (session.source === 'codesurf' && provider) return provider
+  return String(session.source ?? 'codesurf').trim().toLowerCase() || 'codesurf'
+}
+
+export function getSessionAgentLabel(session: SessionEntry): string {
+  const key = getSessionAgentKey(session)
+  if (key === 'claude') return 'Claude'
+  if (key === 'codex') return 'Codex'
+  if (key === 'cursor') return 'Cursor'
+  if (key === 'openclaw') return 'OpenClaw'
+  if (key === 'opencode') return 'OpenCode'
+  return session.sourceLabel || 'CodeSurf'
 }
 
 export function compareSessions(a: SessionEntry, b: SessionEntry, sortMode: ThreadSortMode): number {
@@ -204,4 +240,8 @@ export const SESSION_SOURCE_ICONS: Record<string, React.JSX.Element> = {
   cursor:   <CursorIcon size={14} />,
   openclaw: <OpenClawIcon size={14} />,
   opencode: <OpenCodeIcon size={14} />,
+}
+
+export function getSessionAgentIcon(session: SessionEntry): React.JSX.Element {
+  return SESSION_SOURCE_ICONS[getSessionAgentKey(session)] ?? SESSION_SOURCE_ICONS[session.source] ?? <CodeSurfIcon size={14} />
 }

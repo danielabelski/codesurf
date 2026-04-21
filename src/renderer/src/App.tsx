@@ -14,7 +14,7 @@ import type { PanelNode } from './components/PanelLayout'
 import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf, closeOthersInLeaf, closeToRightInLeaf, findLeafById } from './components/PanelLayout'
 import { basename, getDroppedPaths, toFileUrl, isMediaFile } from './utils/dnd'
 import { CODESURF_OPEN_LINK_EVENT, stripLocalPathLocation, type CodeSurfOpenLinkDetail } from './utils/links'
-import { disposeChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
+import { disposeChatTileRuntimeState, getChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
 import { disposeMediaTile } from './components/MediaTile'
 import { MainStatusBar } from './components/MainStatusBar'
 
@@ -1547,6 +1547,33 @@ function App(): JSX.Element {
     }
     return null
   }, [expandedTileId, panelLayout, activePanelId, selectedTileId, tiles])
+  const [chatTileSessionMatches, setChatTileSessionMatches] = useState<Record<string, { entryId: string | null; sessionId: string | null }>>({})
+  const rememberChatTileSessionMatch = useCallback((tileId: string, session: AggregatedSessionEntry, sessionIdOverride?: string | null) => {
+    const sessionId = sessionIdOverride === undefined
+      ? (typeof session.sessionId === 'string' ? session.sessionId : null)
+      : sessionIdOverride
+    setChatTileSessionMatches(prev => {
+      const current = prev[tileId]
+      if (current?.entryId === session.id && current?.sessionId === sessionId) return prev
+      return {
+        ...prev,
+        [tileId]: {
+          entryId: session.id,
+          sessionId,
+        },
+      }
+    })
+  }, [])
+  const activeChatSessionMatch = useMemo(() => {
+    if (!activeChatTileId) return { entryId: null, sessionId: null }
+    const remembered = chatTileSessionMatches[activeChatTileId] ?? { entryId: null, sessionId: null }
+    const runtimeState = getChatTileRuntimeState<{ sessionId?: string | null }>(activeChatTileId)
+    const runtimeSessionId = typeof runtimeState?.sessionId === 'string' ? runtimeState.sessionId : null
+    return {
+      entryId: remembered.entryId,
+      sessionId: runtimeSessionId ?? remembered.sessionId,
+    }
+  }, [activeChatTileId, chatTileSessionMatches])
 
   // ─── Tile creation ────────────────────────────────────────────────────────
   const addTile = useCallback((type: TileState['type'], filePath?: string, pos?: { x: number; y: number }, initialOptions?: { hideTitlebar?: boolean; hideNavbar?: boolean; launchBin?: string; launchArgs?: string[] }) => {
@@ -2498,6 +2525,9 @@ function App(): JSX.Element {
       agentMode: false,
       autoAgentMode: false,
       preserveSessionSummary: true,
+      linkedSessionEntryId: session.id.startsWith('codesurf-runtime:') || session.id.startsWith('codesurf-tile:') || session.id.startsWith('codesurf-job:')
+        ? null
+        : session.id,
       sessionId: typeof state.sessionId === 'string' || state.sessionId === null ? state.sessionId : session.sessionId,
       jobId: typeof state.jobId === 'string' || state.jobId === null ? state.jobId : null,
       jobSequence: typeof state.jobSequence === 'number' ? state.jobSequence : 0,
@@ -2518,6 +2548,7 @@ function App(): JSX.Element {
     })()
 
     if (activeFullscreenChatTileId) {
+      rememberChatTileSessionMatch(activeFullscreenChatTileId, session, nextChatState.sessionId ?? null)
       setChatTileRuntimeState(activeFullscreenChatTileId, nextChatState)
       await window.electron.canvas.saveTileState(workspaceId, activeFullscreenChatTileId, nextChatState).catch(() => {})
       setChatReloadTokens(prev => ({ ...prev, [activeFullscreenChatTileId]: (prev[activeFullscreenChatTileId] ?? 0) + 1 }))
@@ -2526,11 +2557,12 @@ function App(): JSX.Element {
     }
 
     const chatTileId = addTile('chat')
+    rememberChatTileSessionMatch(chatTileId, session, nextChatState.sessionId ?? null)
     await window.electron.canvas.saveTileState(workspaceId, chatTileId, {
       ...nextChatState,
     }).catch(() => {})
     bringToFront(chatTileId)
-  }, [addTile, bringToFront, handleOpenFile])
+  }, [addTile, bringToFront, handleOpenFile, rememberChatTileSessionMatch])
 
   const openSessionInChat = useCallback(async (session: AggregatedSessionEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
@@ -3865,6 +3897,8 @@ function App(): JSX.Element {
                 workspaces={workspaces}
                 tiles={tiles}
                 activeChatTileId={activeChatTileId}
+                activeChatSessionId={activeChatSessionMatch.sessionId}
+                activeChatSessionEntryId={activeChatSessionMatch.entryId}
                 onSwitchWorkspace={handleSwitchWorkspace}
                 onDeleteWorkspace={handleDeleteWorkspace}
                 onNewWorkspace={handleNewWorkspace}

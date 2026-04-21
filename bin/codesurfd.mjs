@@ -1279,19 +1279,37 @@ function truncateSessionText(text, length = SESSION_TEXT_LIMIT) {
   return normalized.length > length ? normalized.slice(0, length) : normalized
 }
 
-function sessionTitleFromText(text, provider) {
+function cleanSessionTitleCandidate(text, hardCap = 80) {
   const trimmed = String(text ?? '').trim()
-  if (!trimmed) return `${provider} session`
-  return trimmed.split(/\r?\n/, 1)[0].slice(0, 80)
+  if (!trimmed) return null
+
+  let next = trimmed
+    .replace(/\r\n/g, '\n')
+    .split(/\r?\n/, 1)[0]
+    .trim()
+
+  next = next.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+  next = next.replace(/`([^`]+)`/g, '$1')
+  next = next.replace(/^[-*+]\s+/, '')
+  next = next.replace(/^\[[ xX]\]\s+/, '')
+  next = next.replace(/^\d+\.\s+/, '')
+  next = next.replace(/^#+\s+/, '')
+  next = next.replace(/\s+/g, ' ').trim()
+
+  if (!next) return null
+  return next.length > hardCap ? `${next.slice(0, hardCap).trimEnd()}…` : next
 }
 
-function extractSessionTitle(messages, provider) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
+function sessionTitleFromText(text, provider) {
+  return cleanSessionTitleCandidate(text) ?? `${provider} session`
+}
+
+function extractInitialSessionTitle(messages) {
+  for (const message of messages) {
     if (!message || typeof message !== 'object') continue
     const text = truncateSessionText(typeof message.content === 'string' ? message.content : null)
-    if (!text) continue
-    return sessionTitleFromText(text, provider)
+    const title = cleanSessionTitleCandidate(text)
+    if (title) return title
   }
   return null
 }
@@ -1318,6 +1336,7 @@ function extractTileSessionSummary(tileId, state) {
     : 'claude'
   const model = typeof record.model === 'string' ? record.model : ''
   const sessionId = typeof record.sessionId === 'string' ? record.sessionId : null
+  const explicitTitle = cleanSessionTitleCandidate(typeof record.title === 'string' ? record.title : null)
 
   return {
     version: 1,
@@ -1327,7 +1346,7 @@ function extractTileSessionSummary(tileId, state) {
     model,
     messageCount: messages.length,
     lastMessage,
-    title: extractSessionTitle(messages, provider) ?? sessionTitleFromText(lastMessage, provider),
+    title: explicitTitle ?? extractInitialSessionTitle(messages) ?? `${provider} session`,
     updatedAt: Date.now(),
   }
 }
@@ -1358,9 +1377,9 @@ function extractRuntimeSessionSummary(tileId, state) {
     }
   }
 
-  const title = typeof record.title === 'string' && record.title.trim()
-    ? record.title.trim()
-    : extractSessionTitle(messages, provider) ?? sessionTitleFromText(lastMessage, provider)
+  const title = cleanSessionTitleCandidate(typeof record.title === 'string' ? record.title : null)
+    ?? extractInitialSessionTitle(messages)
+    ?? `${provider} session`
 
   return {
     version: 1,
@@ -1566,6 +1585,11 @@ function listLocalWorkspaceSessions(workspaceId) {
       const filePath = join(dotDir, name)
       const tileId = name.replace('runtime-session-', '').replace('.json', '')
       const state = readJsonFile(filePath, null)
+      const linkedSessionEntryId = typeof state?.linkedSessionEntryId === 'string' ? state.linkedSessionEntryId.trim() : ''
+      if (linkedSessionEntryId) {
+        runtimeTileIds.add(tileId)
+        continue
+      }
       const summary = extractRuntimeSessionSummary(tileId, state)
       if (!summary) continue
       runtimeTileIds.add(tileId)
@@ -1603,6 +1627,12 @@ function listLocalWorkspaceSessions(workspaceId) {
       const tileId = name.replace('tile-state-', '').replace('.json', '')
       if (runtimeTileIds.has(tileId)) continue
       const summaryPath = tileSessionSummaryPath(workspaceId, tileId)
+      const state = readJsonFile(filePath, null)
+      const linkedSessionEntryId = typeof state?.linkedSessionEntryId === 'string' ? state.linkedSessionEntryId.trim() : ''
+      if (linkedSessionEntryId) {
+        try { rmSync(summaryPath, { force: true }) } catch {}
+        continue
+      }
 
       let summary = readJsonFile(summaryPath, null)
       
@@ -1624,7 +1654,6 @@ function listLocalWorkspaceSessions(workspaceId) {
       }
       
       if (shouldRebuildSummary) {
-        const state = readJsonFile(filePath, null)
         if (!state) continue
         summary = extractTileSessionSummary(tileId, state)
         if (!summary) continue
@@ -1660,6 +1689,13 @@ function listLocalWorkspaceSessions(workspaceId) {
 
   // Add daemon sessions
   const daemonEntries = listDaemonWorkspaceSessions(workspaceId, entries)
+
+  function entryPriority(entry) {
+    if (entry?.id?.startsWith('codesurf-runtime:')) return 3
+    if (entry?.id?.startsWith('codesurf-job:')) return 2
+    if (entry?.id?.startsWith('codesurf-tile:')) return 1
+    return 0
+  }
   
   // Fix 1: Session ID deduplication
   // Build a map of sessionId -> best entry (by updatedAt)
@@ -1672,7 +1708,9 @@ function listLocalWorkspaceSessions(workspaceId) {
       sessionMap.set(`nosession-${entry.id}`, entry)
     } else {
       const existing = sessionMap.get(entry.sessionId)
-      if (!existing || entry.updatedAt > existing.updatedAt) {
+      const existingPriority = entryPriority(existing)
+      const nextPriority = entryPriority(entry)
+      if (!existing || nextPriority > existingPriority || (nextPriority === existingPriority && entry.updatedAt > existing.updatedAt)) {
         sessionMap.set(entry.sessionId, entry)
       }
     }
@@ -1684,7 +1722,9 @@ function listLocalWorkspaceSessions(workspaceId) {
       sessionMap.set(`daemon-${entry.id}`, entry)
     } else {
       const existing = sessionMap.get(entry.sessionId)
-      if (!existing || entry.updatedAt > existing.updatedAt) {
+      const existingPriority = entryPriority(existing)
+      const nextPriority = entryPriority(entry)
+      if (!existing || nextPriority > existingPriority || (nextPriority === existingPriority && entry.updatedAt > existing.updatedAt)) {
         sessionMap.set(entry.sessionId, entry)
       }
     }

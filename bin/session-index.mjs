@@ -6,11 +6,13 @@ import Database from 'better-sqlite3'
 
 const STANDARD_CODESURF_SUBDIRS = ['sessions', 'agents', 'skills', 'tools', 'plugins', 'extensions']
 const EXTERNAL_SESSION_CACHE_MS = 30_000
+const EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES = 64
 const MAX_SESSION_LISTING_JSON_BYTES = 2 * 1024 * 1024
 const MAX_SESSION_LISTING_TEXT_SAMPLE_BYTES = 16 * 1024
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
 
 const externalSessionCache = new Map()
+const externalSessionStateCache = new Map()
 const SESSION_TITLE_OVERRIDES_FILE = 'session-title-overrides.json'
 
 function getProjectCodeSurfDir(codesurfHome, workspacePath) {
@@ -112,6 +114,37 @@ async function statSafe(path) {
   } catch {
     return null
   }
+}
+
+function touchExternalSessionStateCache(key, value) {
+  externalSessionStateCache.delete(key)
+  externalSessionStateCache.set(key, value)
+  while (externalSessionStateCache.size > EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES) {
+    const oldestKey = externalSessionStateCache.keys().next().value
+    if (!oldestKey) break
+    externalSessionStateCache.delete(oldestKey)
+  }
+  return value.state
+}
+
+async function getCachedExternalSessionChatState(cacheKey, filePath, load) {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) {
+    externalSessionStateCache.delete(cacheKey)
+    return null
+  }
+
+  const cached = externalSessionStateCache.get(cacheKey)
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return touchExternalSessionStateCache(cacheKey, cached)
+  }
+
+  const state = await load()
+  return touchExternalSessionStateCache(cacheKey, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    state,
+  })
 }
 
 async function scanJsonlFile(filePath, onLine) {
@@ -979,21 +1012,26 @@ async function parseCodeSurfChatState(filePath) {
 }
 
 async function parseClaudeChatState(filePath, entry) {
-  const raw = await readTextSafe(filePath)
-  if (!raw) return null
-  const messages = raw.split(/\r?\n/)
-    .filter(Boolean)
-    .map((line, index) => {
+  const messages = []
+
+  try {
+    await scanJsonlFile(filePath, (line, lineNumber) => {
       try {
         const evt = JSON.parse(line)
         const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
-        if (!role || typeof evt?.content !== 'string') return null
-        return makeImportedMessage(`claude-${index}`, role, evt.content, Date.parse(evt?.timestamp ?? '') || Date.now() + index)
-      } catch {
-        return null
-      }
+        if (!role || typeof evt?.content !== 'string') return
+        const message = makeImportedMessage(
+          `claude-${lineNumber - 1}`,
+          role,
+          evt.content,
+          Date.parse(evt?.timestamp ?? '') || Date.now() + lineNumber,
+        )
+        if (message) messages.push(message)
+      } catch {}
     })
-    .filter(Boolean)
+  } catch {
+    return null
+  }
 
   return {
     provider: 'claude',
@@ -1004,12 +1042,12 @@ async function parseClaudeChatState(filePath, entry) {
 }
 
 async function parseCodexChatState(filePath, entry) {
-  const raw = await readTextSafe(filePath)
-  if (!raw) return null
   const messages = []
   const pendingToolCalls = new Map()
   let pendingThinking = []
   let pendingCalls = []
+  let model = entry.model
+  let sessionId = entry.sessionId
 
   const flushAssistantArtifacts = (index, timestamp, content = '') => {
     const next = makeImportedRichMessage({
@@ -1026,68 +1064,74 @@ async function parseCodexChatState(filePath, entry) {
     pendingToolCalls.clear()
   }
 
-  const lines = raw.split(/\r?\n/).filter(Boolean)
-  lines.forEach((line, index) => {
-    try {
-      const evt = JSON.parse(line)
-      const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + index
+  let lastLineNumber = 0
+  try {
+    await scanJsonlFile(filePath, (line, lineNumber) => {
+      lastLineNumber = lineNumber
+      try {
+        const evt = JSON.parse(line)
+        const timestamp = Date.parse(evt?.timestamp ?? '') || Date.now() + lineNumber
+        const payload = evt?.payload
 
-      if (evt?.type !== 'response_item') return
-      const payload = evt?.payload
+        if (!model && typeof payload?.model === 'string') model = payload.model
+        if (!sessionId && typeof payload?.id === 'string') sessionId = payload.id
 
-      if (payload?.type === 'reasoning') {
-        const summary = extractReasoningSummary(payload)
-        if (summary) pendingThinking.push(summary)
-        return
-      }
+        if (evt?.type !== 'response_item') return
 
-      if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') {
-        const call = parseCodexToolCall(payload)
-        if (!call) return
-        pendingToolCalls.set(call.id, call)
-        pendingCalls.push(call)
-        return
-      }
+        if (payload?.type === 'reasoning') {
+          const summary = extractReasoningSummary(payload)
+          if (summary) pendingThinking.push(summary)
+          return
+        }
 
-      if (payload?.type === 'function_call_output') {
-        const callId = typeof payload?.call_id === 'string' ? payload.call_id : null
-        if (!callId) return
-        const existing = pendingToolCalls.get(callId)
-        if (!existing) return
-        existing.output = sanitizeToolOutputText(typeof payload?.output === 'string' ? payload.output : '')
-        if (existing.commandEntry) existing.commandEntry.output = existing.output
-        return
-      }
+        if (payload?.type === 'function_call' || payload?.type === 'custom_tool_call') {
+          const call = parseCodexToolCall(payload)
+          if (!call) return
+          pendingToolCalls.set(call.id, call)
+          pendingCalls.push(call)
+          return
+        }
 
-      if (payload?.type !== 'message') return
-      const role = roleFromUnknown(payload?.role)
-      if (!role) return
+        if (payload?.type === 'function_call_output') {
+          const callId = typeof payload?.call_id === 'string' ? payload.call_id : null
+          if (!callId) return
+          const existing = pendingToolCalls.get(callId)
+          if (!existing) return
+          existing.output = sanitizeToolOutputText(typeof payload?.output === 'string' ? payload.output : '')
+          if (existing.commandEntry) existing.commandEntry.output = existing.output
+          return
+        }
 
-      const content = extractTextParts(payload.content)
-      if (role === 'assistant') {
-        flushAssistantArtifacts(index, timestamp, content)
-        return
-      }
+        if (payload?.type !== 'message') return
+        const role = roleFromUnknown(payload?.role)
+        if (!role) return
 
-      if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-        flushAssistantArtifacts(index, timestamp, '')
-      }
+        const content = extractTextParts(payload.content)
+        if (role === 'assistant') {
+          flushAssistantArtifacts(lineNumber - 1, timestamp, content)
+          return
+        }
 
-      const message = makeImportedMessage(`codex-${index}`, role, content, timestamp)
-      if (message) messages.push(message)
-    } catch {
-      // ignore malformed session lines
-    }
-  })
+        if (pendingThinking.length > 0 || pendingCalls.length > 0) {
+          flushAssistantArtifacts(lineNumber - 1, timestamp, '')
+        }
+
+        const message = makeImportedMessage(`codex-${lineNumber - 1}`, role, content, timestamp)
+        if (message) messages.push(message)
+      } catch {}
+    })
+  } catch {
+    return null
+  }
 
   if (pendingThinking.length > 0 || pendingCalls.length > 0) {
-    flushAssistantArtifacts(lines.length, Date.now())
+    flushAssistantArtifacts(lastLineNumber, Date.now())
   }
 
   return {
     provider: 'codex',
-    model: entry.model,
-    sessionId: entry.sessionId,
+    model,
+    sessionId,
     messages,
   }
 }
@@ -1140,19 +1184,26 @@ async function parseOpenCodeChatState(filePath, entry) {
 export async function getExternalSessionChatState(codesurfHome, workspacePath, id) {
   const entry = await findSessionEntryById(codesurfHome, workspacePath, id)
   if (!entry?.filePath || !entry.canOpenInChat) return null
+  const cacheKey = `${workspacePath ?? '__no_workspace__'}::${entry.source}::${entry.filePath}`
 
-  if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath)
-  if (entry.source === 'claude') return parseClaudeChatState(entry.filePath, entry)
-  if (entry.source === 'codex') return parseCodexChatState(entry.filePath, entry)
-  if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath, entry)
-  if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath, entry)
-  return null
+  return await getCachedExternalSessionChatState(cacheKey, entry.filePath, async () => {
+    if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath)
+    if (entry.source === 'claude') return parseClaudeChatState(entry.filePath, entry)
+    if (entry.source === 'codex') return parseCodexChatState(entry.filePath, entry)
+    if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath, entry)
+    if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath, entry)
+    return null
+  })
 }
 
 export function invalidateExternalSessionCache(workspacePath) {
   if (workspacePath) {
     externalSessionCache.delete(workspacePath)
+    for (const key of externalSessionStateCache.keys()) {
+      if (key.startsWith(`${workspacePath}::`)) externalSessionStateCache.delete(key)
+    }
     return
   }
   externalSessionCache.clear()
+  externalSessionStateCache.clear()
 }

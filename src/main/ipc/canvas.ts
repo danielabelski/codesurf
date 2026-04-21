@@ -47,19 +47,37 @@ function truncateSessionText(text: string | null | undefined, length = 120): str
   return normalized.length > length ? normalized.slice(0, length) : normalized
 }
 
-function sessionTitleFromText(text: string | null | undefined, provider: string): string {
-  const trimmed = text?.trim()
-  if (!trimmed) return `${provider} session`
-  return trimmed.split(/\r?\n/, 1)[0].slice(0, 80)
+function cleanSessionTitleCandidate(text: string | null | undefined, hardCap = 80): string | null {
+  const trimmed = String(text ?? '').trim()
+  if (!trimmed) return null
+
+  let next = trimmed
+    .replace(/\r\n/g, '\n')
+    .split(/\r?\n/, 1)[0]
+    .trim()
+
+  next = next.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+  next = next.replace(/`([^`]+)`/g, '$1')
+  next = next.replace(/^[-*+]\s+/, '')
+  next = next.replace(/^\[[ xX]\]\s+/, '')
+  next = next.replace(/^\d+\.\s+/, '')
+  next = next.replace(/^#+\s+/, '')
+  next = next.replace(/\s+/g, ' ').trim()
+
+  if (!next) return null
+  return next.length > hardCap ? `${next.slice(0, hardCap).trimEnd()}…` : next
 }
 
-function extractSessionTitle(messages: Record<string, unknown>[], provider: string): string | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const rawMessage = messages[index]
+function sessionTitleFromText(text: string | null | undefined, provider: string): string {
+  return cleanSessionTitleCandidate(text) ?? `${provider} session`
+}
+
+function extractInitialSessionTitle(messages: Record<string, unknown>[]): string | null {
+  for (const rawMessage of messages) {
     if (!rawMessage || typeof rawMessage !== 'object') continue
     const text = truncateSessionText(typeof rawMessage.content === 'string' ? rawMessage.content : null)
-    if (!text) continue
-    return sessionTitleFromText(text, provider)
+    const title = cleanSessionTitleCandidate(text)
+    if (title) return title
   }
   return null
 }
@@ -87,6 +105,8 @@ function extractTileSessionSummary(tileId: string, state: unknown): TileSessionS
   const model = typeof record.model === 'string' ? record.model : ''
   const sessionId = typeof record.sessionId === 'string' ? record.sessionId : null
 
+  const explicitTitle = cleanSessionTitleCandidate(typeof record.title === 'string' ? record.title : null)
+
   return {
     version: 1,
     tileId,
@@ -95,7 +115,7 @@ function extractTileSessionSummary(tileId: string, state: unknown): TileSessionS
     model,
     messageCount: messages.length,
     lastMessage,
-    title: extractSessionTitle(messages as Record<string, unknown>[], provider) ?? sessionTitleFromText(lastMessage, provider),
+    title: explicitTitle ?? extractInitialSessionTitle(messages as Record<string, unknown>[]) ?? `${provider} session`,
     updatedAt: Date.now(),
   }
 }
@@ -131,7 +151,15 @@ async function writeTileSessionSummary(storageId: string, tileId: string, state:
   const summaryPath = tileSessionSummaryPath(storageId, tileId)
   const previous = await readTileSessionSummary(summaryPath)
   const record = state && typeof state === 'object' ? state as Record<string, unknown> : null
+  const linkedSessionEntryId = typeof record?.linkedSessionEntryId === 'string' ? record.linkedSessionEntryId.trim() : ''
   const preserveSessionSummary = record?.preserveSessionSummary === true
+
+  if (linkedSessionEntryId) {
+    const changed = previous !== null
+    await deleteFileIfExists(summaryPath)
+    tileSessionSummaryCache.set(summaryPath, null)
+    return { changed, summary: null }
+  }
 
   if (preserveSessionSummary) {
     if (previous) {
@@ -221,6 +249,53 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+function normalizeSessionPath(path: string | null | undefined): string | null {
+  const normalized = String(path ?? '').trim()
+  return normalized || null
+}
+
+function sessionBelongsToWorkspace(session: AggregatedSessionEntry, workspaceProjectPaths: Set<string>): boolean {
+  const projectPath = normalizeSessionPath(session.projectPath)
+  if (projectPath && workspaceProjectPaths.has(projectPath)) return true
+  if (session.scope === 'workspace' || session.scope === 'project') return true
+  return false
+}
+
+function sessionIdentityAgent(entry: AggregatedSessionEntry): string {
+  if (entry.source === 'codesurf') {
+    const provider = String(entry.provider ?? '').trim().toLowerCase()
+    if (provider) return provider
+  }
+  return String(entry.source ?? 'codesurf').trim().toLowerCase() || 'codesurf'
+}
+
+function mergeSessionEntries(localSessions: AggregatedSessionEntry[], nativeSessions: AggregatedSessionEntry[]): AggregatedSessionEntry[] {
+  const byKey = new Map<string, AggregatedSessionEntry>()
+
+  const priority = (entry: AggregatedSessionEntry): number => {
+    if (entry.id.startsWith('codesurf-runtime:')) return 5
+    if (entry.id.startsWith('codesurf-job:')) return 4
+    if (entry.id.startsWith('codesurf-tile:')) return 3
+    return 1
+  }
+
+  for (const entry of [...nativeSessions, ...localSessions]) {
+    const key = entry.sessionId ? `session:${sessionIdentityAgent(entry)}:${entry.sessionId}` : `entry:${entry.id}`
+    const existing = byKey.get(key)
+    if (!existing) {
+      byKey.set(key, entry)
+      continue
+    }
+    const existingPriority = priority(existing)
+    const nextPriority = priority(entry)
+    if (nextPriority > existingPriority || (nextPriority === existingPriority && entry.updatedAt > existing.updatedAt)) {
+      byKey.set(key, entry)
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
 export function registerCanvasIPC(): void {
@@ -317,21 +392,41 @@ export function registerCanvasIPC(): void {
     broadcastSessionsChanged(workspaceId)
   })
 
-  // List chat sessions for a workspace. The sidebar only surfaces conversations
-  // that actually belong to a chat block in this workspace — i.e. the local
-  // daemon-owned tile sessions. External provider transcripts (Claude CLI,
-  // Codex rollouts, Cursor chats, OpenClaw, OpenCode) are intentionally NOT
-  // listed here: they're not chat-block conversations and kept bleeding into
-  // the wrong workspaces.
-  ipcMain.handle('canvas:listSessions', async (_, workspaceId: string, _forceRefresh = false) => {
+  // List workspace sessions by merging our local runtime/tile sessions with
+  // native CLI session stores (Claude/Codex/OpenCode/OpenClaw/etc.) relevant
+  // to this workspace's project paths. Native sessions remain the source of
+  // truth; local entries only win when they represent the actively loaded
+  // runtime view of the same session.
+  ipcMain.handle('canvas:listSessions', async (_, workspaceId: string, forceRefresh = false) => {
     assertSafeWorkspaceArtifactId(workspaceId)
-    const workspacePath = await getWorkspacePathById(workspaceId)
+    const workspaces = await daemonClient.listWorkspaces().catch(() => [])
+    const workspaceEntry = workspaces.find(entry => entry.id === workspaceId) ?? null
+    const workspacePath = normalizeSessionPath(workspaceEntry?.path) ?? await getWorkspacePathById(workspaceId)
+    const workspaceProjectPaths = new Set(
+      (workspaceEntry?.projectPaths ?? [])
+        .map(projectPath => normalizeSessionPath(projectPath))
+        .filter((projectPath): projectPath is string => Boolean(projectPath)),
+    )
+    if (workspacePath) workspaceProjectPaths.add(workspacePath)
 
     const localSessions: AggregatedSessionEntry[] = await daemonClient.listLocalSessions(workspaceId).catch(() => [])
     for (const session of localSessions) {
       if (!session.projectPath) session.projectPath = workspacePath
     }
-    return localSessions.sort((a, b) => b.updatedAt - a.updatedAt)
+
+    const nativeSessions = workspacePath
+      ? await daemonClient.listExternalSessions(workspacePath, forceRefresh).catch(() => [])
+      : []
+
+    const relevantNativeSessions = nativeSessions
+      .filter(session => session.source !== 'codesurf')
+      .filter(session => sessionBelongsToWorkspace(session, workspaceProjectPaths))
+      .map(session => ({
+        ...session,
+        projectPath: normalizeSessionPath(session.projectPath) ?? workspacePath,
+      }))
+
+    return mergeSessionEntries(localSessions, relevantNativeSessions)
   })
 
   ipcMain.handle('threads:indexStatus', () => {

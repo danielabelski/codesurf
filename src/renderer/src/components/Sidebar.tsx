@@ -6,7 +6,7 @@ import { useTheme } from '../ThemeContext'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { SidebarFooter } from './sidebar/SidebarFooter'
 import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
-import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SESSION_SOURCE_ICONS } from './sidebar/utils'
+import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS } from './sidebar/utils'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
@@ -58,6 +58,8 @@ interface Props {
    * the user can see "you are here" without clicking around.
    */
   activeChatTileId?: string | null
+  activeChatSessionId?: string | null
+  activeChatSessionEntryId?: string | null
 }
 
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -69,6 +71,8 @@ export function Sidebar({
   extensionTiles, extensionEntries, onAddExtensionTile, pinnedExtensionIds, onTogglePinnedExtension,
   collapsed, width, onWidthChange, minWidth = 270, maxWidth = 520, onResizeStateChange, onToggleCollapse: _onToggleCollapse, onScrollMetricsChange, showFooter = true,
   activeChatTileId = null,
+  activeChatSessionId = null,
+  activeChatSessionEntryId = null,
 }: Props): React.JSX.Element {
   const fonts = useAppFonts()
   const theme = useTheme()
@@ -88,6 +92,7 @@ export function Sidebar({
   const [threadSortMode, setThreadSortMode] = useState<ThreadSortMode>('updated')
   const [showCronSessions, setShowCronSessions] = useState(false)
   const [showSubagentSessions, setShowSubagentSessions] = useState(false)
+  const [hiddenSessionAgents, setHiddenSessionAgents] = useState<Record<string, boolean>>({})
   const [collapsedThreadGroups, setCollapsedThreadGroups] = useState<Record<string, boolean>>({})
   const [loadedSessionWorkspaceIds, setLoadedSessionWorkspaceIds] = useState<string[]>([])
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
@@ -458,7 +463,7 @@ export function Sidebar({
     setExtGroupsCollapsed(prev => ({ ...prev, [extId]: !prev[extId] }))
   }, [])
 
-const visibleSessions = useMemo(() => {
+  const visibleSessions = useMemo(() => {
     const deduped = new Map<string, SessionEntry>()
     for (const session of sessions) {
       const existing = deduped.get(session.id)
@@ -478,11 +483,26 @@ const visibleSessions = useMemo(() => {
       if (normalizedTitle === 'new agent') return false
       if (!showCronSessions && isCronSession(session)) return false
       if (!showSubagentSessions && isSubagentSession(session)) return false
+      if (hiddenSessionAgents[getSessionAgentKey(session)] === true) return false
       if (threadOrganizeMode === 'project' && session.scope === 'user') return false
       return true
     })
     return buildNestedSessionList(filtered, threadSortMode)
-  }, [sessions, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode])
+  }, [sessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode])
+
+  const availableSessionAgents = useMemo(() => {
+    const byKey = new Map<string, { key: string; label: string; icon: React.JSX.Element }>()
+    for (const session of sessions) {
+      const key = getSessionAgentKey(session)
+      if (byKey.has(key)) continue
+      byKey.set(key, {
+        key,
+        label: getSessionAgentLabel(session),
+        icon: getSessionAgentIcon(session),
+      })
+    }
+    return [...byKey.values()].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }))
+  }, [sessions])
 
   // Chronological mode uses a single flat list with one paginator.
   // Project mode paginates per-project (see projectVisibleCounts below).
@@ -758,7 +778,7 @@ const visibleSessions = useMemo(() => {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  opacity: threadMenuOpen || showCronSessions || showSubagentSessions || threadOrganizeMode !== 'project' || threadSortMode !== 'updated' ? 1 : 0.8,
+                  opacity: threadMenuOpen || showCronSessions || showSubagentSessions || Object.values(hiddenSessionAgents).some(Boolean) || threadOrganizeMode !== 'project' || threadSortMode !== 'updated' ? 1 : 0.8,
                 }}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -841,6 +861,26 @@ const visibleSessions = useMemo(() => {
                     active={showCronSessions}
                     onClick={() => setShowCronSessions(value => !value)}
                   />
+                  {availableSessionAgents.length > 0 && (
+                    <>
+                      <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                      <ThreadMenuSectionLabel>Agents</ThreadMenuSectionLabel>
+                      {availableSessionAgents.map(agent => (
+                        <ThreadMenuItem
+                          key={agent.key}
+                          icon={agent.icon}
+                          label={agent.label}
+                          active={hiddenSessionAgents[agent.key] !== true}
+                          onClick={() => {
+                            setHiddenSessionAgents(prev => ({
+                              ...prev,
+                              [agent.key]: prev[agent.key] === true ? false : true,
+                            }))
+                          }}
+                        />
+                      ))}
+                    </>
+                  )}
                   </div>
                 </SidebarMenuPortal>
               )}
@@ -1022,139 +1062,146 @@ const visibleSessions = useMemo(() => {
                     </div>
                   )}
 
-                  {(threadOrganizeMode !== 'project' || !isThreadGroupCollapsed(group)) && group.sessions.map(session => (
-                    <SidebarItem
-                      key={session.id}
-                      label={formatSessionTitleForSidebar(session.title)}
-                      icon={SESSION_SOURCE_ICONS[session.source]}
-                      indent={Math.max(1, session.displayIndent + 1)}
-                      indentUnit={6}
-                      extraWidth={24}
-                      title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}`}
-                      emphasize={
-                        activeChatTileId
-                          ? session.tileId === activeChatTileId
-                          : undefined
-                      }
-                      onClick={() => {
-                        if (session.tileId && openTileIdSet.has(session.tileId)) {
-                          onFocusTile(session.tileId)
-                          return
-                        }
-                        onOpenSessionInChat(session)
-                      }}
-                      onContextMenu={e => {
-                        e.preventDefault()
-                        setSessionCtx({ x: e.clientX, y: e.clientY, session })
-                      }}
-                      extra={
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                          {(session.checkpointCount ?? 0) > 0 && (
-                            <>
-                              <div
-                                title={`${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'} available`}
-                                style={{
-                                  minWidth: 18,
-                                  height: 18,
-                                  padding: '0 6px',
-                                  borderRadius: 999,
-                                  border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-                                  background: theme.chat.assistantBubble,
-                                  color: theme.text.secondary,
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                  fontSize: 10,
-                                  fontWeight: 600,
-                                  lineHeight: 1,
-                                  boxSizing: 'border-box',
-                                }}
-                              >
-                                {session.checkpointCount}
-                              </div>
-                              <button
-                                title="Restore latest checkpoint"
-                                onClick={e => {
-                                  e.stopPropagation()
-                                  const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
-                                  if (!confirmed) return
-                                  void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
-                                    .then(checkpoints => {
-                                      const latest = checkpoints[0]
-                                      if (!latest) return null
-                                      return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
-                                    })
-                                    .then(async result => {
-                                      if (!result?.ok) {
-                                        if (result?.error) window.alert(result.error)
-                                        return
-                                      }
-                                      const workspaceEntry = workspaceById.get(session.workspaceId)
-                                      if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
-                                      if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
-                                    })
-                                    .catch(error => {
-                                      window.alert(error instanceof Error ? error.message : String(error))
-                                    })
-                                }}
-                                style={{
-                                  width: 18,
-                                  height: 18,
-                                  borderRadius: 4,
-                                  border: 'none',
-                                  background: 'transparent',
-                                  color: theme.text.disabled,
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'center',
-                                }}
-                              >
-                                <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                  <path d="M3.1 4.1V1.9m0 0h2.3m-2.3 0 2 2m1.9-1.1a4.8 4.8 0 1 1-2.7 8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                              </button>
-                            </>
-                          )}
-                          <button
-                            title={pendingDeleteSessionId === session.id ? 'Click again to confirm delete' : 'Delete session'}
-                            onClick={e => {
-                              e.stopPropagation()
-                              if (pendingDeleteSessionId === session.id) {
-                                void deleteSession(session)
-                                return
-                              }
-                              armDeleteSession(session.id)
-                            }}
-                            disabled={deletingSessionId === session.id}
-                            style={{
-                              width: 18,
-                              height: 18,
-                              borderRadius: 4,
-                              border: 'none',
-                              background: pendingDeleteSessionId === session.id ? theme.status.danger : 'transparent',
-                              color: pendingDeleteSessionId === session.id ? '#fff' : theme.text.disabled,
-                              cursor: deletingSessionId === session.id ? 'default' : 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              opacity: deletingSessionId === session.id ? 0.5 : 1,
-                            }}
-                          >
-                            {pendingDeleteSessionId === session.id ? (
-                              <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                <path d="M3 7.2 5.6 9.8 11 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            ) : (
-                              <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                <path d="M3.5 4.5h7M5 4.5V3.4c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9v1.1M4.3 4.5l.4 6.1c0 .5.4.9.9.9h2.8c.5 0 .9-.4.9-.9l.4-6.1M6 6.2v3.2M8 6.2v3.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
+                  {(threadOrganizeMode !== 'project' || !isThreadGroupCollapsed(group)) && group.sessions.map(session => {
+                    const hasSpecificActiveSession = Boolean(activeChatSessionEntryId || activeChatSessionId)
+                    const emphasize = hasSpecificActiveSession
+                      ? (
+                          session.id === activeChatSessionEntryId
+                          || (Boolean(activeChatSessionId) && session.sessionId === activeChatSessionId)
+                        )
+                      : (
+                          Boolean(activeChatTileId) && session.tileId === activeChatTileId
+                        )
+                    return (
+                      <SidebarItem
+                        key={session.id}
+                        label={formatSessionTitleForSidebar(session.title)}
+                        icon={getSessionAgentIcon(session)}
+                        indent={Math.max(1, session.displayIndent + 1)}
+                        indentUnit={6}
+                        extraWidth={24}
+                        title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}`}
+                        emphasize={emphasize || undefined}
+                        onClick={() => {
+                          if (session.tileId && openTileIdSet.has(session.tileId)) {
+                            onFocusTile(session.tileId)
+                            return
+                          }
+                          onOpenSessionInChat(session)
+                        }}
+                        onContextMenu={e => {
+                          e.preventDefault()
+                          setSessionCtx({ x: e.clientX, y: e.clientY, session })
+                        }}
+                        extra={
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                            {(session.checkpointCount ?? 0) > 0 && (
+                              <>
+                                <div
+                                  title={`${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'} available`}
+                                  style={{
+                                    minWidth: 18,
+                                    height: 18,
+                                    padding: '0 6px',
+                                    borderRadius: 999,
+                                    border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+                                    background: theme.chat.assistantBubble,
+                                    color: theme.text.secondary,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontSize: 10,
+                                    fontWeight: 600,
+                                    lineHeight: 1,
+                                    boxSizing: 'border-box',
+                                  }}
+                                >
+                                  {session.checkpointCount}
+                                </div>
+                                <button
+                                  title="Restore latest checkpoint"
+                                  onClick={e => {
+                                    e.stopPropagation()
+                                    const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
+                                    if (!confirmed) return
+                                    void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
+                                      .then(checkpoints => {
+                                        const latest = checkpoints[0]
+                                        if (!latest) return null
+                                        return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
+                                      })
+                                      .then(async result => {
+                                        if (!result?.ok) {
+                                          if (result?.error) window.alert(result.error)
+                                          return
+                                        }
+                                        const workspaceEntry = workspaceById.get(session.workspaceId)
+                                        if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
+                                        if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
+                                      })
+                                      .catch(error => {
+                                        window.alert(error instanceof Error ? error.message : String(error))
+                                      })
+                                  }}
+                                  style={{
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: 4,
+                                    border: 'none',
+                                    background: 'transparent',
+                                    color: theme.text.disabled,
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                  }}
+                                >
+                                  <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
+                                    <path d="M3.1 4.1V1.9m0 0h2.3m-2.3 0 2 2m1.9-1.1a4.8 4.8 0 1 1-2.7 8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </button>
+                              </>
                             )}
-                          </button>
-                        </div>
-                      }
-                    />
-                  ))}
+                            <button
+                              title={pendingDeleteSessionId === session.id ? 'Click again to confirm delete' : 'Delete session'}
+                              onClick={e => {
+                                e.stopPropagation()
+                                if (pendingDeleteSessionId === session.id) {
+                                  void deleteSession(session)
+                                  return
+                                }
+                                armDeleteSession(session.id)
+                              }}
+                              disabled={deletingSessionId === session.id}
+                              style={{
+                                width: 18,
+                                height: 18,
+                                borderRadius: 4,
+                                border: 'none',
+                                background: pendingDeleteSessionId === session.id ? theme.status.danger : 'transparent',
+                                color: pendingDeleteSessionId === session.id ? '#fff' : theme.text.disabled,
+                                cursor: deletingSessionId === session.id ? 'default' : 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                opacity: deletingSessionId === session.id ? 0.5 : 1,
+                              }}
+                            >
+                              {pendingDeleteSessionId === session.id ? (
+                                <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
+                                  <path d="M3 7.2 5.6 9.8 11 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              ) : (
+                                <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
+                                  <path d="M3.5 4.5h7M5 4.5V3.4c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9v1.1M4.3 4.5l.4 6.1c0 .5.4.9.9.9h2.8c.5 0 .9-.4.9-.9l.4-6.1M6 6.2v3.2M8 6.2v3.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                        }
+                      />
+                    )
+                  })}
 
                   {threadOrganizeMode === 'project' && !isThreadGroupCollapsed(group) && group.sessions.length === 0 && (
                     <div

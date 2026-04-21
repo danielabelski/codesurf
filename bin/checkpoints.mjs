@@ -120,6 +120,30 @@ function checkpointSummary(record) {
   }
 }
 
+function checkpointRestoredMessage(record, checkpointId, filesRestored, filesDeleted) {
+  const toolId = `checkpoint-restored-${checkpointId}`
+  const parts = []
+  if (typeof record?.label === 'string' && record.label.trim()) parts.push(`Restored ${record.label.trim()}`)
+  else parts.push('Restored checkpoint')
+  if (filesRestored > 0) parts.push(`${filesRestored} file${filesRestored === 1 ? '' : 's'} restored`)
+  if (filesDeleted > 0) parts.push(`${filesDeleted} file${filesDeleted === 1 ? '' : 's'} removed`)
+  return {
+    id: toolId,
+    role: 'assistant',
+    content: '',
+    timestamp: Date.now(),
+    isStreaming: false,
+    toolBlocks: [{
+      id: toolId,
+      name: 'Checkpoint restored',
+      input: '',
+      summary: parts.join(' · '),
+      status: 'done',
+    }],
+    contentBlocks: [{ type: 'tool', toolId }],
+  }
+}
+
 export function createCheckpointStore({
   assertSafeId,
   atomicWriteJson,
@@ -359,6 +383,11 @@ export function createCheckpointStore({
           ...record.sessionStateSnapshot,
           updatedAt: Date.now(),
         }
+        const restoredMessage = checkpointRestoredMessage(record, checkpointId, filesRestored, filesDeleted)
+        restoredSessionState.messages = [
+          ...(Array.isArray(restoredSessionState.messages) ? restoredSessionState.messages : []),
+          restoredMessage,
+        ]
         atomicWriteJson(runtimeStateFile, restoredSessionState)
       }
 

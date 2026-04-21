@@ -232,6 +232,8 @@ test('daemon checkpoints create, list, and restore runtime session snapshots', a
   assert.equal(response.payload.checkpoints.count, 1)
   assert.equal(response.payload.checkpoints.latestCheckpointId, checkpointId)
   assert.equal(response.payload.checkpoints.lastRestoredCheckpointId, checkpointId)
+  const restoredNotice = response.payload.messages.find(message => Array.isArray(message?.toolBlocks) && message.toolBlocks.some(block => block?.name === 'Checkpoint restored'))
+  assert.ok(restoredNotice)
 
   response = await daemon.request('/session/runtime/upsert', {
     body: {

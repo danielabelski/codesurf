@@ -27,7 +27,7 @@ import {
   getApproxSystemOverheadTokens,
 } from '../config/providers'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
-import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote } from '../../../shared/chat-types'
+import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote, FileChange } from '../../../shared/chat-types'
 import { BlockNoteAffordance } from './chat/BlockNoteAffordance'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
 import { setTileTodos, clearTileTodos, useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
@@ -267,6 +267,17 @@ interface QueuedChatTurn {
   parentId?: string | null
 }
 
+type LatestChangeDrawerState = {
+  key: string
+  messageId: string
+  toolBlockId: string
+  fileChanges: FileChange[]
+  fileCount: number
+  additions: number
+  deletions: number
+  changeBlockCount: number
+}
+
 interface ChatTilePersistedState {
   messages: ChatMessage[]
   input: string
@@ -280,6 +291,7 @@ interface ChatTilePersistedState {
   agentMode: boolean
   autoAgentMode: boolean
   preserveSessionSummary?: boolean
+  linkedSessionEntryId?: string | null
   sessionId: string | null
   jobId?: string | null
   jobSequence?: number
@@ -2181,6 +2193,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [showBranchMenu, setShowBranchMenu] = useState(false)
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(() => initialRuntimeStateRef.current?.sessionId ?? null)
+  const [linkedSessionEntryId, setLinkedSessionEntryId] = useState<string | null>(() => initialRuntimeStateRef.current?.linkedSessionEntryId ?? null)
   const [preserveSessionSummary, setPreserveSessionSummary] = useState<boolean>(() => initialRuntimeStateRef.current?.preserveSessionSummary === true)
   // Compacted-session history archive. Claude Agent SDK returns a condensed
   // transcript on resume (just the last couple of messages); the SDK already
@@ -2357,20 +2370,144 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     return messages.slice(-CHAT_RENDER_WINDOW)
   }, [messages])
 
+  const mergeDrawerFileChanges = useCallback((fileChanges: FileChange[]): FileChange[] => {
+    const merged = new Map<string, FileChange>()
+    for (const change of fileChanges) {
+      const key = `${change.path}::${change.previousPath ?? ''}::${change.changeType}`
+      const existing = merged.get(key)
+      if (!existing) {
+        merged.set(key, { ...change })
+        continue
+      }
+      existing.additions += change.additions
+      existing.deletions += change.deletions
+      existing.diff = `${existing.diff}\n\n${change.diff}`.trim()
+    }
+    return Array.from(merged.values())
+  }, [])
+
   const hiddenMessageCount = Math.max(0, messages.length - renderedMessages.length)
-  const latestChangeSummary = useMemo(() => {
+  const latestChangeDrawer = useMemo<LatestChangeDrawerState | null>(() => {
+    const batchMessages: ChatMessage[] = []
     for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
       const message = messages[messageIndex]
-      const fileChanges = message.toolBlocks?.flatMap(block => block.fileChanges ?? []) ?? []
-      if (fileChanges.length === 0) continue
-      return {
-        fileCount: fileChanges.length,
-        additions: fileChanges.reduce((sum, change) => sum + change.additions, 0),
-        deletions: fileChanges.reduce((sum, change) => sum + change.deletions, 0),
+      if (message.role === 'user') break
+      batchMessages.unshift(message)
+    }
+    if (batchMessages.length === 0) return null
+
+    const rawFileChanges: FileChange[] = []
+    let latestMessageId: string | null = null
+    let latestToolBlockId: string | null = null
+    let changeBlockCount = 0
+
+    for (const message of batchMessages) {
+      for (const block of message.toolBlocks ?? []) {
+        const fileChanges = block.fileChanges ?? []
+        if (fileChanges.length === 0) continue
+        changeBlockCount += 1
+        rawFileChanges.push(...fileChanges)
+        latestMessageId = message.id
+        latestToolBlockId = block.id
       }
     }
-    return null
-  }, [messages])
+
+    if (rawFileChanges.length === 0 || !latestMessageId || !latestToolBlockId) return null
+
+    const fileChanges = mergeDrawerFileChanges(rawFileChanges)
+    return {
+      key: `${latestMessageId}:${latestToolBlockId}:${changeBlockCount}:${fileChanges.length}`,
+      messageId: latestMessageId,
+      toolBlockId: latestToolBlockId,
+      fileChanges,
+      fileCount: fileChanges.length,
+      additions: fileChanges.reduce((sum, change) => sum + change.additions, 0),
+      deletions: fileChanges.reduce((sum, change) => sum + change.deletions, 0),
+      changeBlockCount,
+    }
+  }, [messages, mergeDrawerFileChanges])
+  const [latestChangeDrawerExpanded, setLatestChangeDrawerExpanded] = useState(true)
+  const [latestChangeDrawerExpandedFiles, setLatestChangeDrawerExpandedFiles] = useState<Record<string, boolean>>({})
+  const [latestCheckpointId, setLatestCheckpointId] = useState<string | null>(null)
+  const [isRestoringLatestCheckpoint, setIsRestoringLatestCheckpoint] = useState(false)
+
+  useEffect(() => {
+    if (!latestChangeDrawer) {
+      setLatestCheckpointId(null)
+      return
+    }
+
+    setLatestChangeDrawerExpanded(true)
+    setLatestChangeDrawerExpandedFiles({})
+  }, [latestChangeDrawer?.key])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!workspaceId || !latestChangeDrawer) {
+      setLatestCheckpointId(null)
+      return
+    }
+
+    void window.electron.canvas
+      .listCheckpoints(workspaceId, `codesurf-runtime:${tileId}`)
+      .then(checkpoints => {
+        if (cancelled) return
+        const undoIndex = Math.max(0, (latestChangeDrawer.changeBlockCount ?? 1) - 1)
+        setLatestCheckpointId(checkpoints[undoIndex]?.id ?? checkpoints[0]?.id ?? null)
+      })
+      .catch(() => {
+        if (!cancelled) setLatestCheckpointId(null)
+      })
+
+    return () => { cancelled = true }
+  }, [workspaceId, tileId, latestChangeDrawer?.key])
+
+  const toggleLatestChangeDrawerFile = useCallback((key: string) => {
+    setLatestChangeDrawerExpandedFiles(prev => ({ ...prev, [key]: !(prev[key] ?? false) }))
+  }, [])
+
+  const restoreLatestCheckpoint = useCallback(async () => {
+    if (!workspaceId || !latestCheckpointId || isRestoringLatestCheckpoint) return
+    setIsRestoringLatestCheckpoint(true)
+    try {
+      const result = await window.electron.canvas.restoreCheckpoint(workspaceId, latestCheckpointId, `codesurf-runtime:${tileId}`)
+      if (!result.ok) {
+        const errorText = result.error ?? 'Checkpoint restore failed'
+        setMessagesSafe(prev => [...prev, {
+          id: `msg-restore-checkpoint-error-${Date.now()}`,
+          role: 'assistant',
+          content: `Undo failed: ${errorText}`,
+          timestamp: Date.now(),
+        }])
+        return
+      }
+      const restoredParts: string[] = []
+      if (typeof result.filesRestored === 'number' && result.filesRestored > 0) {
+        restoredParts.push(`${result.filesRestored} restored`)
+      }
+      if (typeof result.filesDeleted === 'number' && result.filesDeleted > 0) {
+        restoredParts.push(`${result.filesDeleted} deleted`)
+      }
+      const suffix = restoredParts.length > 0 ? ` (${restoredParts.join(', ')})` : ''
+      setMessagesSafe(prev => [...prev, {
+        id: `msg-restore-checkpoint-${Date.now()}`,
+        role: 'assistant',
+        content: `Restored the latest checkpoint before those changes${suffix}.`,
+        timestamp: Date.now(),
+      }])
+      setLatestCheckpointId(null)
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error)
+      setMessagesSafe(prev => [...prev, {
+        id: `msg-restore-checkpoint-error-${Date.now()}`,
+        role: 'assistant',
+        content: `Undo failed: ${errorText}`,
+        timestamp: Date.now(),
+      }])
+    } finally {
+      setIsRestoringLatestCheckpoint(false)
+    }
+  }, [workspaceId, tileId, latestCheckpointId, isRestoringLatestCheckpoint, setMessagesSafe])
 
   // Clamp index when filtered items change
   useEffect(() => {
@@ -2622,6 +2759,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       agentMode: effectiveAgentMode,
       autoAgentMode,
       preserveSessionSummary,
+      linkedSessionEntryId,
       sessionId,
       jobId,
       jobSequence,
@@ -2632,7 +2770,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (isChatTileRuntimeStateDisposed(tileId)) return
       setChatTileRuntimeState(tileId, latestStateRef.current)
     }
-  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
+  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
 
   // Publish latest TodoWrite todos for this tile so external chrome (tab bar,
   // sidebar) can surface the agent's current todo list without drilling into
@@ -2730,7 +2868,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
     const nextState = stateOverride ?? latestStateRef.current
     if (!workspaceId || !stateLoadedRef.current || !nextState || isChatTileRuntimeStateDisposed(tileId)) return
-    void window.electron.canvas.saveTileState(workspaceId, tileId, nextState).catch(() => {})
+    const persistedState = nextState.linkedSessionEntryId
+      ? { ...nextState, messages: [] }
+      : nextState
+    void window.electron.canvas.saveTileState(workspaceId, tileId, persistedState).catch(() => {})
   }, [workspaceId, tileId])
 
   useEffect(() => {
@@ -2765,6 +2906,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (typeof saved.thinking === 'string') setThinking(saved.thinking)
       if (typeof saved.autoAgentMode === 'boolean') setAutoAgentMode(saved.autoAgentMode)
       if (typeof saved.preserveSessionSummary === 'boolean') setPreserveSessionSummary(saved.preserveSessionSummary)
+      if (typeof saved.linkedSessionEntryId === 'string' || saved.linkedSessionEntryId === null) setLinkedSessionEntryId(saved.linkedSessionEntryId ?? null)
       if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId)
       if (typeof saved.jobId === 'string' || saved.jobId === null) setJobId(saved.jobId ?? null)
       if (typeof saved.jobSequence === 'number') {
@@ -2795,6 +2937,27 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       stateLoadedRef.current = true
     })
   }, [workspaceId, tileId, reloadToken])
+
+  useEffect(() => {
+    if (!stateLoadedRef.current) return
+    if (!workspaceId || !linkedSessionEntryId) return
+    if (isStreaming) return
+
+    let cancelled = false
+    void window.electron.canvas.getSessionState(workspaceId, linkedSessionEntryId)
+      .then((saved: any) => {
+        if (cancelled || !saved) return
+        if (Array.isArray(saved.messages)) setMessagesSafe(saved.messages)
+        if (typeof saved.provider === 'string') setProvider(saved.provider)
+        if (typeof saved.model === 'string') setModel(saved.model)
+        if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null)
+        if (saved.executionTarget === 'local' || saved.executionTarget === 'cloud') setExecutionTarget(saved.executionTarget)
+        if (typeof saved.cloudHostId === 'string' || saved.cloudHostId === null) setCloudHostId(saved.cloudHostId ?? null)
+      })
+      .catch(() => {})
+
+    return () => { cancelled = true }
+  }, [workspaceId, linkedSessionEntryId, reloadToken, isStreaming, setMessagesSafe])
 
   // Reset the "last activity" clock every time streaming toggles on so the
   // quiet-indicator starts from zero for each new turn. The message-change
@@ -2866,7 +3029,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         persistTimerRef.current = null
       }
     }
-  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
+  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
 
   useEffect(() => {
     return () => {
@@ -4013,7 +4176,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       thinking: activeThinking,
       agentMode: state?.agentMode ?? effectiveAgentMode,
       autoAgentMode: state?.autoAgentMode ?? autoAgentMode,
-      preserveSessionSummary: false,
+      preserveSessionSummary: linkedSessionEntryId ? true : false,
+      linkedSessionEntryId,
       sessionId: activeSessionId,
       jobId: null,
       jobSequence: 0,
@@ -4021,7 +4185,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       isStreaming: true,
     }
 
-    setPreserveSessionSummary(false)
+    setPreserveSessionSummary(linkedSessionEntryId ? true : false)
     setMessagesSafe(optimisticMessages)
     setIsStreaming(true)
     setJobId(null)
@@ -4110,7 +4274,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       focusComposer()
       return false
     }
-  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, persistLatestState])
+  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, linkedSessionEntryId, persistLatestState])
 
   const logQueueEvent = useCallback((
     type: 'enqueue' | 'dispatch' | 'delete' | 'complete' | 'clear' | 'reorder',
@@ -4228,7 +4392,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       createdAt: Date.now(),
     }
 
-    setPreserveSessionSummary(false)
+    setPreserveSessionSummary(linkedSessionEntryId ? true : false)
     const nextQueue = [...queuedTurns, queuedTurn]
     setQueuedTurns(nextQueue)
     flushQueueStateNow(nextQueue)
@@ -4246,7 +4410,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     focusComposer()
     return true
-  }, [input, attachments, focusComposer, queuedTurns, flushQueueStateNow, logQueueEvent])
+  }, [input, attachments, focusComposer, queuedTurns, linkedSessionEntryId, flushQueueStateNow, logQueueEvent])
 
   const sendMessage = useCallback(async () => {
     if (isStreaming) {
@@ -4347,6 +4511,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     flushQueueStateNow([])
     logQueueEvent('clear')
     setPreserveSessionSummary(false)
+    setLinkedSessionEntryId(null)
     setSessionId(null)
     setJobId(null)
     setJobSequence(0)
@@ -4795,7 +4960,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             // decisions and the React render step.
             type ChipItem =
               | { kind: 'thinking'; key: string; block: ThinkingBlock }
-              | { kind: 'tool-single'; key: string; block: ToolBlock }
+              | { kind: 'tool-single'; key: string; block: ToolBlock; isLive: boolean }
               | { kind: 'tool-group-same'; key: string; blocks: ToolBlock[] }
               | { kind: 'tool-group-mixed'; key: string; blocks: ToolBlock[] }
 
@@ -4806,7 +4971,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             // Extract chip items (thinking + tool groups) from a single
             // message's contentBlocks. Text blocks are ignored — callers
             // only invoke this on chip-only messages.
-            const extractChipsFromMessage = (msg: ChatMessage): ChipItem[] => {
+            const extractChipsFromMessage = (msg: ChatMessage, isLiveMessage: boolean): ChipItem[] => {
               const items: ChipItem[] = []
               const blocks = msg.contentBlocks ?? []
               let i = 0
@@ -4817,7 +4982,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   if (tb) items.push({
                     kind: 'thinking',
                     key: `${msg.id}-think-${block.thinkingId}`,
-                    block: tb,
+                    block: !isLiveMessage && !tb.done ? { ...tb, done: true } : tb,
                   })
                   i++; continue
                 }
@@ -4857,6 +5022,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       kind: 'tool-single',
                       key: `${msg.id}-${tb.id}`,
                       block: tb,
+                      isLive: isLiveMessage,
                     })
                   }
                   continue
@@ -4871,7 +5037,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 return <ThinkingBlockView key={item.key} thinking={item.block} />
               }
               if (item.kind === 'tool-single') {
-                return <ToolBlockView key={item.key} block={item.block} />
+                return <ToolBlockView key={item.key} block={item.block} isLive={item.isLive} />
               }
               if (item.kind === 'tool-group-same') {
                 return <CollapsedToolGroup key={item.key} name={item.blocks[0]?.name ?? ''} blocks={item.blocks} />
@@ -4970,8 +5136,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             }
 
             for (const msg of renderedMessages) {
+              const isLiveMessage = Boolean(
+                msg.role === 'assistant'
+                && isStreaming
+                && msg.isStreaming
+                && msg.id === renderedMessages[renderedMessages.length - 1]?.id
+              )
               if (isChipOnly(msg)) {
-                const items = extractChipsFromMessage(msg)
+                const items = extractChipsFromMessage(msg, isLiveMessage)
                 if (clusterItems.length === 0) clusterStartKey = msg.id
                 clusterItems.push(...items)
                 clusterMsgIds.push(msg.id)
@@ -5009,9 +5181,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     the first thinking block twice. */}
                 {(() => {
                   const hasInlineThinking = (msg.contentBlocks ?? []).some(b => b.type === 'thinking')
-                  const showLegacy = !hasInlineThinking && (msg.thinking || (msg.isStreaming && !msg.content))
+                  const legacyThinking = msg.thinking
+                    ? (!isLiveMessage && !msg.thinking.done ? { ...msg.thinking, done: true } : msg.thinking)
+                    : (isLiveMessage && !msg.content ? { content: '', done: false } : null)
+                  const showLegacy = !hasInlineThinking && Boolean(legacyThinking)
                   return showLegacy
-                    ? <ThinkingBlockView thinking={msg.thinking ?? { content: '', done: false }} />
+                    ? <ThinkingBlockView thinking={legacyThinking ?? { content: '', done: false }} />
                     : null
                 })()}
 
@@ -5052,7 +5227,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                           if (chipRow.length === 0) chipRowStartIdx = i
                           const tb = msg.thinkingBlocks?.find(t => t.id === block.thinkingId)
                           if (tb) {
-                            chipRow.push(<ThinkingBlockView key={`think-${block.thinkingId}`} thinking={tb} />)
+                            chipRow.push(
+                              <ThinkingBlockView
+                                key={`think-${block.thinkingId}`}
+                                thinking={!isLiveMessage && !tb.done ? { ...tb, done: true } : tb}
+                              />
+                            )
                           }
                           i++
                           continue
@@ -5091,7 +5271,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                               }
                               continue
                             }
-                            chipRow.push(<ToolBlockView key={tb.id} block={tb} />)
+                            chipRow.push(<ToolBlockView key={tb.id} block={tb} isLive={isLiveMessage} />)
                           }
                           continue
                         }
@@ -5111,7 +5291,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                               color: theme.chat.text, position: 'relative',
                               width: '100%', minWidth: 0, overflow: 'hidden',
                             }}>
-                              <ChatMessageContent text={block.text} isStreaming={msg.isStreaming && isLastBlock} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
+                              <ChatMessageContent text={block.text} isStreaming={isLiveMessage && isLastBlock} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
                             </div>
                           )
                           i++
@@ -5124,7 +5304,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       // block while the message is streaming. The component
                       // itself decides whether to show (hides during thinking,
                       // honors the 2s show-delay) so we render unconditionally.
-                      if (msg.role === 'assistant' && msg.isStreaming) {
+                      if (msg.role === 'assistant' && isLiveMessage) {
                         elements.push(<WorkingChipView key={`working-${msg.id}`} message={msg} />)
                       }
                       return elements
@@ -5155,7 +5335,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                               }
                               continue
                             }
-                            out.push(<ToolBlockView key={tb.id} block={tb} />)
+                            out.push(<ToolBlockView key={tb.id} block={tb} isLive={isLiveMessage} />)
                           }
                           return out
                         })()}
@@ -5172,8 +5352,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                         color: theme.chat.text, position: 'relative',
                         width: '100%', minWidth: 0, overflow: 'hidden',
                       }}>
-                        <ChatMessageContent text={msg.content} isStreaming={msg.isStreaming} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
-                        {msg.isStreaming && msg.content.length === 0 && !hasVisibleToolBlocks && (
+                        <ChatMessageContent text={msg.content} isStreaming={isLiveMessage} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
+                        {isLiveMessage && msg.content.length === 0 && !hasVisibleToolBlocks && (
                           <WorkingDots />
                         )}
                       </div>
@@ -5181,7 +5361,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   </>
                 )}
                 {/* Cost/turns/time footer */}
-                {!msg.isStreaming && msg.role === 'assistant' && msg.cost != null && (
+                {!isLiveMessage && msg.role === 'assistant' && msg.cost != null && (
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     fontSize: monoSize - 2, color: theme.chat.subtle, fontFamily: fontMono,
@@ -5198,7 +5378,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   </div>
                 )}
                 {/* User message time footer */}
-                {!msg.isStreaming && msg.role === 'user' && (
+                {!isLiveMessage && msg.role === 'user' && (
                   <div style={{
                     fontSize: monoSize - 2, color: theme.chat.subtle, fontFamily: fontMono,
                     padding: '0 4px', textAlign: 'right',
@@ -5257,7 +5437,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           </div>
         )}
 
-        {latestChangeSummary && (
+        {latestChangeDrawer && (
           <div style={{
             flexShrink: 0,
             width: CHAT_COMPOSER_WIDTH,
@@ -5272,55 +5452,175 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             position: 'relative',
             zIndex: 1,
           }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
-              padding: '10px 14px',
-              ...NON_SELECTABLE_UI_STYLE,
-            }}>
-              <div style={{
+            <div
+              style={{
                 display: 'flex',
-                alignItems: 'baseline',
-                gap: 8,
-                minWidth: 0,
-                color: theme.chat.textSecondary,
-                fontFamily: fontSans,
-              }}>
-                <span style={{ fontSize: 13, fontWeight: 500 }}>
-                  {latestChangeSummary.fileCount} file{latestChangeSummary.fileCount === 1 ? '' : 's'} changed
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.success }}>
-                  +{latestChangeSummary.additions}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.danger }}>
-                  -{latestChangeSummary.deletions}
-                </span>
-              </div>
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '10px 14px',
+                ...NON_SELECTABLE_UI_STYLE,
+              }}
+            >
               <button
                 type="button"
-                onClick={reviewLatestChanges}
+                onClick={() => setLatestChangeDrawerExpanded(v => !v)}
                 style={{
+                  flex: 1,
+                  minWidth: 0,
+                  display: 'flex',
+                  alignItems: 'baseline',
+                  gap: 8,
+                  flexWrap: 'wrap',
                   border: 'none',
                   background: 'transparent',
-                  color: theme.chat.text,
-                  fontSize: 13,
-                  fontFamily: fontSans,
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
                   padding: 0,
-                  flexShrink: 0,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  color: theme.chat.textSecondary,
+                  fontFamily: fontSans,
                   ...NON_SELECTABLE_UI_STYLE,
                 }}
               >
-                <span>Review changes</span>
-                <ChevronRight size={13} />
+                <span style={{ fontSize: 13, fontWeight: 600, color: theme.chat.text }}>
+                  {latestChangeDrawer.fileCount} file{latestChangeDrawer.fileCount === 1 ? '' : 's'} changed
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.success }}>
+                  +{latestChangeDrawer.additions}
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: theme.status.danger }}>
+                  -{latestChangeDrawer.deletions}
+                </span>
               </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                {latestCheckpointId && (
+                  <button
+                    type="button"
+                    onClick={event => {
+                      event.stopPropagation()
+                      void restoreLatestCheckpoint()
+                    }}
+                    disabled={isRestoringLatestCheckpoint}
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: isRestoringLatestCheckpoint ? theme.chat.muted : theme.chat.text,
+                      fontSize: 13,
+                      fontFamily: fontSans,
+                      fontWeight: 500,
+                      cursor: isRestoringLatestCheckpoint ? 'default' : 'pointer',
+                      padding: 0,
+                      opacity: isRestoringLatestCheckpoint ? 0.6 : 1,
+                      ...NON_SELECTABLE_UI_STYLE,
+                    }}
+                  >
+                    {isRestoringLatestCheckpoint ? 'Undoing…' : 'Undo'}
+                  </button>
+                )}
+                <ChevronRight size={14} style={{
+                  transform: latestChangeDrawerExpanded ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 0.15s',
+                  opacity: 0.55,
+                }} />
+              </div>
             </div>
+            {latestChangeDrawerExpanded && (
+              <div style={{
+                borderTop: `1px solid ${theme.chat.divider}`,
+                display: 'flex',
+                flexDirection: 'column',
+              }}>
+                {latestChangeDrawer.fileChanges.map((change, index) => {
+                  const fileKey = `${latestChangeDrawer.key}:${change.path}:${index}`
+                  const isExpanded = latestChangeDrawerExpandedFiles[fileKey] ?? false
+                  return (
+                    <div
+                      key={fileKey}
+                      style={{
+                        borderTop: index > 0 ? `1px solid ${theme.chat.divider}` : 'none',
+                        background: theme.surface.panelMuted,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleLatestChangeDrawerFile(fileKey)}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          padding: '12px 14px',
+                          border: 'none',
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                          color: theme.chat.text,
+                          fontFamily: fontSans,
+                          fontSize: 13,
+                          ...NON_SELECTABLE_UI_STYLE,
+                        }}
+                      >
+                        <span style={{
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          {change.path}
+                        </span>
+                        <span style={{ color: theme.status.success, fontWeight: 600, flexShrink: 0 }}>
+                          +{change.additions}
+                        </span>
+                        <span style={{ color: theme.status.danger, fontWeight: 600, flexShrink: 0 }}>
+                          -{change.deletions}
+                        </span>
+                        <ChevronRight size={14} style={{
+                          transform: isExpanded ? 'rotate(90deg)' : 'none',
+                          transition: 'transform 0.15s',
+                          opacity: 0.55,
+                          flexShrink: 0,
+                        }} />
+                      </button>
+                      {isExpanded && (
+                        <div style={{ borderTop: `1px solid ${theme.chat.divider}` }}>
+                          <DiffView
+                            diff={change.diff}
+                            path={change.path}
+                            fontSize={Math.max(11, monoSize - 1)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  padding: '10px 14px 12px',
+                  borderTop: `1px solid ${theme.chat.divider}`,
+                  background: theme.surface.panelMuted,
+                }}>
+                  <button
+                    type="button"
+                    onClick={reviewLatestChanges}
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: theme.chat.textSecondary,
+                      fontSize: 12,
+                      fontFamily: fontSans,
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      padding: 0,
+                      ...NON_SELECTABLE_UI_STYLE,
+                    }}
+                  >
+                    Jump to message
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -5340,9 +5640,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
             margin: '0 auto -12px auto',
             border: `1px solid ${theme.chat.divider}`,
-            borderTop: latestChangeSummary ? 'none' : `1px solid ${theme.chat.divider}`,
+            borderTop: latestChangeDrawer ? 'none' : `1px solid ${theme.chat.divider}`,
             borderBottom: 'none',
-            borderRadius: latestChangeSummary ? 0 : '14px 14px 0 0',
+            borderRadius: latestChangeDrawer ? 0 : '14px 14px 0 0',
             // Collapsed summary row uses the darkest chat surface so it reads
             // as a compacted tray tucked behind the composer; expanded uses
             // the lighter muted surface so individual rows remain legible.
@@ -6858,7 +7158,7 @@ const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks
 })
 
 
-const ToolBlockView = React.memo(function ToolBlockView({ block }: { block: ToolBlock }): JSX.Element {
+const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false }: { block: ToolBlock; isLive?: boolean }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
   const codePanelFontSize = Math.max(11, fonts.size - 1)
@@ -6919,7 +7219,7 @@ const ToolBlockView = React.memo(function ToolBlockView({ block }: { block: Tool
     })
     return map
   })
-  const isRunning = block.status === 'running'
+  const isRunning = isLive && block.status === 'running'
   const hasNestedData = (block.fileChanges?.length ?? 0) > 0 || (block.commandEntries?.length ?? 0) > 0
 
   const toggleFile = useCallback((key: string) => {

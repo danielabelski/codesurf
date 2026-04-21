@@ -317,7 +317,7 @@ test('daemon lists, reads, and deletes local session state while maintaining sum
   assert.equal(response.payload[0].model, 'gpt-5.4')
   assert.equal(response.payload[0].messageCount, 2)
   assert.equal(response.payload[0].lastMessage, 'latest assistant reply')
-  assert.equal(response.payload[0].title, 'latest assistant reply')
+  assert.equal(response.payload[0].title, 'first message')
 
   const summaryStat = await stat(summaryFile)
   assert.ok(summaryStat.isFile())
@@ -624,6 +624,43 @@ test('daemon lists external CodeSurf sessions and invalidates the external-sessi
   assert.deepEqual(response.payload, { ok: true })
   assert.equal(existsSync(projectSessionPath), false)
   assert.equal(existsSync(join(workspacePath, '.codesurf', 'sessions', 'deleted', 'project-chat.json')), true)
+})
+
+test('daemon refreshes cached external transcript state when the source file changes', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const transcriptPath = join(daemon.homeDir, '.claude', 'transcripts', 'cached-refresh.jsonl')
+  await mkdir(dirname(transcriptPath), { recursive: true })
+  await writeFile(transcriptPath, `${JSON.stringify({
+    type: 'user',
+    content: 'initial prompt',
+    timestamp: '2026-04-21T12:00:00.000Z',
+  })}\n`, 'utf8')
+
+  let response = await daemon.request('/session/external/list')
+  assert.equal(response.status, 200)
+  const entry = response.payload.find(item => item.id === `claude:${transcriptPath}`)
+  assert.ok(entry)
+
+  response = await daemon.request(`/session/external/state?sessionEntryId=${encodeURIComponent(entry.id)}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.messages.length, 1)
+  assert.equal(response.payload.messages[0].content, 'initial prompt')
+
+  await new Promise(resolve => setTimeout(resolve, 25))
+  await writeFile(transcriptPath, `${JSON.stringify({
+    type: 'user',
+    content: 'updated prompt',
+    timestamp: '2026-04-21T12:00:01.000Z',
+  })}\n`, 'utf8')
+
+  response = await daemon.request(`/session/external/state?sessionEntryId=${encodeURIComponent(entry.id)}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.messages.length, 1)
+  assert.equal(response.payload.messages[0].content, 'updated prompt')
 })
 
 test('daemon validates local session route inputs', async t => {
