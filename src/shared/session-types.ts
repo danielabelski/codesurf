@@ -18,6 +18,7 @@ export interface AggregatedSessionEntry {
   sourceLabel: string
   sourceDetail?: string
   checkpointCount?: number
+  isArchived?: boolean
   canOpenInChat?: boolean
   canOpenInApp?: boolean
   resumeBin?: string

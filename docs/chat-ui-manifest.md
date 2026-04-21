@@ -126,6 +126,7 @@ Implemented manifestation:
 - checkpoint save appears as a normal operational chip in the message stream
 - file changes after checkpointed edits continue using existing file-change chips/diff expanders
 - session/history rows reuse their existing tooltip and context-menu surfaces for checkpoint count and latest-restore action
+- conversation rows now use an archive affordance instead of destructive delete, and the existing thread filter menu can reveal archived conversations when needed
 
 ### Rewind / restore affordance
 

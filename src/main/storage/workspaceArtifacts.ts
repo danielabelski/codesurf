@@ -82,6 +82,11 @@ export function tileSessionSummaryPath(storageId: string, tileId: string): strin
   return join(CONTEX_HOME, 'workspaces', storageId, '.contex', `tile-session-${tileId}.json`)
 }
 
+export function sessionArchiveStatePath(storageId: string): string {
+  assertSafeWorkspaceArtifactId(storageId)
+  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', 'session-archives.json')
+}
+
 export async function loadWorkspaceTileState<T>(workspaceId: string, tileId: string, fallback: T): Promise<T> {
   const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
   for (const storageId of storageIds) {

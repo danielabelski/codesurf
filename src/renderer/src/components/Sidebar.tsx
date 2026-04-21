@@ -5,6 +5,12 @@ import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { SidebarFooter } from './sidebar/SidebarFooter'
+import {
+  SESSION_ACTION_BUTTON_SIZE,
+  SESSION_ACTION_ICON_SIZE,
+  SESSION_ROW_EXTRA_WIDTH,
+  getSessionArchiveActionLabel,
+} from './sidebar/session-actions'
 import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS } from './sidebar/utils'
 import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
@@ -91,17 +97,16 @@ export function Sidebar({
   const [threadMenuOpen, setThreadMenuOpen] = useState(false)
   const [threadOrganizeMode, setThreadOrganizeMode] = useState<ThreadOrganizeMode>('project')
   const [threadSortMode, setThreadSortMode] = useState<ThreadSortMode>('updated')
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false)
   const [showCronSessions, setShowCronSessions] = useState(false)
   const [showSubagentSessions, setShowSubagentSessions] = useState(false)
   const [hiddenSessionAgents, setHiddenSessionAgents] = useState<Record<string, boolean>>({})
   const [collapsedThreadGroups, setCollapsedThreadGroups] = useState<Record<string, boolean>>({})
   const [loadedSessionWorkspaceIds, setLoadedSessionWorkspaceIds] = useState<string[]>([])
-  const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
   const [hoveredProjectRow, setHoveredProjectRow] = useState<string | null>(null)
-  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
+  const [archivingSessionId, setArchivingSessionId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
-  const deleteConfirmTimerRef = useRef<number | null>(null)
   const threadMenuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -229,12 +234,6 @@ export function Sidebar({
     if (typeof explicit === 'boolean') return explicit
     return group.projectId !== activeProjectId
   }, [collapsedThreadGroups, activeProjectId])
-
-  useEffect(() => {
-    return () => {
-      if (deleteConfirmTimerRef.current) window.clearTimeout(deleteConfirmTimerRef.current)
-    }
-  }, [])
 
   useEffect(() => {
     if (!threadMenuOpen) return
@@ -426,8 +425,13 @@ export function Sidebar({
       },
     })
 
+    items.push({
+      label: getSessionArchiveActionLabel(session.isArchived === true),
+      action: () => { void setSessionArchived(session, !(session.isArchived === true)) },
+    })
+
     return items.length > 0 ? items : [{ label: 'No actions available', action: () => {} }]
-  }, [loadWorkspaceSessions, onFocusTile, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, openTileIdSet, workspaceById])
+  }, [loadWorkspaceSessions, onFocusTile, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, openTileIdSet, setSessionArchived, workspaceById])
   const resizing = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
@@ -537,6 +541,7 @@ export function Sidebar({
       const hasContent = Boolean(session.title?.trim()) || Boolean(session.lastMessage?.trim()) || session.messageCount > 0
       if (!hasContent) return false
       if (normalizedTitle === 'new agent') return false
+      if (!showArchivedSessions && session.isArchived === true) return false
       if (!showCronSessions && isCronSession(session)) return false
       if (!showSubagentSessions && isSubagentSession(session)) return false
       if (hiddenSessionAgents[getSessionAgentKey(session)] === true) return false
@@ -544,7 +549,7 @@ export function Sidebar({
       return true
     })
     return buildNestedSessionList(filtered, threadSortMode, sessionPromotions)
-  }, [promotedSessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode, sessionPromotions])
+  }, [promotedSessions, showArchivedSessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode, sessionPromotions])
 
   const availableSessionAgents = useMemo(() => {
     const byKey = new Map<string, { key: string; label: string; icon: React.JSX.Element }>()
@@ -564,7 +569,7 @@ export function Sidebar({
   // Project mode paginates per-project (see projectVisibleCounts below).
   useEffect(() => {
     setVisibleSessionCount(SESSION_PAGE_SIZE)
-  }, [workspace?.id, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode])
+  }, [workspace?.id, showArchivedSessions, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode])
 
   const displayedSessions = useMemo(() => {
     if (threadOrganizeMode !== 'chronological') return visibleSessions
@@ -688,32 +693,25 @@ export function Sidebar({
     ? displayedSessions.length < visibleSessions.length
     : false
 
-  const armDeleteSession = useCallback((sessionId: string) => {
-    if (deleteConfirmTimerRef.current) window.clearTimeout(deleteConfirmTimerRef.current)
-    setPendingDeleteSessionId(sessionId)
-    deleteConfirmTimerRef.current = window.setTimeout(() => {
-      setPendingDeleteSessionId(current => current === sessionId ? null : current)
-      deleteConfirmTimerRef.current = null
-    }, 4000)
-  }, [])
-
-  const deleteSession = useCallback(async (session: SessionEntry) => {
-    if (!session.workspaceId || deletingSessionId) return
-    setDeletingSessionId(session.id)
+  const setSessionArchived = useCallback(async (session: SessionEntry, archived: boolean) => {
+    if (!session.workspaceId || archivingSessionId) return
+    setArchivingSessionId(session.id)
     try {
-      const result = await window.electron.canvas.deleteSession(session.workspaceId, session.id)
+      const result = await window.electron.canvas.setSessionArchived(session.workspaceId, session.id, archived)
       if (result?.ok) {
-        setSessions(prev => prev.filter(entry => entry.id !== session.id))
+        setSessions(prev => prev.map(entry => {
+          if (entry.id !== session.id || entry.workspaceId !== session.workspaceId) return entry
+          return { ...entry, isArchived: archived }
+        }))
       }
     } finally {
-      setDeletingSessionId(null)
-      setPendingDeleteSessionId(current => current === session.id ? null : current)
-      if (deleteConfirmTimerRef.current) {
-        window.clearTimeout(deleteConfirmTimerRef.current)
-        deleteConfirmTimerRef.current = null
-      }
+      setArchivingSessionId(null)
     }
-  }, [deletingSessionId])
+  }, [archivingSessionId])
+
+  const handleArchiveSessionClick = useCallback((session: SessionEntry) => {
+    void setSessionArchived(session, !(session.isArchived === true))
+  }, [setSessionArchived])
 
   const handleOpenProjectFromSidebar = useCallback(() => {
     onOpenFolder()
@@ -834,7 +832,7 @@ export function Sidebar({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  opacity: threadMenuOpen || showCronSessions || showSubagentSessions || Object.values(hiddenSessionAgents).some(Boolean) || threadOrganizeMode !== 'project' || threadSortMode !== 'updated' ? 1 : 0.8,
+                  opacity: threadMenuOpen || showArchivedSessions || showCronSessions || showSubagentSessions || Object.values(hiddenSessionAgents).some(Boolean) || threadOrganizeMode !== 'project' || threadSortMode !== 'updated' ? 1 : 0.8,
                 }}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -905,6 +903,12 @@ export function Sidebar({
                   />
                   <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
                   <ThreadMenuSectionLabel>Show</ThreadMenuSectionLabel>
+                  <ThreadMenuItem
+                    icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><path d="M5.5 2.75h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /><path d="M6.25 7.25h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>}
+                    label="Archived"
+                    active={showArchivedSessions}
+                    onClick={() => setShowArchivedSessions(value => !value)}
+                  />
                   <ThreadMenuItem
                     icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 5.1h10M3 10.9h10" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" /><path d="M4.3 5.1v2.2c0 .92.75 1.67 1.67 1.67h1.06c.92 0 1.67.75 1.67 1.67v1" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>}
                     label="Sub-threads"
@@ -1131,9 +1135,10 @@ export function Sidebar({
                         icon={getSessionAgentIcon(session)}
                         indent={Math.max(1, session.displayIndent + 1)}
                         indentUnit={6}
-                        extraWidth={24}
-                        title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}`}
+                        extraWidth={SESSION_ROW_EXTRA_WIDTH}
+                        title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}`}
                         active={isSelected}
+                        muted={session.isArchived === true && !isSelected}
                         onClick={() => {
                           promoteSession(session)
                           if (session.tileId && openTileIdSet.has(session.tileId)) {
@@ -1216,37 +1221,37 @@ export function Sidebar({
                               </>
                             )}
                             <button
-                              title={pendingDeleteSessionId === session.id ? 'Click again to confirm delete' : 'Delete session'}
+                              title={getSessionArchiveActionLabel(session.isArchived === true)}
                               onClick={e => {
                                 e.stopPropagation()
-                                if (pendingDeleteSessionId === session.id) {
-                                  void deleteSession(session)
-                                  return
-                                }
-                                armDeleteSession(session.id)
+                                handleArchiveSessionClick(session)
                               }}
-                              disabled={deletingSessionId === session.id}
+                              disabled={archivingSessionId === session.id}
                               style={{
-                                width: 18,
-                                height: 18,
-                                borderRadius: 4,
+                                width: SESSION_ACTION_BUTTON_SIZE,
+                                height: SESSION_ACTION_BUTTON_SIZE,
+                                borderRadius: 7,
                                 border: 'none',
-                                background: pendingDeleteSessionId === session.id ? theme.status.danger : 'transparent',
-                                color: pendingDeleteSessionId === session.id ? '#fff' : theme.text.disabled,
-                                cursor: deletingSessionId === session.id ? 'default' : 'pointer',
+                                background: session.isArchived === true ? theme.surface.hover : 'transparent',
+                                color: session.isArchived === true ? theme.text.secondary : theme.text.disabled,
+                                cursor: archivingSessionId === session.id ? 'default' : 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
                                 justifyContent: 'center',
-                                opacity: deletingSessionId === session.id ? 0.5 : 1,
+                                opacity: archivingSessionId === session.id ? 0.5 : 1,
+                                flexShrink: 0,
                               }}
                             >
-                              {pendingDeleteSessionId === session.id ? (
-                                <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                  <path d="M3 7.2 5.6 9.8 11 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                              {session.isArchived === true ? (
+                                <svg width={SESSION_ACTION_ICON_SIZE} height={SESSION_ACTION_ICON_SIZE} viewBox="0 0 16 16" fill="none">
+                                  <path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+                                  <path d="M8 9.75V3.5m0 0L5.9 5.6M8 3.5l2.1 2.1" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
                                 </svg>
                               ) : (
-                                <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                  <path d="M3.5 4.5h7M5 4.5V3.4c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9v1.1M4.3 4.5l.4 6.1c0 .5.4.9.9.9h2.8c.5 0 .9-.4.9-.9l.4-6.1M6 6.2v3.2M8 6.2v3.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                                <svg width={SESSION_ACTION_ICON_SIZE} height={SESSION_ACTION_ICON_SIZE} viewBox="0 0 16 16" fill="none">
+                                  <path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+                                  <path d="M5.5 2.75h5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+                                  <path d="M6.25 7.25h3.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
                                 </svg>
                               )}
                             </button>

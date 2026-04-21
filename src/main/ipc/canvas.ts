@@ -10,6 +10,7 @@ import {
   kanbanStatePath,
   loadWorkspaceTileState,
   saveWorkspaceTileState,
+  sessionArchiveStatePath,
   tileSessionSummaryPath,
   tileStatePath,
 } from '../storage/workspaceArtifacts'
@@ -26,6 +27,7 @@ import { syncWorkspaceRelayParticipants } from '../relay/service'
 import { daemonClient } from '../daemon/client'
 import { getIndexerStatus, indexAllSources } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
+import { readArchivedSessionIds, writeArchivedSessionIds } from '../storage/sessionArchives'
 
 interface TileSessionSummary {
   version: 1
@@ -251,6 +253,32 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function readWorkspaceArchivedSessionIds(workspaceId: string): Promise<Set<string>> {
+  const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
+  const paths = storageIds.map(storageId => sessionArchiveStatePath(storageId))
+  return await readArchivedSessionIds(paths)
+}
+
+async function setWorkspaceSessionArchived(workspaceId: string, sessionEntryId: string, archived: boolean): Promise<boolean> {
+  const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
+  const primaryStorageId = storageIds[0] ?? workspaceId
+  const archivePath = sessionArchiveStatePath(primaryStorageId)
+  const archivedIds = await readArchivedSessionIds(storageIds.map(storageId => sessionArchiveStatePath(storageId)))
+  const hadEntry = archivedIds.has(sessionEntryId)
+  if (archived) archivedIds.add(sessionEntryId)
+  else archivedIds.delete(sessionEntryId)
+  if (hadEntry === archived) return false
+  await writeArchivedSessionIds(archivePath, Array.from(archivedIds))
+  return true
+}
+
+function applyArchivedSessionState(sessions: AggregatedSessionEntry[], archivedIds: Set<string>): AggregatedSessionEntry[] {
+  return sessions.map(session => {
+    const isArchived = archivedIds.has(session.id)
+    return session.isArchived === isArchived ? session : { ...session, isArchived }
+  })
+}
+
 function normalizeSessionPath(path: string | null | undefined): string | null {
   const normalized = String(path ?? '').trim()
   return normalized || null
@@ -402,7 +430,7 @@ export function registerCanvasIPC(): void {
     const workspaces = await daemonClient.listWorkspaces().catch(() => [])
     const workspaceEntry = workspaces.find(entry => entry.id === workspaceId) ?? null
     const workspacePath = normalizeSessionPath(workspaceEntry?.path) ?? await getWorkspacePathById(workspaceId)
-    const workspaceProjectPaths = new Set(
+    const workspaceProjectPaths = new Set<string>(
       (workspaceEntry?.projectPaths ?? [])
         .map(projectPath => normalizeSessionPath(projectPath))
         .filter((projectPath): projectPath is string => Boolean(projectPath)),
@@ -426,7 +454,8 @@ export function registerCanvasIPC(): void {
         projectPath: normalizeSessionPath(session.projectPath) ?? workspacePath,
       }))
 
-    return mergeSessionEntries(localSessions, relevantNativeSessions)
+    const archivedIds = await readWorkspaceArchivedSessionIds(workspaceId)
+    return applyArchivedSessionState(mergeSessionEntries(localSessions, relevantNativeSessions), archivedIds)
   })
 
   ipcMain.handle('threads:indexStatus', () => {
@@ -499,6 +528,15 @@ export function registerCanvasIPC(): void {
 
     if (result.ok) broadcastSessionsChangedNow(workspaceId)
     return result
+  })
+
+  ipcMain.handle('canvas:setSessionArchived', async (_, workspaceId: string, sessionEntryId: string, archived: boolean) => {
+    assertSafeWorkspaceArtifactId(workspaceId)
+    const changed = await setWorkspaceSessionArchived(workspaceId, sessionEntryId, archived).catch(error => {
+      throw new Error(error instanceof Error ? error.message : String(error))
+    })
+    if (changed) broadcastSessionsChangedNow(workspaceId, archived ? 'archiveSession' : 'unarchiveSession')
+    return { ok: true, changed, archived }
   })
 
   ipcMain.handle('canvas:listCheckpoints', async (_, workspaceId: string, sessionEntryId: string) => {

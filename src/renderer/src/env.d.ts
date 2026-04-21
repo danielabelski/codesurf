@@ -125,6 +125,7 @@ interface ElectronAPI {
     onSessionsChanged(cb: (payload: { workspaceId: string }) => void): () => void
     getSessionState(workspaceId: string, sessionEntryId: string): Promise<any>
     deleteSession(workspaceId: string, sessionEntryId: string): Promise<{ ok: boolean; error?: string }>
+    setSessionArchived(workspaceId: string, sessionEntryId: string, archived: boolean): Promise<{ ok: boolean; changed?: boolean; archived?: boolean; error?: string }>
     renameSession(workspaceId: string, sessionEntryId: string, title: string): Promise<{ ok: boolean; error?: string; title?: string }>
     listCheckpoints(workspaceId: string, sessionEntryId: string): Promise<Array<{ id: string; sessionEntryId: string; createdAt: string; restoredAt?: string | null; label: string; reason?: string | null; fileCount: number; files: string[] }>>
     restoreCheckpoint(workspaceId: string, checkpointId: string, sessionEntryId?: string): Promise<{ ok: boolean; checkpoint?: { id: string }; filesRestored?: number; filesDeleted?: number; error?: string }>
