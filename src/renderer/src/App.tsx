@@ -3883,6 +3883,21 @@ function App(): JSX.Element {
                 onNewKanban={() => addTile('kanban')}
                 onNewBrowser={() => addTile('browser')}
                 onNewChat={() => addTile('chat')}
+                onNewChatForProject={async ({ workspaceId }) => {
+                  // Switch to the project's workspace first (if different)
+                  // so the newly created chat inherits the right context.
+                  if (workspaceId && workspaceId !== workspace?.id) {
+                    await handleSwitchWorkspace(workspaceId)
+                  }
+                  const chatTileId = addTile('chat')
+                  bringToFront(chatTileId)
+                  // If we're currently in fullscreen mode, make the new chat
+                  // the fullscreen tile so the user lands directly in it.
+                  // Otherwise it just appears on the canvas.
+                  if (expandedTileIdRef.current) {
+                    setExpandedTileId(chatTileId)
+                  }
+                }}
                 onNewFiles={() => addTile('files')}
                 onOpenSettings={(tab) => setShowSettings(tab)}
                 onOpenSessionInChat={openSessionInChat}

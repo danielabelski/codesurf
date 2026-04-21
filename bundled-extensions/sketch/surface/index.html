@@ -96,6 +96,23 @@
       pointer-events: none;
       user-select: none;
     }
+    .drop-hint {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: var(--ct-accent-s, rgba(79,70,229,.10));
+      border: 2px dashed var(--ct-accent, #4f46e5);
+      border-radius: 6px;
+      color: var(--ct-accent, #4f46e5);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      pointer-events: none;
+      user-select: none;
+    }
+    .canvas-wrap.is-dragover .drop-hint { display: flex; }
   </style>
 </head>
 <body>
@@ -132,9 +149,10 @@
     <button id="delete" title="Delete selection">&#128465;</button>
     <button id="clear" title="Clear all">&#10060;</button>
   </div>
-  <div class="canvas-wrap">
+  <div class="canvas-wrap" id="wrap">
     <canvas id="c"></canvas>
     <div class="status" id="status"></div>
+    <div class="drop-hint">Drop image to insert</div>
   </div>
 
   <script>
@@ -161,9 +179,31 @@
       let selectedIdx = -1
       /** Drag offset for moving. */
       let dragOffset = null
+      /** Which resize handle is being dragged ('nw','n','ne','e','se','s','sw','w') or null. */
+      let resizeHandle = null
+      /** Snapshot of image rect at resize start: { x, y, w, h }. */
+      let resizeStart = null
+      /** Drop point (canvas coords) where the resize began. */
+      let resizeAnchor = null
 
-      // Shape = { type, color, width, points?, x?,y?,w?,h?,x2?,y2? }
+      // Shape = { type, color, width, points?, x?,y?,w?,h?,x2?,y2?, src? }
       // points: array of {x,y}
+      // 'image' shape: { type:'image', x, y, w, h, src } — src is a data URL
+
+      /** Cache of loaded HTMLImageElements keyed by data URL src. */
+      const imageCache = new Map()
+      /** Load a data URL into an HTMLImageElement, returning a cached promise. */
+      function loadImage(src) {
+        const existing = imageCache.get(src)
+        if (existing && existing.complete && existing.naturalWidth > 0) return Promise.resolve(existing)
+        return new Promise((resolve, reject) => {
+          const img = new Image()
+          img.onload = () => { imageCache.set(src, img); resolve(img); render() }
+          img.onerror = reject
+          img.src = src
+          imageCache.set(src, img)
+        })
+      }
 
       // ── Canvas sizing ────────────────────────────────────────────────────
       let dpr = window.devicePixelRatio || 1
@@ -229,8 +269,68 @@
           ctx.lineTo(x2 - head * Math.cos(angle + Math.PI/6), y2 - head * Math.sin(angle + Math.PI/6))
           ctx.closePath()
           ctx.fill()
+        } else if (s.type === 'image') {
+          const img = imageCache.get(s.src)
+          if (img && img.complete && img.naturalWidth > 0) {
+            ctx.drawImage(img, s.x * dpr, s.y * dpr, s.w * dpr, s.h * dpr)
+          } else {
+            // placeholder while loading
+            ctx.strokeStyle = 'rgba(79,70,229,0.5)'
+            ctx.setLineDash([4,4])
+            ctx.lineWidth = 1 * dpr
+            ctx.strokeRect(s.x * dpr, s.y * dpr, s.w * dpr, s.h * dpr)
+            ctx.setLineDash([])
+            if (s.src && !imageCache.has(s.src)) loadImage(s.src).catch(() => {})
+          }
         }
       }
+      /** Handle hit-box size (in canvas CSS pixels). */
+      const HANDLE_SIZE = 10
+      const HANDLE_NAMES = ['nw','n','ne','e','se','s','sw','w']
+      const HANDLE_CURSORS = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize', n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' }
+
+      /** Returns the (x,y) anchor for a given handle of rect b. */
+      function handlePoint(b, name) {
+        const cx = b.x + b.w / 2, cy = b.y + b.h / 2
+        switch (name) {
+          case 'nw': return { x: b.x, y: b.y }
+          case 'n':  return { x: cx, y: b.y }
+          case 'ne': return { x: b.x + b.w, y: b.y }
+          case 'e':  return { x: b.x + b.w, y: cy }
+          case 'se': return { x: b.x + b.w, y: b.y + b.h }
+          case 's':  return { x: cx, y: b.y + b.h }
+          case 'sw': return { x: b.x, y: b.y + b.h }
+          case 'w':  return { x: b.x, y: cy }
+        }
+        return { x: 0, y: 0 }
+      }
+
+      /** Hit-test a point against the 8 handles of bounds b. Returns handle name or null. */
+      function hitHandle(b, x, y) {
+        const r = HANDLE_SIZE / 2 + 2
+        for (const name of HANDLE_NAMES) {
+          const p = handlePoint(b, name)
+          if (x >= p.x - r && x <= p.x + r && y >= p.y - r && y <= p.y + r) return name
+        }
+        return null
+      }
+
+      function drawHandles(b) {
+        const size = HANDLE_SIZE * dpr
+        ctx.save()
+        ctx.lineWidth = 1 * dpr
+        ctx.strokeStyle = 'rgba(79,70,229,0.95)'
+        ctx.fillStyle = '#ffffff'
+        for (const name of HANDLE_NAMES) {
+          const p = handlePoint(b, name)
+          const hx = p.x * dpr - size / 2
+          const hy = p.y * dpr - size / 2
+          ctx.fillRect(hx, hy, size, size)
+          ctx.strokeRect(hx, hy, size, size)
+        }
+        ctx.restore()
+      }
+
       function render() {
         ctx.save()
         ctx.setTransform(1,0,0,1,0,0)
@@ -238,13 +338,16 @@
         for (const s of shapes) drawShape(s)
         if (drafting) drawShape(drafting)
         if (selectedIdx >= 0 && selectedIdx < shapes.length) {
-          const b = boundsOf(shapes[selectedIdx])
+          const sel = shapes[selectedIdx]
+          const b = boundsOf(sel)
           if (b) {
             ctx.strokeStyle = 'rgba(79,70,229,0.9)'
             ctx.setLineDash([6,4])
             ctx.lineWidth = 1 * dpr
             ctx.strokeRect((b.x - 4) * dpr, (b.y - 4) * dpr, (b.w + 8) * dpr, (b.h + 8) * dpr)
             ctx.setLineDash([])
+            // Resize handles — currently image-only. Easy to extend to rect/ellipse later.
+            if (sel.type === 'image') drawHandles(b)
           }
         }
         ctx.restore()
@@ -264,7 +367,7 @@
           }
           return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
         }
-        if (s.type === 'rect' || s.type === 'ellipse') {
+        if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'image') {
           const x = Math.min(s.x, s.x + s.w)
           const y = Math.min(s.y, s.y + s.h)
           return { x, y, w: Math.abs(s.w), h: Math.abs(s.h) }
@@ -292,7 +395,7 @@
       function translateShape(s, dx, dy) {
         if (s.type === 'pen' || s.type === 'eraser') {
           s.points = s.points.map(p => ({ x: p.x + dx, y: p.y + dy }))
-        } else if (s.type === 'rect' || s.type === 'ellipse') {
+        } else if (s.type === 'rect' || s.type === 'ellipse' || s.type === 'image') {
           s.x += dx; s.y += dy
         } else if (s.type === 'line' || s.type === 'arrow') {
           s.x += dx; s.y += dy; s.x2 += dx; s.y2 += dy
@@ -312,6 +415,22 @@
         canvas.setPointerCapture(e.pointerId)
         const p = pointFromEvent(e)
         if (tool === 'select') {
+          // 1. If an image is already selected, test its resize handles first
+          //    so you can grab a corner without being stolen by translate.
+          if (selectedIdx >= 0 && selectedIdx < shapes.length && shapes[selectedIdx].type === 'image') {
+            const sel = shapes[selectedIdx]
+            const b = boundsOf(sel)
+            const h = b ? hitHandle(b, p.x, p.y) : null
+            if (h) {
+              pushUndo()
+              resizeHandle = h
+              resizeStart = { x: sel.x, y: sel.y, w: sel.w, h: sel.h }
+              resizeAnchor = p
+              canvas.style.cursor = HANDLE_CURSORS[h]
+              return
+            }
+          }
+          // 2. Otherwise standard hit-test + translate.
           const idx = hitTest(p.x, p.y)
           selectedIdx = idx
           if (idx >= 0) {
@@ -335,6 +454,39 @@
 
       canvas.addEventListener('pointermove', (e) => {
         const p = pointFromEvent(e)
+        // Live resize on a grabbed handle.
+        if (tool === 'select' && resizeHandle && selectedIdx >= 0 && resizeStart && resizeAnchor) {
+          const dx = p.x - resizeAnchor.x
+          const dy = p.y - resizeAnchor.y
+          const MIN = 12
+          let nx = resizeStart.x, ny = resizeStart.y, nw = resizeStart.w, nh = resizeStart.h
+          if (resizeHandle.includes('w')) { nx = resizeStart.x + dx; nw = resizeStart.w - dx }
+          if (resizeHandle.includes('e')) { nw = resizeStart.w + dx }
+          if (resizeHandle.includes('n')) { ny = resizeStart.y + dy; nh = resizeStart.h - dy }
+          if (resizeHandle.includes('s')) { nh = resizeStart.h + dy }
+          // Preserve aspect ratio when Shift is held (for corner handles).
+          const isCorner = resizeHandle.length === 2
+          if (isCorner && e.shiftKey) {
+            const aspect = resizeStart.w / Math.max(1, resizeStart.h)
+            // Pick dominant axis by displacement magnitude.
+            if (Math.abs(dx) > Math.abs(dy)) {
+              const targetH = Math.abs(nw) / aspect
+              nh = nh < 0 ? -targetH : targetH
+              if (resizeHandle.includes('n')) ny = resizeStart.y + (resizeStart.h - nh)
+            } else {
+              const targetW = Math.abs(nh) * aspect
+              nw = nw < 0 ? -targetW : targetW
+              if (resizeHandle.includes('w')) nx = resizeStart.x + (resizeStart.w - nw)
+            }
+          }
+          // Enforce minimum size (without flipping).
+          if (nw < MIN) { if (resizeHandle.includes('w')) nx = resizeStart.x + resizeStart.w - MIN; nw = MIN }
+          if (nh < MIN) { if (resizeHandle.includes('n')) ny = resizeStart.y + resizeStart.h - MIN; nh = MIN }
+          const sel = shapes[selectedIdx]
+          sel.x = Math.round(nx); sel.y = Math.round(ny); sel.w = Math.round(nw); sel.h = Math.round(nh)
+          render()
+          return
+        }
         if (tool === 'select' && dragOffset && selectedIdx >= 0) {
           const dx = p.x - dragOffset.x
           const dy = p.y - dragOffset.y
@@ -342,6 +494,15 @@
           translateShape(shapes[selectedIdx], dx, dy)
           render()
           return
+        }
+        // Hover cursor feedback over image handles (select tool, no drag in progress).
+        if (tool === 'select' && !drawing && selectedIdx >= 0 && selectedIdx < shapes.length) {
+          const sel = shapes[selectedIdx]
+          if (sel.type === 'image') {
+            const b = boundsOf(sel)
+            const h = b ? hitHandle(b, p.x, p.y) : null
+            canvas.style.cursor = h ? HANDLE_CURSORS[h] : 'default'
+          }
         }
         if (!drawing || !drafting) return
         if (drafting.type === 'pen' || drafting.type === 'eraser') {
@@ -359,6 +520,13 @@
       function endDraw() {
         if (tool === 'select') {
           dragOffset = null
+          if (resizeHandle) {
+            resizeHandle = null
+            resizeStart = null
+            resizeAnchor = null
+            canvas.style.cursor = 'default'
+            render()
+          }
           return
         }
         if (!drawing) return
@@ -453,6 +621,112 @@
         }
       })
 
+      // ── Drag & Drop + Paste (image insertion) ───────────────────────────
+      // Accept image File drops anywhere over the canvas, and Cmd/Ctrl+V
+      // paste when the surface has focus. Dropped/pasted images are added
+      // as a movable 'image' shape, centered on the drop point (or the
+      // canvas center for paste), sized to fit within the visible area.
+      function insertImageFromDataUrl(dataUrl, atPoint) {
+        loadImage(dataUrl).then((img) => {
+          const rect = wrap.getBoundingClientRect()
+          const maxW = rect.width * 0.9
+          const maxH = rect.height * 0.9
+          let w = img.naturalWidth
+          let h = img.naturalHeight
+          if (w > maxW || h > maxH) {
+            const k = Math.min(maxW / w, maxH / h)
+            w = Math.max(1, Math.round(w * k))
+            h = Math.max(1, Math.round(h * k))
+          }
+          const cx = atPoint ? atPoint.x : rect.width / 2
+          const cy = atPoint ? atPoint.y : rect.height / 2
+          pushUndo()
+          shapes.push({ type: 'image', x: Math.round(cx - w/2), y: Math.round(cy - h/2), w, h, src: dataUrl, color: '#000', width: 1 })
+          // Auto-switch to select so user can reposition immediately.
+          tool = 'select'
+          selectedIdx = shapes.length - 1
+          for (const b of toolbar.querySelectorAll('button[data-tool]')) {
+            b.setAttribute('aria-pressed', String(b.dataset.tool === 'select'))
+          }
+          canvas.style.cursor = 'default'
+          render()
+        }).catch(() => {})
+      }
+
+      function fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result))
+          reader.onerror = reject
+          reader.readAsDataURL(file)
+        })
+      }
+
+      ;['dragenter','dragover'].forEach(ev => wrap.addEventListener(ev, (e) => {
+        if (!e.dataTransfer) return
+        const hasFiles = Array.from(e.dataTransfer.items || []).some(i => i.kind === 'file')
+        const hasUriList = Array.from(e.dataTransfer.types || []).some(t => t === 'text/uri-list' || t === 'text/plain')
+        if (hasFiles || hasUriList) {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+          wrap.classList.add('is-dragover')
+        }
+      }))
+      ;['dragleave','drop'].forEach(ev => wrap.addEventListener(ev, (e) => {
+        if (ev === 'dragleave' && e.target !== wrap) return
+        wrap.classList.remove('is-dragover')
+      }))
+      wrap.addEventListener('drop', async (e) => {
+        e.preventDefault()
+        const rect = wrap.getBoundingClientRect()
+        const dropPoint = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+        const files = Array.from(e.dataTransfer?.files || []).filter(f => /^image\//.test(f.type))
+        if (files.length > 0) {
+          for (const f of files) {
+            try {
+              const url = await fileToDataUrl(f)
+              insertImageFromDataUrl(url, dropPoint)
+            } catch (_) { /* ignore */ }
+          }
+          return
+        }
+        // Fallback: data URL in plain text, or remote URL (best effort fetch).
+        const text = e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain')
+        if (text) {
+          const url = text.trim().split(/\r?\n/).find(Boolean)
+          if (!url) return
+          if (url.startsWith('data:image/')) {
+            insertImageFromDataUrl(url, dropPoint)
+            return
+          }
+          try {
+            const resp = await fetch(url)
+            if (!resp.ok) return
+            const blob = await resp.blob()
+            if (!/^image\//.test(blob.type)) return
+            const dataUrl = await new Promise((resolve, reject) => {
+              const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = reject; r.readAsDataURL(blob)
+            })
+            insertImageFromDataUrl(dataUrl, dropPoint)
+          } catch (_) { /* cross-origin or offline — silently ignore */ }
+        }
+      })
+
+      // Paste image from clipboard (Cmd/Ctrl+V). Works when the iframe has
+      // focus — click the canvas first if paste seems unresponsive.
+      window.addEventListener('paste', async (e) => {
+        const items = Array.from(e.clipboardData?.items || [])
+        const imageItem = items.find(i => i.kind === 'file' && /^image\//.test(i.type))
+        if (!imageItem) return
+        const file = imageItem.getAsFile()
+        if (!file) return
+        e.preventDefault()
+        try {
+          const url = await fileToDataUrl(file)
+          insertImageFromDataUrl(url, null)
+        } catch (_) { /* ignore */ }
+      })
+
       // ── Status ───────────────────────────────────────────────────────────
       function flushStatus() {
         statusEl.textContent = shapes.length === 0 ? 'empty' : (shapes.length + ' shape' + (shapes.length === 1 ? '' : 's'))
@@ -529,6 +803,11 @@
             octx.lineTo(x2 - head*Math.cos(angle - Math.PI/6), y2 - head*Math.sin(angle - Math.PI/6))
             octx.lineTo(x2 - head*Math.cos(angle + Math.PI/6), y2 - head*Math.sin(angle + Math.PI/6))
             octx.closePath(); octx.fill()
+          } else if (s.type === 'image') {
+            const img = imageCache.get(s.src)
+            if (img && img.complete && img.naturalWidth > 0) {
+              octx.drawImage(img, s.x * dpr, s.y * dpr, s.w * dpr, s.h * dpr)
+            }
           }
           octx.restore()
         }

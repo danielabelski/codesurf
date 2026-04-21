@@ -6,7 +6,7 @@ import { useTheme } from '../ThemeContext'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { SidebarFooter } from './sidebar/SidebarFooter'
 import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
-import { buildNestedSessionList, deriveProjectsFromWorkspaces, getProjectDisplayLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SESSION_SOURCE_ICONS } from './sidebar/utils'
+import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SESSION_SOURCE_ICONS } from './sidebar/utils'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
@@ -28,6 +28,12 @@ interface Props {
   onNewKanban: () => void
   onNewBrowser: () => void
   onNewChat: () => void
+  /**
+   * Start a new chat scoped to a specific project row. Host decides whether
+   * to open it fullscreen or drop it onto the canvas based on the current
+   * view mode. When omitted, the per-row "+" buttons are hidden.
+   */
+  onNewChatForProject?: (args: { projectId: string; projectPath: string; workspaceId: string | null }) => void
   onNewFiles: () => void
   onOpenSettings: (tab: string) => void
   onOpenSessionInChat: (session: SessionEntry) => void
@@ -58,7 +64,7 @@ interface Props {
 
 export function Sidebar({
   workspace, workspaces, tiles, onSwitchWorkspace: _onSwitchWorkspace, onDeleteWorkspace: _onDeleteWorkspace, onNewWorkspace: _onNewWorkspace, onOpenFolder, onOpenFile, onFocusTile, onUpdateTile: _onUpdateTile, onCloseTile: _onCloseTile,
-  onNewTerminal, onNewKanban, onNewBrowser, onNewChat, onNewFiles, onOpenSettings,
+  onNewTerminal, onNewKanban, onNewBrowser, onNewChat, onNewChatForProject, onNewFiles, onOpenSettings,
   onOpenSessionInChat, onOpenSessionInApp,
   extensionTiles, extensionEntries, onAddExtensionTile, pinnedExtensionIds, onTogglePinnedExtension,
   collapsed, width, onWidthChange, minWidth = 270, maxWidth = 520, onResizeStateChange, onToggleCollapse: _onToggleCollapse, onScrollMetricsChange, showFooter = true,
@@ -85,6 +91,7 @@ export function Sidebar({
   const [collapsedThreadGroups, setCollapsedThreadGroups] = useState<Record<string, boolean>>({})
   const [loadedSessionWorkspaceIds, setLoadedSessionWorkspaceIds] = useState<string[]>([])
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
+  const [hoveredProjectRow, setHoveredProjectRow] = useState<string | null>(null)
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const deleteConfirmTimerRef = useRef<number | null>(null)
@@ -722,7 +729,7 @@ const visibleSessions = useMemo(() => {
           )
         })()}
 
-        <div style={{ padding: '8px 12px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
+        <div style={{ padding: '8px 8px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
             <span style={{
               fontSize: fonts.secondarySize - 2,
@@ -904,64 +911,124 @@ const visibleSessions = useMemo(() => {
               {filteredSessionGroups.map(group => (
                 <div key={group.key} style={{ paddingBottom: 8 }}>
                   {threadOrganizeMode === 'project' && (
-                    <button
-                      type="button"
-                      onClick={() => toggleThreadGroup(group.key)}
-                      title={`${isThreadGroupCollapsed(group) ? 'Expand' : 'Collapse'} ${group.label}`}
+                    <div
+                      onMouseEnter={() => setHoveredProjectRow(group.key)}
+                      onMouseLeave={() => setHoveredProjectRow(curr => curr === group.key ? null : curr)}
                       style={{
                         display: 'flex',
                         alignItems: 'center',
-                        gap: 10,
+                        gap: 4,
                         width: '100%',
-                        padding: '6px 0 8px',
+                        padding: '6px 4px 8px 0',
                         color: group.projectId === activeProjectId ? theme.text.primary : theme.text.secondary,
-                        background: 'transparent',
-                        border: 'none',
-                        textAlign: 'left',
-                        cursor: 'pointer',
-                        userSelect: 'none',
-                        WebkitUserSelect: 'none',
                       }}
                     >
-                      <span
+                      <button
+                        type="button"
+                        onClick={() => toggleThreadGroup(group.key)}
+                        title={`${isThreadGroupCollapsed(group) ? 'Expand' : 'Collapse'} ${group.label}`}
                         style={{
                           display: 'flex',
                           alignItems: 'center',
-                          justifyContent: 'center',
-                          width: 10,
-                          color: theme.text.disabled,
-                          flexShrink: 0,
+                          gap: 6,
+                          flex: 1,
+                          minWidth: 0,
+                          background: 'transparent',
+                          border: 'none',
+                          padding: 0,
+                          color: 'inherit',
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                          userSelect: 'none',
+                          WebkitUserSelect: 'none',
                         }}
                       >
-                        <svg
-                          width="8"
-                          height="8"
-                          viewBox="0 0 8 8"
+                        <span
                           style={{
-                            transition: 'transform 0.15s ease',
-                            transform: isThreadGroupCollapsed(group) ? 'rotate(0deg)' : 'rotate(90deg)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 10,
+                            color: theme.text.disabled,
+                            flexShrink: 0,
                           }}
                         >
-                          <path d="M2 1l4 3-4 3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </span>
-                      <span style={{ display: 'flex', alignItems: 'center', color: theme.text.disabled }}>
-                        <svg width="16" height="16" viewBox="0 0 14 14" fill="none">
-                          <path d="M1.8 4.1c0-.9.7-1.6 1.6-1.6h2l1.1 1.2h4.1c.9 0 1.6.7 1.6 1.6v4.4c0 .9-.7 1.6-1.6 1.6H3.4c-.9 0-1.6-.7-1.6-1.6V4.1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                        </svg>
-                      </span>
-                      <span style={{ fontSize: fonts.size + 1, fontWeight: 600, color: theme.text.secondary }}>
-                        {group.label}
-                      </span>
-                    </button>
+                          <svg
+                            width="8"
+                            height="8"
+                            viewBox="0 0 8 8"
+                            style={{
+                              transition: 'transform 0.15s ease',
+                              transform: isThreadGroupCollapsed(group) ? 'rotate(0deg)' : 'rotate(90deg)',
+                            }}
+                          >
+                            <path d="M2 1l4 3-4 3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </span>
+                        <span style={{ display: 'flex', alignItems: 'center', color: theme.text.disabled, flexShrink: 0 }}>
+                          <svg width="16" height="16" viewBox="0 0 14 14" fill="none">
+                            <path d="M1.8 4.1c0-.9.7-1.6 1.6-1.6h2l1.1 1.2h4.1c.9 0 1.6.7 1.6 1.6v4.4c0 .9-.7 1.6-1.6 1.6H3.4c-.9 0-1.6-.7-1.6-1.6V4.1Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+                          </svg>
+                        </span>
+                        <span style={{
+                          fontSize: fonts.size + 1,
+                          fontWeight: 600,
+                          color: theme.text.secondary,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          minWidth: 0,
+                          flex: 1,
+                        }}>
+                          {group.label}
+                        </span>
+                      </button>
+                      {onNewChatForProject && (
+                        <button
+                          type="button"
+                          title={`New chat in ${group.label}`}
+                          onClick={e => {
+                            e.stopPropagation()
+                            onNewChatForProject({
+                              projectId: group.projectId,
+                              projectPath: group.projectPath,
+                              workspaceId: group.representativeWorkspaceId,
+                            })
+                          }}
+                          style={{
+                            width: 20,
+                            height: 20,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: 5,
+                            color: theme.text.disabled,
+                            cursor: 'pointer',
+                            padding: 0,
+                            flexShrink: 0,
+                            opacity: hoveredProjectRow === group.key ? 1 : 0,
+                            transition: 'opacity 0.1s ease, background 0.1s ease, color 0.1s ease',
+                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = theme.surface.hover; e.currentTarget.style.color = theme.text.primary }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = theme.text.disabled }}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+                            <path d="M7 2.5v9M2.5 7h9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   {(threadOrganizeMode !== 'project' || !isThreadGroupCollapsed(group)) && group.sessions.map(session => (
                     <SidebarItem
                       key={session.id}
-                      label={session.title.length > 44 ? `${session.title.slice(0, 44)}...` : session.title}
+                      label={formatSessionTitleForSidebar(session.title)}
                       icon={SESSION_SOURCE_ICONS[session.source]}
                       indent={Math.max(1, session.displayIndent + 1)}
+                      indentUnit={6}
                       extraWidth={24}
                       title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}`}
                       emphasize={
@@ -1025,7 +1092,7 @@ const visibleSessions = useMemo(() => {
                   {threadOrganizeMode === 'project' && !isThreadGroupCollapsed(group) && group.sessions.length === 0 && (
                     <div
                       style={{
-                        padding: '0 0 2px 36px',
+                        padding: '0 0 2px 24px',
                         fontSize: fonts.secondarySize,
                         color: theme.text.disabled,
                       }}
@@ -1046,7 +1113,7 @@ const visibleSessions = useMemo(() => {
                       type="button"
                       onClick={() => bumpProjectCount(group.projectId)}
                       style={{
-                        marginLeft: 36,
+                        marginLeft: 24,
                         marginTop: 2,
                         padding: '2px 6px',
                         border: 'none',
@@ -1103,7 +1170,7 @@ const visibleSessions = useMemo(() => {
               <div style={{ paddingBottom: 6 }}>
                 {/* Search filter */}
                 {(groupedExtensions.length > 3) && (
-                  <div style={{ padding: '2px 8px 4px', margin: '0 6px' }}>
+                  <div style={{ padding: '2px 6px 4px', margin: '0 4px' }}>
                     <div style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -1221,9 +1288,9 @@ const visibleSessions = useMemo(() => {
                         style={{
                           display: 'flex',
                           alignItems: 'center',
-                          gap: 7,
-                          padding: '6px 8px 4px 12px',
-                          margin: '0 6px',
+                          gap: 6,
+                          padding: '6px 8px 4px 8px',
+                          margin: '0 4px',
                           cursor: 'pointer',
                           userSelect: 'none',
                           WebkitUserSelect: 'none',

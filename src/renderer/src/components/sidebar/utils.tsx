@@ -27,6 +27,23 @@ export function sessionMetaText(session: SessionEntry): string {
   return `${session.title} ${session.sourceLabel} ${session.sourceDetail ?? ''}`.toLowerCase()
 }
 
+/**
+ * Conversation-title display policy for the sidebar.
+ *
+ * Visual truncation is handled by CSS (`overflow: hidden; text-overflow:
+ * ellipsis`) on the label span, so titles automatically fit the current
+ * sidebar width — resize the sidebar and they grow/shrink with it.
+ *
+ * This helper just normalizes whitespace (collapse newlines/tabs to single
+ * spaces, trim) and applies a generous safety cap to keep pathological
+ * multi-KB titles from bloating the DOM. The full title is still shown in
+ * the row's `title` tooltip.
+ */
+export function formatSessionTitleForSidebar(title: string, hardCap = 160): string {
+  const clean = (title ?? '').replace(/\s+/g, ' ').trim()
+  return clean.length > hardCap ? `${clean.slice(0, hardCap).trimEnd()}…` : clean
+}
+
 export function normalizeSidebarPath(path: string | null | undefined): string {
   return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 }

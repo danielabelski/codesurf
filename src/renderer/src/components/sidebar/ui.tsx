@@ -10,8 +10,8 @@ export function SectionHeader({ label, collapsed, onToggle, extra }: { label: st
     <div
       onClick={onToggle}
       style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
-        padding: '6px 12px 4px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4,
+        padding: '6px 8px 4px',
         cursor: 'pointer', userSelect: 'none', WebkitUserSelect: 'none',
       }}
     >
@@ -102,7 +102,7 @@ export function SidebarMenuPortal({ anchorRef, children }: { anchorRef: React.Re
   )
 }
 
-export function SidebarItem({ label, icon, active, muted, emphasize, onClick, onContextMenu, indent = 0, extra, extraAlwaysVisible = false, extraWidth, title }: {
+export function SidebarItem({ label, icon, active, muted, emphasize, onClick, onContextMenu, indent = 0, indentUnit = 10, extra, extraAlwaysVisible = false, extraWidth, title }: {
   label: string
   icon?: React.ReactNode
   active?: boolean
@@ -121,6 +121,8 @@ export function SidebarItem({ label, icon, active, muted, emphasize, onClick, on
   onClick: () => void
   onContextMenu?: (e: React.MouseEvent) => void
   indent?: number
+  /** px per indent level (default 10). Lower values bring nested items closer to the edge. */
+  indentUnit?: number
   extra?: React.ReactNode
   extraAlwaysVisible?: boolean
   extraWidth?: number
@@ -152,10 +154,10 @@ export function SidebarItem({ label, icon, active, muted, emphasize, onClick, on
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        display: 'flex', alignItems: 'center', gap: 7,
-        paddingTop: 4, paddingBottom: 4, paddingLeft: 12 + indent * 14,
-        paddingRight: extra && (hovered || extraAlwaysVisible) ? 8 + (extraWidth ?? 20) : 8,
-        minHeight: 30, cursor: 'pointer', userSelect: 'none', WebkitUserSelect: 'none', borderRadius: 6, margin: '0 6px',
+        display: 'flex', alignItems: 'center', gap: 6,
+        paddingTop: 4, paddingBottom: 4, paddingLeft: 8 + indent * indentUnit,
+        paddingRight: extra && (hovered || extraAlwaysVisible) ? 6 + (extraWidth ?? 20) : 6,
+        minHeight: 28, cursor: 'pointer', userSelect: 'none', WebkitUserSelect: 'none', borderRadius: 6, margin: '0 4px',
         background: active ? theme.surface.selection : hovered ? theme.surface.hover : 'transparent',
         transition: 'background 0.1s ease', position: 'relative',
       }}
@@ -171,7 +173,7 @@ export function SidebarItem({ label, icon, active, muted, emphasize, onClick, on
       {extra && (
         <span style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center', width: extraWidth, minWidth: 20, minHeight: 20,
-          position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', opacity: hovered || extraAlwaysVisible ? 1 : 0,
+          position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', opacity: hovered || extraAlwaysVisible ? 1 : 0,
           visibility: hovered || extraAlwaysVisible ? 'visible' : 'hidden', pointerEvents: hovered || extraAlwaysVisible ? 'auto' : 'none', transition: 'opacity 0.1s ease',
         }}>
           {extra}
