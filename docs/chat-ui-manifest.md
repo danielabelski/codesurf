@@ -89,9 +89,9 @@ Implemented manifestation:
 - it renders through existing `ToolBlockView`
 - its collapsed summary text reports:
   - how many sections were loaded
-  - which buckets were included
+  - explicit bucket counts for `local-only` and `remote-safe`
   - a short list of contributing files
-- expanding the chip now reveals the exact injected instruction prompt, including the section headings and file paths that were read for that run
+- expanding the chip now reveals the outbound context bucket manifest first, then the exact injected instruction prompt, including the section headings and file paths that were read for that run
 
 That gives the user an inspectable "what context was loaded" trace without creating any new component family.
 
@@ -143,6 +143,7 @@ The actual restore work remains daemon-side. The renderer only invokes the resto
 Backend source:
 
 - `GET /memory/load`
+- `bin/context-buckets.mjs`
 - `src/main/ipc/chat.ts` runtime memory prompt loading
 - `bin/chat-jobs.mjs` daemon memory prompt usage
 
