@@ -365,73 +365,6 @@ export function Sidebar({
     [projectEntries, promotedSessions],
   )
 
-  const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
-    const items: MenuItem[] = []
-    const hasOpenTile = Boolean(session.tileId && openTileIdSet.has(session.tileId))
-
-    if (hasOpenTile) {
-      items.push({ label: 'Focus Existing Chat', action: () => onFocusTile(session.tileId!) })
-    }
-    if (session.canOpenInChat !== false) {
-      items.push({ label: hasOpenTile ? 'Open in New Chat' : 'Open in Chat', action: () => onOpenSessionInChat(session) })
-    }
-    if (session.canOpenInApp) {
-      items.push({ label: `Open in ${session.sourceLabel}`, action: () => onOpenSessionInApp(session) })
-    }
-    if (session.id.startsWith('codesurf-runtime:') && (session.checkpointCount ?? 0) > 0) {
-      items.push({
-        label: session.checkpointCount === 1 ? 'Restore Latest Checkpoint' : `Restore Latest Checkpoint (${session.checkpointCount})`,
-        action: () => {
-          const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
-          if (!confirmed) return
-          void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
-            .then(checkpoints => {
-              const latest = checkpoints[0]
-              if (!latest) return null
-              return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
-            })
-            .then(async result => {
-              if (!result?.ok) {
-                if (result?.error) window.alert(result.error)
-                return
-              }
-              const workspaceEntry = workspaceById.get(session.workspaceId)
-              if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
-              if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
-            })
-            .catch(error => {
-              window.alert(error instanceof Error ? error.message : String(error))
-            })
-        },
-      })
-    }
-    if (session.filePath) {
-      items.push({ label: 'Open Raw File', action: () => onOpenFile(session.filePath!) })
-    }
-
-    items.push({
-      label: 'Rename Thread',
-      action: () => {
-        const nextTitle = window.prompt('Rename thread', session.title)?.trim()
-        if (!nextTitle || nextTitle === session.title) return
-        void window.electron.canvas.renameSession(session.workspaceId, session.id, nextTitle).then(result => {
-          if (!result?.ok) return
-          setSessions(prev => prev.map(entry => entry.id === session.id && entry.workspaceId === session.workspaceId
-            ? { ...entry, title: nextTitle }
-            : entry))
-          const workspaceEntry = workspaceById.get(session.workspaceId)
-          if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry, true)
-        }).catch(() => {})
-      },
-    })
-
-    items.push({
-      label: getSessionArchiveActionLabel(session.isArchived === true),
-      action: () => { void setSessionArchived(session, !(session.isArchived === true)) },
-    })
-
-    return items.length > 0 ? items : [{ label: 'No actions available', action: () => {} }]
-  }, [loadWorkspaceSessions, onFocusTile, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, openTileIdSet, setSessionArchived, workspaceById])
   const resizing = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
@@ -712,6 +645,74 @@ export function Sidebar({
   const handleArchiveSessionClick = useCallback((session: SessionEntry) => {
     void setSessionArchived(session, !(session.isArchived === true))
   }, [setSessionArchived])
+
+  const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
+    const items: MenuItem[] = []
+    const hasOpenTile = Boolean(session.tileId && openTileIdSet.has(session.tileId))
+
+    if (hasOpenTile) {
+      items.push({ label: 'Focus Existing Chat', action: () => onFocusTile(session.tileId!) })
+    }
+    if (session.canOpenInChat !== false) {
+      items.push({ label: hasOpenTile ? 'Open in New Chat' : 'Open in Chat', action: () => onOpenSessionInChat(session) })
+    }
+    if (session.canOpenInApp) {
+      items.push({ label: `Open in ${session.sourceLabel}`, action: () => onOpenSessionInApp(session) })
+    }
+    if (session.id.startsWith('codesurf-runtime:') && (session.checkpointCount ?? 0) > 0) {
+      items.push({
+        label: session.checkpointCount === 1 ? 'Restore Latest Checkpoint' : `Restore Latest Checkpoint (${session.checkpointCount})`,
+        action: () => {
+          const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
+          if (!confirmed) return
+          void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
+            .then(checkpoints => {
+              const latest = checkpoints[0]
+              if (!latest) return null
+              return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
+            })
+            .then(async result => {
+              if (!result?.ok) {
+                if (result?.error) window.alert(result.error)
+                return
+              }
+              const workspaceEntry = workspaceById.get(session.workspaceId)
+              if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
+              if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
+            })
+            .catch(error => {
+              window.alert(error instanceof Error ? error.message : String(error))
+            })
+        },
+      })
+    }
+    if (session.filePath) {
+      items.push({ label: 'Open Raw File', action: () => onOpenFile(session.filePath!) })
+    }
+
+    items.push({
+      label: 'Rename Thread',
+      action: () => {
+        const nextTitle = window.prompt('Rename thread', session.title)?.trim()
+        if (!nextTitle || nextTitle === session.title) return
+        void window.electron.canvas.renameSession(session.workspaceId, session.id, nextTitle).then(result => {
+          if (!result?.ok) return
+          setSessions(prev => prev.map(entry => entry.id === session.id && entry.workspaceId === session.workspaceId
+            ? { ...entry, title: nextTitle }
+            : entry))
+          const workspaceEntry = workspaceById.get(session.workspaceId)
+          if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry, true)
+        }).catch(() => {})
+      },
+    })
+
+    items.push({
+      label: getSessionArchiveActionLabel(session.isArchived === true),
+      action: () => { void setSessionArchived(session, !(session.isArchived === true)) },
+    })
+
+    return items.length > 0 ? items : [{ label: 'No actions available', action: () => {} }]
+  }, [loadWorkspaceSessions, onFocusTile, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, openTileIdSet, setSessionArchived, workspaceById])
 
   const handleOpenProjectFromSidebar = useCallback(() => {
     onOpenFolder()
