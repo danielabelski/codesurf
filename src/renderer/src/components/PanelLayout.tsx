@@ -333,11 +333,11 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
       display: 'flex', alignItems: 'flex-end', height: 34,
       background: theme.surface.panel, borderBottom: `1px solid ${theme.border.subtle}`,
       overflow: 'hidden', flexShrink: 0, zIndex: 1,
-      padding: '0 8px',
+      padding: '0 4px 0 2px',
     }}>
       {/* Scrollable tab strip */}
       <div ref={scrollRef} style={{
-        display: 'flex', alignItems: 'center', gap: 4,
+        display: 'flex', alignItems: 'center', gap: 2,
         flex: 1, overflowX: 'auto', overflowY: 'hidden',
         scrollbarWidth: 'none',
         padding: '0 0 1px',
@@ -360,9 +360,9 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                 setCtxMenu({ tileId: tab.id, tileType: getTileType(tab.id), x: e.clientX, y: e.clientY })
               }}
               style={{
-                display: 'flex', alignItems: 'center', gap: 5,
+                display: 'flex', alignItems: 'center', gap: 3,
                 height: 21,
-                padding: '0 3px', margin: '0 5px', cursor: 'grab', userSelect: 'none',
+                padding: '0 2px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
                 fontSize: 10, color: isActive ? theme.text.primary : theme.text.muted,
                 background: 'transparent',
                 border: '1px solid transparent',
@@ -390,7 +390,7 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
-                  flex: 1,
+                  minWidth: 0,
                   textDecorationLine: isActive ? 'underline' : 'none',
                   textDecorationColor: isActive ? theme.accent.base : 'transparent',
                   textDecorationThickness: 1,
@@ -402,9 +402,24 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
               <span
                 onMouseDown={e => e.stopPropagation()}
                 onClick={e => { e.stopPropagation(); onClose(tab.id) }}
-                style={{ width: 15, height: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15, lineHeight: 1, color: isActive ? theme.text.secondary : theme.text.disabled, flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s' }}
+                style={{
+                  width: 15, height: 15,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 15, lineHeight: 1,
+                  // Always dimmed — matches the muted × on the main tile
+                  // chrome close at the top. No active/inactive variation
+                  // so the × never competes with the tab label.
+                  color: theme.text.disabled,
+                  flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s',
+                  // × is always rendered at normal weight — a bold × reads
+                  // as a heavy close target on the active tab. Keep the
+                  // active/inactive vertical nudges so both glyphs stay on
+                  // the label's optical centre-line.
+                  fontWeight: 400,
+                  marginTop: isActive ? -3 : 3,
+                }}
                 onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                onMouseLeave={e => { e.currentTarget.style.color = isActive ? theme.text.secondary : theme.text.disabled }}
+                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
               >
                 ×
               </span>

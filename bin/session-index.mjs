@@ -31,6 +31,13 @@ async function readSessionTitleOverrides(codesurfHome) {
   }
 }
 
+function normalizePath(value) {
+  return String(value ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+}
+
 function externalSessionOverrideKey(workspacePath, id) {
   return `external:${normalizePath(workspacePath) || '__global__'}:${String(id ?? '').trim()}`
 }

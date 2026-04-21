@@ -128,6 +128,66 @@ export const daemonClient = {
   listLocalSessions(workspaceId: string): Promise<AggregatedSessionEntry[]> {
     return daemonRequest(`/session/local/list?workspaceId=${encodeURIComponent(workspaceId)}`)
   },
+  upsertRuntimeSession(workspaceId: string, cardId: string, state: unknown): Promise<{ ok: boolean; summary?: unknown; error?: string }> {
+    return daemonRequest('/session/runtime/upsert', {
+      body: { workspaceId, cardId, state },
+    })
+  },
+  createCheckpoint(workspaceId: string, sessionEntryId: string, payload: {
+    label?: string | null
+    reason?: string | null
+    files?: string[]
+    metadata?: Record<string, unknown>
+    source?: string | null
+  }): Promise<{ ok: boolean; checkpoint?: { id: string }; error?: string }> {
+    return daemonRequest('/checkpoint/create', {
+      body: {
+        workspaceId,
+        sessionEntryId,
+        ...payload,
+      },
+    })
+  },
+  listCheckpoints(workspaceId: string, sessionEntryId: string): Promise<Array<{
+    id: string
+    sessionEntryId: string
+    createdAt: string
+    restoredAt?: string | null
+    label: string
+    reason?: string | null
+    fileCount: number
+    files: string[]
+  }>> {
+    return daemonRequest('/checkpoint/list', {
+      body: { workspaceId, sessionEntryId },
+    })
+  },
+  restoreCheckpoint(workspaceId: string, checkpointId: string, sessionEntryId?: string | null): Promise<{
+    ok: boolean
+    checkpoint?: { id: string }
+    filesRestored?: number
+    filesDeleted?: number
+    error?: string
+  }> {
+    return daemonRequest('/checkpoint/restore', {
+      body: { workspaceId, checkpointId, sessionEntryId: sessionEntryId ?? null },
+    })
+  },
+  loadMemoryContext(workspaceId: string, executionTarget: 'local' | 'cloud' = 'local'): Promise<{
+    executionTarget: 'local' | 'cloud'
+    includedBuckets: string[]
+    sections: Array<{
+      scope: string
+      bucket: string
+      displayPath: string
+      path: string
+      importedFrom?: string | null
+      content: string
+    }>
+    prompt?: string
+  }> {
+    return daemonRequest(`/memory/load?workspaceId=${encodeURIComponent(workspaceId)}&executionTarget=${encodeURIComponent(executionTarget)}`)
+  },
   listExternalSessions(workspacePath: string | null, force = false): Promise<AggregatedSessionEntry[]> {
     const normalizedPath = String(workspacePath ?? '').trim()
     const query = new URLSearchParams()

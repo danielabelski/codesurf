@@ -123,15 +123,15 @@ function Btn({ label, title, active, loading, onClick }: {
 }
 
 const TabsIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-    <rect x="1" y="5" width="14" height="10" rx="1"/>
+  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.25} strokeLinejoin="round">
+    <rect x="1" y="5" width="14" height="10" rx="1.5"/>
     <rect x="1" y="2" width="4" height="4" rx="1"/>
     <rect x="6" y="2" width="4" height="4" rx="1"/>
   </svg>
 )
 
 const GridIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.25} strokeLinejoin="round">
     <rect x="1" y="1" width="6" height="6" rx="1"/>
     <rect x="9" y="1" width="6" height="6" rx="1"/>
     <rect x="1" y="9" width="6" height="6" rx="1"/>
@@ -140,7 +140,7 @@ const GridIcon = () => (
 )
 
 const ColumnIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.25} strokeLinejoin="round">
     <rect x="2" y="1" width="12" height="4" rx="1"/>
     <rect x="2" y="6" width="12" height="4" rx="1"/>
     <rect x="2" y="11" width="12" height="4" rx="1"/>
@@ -148,7 +148,7 @@ const ColumnIcon = () => (
 )
 
 const RowIcon = () => (
-  <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.25} strokeLinejoin="round">
     <rect x="1" y="2" width="4" height="12" rx="1"/>
     <rect x="6" y="2" width="4" height="12" rx="1"/>
     <rect x="11" y="2" width="4" height="12" rx="1"/>

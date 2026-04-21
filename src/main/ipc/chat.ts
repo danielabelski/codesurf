@@ -20,6 +20,11 @@ import { getAgentPath, getShellEnvPath } from '../agent-paths'
 import { updateLinks } from '../peer-state'
 import { parseClaudeStream } from '../agent-stream'
 import { ensureLocalProxyRunning } from './localProxy'
+import {
+  applyProjectContextPolicy,
+  buildProviderContextPolicy,
+  describeProjectContextEnvelope,
+} from '../privacy/provider-context-policy'
 import type { ExecutionHostRecord, ExecutionPreference, ExtensionChatTransportConfig } from '../../shared/types'
 import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
@@ -98,6 +103,7 @@ interface ChatRequest {
     detachedDaemonAvailable: boolean
     detachedDaemonPreferred: boolean
   }
+  memoryPrompt?: string
 }
 
 function log(...args: unknown[]): void {
@@ -111,6 +117,120 @@ function sendStream(cardId: string, event: Record<string, unknown>): void {
       win.webContents.send('agent:stream', { cardId, ...event })
     }
   })
+}
+
+interface RuntimeChatSessionState {
+  provider: string
+  model: string
+  sessionId: string | null
+  jobId: string | null
+  jobSequence: number
+  executionTarget: 'local' | 'cloud'
+  cloudHostId: string | null
+  isStreaming: boolean
+  messages: ChatMessage[]
+}
+
+function cloneChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map(message => ({
+    role: message.role,
+    content: String(message.content ?? ''),
+  }))
+}
+
+function buildRuntimeSessionEntryId(req: ChatRequest): string {
+  return `codesurf-runtime:${req.cardId}`
+}
+
+function buildCheckpointLabel(toolName: string, filePaths: string[], workspaceDir?: string): string {
+  if (filePaths.length === 0) return `Before ${toolName}`
+  if (filePaths.length === 1) return `Before ${toolName} ${getDisplayPath(filePaths[0], workspaceDir)}`
+  return `Before ${toolName} (${filePaths.length} files)`
+}
+
+function extractAnthropicCheckpointPaths(toolName: string, input: Record<string, unknown>, workspaceDir?: string): string[] {
+  const resolveFile = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !value.trim()) return null
+    return resolveCodexFilePath(value, workspaceDir)
+  }
+
+  if (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write') {
+    const filePath = resolveFile(input.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  if (toolName === 'NotebookEdit') {
+    const filePath = resolveFile(input.notebook_path) ?? resolveFile(input.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  return []
+}
+
+async function createRuntimeCheckpoint(
+  req: ChatRequest,
+  toolName: string,
+  filePaths: string[],
+  metadata: Record<string, unknown> = {},
+): Promise<{ ok: boolean; checkpointId?: string; skipped?: boolean; error?: string }> {
+  if (filePaths.length === 0) return { ok: true, skipped: true }
+  if (!req.workspaceId) return { ok: true, skipped: true }
+
+  try {
+    const response = await daemonClient.createCheckpoint(req.workspaceId, buildRuntimeSessionEntryId(req), {
+      label: buildCheckpointLabel(toolName, filePaths, req.workspaceDir),
+      reason: `tool:${toolName}`,
+      files: filePaths,
+      metadata: {
+        provider: req.provider,
+        model: req.model,
+        toolName,
+        cardId: req.cardId,
+        ...metadata,
+      },
+      source: 'main-ipc-chat',
+    })
+    if (!response.ok) {
+      return { ok: false, error: response.error ?? `Failed to create checkpoint for ${toolName}` }
+    }
+    return { ok: true, checkpointId: response.checkpoint?.id }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log('createRuntimeCheckpoint error', req.cardId, toolName, message)
+    return { ok: false, error: message }
+  }
+}
+
+type ToolCheckpointPermissionResult =
+  | { behavior: 'allow'; toolUseID?: string }
+  | { behavior: 'deny'; message: string; toolUseID?: string }
+
+async function allowToolWithCheckpoint(
+  req: ChatRequest,
+  toolName: string,
+  input: Record<string, unknown>,
+  toolOptions: any,
+): Promise<ToolCheckpointPermissionResult> {
+  const checkpoint = await createRuntimeCheckpoint(req, toolName, extractAnthropicCheckpointPaths(toolName, input, req.workspaceDir), {
+    toolUseID: typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null,
+  })
+  if (!checkpoint.ok) {
+    return {
+      behavior: 'deny',
+      message: `Checkpoint creation failed before ${toolName}: ${checkpoint.error ?? 'unknown error'}`,
+      toolUseID: toolOptions?.toolUseID,
+    }
+  }
+  return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+}
+
+async function upsertRuntimeSessionState(req: ChatRequest, state: RuntimeChatSessionState): Promise<void> {
+  if (!req.workspaceId) return
+  try {
+    await daemonClient.upsertRuntimeSession(req.workspaceId, req.cardId, state)
+  } catch (error) {
+    log('upsertRuntimeSession error', req.cardId, error)
+  }
 }
 
 // Active Claude SDK queries
@@ -425,6 +545,13 @@ function buildAsyncExecutionContext(params: {
   }
 }
 
+function joinPromptSections(...sections: Array<string | undefined | null>): string | undefined {
+  const normalized = sections
+    .map(section => String(section ?? '').trim())
+    .filter(Boolean)
+  return normalized.length > 0 ? normalized.join('\n\n') : undefined
+}
+
 function buildAsyncExecutionPrompt(asyncExecution: ChatRequest['asyncExecution']): string | undefined {
   if (!asyncExecution) return undefined
 
@@ -450,15 +577,33 @@ function buildAsyncExecutionPrompt(asyncExecution: ChatRequest['asyncExecution']
   return lines.join('\n')
 }
 
-function buildClaudeAgentPrompt(basePrompt: string | undefined, asyncExecution: ChatRequest['asyncExecution']): string | undefined {
+function buildClaudeAgentPrompt(
+  basePrompt: string | undefined,
+  memoryPrompt: string | undefined,
+  asyncExecution: ChatRequest['asyncExecution'],
+): string | undefined {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  if (basePrompt && asyncPrompt) return `${basePrompt}\n\n${asyncPrompt}`
-  return basePrompt ?? asyncPrompt
+  return joinPromptSections(basePrompt, memoryPrompt, asyncPrompt)
 }
 
-function buildCodexPrompt(userText: string, asyncExecution: ChatRequest['asyncExecution']): string {
+function buildCodexPrompt(
+  userText: string,
+  asyncExecution: ChatRequest['asyncExecution'],
+  memoryPrompt?: string,
+): string {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  return asyncPrompt ? `${asyncPrompt}\n\n## User Request\n${userText}` : userText
+  const preamble = joinPromptSections(memoryPrompt, asyncPrompt)
+  return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
+}
+
+async function loadRuntimeMemoryPrompt(req: ChatRequest): Promise<string | undefined> {
+  if (!req.workspaceId) return undefined
+  const context = await daemonClient.loadMemoryContext(
+    req.workspaceId,
+    req.executionTarget === 'cloud' ? 'cloud' : 'local',
+  )
+  const prompt = String(context?.prompt ?? '').trim()
+  return prompt || undefined
 }
 
 async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostRecord | null> {
@@ -601,7 +746,21 @@ async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, 
 }
 
 async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Promise<{ ok: boolean; jobId: string; detached?: boolean }> {
-  const projectContext = await buildProjectContext(req.workspaceDir)
+  const rawProjectContext = await buildProjectContext(req.workspaceDir)
+  const contextPolicy = buildProviderContextPolicy({
+    executionTarget: req.executionTarget,
+    hostType: host.type,
+  })
+  const projectContext = applyProjectContextPolicy(rawProjectContext, contextPolicy)
+
+  log('daemon projectContext policy', {
+    hostType: host.type,
+    executionTarget: req.executionTarget ?? 'local',
+    reason: contextPolicy.reason,
+    raw: describeProjectContextEnvelope(rawProjectContext),
+    effective: describeProjectContextEnvelope(projectContext),
+  })
+
   const job = await hostRequest<{
     id: string
     status: string
@@ -1023,6 +1182,19 @@ function chatClaude(req: ChatRequest): void {
   }
 
   const existingSessionId = sessionIds.get(req.cardId)
+  const runtimeMessages = cloneChatMessages(req.messages)
+  const runtimeSession: RuntimeChatSessionState = {
+    provider: req.provider,
+    model: req.model,
+    sessionId: existingSessionId ?? req.sessionId ?? null,
+    jobId: req.jobId ?? null,
+    jobSequence: typeof req.jobSequence === 'number' ? req.jobSequence : 0,
+    executionTarget: req.executionTarget === 'cloud' ? 'cloud' : 'local',
+    cloudHostId: req.cloudHostId ?? null,
+    isStreaming: true,
+    messages: runtimeMessages,
+  }
+  void upsertRuntimeSessionState(req, runtimeSession)
   log('chatClaude starting', {
     model: req.model,
     prompt: lastUserMsg.content.slice(0, 100),
@@ -1131,7 +1303,7 @@ function chatClaude(req: ChatRequest): void {
     ].join('\n')
     log('systemPrompt built for', req.peers.length, 'peers, contex tools:', contexToolNames.length)
   }
-  systemPrompt = buildClaudeAgentPrompt(systemPrompt, req.asyncExecution)
+  systemPrompt = buildClaudeAgentPrompt(systemPrompt, req.memoryPrompt, req.asyncExecution)
 
   // Resolve claude binary from startup detection
   const claudePath = getAgentPath('claude')
@@ -1175,7 +1347,7 @@ function chatClaude(req: ChatRequest): void {
       // Read the live mode so mid-thread switches take effect immediately.
       const currentMode = cardPermissionModes.get(req.cardId) ?? permMode
       if (currentMode === 'bypassPermissions') {
-        return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
       }
 
       const permissionRequest: ToolPermissionRequest = {
@@ -1192,7 +1364,7 @@ function chatClaude(req: ChatRequest): void {
       //   'deny'  → `never` (persistent deny) — reject silently
       const storedDecision = resolveStoredPermission(permissionRequest)
       if (storedDecision === 'allow') {
-        return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
       }
       if (storedDecision === 'deny') {
         // Surface the resolved state in the stream so the renderer can
@@ -1256,7 +1428,7 @@ function chatClaude(req: ChatRequest): void {
         log('tool permission persist error:', (err as Error).message)
       }
 
-      return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+      return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
     },
     ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
     // Use detected system binary, not the SDK's bundled cli.js
@@ -1287,6 +1459,7 @@ function chatClaude(req: ChatRequest): void {
     // Consume the async generator in the background
     ;(async () => {
       let capturedSessionId = false
+      let assistantText = ''
       // Track streamed text per content_block index so we can fall back to the
       // assembled `assistant` message for any text the partial stream missed.
       // Key format: `${turn}:${index}` — we bump `turn` on each assistant message.
@@ -1301,6 +1474,8 @@ function chatClaude(req: ChatRequest): void {
             if (sid) {
               log('captured session_id:', sid.slice(0, 8))
               sessionIds.set(req.cardId, sid)
+              runtimeSession.sessionId = sid
+              void upsertRuntimeSessionState(req, runtimeSession)
               sendStream(req.cardId, { type: 'session', sessionId: sid })
               capturedSessionId = true
             }
@@ -1313,6 +1488,7 @@ function chatClaude(req: ChatRequest): void {
               if (evt.delta?.type === 'text_delta' && evt.delta.text) {
                 const key = `${streamTurn}:${evt.index ?? 0}`
                 streamedTextByIndex.set(key, (streamedTextByIndex.get(key) ?? '') + evt.delta.text)
+                assistantText += evt.delta.text
                 sendStream(req.cardId, { type: 'text', text: evt.delta.text })
               } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
                 sendStream(req.cardId, { type: 'thinking', text: evt.delta.thinking, thinkingId: currentThinkingId })
@@ -1399,6 +1575,18 @@ function chatClaude(req: ChatRequest): void {
             })
           } else if (msg.type === 'result') {
             const result = msg as any
+            if (!assistantText && typeof result.result === 'string' && result.result.trim()) {
+              assistantText = result.result
+            }
+            if (assistantText.trim()) {
+              runtimeSession.messages = [
+                ...runtimeMessages,
+                { role: 'assistant', content: assistantText },
+              ]
+            }
+            runtimeSession.sessionId = result.session_id ?? runtimeSession.sessionId
+            runtimeSession.isStreaming = false
+            void upsertRuntimeSessionState(req, runtimeSession)
             sendStream(req.cardId, {
               type: 'done',
               cost: result.total_cost_usd,
@@ -1416,11 +1604,27 @@ function chatClaude(req: ChatRequest): void {
 
         // Generator finished -- ensure done is sent
         if (activeQueries.has(req.cardId)) {
-          sendStream(req.cardId, { type: 'done' })
+          if (assistantText.trim()) {
+            runtimeSession.messages = [
+              ...runtimeMessages,
+              { role: 'assistant', content: assistantText },
+            ]
+          }
+          runtimeSession.isStreaming = false
+          void upsertRuntimeSessionState(req, runtimeSession)
+          sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
           activeQueries.delete(req.cardId)
         }
       } catch (err: any) {
         log('generator error:', err.message ?? String(err))
+        if (assistantText.trim()) {
+          runtimeSession.messages = [
+            ...runtimeMessages,
+            { role: 'assistant', content: assistantText },
+          ]
+        }
+        runtimeSession.isStreaming = false
+        void upsertRuntimeSessionState(req, runtimeSession)
         sendStream(req.cardId, { type: 'error', error: err.message ?? String(err) })
         activeQueries.delete(req.cardId)
       }
@@ -1760,13 +1964,26 @@ function chatCodex(req: ChatRequest): void {
 
   const codexBin = getAgentPath('codex') || 'codex'
   const shellPath = getShellEnvPath()
+  const runtimeMessages = cloneChatMessages(req.messages)
+  const runtimeSession: RuntimeChatSessionState = {
+    provider: req.provider,
+    model: req.model,
+    sessionId: req.sessionId ?? sessionIds.get(req.cardId) ?? null,
+    jobId: req.jobId ?? null,
+    jobSequence: typeof req.jobSequence === 'number' ? req.jobSequence : 0,
+    executionTarget: req.executionTarget === 'cloud' ? 'cloud' : 'local',
+    cloudHostId: req.cloudHostId ?? null,
+    isStreaming: true,
+    messages: runtimeMessages,
+  }
+  void upsertRuntimeSessionState(req, runtimeSession)
   const args = ['exec', '--json', '--model', req.model, '--dangerously-bypass-approvals-and-sandbox']
   if (req.workspaceDir) {
     args.push('--skip-git-repo-check', '-C', req.workspaceDir)
   } else {
     args.push('--skip-git-repo-check')
   }
-  args.push(buildCodexPrompt(lastUserMsg.content, req.asyncExecution))
+  args.push(buildCodexPrompt(lastUserMsg.content, req.asyncExecution, req.memoryPrompt))
 
   const proc = spawn(codexBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -1777,6 +1994,7 @@ function chatCodex(req: ChatRequest): void {
   const pendingSnapshots = new Map<string, CodexFileSnapshot>()
   const aggregatedFileChanges = new Map<string, StreamToolFileChange>()
   const exploreEntries: StreamToolCommandEntry[] = []
+  let assistantText = ''
   let editsStarted = false
   let exploreStarted = false
   let pendingStdout = ''
@@ -1787,6 +2005,8 @@ function chatCodex(req: ChatRequest): void {
 
     if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
       sessionIds.set(req.cardId, evt.thread_id)
+      runtimeSession.sessionId = evt.thread_id
+      void upsertRuntimeSessionState(req, runtimeSession)
       sendStream(req.cardId, { type: 'session', sessionId: evt.thread_id })
       return
     }
@@ -1794,6 +2014,19 @@ function chatCodex(req: ChatRequest): void {
     if (evt.type === 'item.started') {
       const item = evt.item
       if (item?.type === 'file_change' && Array.isArray(item.changes)) {
+        const checkpointPaths = item.changes
+          .map((change: { path?: unknown }) => typeof change?.path === 'string'
+            ? resolveCodexFilePath(change.path, req.workspaceDir)
+            : null)
+          .filter((value: string | null): value is string => Boolean(value))
+        const checkpoint = await createRuntimeCheckpoint(req, 'CodexFileChange', checkpointPaths, {
+          changeKinds: item.changes.map((change: { kind?: unknown }) => String(change?.kind ?? 'update')),
+        })
+        if (!checkpoint.ok) {
+          proc.kill('SIGTERM')
+          sendStream(req.cardId, { type: 'error', error: `Checkpoint creation failed before Codex file changes: ${checkpoint.error ?? 'unknown error'}` })
+          return
+        }
         for (const change of item.changes) {
           if (typeof change?.path !== 'string') continue
           const resolvedPath = resolveCodexFilePath(change.path, req.workspaceDir)
@@ -1814,6 +2047,7 @@ function chatCodex(req: ChatRequest): void {
     if (!item || typeof item !== 'object') return
 
     if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) {
+      assistantText += item.text
       sendStream(req.cardId, { type: 'text', text: item.text })
       return
     }
@@ -1892,23 +2126,44 @@ function chatCodex(req: ChatRequest): void {
         try {
           await handleCodexJsonEvent(JSON.parse(pendingStdout.trim()))
         } catch {
+          assistantText += pendingStdout
           sendStream(req.cardId, { type: 'text', text: pendingStdout })
         }
       }
+      if (assistantText.trim()) {
+        runtimeSession.messages = [
+          ...runtimeMessages,
+          { role: 'assistant', content: assistantText },
+        ]
+      }
+      runtimeSession.sessionId = sessionIds.get(req.cardId) ?? runtimeSession.sessionId
+      runtimeSession.isStreaming = false
+      void upsertRuntimeSessionState(req, runtimeSession)
       if (code !== 0 && stderrBuf.trim()) {
         sendStream(req.cardId, { type: 'error', error: stderrBuf.trim() })
       }
-      sendStream(req.cardId, { type: 'done', sessionId: sessionIds.get(req.cardId) })
+      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
     }).catch(() => {
+      if (assistantText.trim()) {
+        runtimeSession.messages = [
+          ...runtimeMessages,
+          { role: 'assistant', content: assistantText },
+        ]
+      }
+      runtimeSession.sessionId = sessionIds.get(req.cardId) ?? runtimeSession.sessionId
+      runtimeSession.isStreaming = false
+      void upsertRuntimeSessionState(req, runtimeSession)
       if (code !== 0 && stderrBuf.trim()) {
         sendStream(req.cardId, { type: 'error', error: stderrBuf.trim() })
       }
-      sendStream(req.cardId, { type: 'done', sessionId: sessionIds.get(req.cardId) })
+      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
     })
   })
 
   proc.on('error', (err) => {
     activeProcesses.delete(req.cardId)
+    runtimeSession.isStreaming = false
+    void upsertRuntimeSessionState(req, runtimeSession)
     sendStream(req.cardId, { type: 'error', error: err.message.includes('ENOENT')
       ? 'Codex CLI not found. Install: npm install -g @openai/codex'
       : err.message })
@@ -2639,6 +2894,21 @@ export function registerChatIPC(): void {
       }),
     }
 
+    let memoryPrompt: string | undefined
+    try {
+      memoryPrompt = await loadRuntimeMemoryPrompt(effectiveRequest)
+    } catch (error) {
+      sendStream(req.cardId, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(req.cardId, { type: 'done' })
+      return { ok: false }
+    }
+    const requestWithMemory: ChatRequest = memoryPrompt
+      ? { ...effectiveRequest, memoryPrompt }
+      : effectiveRequest
+
     if (daemonHost) {
       log('chat execution route', {
         cardId: req.cardId,
@@ -2651,7 +2921,7 @@ export function registerChatIPC(): void {
         hostId: daemonHost.id,
         hostType: daemonHost.type,
       })
-      return await sendChatToDaemon(effectiveRequest, daemonHost)
+      return await sendChatToDaemon(requestWithMemory, daemonHost)
     }
 
     if (requestedRunMode === 'background') {
@@ -2673,18 +2943,18 @@ export function registerChatIPC(): void {
       backend: 'runtime',
     })
 
-    switch (effectiveRequest.provider) {
-      case 'claude': chatClaude(effectiveRequest); break
-      case 'codex': chatCodex(effectiveRequest); break
-      case 'opencode': chatOpencode(effectiveRequest); break
-      case 'openclaw': chatOpenclaw(effectiveRequest); break
-      case 'hermes': chatHermes(effectiveRequest); break
+    switch (requestWithMemory.provider) {
+      case 'claude': chatClaude(requestWithMemory); break
+      case 'codex': chatCodex(requestWithMemory); break
+      case 'opencode': chatOpencode(requestWithMemory); break
+      case 'openclaw': chatOpenclaw(requestWithMemory); break
+      case 'hermes': chatHermes(requestWithMemory); break
       default:
-        if (effectiveRequest.providerTransport?.type === 'local-proxy') {
-          chatLocalProxy(effectiveRequest)
+        if (requestWithMemory.providerTransport?.type === 'local-proxy') {
+          chatLocalProxy(requestWithMemory)
         } else {
-          sendStream(effectiveRequest.cardId, { type: 'error', error: `Unsupported provider: ${effectiveRequest.provider}` })
-          sendStream(effectiveRequest.cardId, { type: 'done' })
+          sendStream(requestWithMemory.cardId, { type: 'error', error: `Unsupported provider: ${requestWithMemory.provider}` })
+          sendStream(requestWithMemory.cardId, { type: 'done' })
         }
     }
 

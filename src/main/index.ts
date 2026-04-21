@@ -37,6 +37,7 @@ import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
 import { stopAllRelayServices } from './relay/service'
+import { normalizeSafeExternalUrl } from './utils/externalUrl'
 // browserTile BrowserView IPC was removed — renderer uses <webview> tag directly
 
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
@@ -301,7 +302,7 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
   })
 
   win.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    void openExternalIfSafe(details.url, 'window')
     return { action: 'deny' }
   })
 
@@ -317,6 +318,22 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
   }
 
   return win
+}
+
+async function openExternalIfSafe(rawUrl: string, source: 'window' | 'ipc'): Promise<boolean> {
+  const safeUrl = normalizeSafeExternalUrl(rawUrl)
+  if (!safeUrl) {
+    console.warn(`[shell] Blocked unsafe external URL from ${source}: ${rawUrl}`)
+    return false
+  }
+
+  try {
+    await shell.openExternal(safeUrl)
+    return true
+  } catch (error) {
+    console.warn(`[shell] Failed to open external URL from ${source}:`, error)
+    return false
+  }
 }
 
 app.whenReady().then(async () => {
@@ -678,9 +695,7 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
-    if (typeof url !== 'string' || url.trim().length === 0) return false
-    await shell.openExternal(url)
-    return true
+    return await openExternalIfSafe(url, 'ipc')
   })
 
   // Native app menu with Cmd+N / Cmd+T

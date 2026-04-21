@@ -3845,11 +3845,13 @@ function App(): JSX.Element {
         <div style={{
           width: '100%',
           height: '100%',
-          background: theme.surface.sidebarOverlay,
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
+          background: expandedTileId
+            ? 'transparent'
+            : `color-mix(in srgb, ${theme.surface.app.includes('gradient') ? theme.surface.panelMuted : theme.surface.app} 60%, transparent)`,
+          backdropFilter: 'blur(2px)',
+          WebkitBackdropFilter: 'blur(2px)',
           borderRadius: 12,
-          border: `0.5px solid ${theme.border.default}`,
+          border: 'none',
           paddingTop: 8,
           overflow: 'hidden',
           display: 'flex',
@@ -4071,6 +4073,10 @@ function App(): JSX.Element {
                       justifyContent: 'center',
                       width: 18,
                       height: 18,
+                      // Nudged 2px down so the × optically aligns with the
+                      // centre of the workspace-tab label (the 600-weight
+                      // title pushes the glyph above centre otherwise).
+                      marginTop: 2,
                       marginBottom: 1,
                       border: 'none',
                       borderRadius: 4,
@@ -4199,6 +4205,10 @@ function App(): JSX.Element {
                       justifyContent: 'center',
                       width: 18,
                       height: 18,
+                      // Nudged 2px down so the × optically aligns with the
+                      // centre of the workspace-tab label (the 600-weight
+                      // title pushes the glyph above centre otherwise).
+                      marginTop: 2,
                       marginBottom: 1,
                       border: 'none',
                       borderRadius: 4,

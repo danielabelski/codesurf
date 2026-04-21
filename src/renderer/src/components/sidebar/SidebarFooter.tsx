@@ -97,12 +97,16 @@ export function SidebarFooter({
       )}
       <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 2, flexShrink: 0, flexDirection: 'row' }}>
         {([
-          { label: 'Settings', icon: <Settings size={12} />, action: () => onOpenSettings('general') },
+          { label: 'Settings', icon: <Settings size={15} />, action: () => onOpenSettings('general') },
           { label: 'New Terminal', icon: TILE_ICONS.terminal, action: onNewTerminal },
           { label: 'Agent Board', icon: TILE_ICONS.kanban, action: onNewKanban, disabled: true },
           { label: 'Browser', icon: TILE_ICONS.browser, action: onNewBrowser },
           { label: 'Chat', icon: TILE_ICONS.chat, action: onNewChat },
-          { label: 'Files', icon: TILE_ICONS.files, action: onNewFiles },
+          { label: 'Files', icon: (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M1 3C1 2.17 1.67 1.5 2.5 1.5H5L6.5 3H11.5C12.33 3 13 3.67 13 4.5V11C13 11.83 12.33 12.5 11.5 12.5H2.5C1.67 12.5 1 11.83 1 11V3Z" stroke="currentColor" strokeWidth="1.2" />
+            </svg>
+          ), action: onNewFiles },
         ] as { label: string; icon: React.ReactNode; action: () => void; disabled?: boolean }[]).map(btn => (
           <button key={btn.label} title={btn.disabled ? `${btn.label} disabled` : btn.label} style={{
             width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent',

@@ -7,6 +7,8 @@ import { dirname, basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { findSessionEntryById, getExternalSessionChatState, invalidateExternalSessionCache, listExternalSessionEntries } from './session-index.mjs'
 import { createChatJobManager } from './chat-jobs.mjs'
+import { createCheckpointStore } from './checkpoints.mjs'
+import { loadMemoryContext } from './memory-loader.mjs'
 
 const HOME = process.env.CODESURF_HOME || join(homedir(), '.codesurf')
 const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'pid.json')
@@ -23,6 +25,15 @@ const SESSION_TITLE_OVERRIDES_FILE = join(HOME, 'session-title-overrides.json')
 const AUTH_TOKEN = randomUUID()
 const SESSION_TEXT_LIMIT = 120
 const chatJobs = createChatJobManager({ homeDir: HOME })
+const checkpointStore = createCheckpointStore({
+  assertSafeId,
+  atomicWriteJson,
+  materializeWorkspace,
+  readJsonFile,
+  readWorkspaceState,
+  runtimeSessionStatePath,
+  workspaceContexDir,
+})
 
 function ensureDir(dirPath) {
   mkdirSync(dirPath, { recursive: true })
@@ -1256,6 +1267,12 @@ function tileSessionSummaryPath(workspaceId, tileId) {
   return join(workspaceContexDir(workspaceId), `tile-session-${tileId}.json`)
 }
 
+function runtimeSessionStatePath(workspaceId, tileId) {
+  assertSafeId(workspaceId)
+  assertSafeId(tileId)
+  return join(workspaceContexDir(workspaceId), `runtime-session-${tileId}.json`)
+}
+
 function truncateSessionText(text, length = SESSION_TEXT_LIMIT) {
   if (!text) return null
   const normalized = String(text).replace(/\s+/g, ' ').trim()
@@ -1315,8 +1332,73 @@ function extractTileSessionSummary(tileId, state) {
   }
 }
 
+function extractRuntimeSessionSummary(tileId, state) {
+  if (!state || typeof state !== 'object') return null
+  const record = state
+  const messages = Array.isArray(record.messages) ? record.messages : []
+  const provider = typeof record.provider === 'string' && record.provider.trim()
+    ? record.provider
+    : 'claude'
+  const model = typeof record.model === 'string' ? record.model : ''
+  const sessionId = typeof record.sessionId === 'string' ? record.sessionId : null
+  const jobId = typeof record.jobId === 'string' ? record.jobId : null
+  const executionTarget = record.executionTarget === 'cloud' ? 'cloud' : 'local'
+  const cloudHostId = typeof record.cloudHostId === 'string' ? record.cloudHostId : null
+  const isStreaming = record.isStreaming === true
+  const checkpointCount = Number(record?.checkpoints?.count ?? 0) || 0
+
+  let lastMessage = null
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]
+    if (!message || typeof message !== 'object') continue
+    const text = truncateSessionText(typeof message.content === 'string' ? message.content : null)
+    if (text) {
+      lastMessage = text
+      break
+    }
+  }
+
+  const title = typeof record.title === 'string' && record.title.trim()
+    ? record.title.trim()
+    : extractSessionTitle(messages, provider) ?? sessionTitleFromText(lastMessage, provider)
+
+  return {
+    version: 1,
+    tileId,
+    sessionId,
+    provider,
+    model,
+    jobId,
+    executionTarget,
+    cloudHostId,
+    isStreaming,
+    checkpointCount,
+    messageCount: messages.length,
+    lastMessage,
+    title,
+    updatedAt: Number(record.updatedAt ?? Date.now()),
+  }
+}
+
 function pathExists(filePath) {
   return existsSync(filePath)
+}
+
+function upsertRuntimeSessionState(workspaceId, tileId, state) {
+  assertSafeId(workspaceId)
+  assertSafeId(tileId)
+  if (!state || typeof state !== 'object') return { ok: false, error: 'state is required' }
+  const summary = extractRuntimeSessionSummary(tileId, state)
+  if (!summary) return { ok: false, error: 'state did not contain a valid session payload' }
+  const existingState = readJsonFile(runtimeSessionStatePath(workspaceId, tileId), null)
+  const nextState = {
+    ...((existingState && typeof existingState === 'object') ? existingState : {}),
+    ...state,
+    updatedAt: summary.updatedAt,
+    title: summary.title,
+  }
+  atomicWriteJson(runtimeSessionStatePath(workspaceId, tileId), nextState)
+  return { ok: true, summary: extractRuntimeSessionSummary(tileId, nextState) }
 }
 
 function moveFileToDeleted(filePath) {
@@ -1473,6 +1555,43 @@ function renameExternalSession(codesurfHome, workspacePath, sessionEntryId, titl
 function listLocalWorkspaceSessions(workspaceId) {
   const dotDir = workspaceContexDir(workspaceId)
   const entries = []
+  const runtimeTileIds = new Set()
+
+  // Scan daemon-owned runtime chat sessions first so they take precedence over
+  // renderer tile-state fallbacks for the same tile.
+  if (existsSync(dotDir)) {
+    for (const name of readDirNames(dotDir)) {
+      if (!name.startsWith('runtime-session-') || !name.endsWith('.json')) continue
+
+      const filePath = join(dotDir, name)
+      const tileId = name.replace('runtime-session-', '').replace('.json', '')
+      const state = readJsonFile(filePath, null)
+      const summary = extractRuntimeSessionSummary(tileId, state)
+      if (!summary) continue
+      runtimeTileIds.add(tileId)
+
+      entries.push(applyLocalSessionTitleOverride(workspaceId, {
+        id: `codesurf-runtime:${tileId}`,
+        source: 'codesurf',
+        scope: 'workspace',
+        tileId,
+        sessionId: summary.sessionId ?? null,
+        provider: summary.provider ?? 'claude',
+        model: summary.model ?? '',
+        messageCount: Number(summary.messageCount ?? 0),
+        lastMessage: summary.lastMessage ?? null,
+        updatedAt: Number(summary.updatedAt ?? Date.now()),
+        title: summary.title ?? sessionTitleFromText(summary.lastMessage ?? null, summary.provider ?? 'claude'),
+        filePath,
+        projectPath: resolveWorkspaceProjectPath(workspaceId, null),
+        sourceLabel: 'CodeSurf',
+        sourceDetail: `${summary.provider ?? 'Agent'} runtime`,
+        canOpenInChat: true,
+        canOpenInApp: false,
+        nestingLevel: 0,
+      }))
+    }
+  }
   
   // Scan tile sessions
   if (existsSync(dotDir)) {
@@ -1481,6 +1600,7 @@ function listLocalWorkspaceSessions(workspaceId) {
 
       const filePath = join(dotDir, name)
       const tileId = name.replace('tile-state-', '').replace('.json', '')
+      if (runtimeTileIds.has(tileId)) continue
       const summaryPath = tileSessionSummaryPath(workspaceId, tileId)
 
       let summary = readJsonFile(summaryPath, null)
@@ -1576,6 +1696,10 @@ function listLocalWorkspaceSessions(workspaceId) {
 
 function getLocalSessionState(workspaceId, sessionEntryId) {
   const normalizedId = String(sessionEntryId)
+  if (normalizedId.startsWith('codesurf-runtime:')) {
+    const tileId = normalizedId.replace('codesurf-runtime:', '')
+    return readJsonFile(runtimeSessionStatePath(workspaceId, tileId), null)
+  }
   if (normalizedId.startsWith('codesurf-tile:')) {
     const tileId = normalizedId.replace('codesurf-tile:tile-state-', '').replace('.json', '')
     return readJsonFile(tileStatePath(workspaceId, tileId), null)
@@ -1589,6 +1713,15 @@ function getLocalSessionState(workspaceId, sessionEntryId) {
 
 function deleteLocalSession(workspaceId, sessionEntryId) {
   const normalizedId = String(sessionEntryId)
+  if (normalizedId.startsWith('codesurf-runtime:')) {
+    const tileId = normalizedId.replace('codesurf-runtime:', '')
+    const filePath = runtimeSessionStatePath(workspaceId, tileId)
+    if (!pathExists(filePath)) return { ok: false, error: 'Session file missing' }
+
+    moveFileToDeleted(filePath)
+    deleteLocalSessionTitleOverride(workspaceId, sessionEntryId)
+    return { ok: true }
+  }
   if (normalizedId.startsWith('codesurf-tile:')) {
     const tileId = normalizedId.replace('codesurf-tile:tile-state-', '').replace('.json', '')
     const filePath = tileStatePath(workspaceId, tileId)
@@ -1623,6 +1756,12 @@ function deleteLocalSession(workspaceId, sessionEntryId) {
 
 function renameLocalSession(workspaceId, sessionEntryId, title) {
   const normalizedId = String(sessionEntryId)
+  if (normalizedId.startsWith('codesurf-runtime:')) {
+    const tileId = normalizedId.replace('codesurf-runtime:', '')
+    const filePath = runtimeSessionStatePath(workspaceId, tileId)
+    if (!pathExists(filePath)) return { ok: false, error: 'Session file missing' }
+    return setLocalSessionTitleOverride(workspaceId, sessionEntryId, title)
+  }
   if (normalizedId.startsWith('codesurf-tile:')) {
     const tileId = normalizedId.replace('codesurf-tile:tile-state-', '').replace('.json', '')
     const filePath = tileStatePath(workspaceId, tileId)
@@ -1657,6 +1796,21 @@ function resolveWorkspaceProjectPath(workspaceId, fallbackPath = null) {
     .map(path => normalizePath(path))
     .filter(Boolean)
   return projectPaths[0] ?? normalizePath(fallbackPath)
+}
+
+async function loadWorkspaceMemoryContext(workspaceId, executionTarget = 'local') {
+  const state = readWorkspaceState()
+  const workspace = state.workspaces.find(entry => entry.id === workspaceId)
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${workspaceId}`)
+  }
+  const materialized = materializeWorkspace(workspace, state.projects)
+  return await loadMemoryContext({
+    homeDir: HOME,
+    workspaceDir: materialized.path,
+    projectPaths: materialized.projectPaths,
+    executionTarget,
+  })
 }
 
 function listDaemonWorkspaceSessions(workspaceId, existingEntries) {
@@ -2120,13 +2274,99 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (method === 'POST' && url.pathname === '/session/runtime/upsert') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const cardId = String(body?.cardId ?? '').trim()
+      if (!workspaceId || !cardId || !body?.state || typeof body.state !== 'object') {
+        sendJson(res, 400, { error: 'workspaceId, cardId, and state are required' })
+        return
+      }
+      sendJson(res, 200, upsertRuntimeSessionState(workspaceId, cardId, body.state))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/create') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim()
+      if (!workspaceId || !sessionEntryId) {
+        sendJson(res, 400, { error: 'workspaceId and sessionEntryId are required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.createCheckpoint(workspaceId, sessionEntryId, {
+        label: body?.label,
+        reason: body?.reason,
+        files: body?.files,
+        metadata: body?.metadata,
+        source: body?.source,
+      }))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/list') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim() || null
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.listCheckpoints(workspaceId, sessionEntryId))
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/checkpoint/restore') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const checkpointId = String(body?.checkpointId ?? '').trim()
+      const sessionEntryId = String(body?.sessionEntryId ?? '').trim() || null
+      if (!workspaceId || !checkpointId) {
+        sendJson(res, 400, { error: 'workspaceId and checkpointId are required' })
+        return
+      }
+      sendJson(res, 200, checkpointStore.restoreCheckpoint(workspaceId, checkpointId, { sessionEntryId }))
+      return
+    }
+
+    if (method === 'GET' && url.pathname === '/memory/load') {
+      const workspaceId = String(url.searchParams.get('workspaceId') ?? '').trim()
+      const executionTarget = url.searchParams.get('executionTarget') === 'cloud' ? 'cloud' : 'local'
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, await loadWorkspaceMemoryContext(workspaceId, executionTarget))
+      return
+    }
+
     if (method === 'POST' && url.pathname === '/chat/job/start') {
       const body = await parseRequestBody(req)
       if (!body?.request || typeof body.request !== 'object') {
         sendJson(res, 400, { error: 'request is required' })
         return
       }
-      const job = await chatJobs.startJob(body.request)
+      let request = body.request
+      if (!String(request?.memoryPrompt ?? '').trim() && typeof request?.workspaceId === 'string' && request.workspaceId.trim()) {
+        try {
+          const memoryContext = await loadWorkspaceMemoryContext(
+            request.workspaceId.trim(),
+            request.executionTarget === 'cloud' ? 'cloud' : 'local',
+          )
+          const prompt = String(memoryContext?.prompt ?? '').trim()
+          if (prompt) {
+            request = {
+              ...request,
+              memoryPrompt: prompt,
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof Error && /Workspace not found:/i.test(error.message))) {
+            throw error
+          }
+        }
+      }
+      const job = await chatJobs.startJob(request)
       sendJson(res, 200, job)
       return
     }

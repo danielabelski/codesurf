@@ -3,6 +3,8 @@ import { ArrowLeft, ArrowRight, RotateCcw, RotateCw, Home, Globe, Monitor, Smart
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import { dispatchOpenLink } from '../utils/links'
+import clusoEmbedJs from '../assets/cluso/cluso-embed.js?raw'
+import clusoEmbedCss from '../assets/cluso/cluso-embed.css?raw'
 
 const HOMEPAGE = 'https://www.google.com'
 
@@ -11,8 +13,6 @@ const DESKTOP_UA =
 const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
 
-const CLUSO_EMBED_JS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.js'
-const CLUSO_EMBED_CSS_PATH = '/Users/jkneen/clawd/agentation-real/dist/assets/cluso-embed.css'
 const WEBVIEW_DISPOSE_DELAY_MS = 15000
 const WEBVIEW_PARKING_ROOT_ID = 'browser-tile-webview-parking-root'
 const CLUSO_TOOLBAR_WIDTH = 297
@@ -703,7 +703,10 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   }, [connectedPeers, tileId])
 
   // Cluso embed assets — loaded once on mount
-  const clusoAssetsRef = useRef<{ js: string | null; css: string | null }>({ js: null, css: null })
+  const clusoAssetsRef = useRef<{ js: string | null; css: string | null }>({
+    js: clusoEmbedJs || null,
+    css: clusoEmbedCss || null,
+  })
 
   // Stable setter refs — avoid re-adding event listeners when state changes
   const setCurrentUrlRef = useRef(setCurrentUrl)
@@ -769,34 +772,21 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       .catch(err => console.error('[Cluso] Injection failed:', err))
   }, [executeInWebview]) // stable — reads assets via ref
 
-  // Load cluso embed assets from filesystem (once per mount)
-  const clusoAssetsLoadedRef = useRef(false)
+  // Load bundled cluso embed assets (once per mount)
   useEffect(() => {
-    if (clusoAssetsLoadedRef.current && clusoAssetsRef.current.js) return
-    const loadAssets = async () => {
-      try {
-        const [jsResult, cssResult] = await Promise.all([
-          window.electron?.fs?.readFile(CLUSO_EMBED_JS_PATH),
-          window.electron?.fs?.readFile(CLUSO_EMBED_CSS_PATH)
-        ])
-        clusoAssetsRef.current = {
-          js: typeof jsResult === 'string' ? jsResult : null,
-          css: typeof cssResult === 'string' ? cssResult : null
-        }
-        clusoAssetsLoadedRef.current = !!(clusoAssetsRef.current.js && clusoAssetsRef.current.css)
-        if (!clusoAssetsLoadedRef.current) {
-          console.warn('[Cluso] Assets loaded but empty/invalid — inspector will not work')
-        }
-        // The page can finish loading before the assets arrive from disk.
-        // If that happened, retry injection now instead of waiting for another navigation.
-        if (mountedRef.current && wvReadyRef.current) {
-          injectCluso()
-        }
-      } catch (err) {
-        console.warn('[BrowserTile] Could not load cluso embed assets:', err)
-      }
+    clusoAssetsRef.current = {
+      js: clusoEmbedJs || null,
+      css: clusoEmbedCss || null,
     }
-    loadAssets()
+
+    if (!clusoAssetsRef.current.js || !clusoAssetsRef.current.css) {
+      console.warn('[Cluso] Bundled embed assets are missing — inspector will not work')
+      return
+    }
+
+    // The page can finish loading before the component mount effect runs.
+    // If that happened, retry injection now instead of waiting for another navigation.
+    if (mountedRef.current && wvReadyRef.current) injectCluso()
   }, [injectCluso])
 
   // Create or reattach the webview imperatively so page state survives view switches

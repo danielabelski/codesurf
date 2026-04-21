@@ -362,7 +362,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
               }}
             />
             <Cpu
-              size={13}
+              size={15}
               strokeWidth={2}
               aria-label={daemonTitle}
               style={{ color: daemonStatusTextColor, flexShrink: 0 }}

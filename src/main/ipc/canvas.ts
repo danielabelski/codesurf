@@ -351,7 +351,7 @@ export function registerCanvasIPC(): void {
   ipcMain.handle('canvas:getSessionState', async (_, workspaceId: string, sessionEntryId: string) => {
     const workspacePath = await getWorkspacePathById(workspaceId)
 
-    if (sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
+    if (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
       return await daemonClient.getLocalSessionState(workspaceId, sessionEntryId).catch(() => null)
     }
 
@@ -371,7 +371,7 @@ export function registerCanvasIPC(): void {
     assertSafeWorkspaceArtifactId(workspaceId)
     const workspacePath = await getWorkspacePathById(workspaceId)
 
-    if (sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
+    if (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
       const result = await daemonClient.deleteLocalSession(workspaceId, sessionEntryId).catch(error => ({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -392,7 +392,7 @@ export function registerCanvasIPC(): void {
     assertSafeWorkspaceArtifactId(workspaceId)
     const workspacePath = await getWorkspacePathById(workspaceId)
 
-    const result = (sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:'))
+    const result = (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:'))
       ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
           ok: false,
           error: error instanceof Error ? error.message : String(error),

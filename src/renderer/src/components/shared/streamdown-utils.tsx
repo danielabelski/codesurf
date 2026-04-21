@@ -57,7 +57,7 @@ export function ensureShimmerStyles(): void {
 // Bump this version suffix whenever the injected CSS below changes so that
 // Vite HMR re-injects a fresh <style> tag instead of short-circuiting on the
 // stale one left behind from a previous build.
-const CODE_LAYOUT_STYLE_VERSION = 'v9'
+const CODE_LAYOUT_STYLE_VERSION = 'v10'
 const CODE_LAYOUT_STYLE_ID = `shared-streamdown-code-layout-${CODE_LAYOUT_STYLE_VERSION}`
 
 export function ensureCodeBlockLayoutStyles(): void {
@@ -186,6 +186,25 @@ export function ensureCodeBlockLayoutStyles(): void {
       display: inline-flex !important;
       align-items: center !important;
       justify-content: center !important;
+      /* Strip streamdown/shadcn's default bordered-pill look — on light
+         backgrounds the 1px dark outline reads as a heavy chip. We only
+         want the glyph, with a subtle hover fill. */
+      background: transparent !important;
+      border: none !important;
+      box-shadow: none !important;
+      outline: none !important;
+      border-radius: 4px !important;
+      cursor: pointer !important;
+      opacity: 0.7;
+      transition: opacity 0.12s, background-color 0.12s;
+    }
+    [data-streamdown="code-block-actions"] button:hover {
+      opacity: 1;
+      background: var(--chat-code-header-bg, rgba(0,0,0,0.06)) !important;
+    }
+    [data-streamdown="code-block-actions"] button:focus-visible {
+      outline: 1px solid var(--chat-code-border, #d7dde4) !important;
+      outline-offset: 1px !important;
     }
     /* Kill any wrapper a future streamdown version might put around the
        actions cluster so it can't add extra vertical height of its own. */
@@ -363,7 +382,7 @@ export function usePatchCodeBlocks(
         // shares the header row with the language label.
         actions.style.cssText = 'position:absolute!important;top:0!important;right:0!important;height:22px!important;display:flex!important;align-items:center!important;padding:0 4px!important;margin:0!important;z-index:5;background:transparent!important;pointer-events:auto'
         actions.querySelectorAll<HTMLElement>('button').forEach(btn => {
-          btn.style.cssText = 'width:18px!important;height:18px!important;padding:1px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important'
+          btn.style.cssText = 'width:18px!important;height:18px!important;padding:1px!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;background:transparent!important;border:none!important;box-shadow:none!important;outline:none!important;border-radius:4px!important;cursor:pointer!important;opacity:0.7'
         })
         actions.querySelectorAll<SVGElement>('svg').forEach(svg => {
           svg.setAttribute('width', '11')

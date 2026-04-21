@@ -63,5 +63,8 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=optional
 
+      - name: Run release gate tests
+        run: npm test
+
       - name: Build and publish GitHub release
         run: npm run release:github
