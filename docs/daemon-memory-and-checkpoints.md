@@ -282,6 +282,7 @@ These systems manifest through existing UI primitives:
 Implemented now:
 
 - memory loading emits a normal `Workspace Instructions` tool chip at the start of local and daemon-backed chat turns
+- expanding that chip now shows the exact layered instruction prompt that was injected for the run, so the user can inspect what AGENTS / CLAUDE content was actually read
 - checkpoint creation emits a normal `Checkpoint saved` tool chip before risky local runtime edits
 - runtime session rows expose checkpoint count through their existing tooltip text
 - runtime session context menus expose `Restore Latest Checkpoint`

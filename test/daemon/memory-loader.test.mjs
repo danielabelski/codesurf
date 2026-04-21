@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { buildMemoryPrompt, describeMemoryContextForTool } from '../../bin/memory-loader.mjs'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
@@ -191,6 +192,45 @@ test('daemon memory loader includes CLAUDE.md layers with the same bucket rules 
   assert.equal(response.status, 200)
   assert.match(response.payload.prompt, /Workspace Claude layer/)
   assert.doesNotMatch(response.payload.prompt, /User Claude layer|Workspace Claude local layer/)
+})
+
+test('daemon memory loader formats expandable Workspace Instructions details from the exact injected prompt', () => {
+  const context = {
+    includedBuckets: ['remote-safe'],
+    sections: [
+      {
+        scope: 'workspace',
+        bucket: 'remote-safe',
+        displayPath: 'AGENTS.md',
+        content: 'Workspace rule A',
+      },
+      {
+        scope: 'workspace',
+        bucket: 'remote-safe',
+        displayPath: 'CLAUDE.md',
+        content: 'Workspace rule B',
+      },
+      {
+        scope: 'workspace-local',
+        bucket: 'local-only',
+        displayPath: '.claude/CLAUDE.md',
+        content: 'Keep this local-only rule out of cloud runs',
+      },
+    ],
+  }
+  const prompt = buildMemoryPrompt({
+    sections: context.sections.filter(section => context.includedBuckets.includes(section.bucket)),
+  })
+
+  const details = describeMemoryContextForTool(context, prompt)
+
+  assert.equal(details.summary, 'Loaded 2 instruction sections (remote-safe): AGENTS.md, CLAUDE.md')
+  assert.match(details.input, /## Workspace Instructions/)
+  assert.match(details.input, /### Workspace Instructions \[remote-safe\] \(AGENTS.md\)/)
+  assert.match(details.input, /Workspace rule A/)
+  assert.match(details.input, /### Workspace Instructions \[remote-safe\] \(CLAUDE.md\)/)
+  assert.match(details.input, /Workspace rule B/)
+  assert.doesNotMatch(details.input, /local-only rule/)
 })
 
 test('daemon memory loader keeps imported local-only files out of cloud prompts and avoids self-import duplication', async t => {

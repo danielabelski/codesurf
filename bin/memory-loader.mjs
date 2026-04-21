@@ -58,6 +58,34 @@ export function buildMemoryPrompt(context) {
   return lines.join('\n').trim()
 }
 
+export function describeMemoryContextForTool(context, promptOverride) {
+  const input = String(promptOverride ?? context?.prompt ?? '').trim() || undefined
+  const visibleSections = Array.isArray(context?.sections) && Array.isArray(context?.includedBuckets)
+    ? context.sections.filter(section => context.includedBuckets.includes(section.bucket))
+    : []
+
+  if (visibleSections.length > 0) {
+    const paths = visibleSections.slice(0, 3).map(section => section.displayPath)
+    const suffix = visibleSections.length > 3 ? ` +${visibleSections.length - 3} more` : ''
+    return {
+      summary: `Loaded ${visibleSections.length} instruction section${visibleSections.length === 1 ? '' : 's'} (${context.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}`,
+      input,
+    }
+  }
+
+  if (input) {
+    return {
+      summary: 'Loaded workspace instructions for this run.',
+      input,
+    }
+  }
+
+  return {
+    summary: undefined,
+    input: undefined,
+  }
+}
+
 function joinPromptSections(...sections) {
   const normalized = sections
     .map(section => String(section ?? '').trim())

@@ -624,11 +624,19 @@ function summarizeMemoryContext(context: Awaited<ReturnType<typeof daemonClient.
   return `Loaded ${sections.length} instruction section${sections.length === 1 ? '' : 's'} (${context.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}`
 }
 
+function buildMemoryContextInput(context: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null | undefined): string | undefined {
+  return String(context?.prompt ?? '').trim() || undefined
+}
+
 function emitMemoryContextLoaded(cardId: string, context: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null | undefined): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
   const toolId = `codesurf-memory-${Date.now()}`
   sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
+  const input = buildMemoryContextInput(context)
+  if (input) {
+    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+  }
   sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
 }
 

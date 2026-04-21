@@ -87,10 +87,11 @@ Implemented manifestation:
 
 - memory loading now appears as a normal tool/status chip in `ChatTile`
 - it renders through existing `ToolBlockView`
-- its summary text reports:
+- its collapsed summary text reports:
   - how many sections were loaded
   - which buckets were included
   - a short list of contributing files
+- expanding the chip now reveals the exact injected instruction prompt, including the section headings and file paths that were read for that run
 
 That gives the user an inspectable "what context was loaded" trace without creating any new component family.
 

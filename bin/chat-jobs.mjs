@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
-import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
+import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } from './memory-loader.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -397,18 +397,11 @@ function joinPromptSections(...sections) {
 }
 
 function summarizeMemoryContext(memoryContext, instructionPrompt) {
-  if (String(instructionPrompt ?? '').trim()) {
-    if (Array.isArray(memoryContext?.sections) && Array.isArray(memoryContext?.includedBuckets)) {
-      const visibleSections = memoryContext.sections.filter(section => memoryContext.includedBuckets.includes(section.bucket))
-      if (visibleSections.length > 0) {
-        const paths = visibleSections.slice(0, 3).map(section => section.displayPath)
-        const suffix = visibleSections.length > 3 ? ` +${visibleSections.length - 3} more` : ''
-        return `Loaded ${visibleSections.length} instruction section${visibleSections.length === 1 ? '' : 's'} (${memoryContext.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}`
-      }
-    }
-    return 'Loaded workspace instructions for this run.'
-  }
-  return undefined
+  return describeMemoryContextForTool(memoryContext, instructionPrompt).summary
+}
+
+function buildMemoryContextInput(memoryContext, instructionPrompt) {
+  return describeMemoryContextForTool(memoryContext, instructionPrompt).input
 }
 
 function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt) {
@@ -832,12 +825,20 @@ export function createChatJobManager({ homeDir }) {
       })
       const instructionPrompt = String(request.memoryPrompt ?? '').trim() || buildMemoryPrompt(memoryContext)
       const memorySummary = summarizeMemoryContext(memoryContext, instructionPrompt)
+      const memoryInput = buildMemoryContextInput(memoryContext, instructionPrompt)
       if (memorySummary) {
         await appendEvent(job.id, {
           type: 'tool_start',
           toolId: 'codesurf-memory-context',
           toolName: 'Workspace Instructions',
         })
+        if (memoryInput) {
+          await appendEvent(job.id, {
+            type: 'tool_input',
+            toolId: 'codesurf-memory-context',
+            text: memoryInput,
+          })
+        }
         await appendEvent(job.id, {
           type: 'tool_summary',
           toolId: 'codesurf-memory-context',
