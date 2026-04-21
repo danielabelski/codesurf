@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
-import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus } from 'lucide-react'
+import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus, Package } from 'lucide-react'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
@@ -95,6 +95,10 @@ function sanitizePanelLayout(root: PanelNode | null | undefined, tileIds: string
 
 function normalizeWorkspacePath(path: string | null | undefined): string {
   return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function WorkspaceTabIcon({ size = 14 }: { size?: number }): React.JSX.Element {
+  return <Package size={size} strokeWidth={2} aria-hidden="true" />
 }
 
 const CODE_EXTENSIONS = new Set(['ts', 'tsx', 'js', 'jsx', 'json', 'py', 'rs', 'go', 'cpp', 'c', 'java', 'css', 'html', 'sh', 'bash', 'yaml', 'yml', 'toml', 'xml'])
@@ -3071,7 +3075,7 @@ function App(): JSX.Element {
   }, [viewport, nextZIndex, saveCanvas, sidebarCollapsed, sidebarWidth])
 
   // ─── Render tile body ─────────────────────────────────────────────────────
-  const renderTileBody = (tile: TileState, options?: { isInteracting?: boolean }): React.ReactNode => {
+  const renderTileBody = (tile: TileState, options?: { isInteracting?: boolean; isActive?: boolean }): React.ReactNode => {
     const isTileInteracting = dragState.type !== null || Boolean(options?.isInteracting)
     switch (tile.type) {
       case 'terminal':
@@ -3114,6 +3118,7 @@ function App(): JSX.Element {
             height={tile.height}
             zIndex={tile.zIndex}
             isInteracting={isTileInteracting}
+            isVisible={options?.isActive !== false}
             connectedPeers={negotiatedDiscoveryState.byTileConnections.get(tile.id)?.map(link => link.peerId) ?? []}
             hideNavbar={tile.hideNavbar}
           />
@@ -3773,6 +3778,11 @@ function App(): JSX.Element {
   const hasWorkspaceTabs = openWorkspaceTabs.length > 0
   const workspaceTitleFallback = workspace?.name?.trim() || 'WORKSPACES'
   const showTopWorkspacePickerTab = showWorkspacePickerTab || (!workspace && openWorkspaceTabs.length === 0)
+  const workspaceTabLabelSize = Math.max(12, appFonts.size - 1)
+  const workspaceTabBackground = theme.accent.base
+  const workspaceTabInactiveBackground = `color-mix(in srgb, ${theme.accent.base} 18%, ${theme.surface.panelElevated})`
+  const workspaceTabInactiveHoverBackground = `color-mix(in srgb, ${theme.accent.base} 28%, ${theme.surface.panelElevated})`
+  const workspaceTabMaxWidth = 'min(248px, 24vw)'
   // Discovery connection colors — adapt to theme mode
   const dsc = theme.mode === 'light'
     ? { line: '53, 104, 255', dot: '53, 104, 255', bg: '255, 255, 255', text: theme.accent.base }
@@ -4021,7 +4031,7 @@ function App(): JSX.Element {
               gap: 8,
               minWidth: 0,
               height: '100%',
-              paddingLeft: 6,
+              paddingLeft: 11,
               // @ts-ignore
               WebkitAppRegion: 'no-drag',
             }}
@@ -4034,15 +4044,22 @@ function App(): JSX.Element {
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
-                    maxWidth: 280,
+                    maxWidth: workspaceTabMaxWidth,
                     minWidth: 0,
-                    height: '100%',
-                    padding: '0 2px 0 0',
-                    gap: 2,
-                    marginBottom: 2,
-                    paddingTop: 4,
-                    color: isActive ? theme.text.primary : theme.text.muted,
-                    transition: 'color 0.12s ease, border-color 0.12s ease',
+                    height: 22,
+                    padding: '0 7px 0 9px',
+                    gap: 5,
+                    marginBottom: 7,
+                    borderRadius: 6,
+                    background: isActive ? workspaceTabBackground : workspaceTabInactiveBackground,
+                    color: isActive ? theme.text.inverse : theme.text.secondary,
+                    transition: 'color 0.12s ease, background 0.12s ease',
+                  }}
+                  onMouseEnter={e => {
+                    if (!isActive) e.currentTarget.style.background = workspaceTabInactiveHoverBackground
+                  }}
+                  onMouseLeave={e => {
+                    if (!isActive) e.currentTarget.style.background = workspaceTabInactiveBackground
                   }}
                 >
                   <button
@@ -4055,28 +4072,34 @@ function App(): JSX.Element {
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
+                      gap: 5,
+                      flex: 1,
                       minWidth: 0,
-                      maxWidth: 246,
-                      height: '100%',
-                      padding: '0 2px',
+                      height: 20,
+                      padding: 0,
                       border: 'none',
                       background: 'transparent',
                       color: 'inherit',
-                      fontSize: appFonts.size,
+                      fontSize: Math.max(11, workspaceTabLabelSize),
                       fontWeight: 600,
+                      lineHeight: 1,
                       letterSpacing: 0,
                       cursor: isActive ? 'default' : 'pointer',
                     }}
                   >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12, lineHeight: 0, color: 'currentColor', flexShrink: 0 }}>
+                      <WorkspaceTabIcon size={12} />
+                    </span>
                     <span
                       style={{
+                        display: 'flex',
+                        alignItems: 'center',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
-                        textDecorationLine: isActive ? 'underline' : 'none',
-                        textDecorationColor: isActive ? theme.accent.base : 'transparent',
-                        textDecorationThickness: 1,
-                        textUnderlineOffset: 5,
+                        minWidth: 0,
+                        lineHeight: 1,
+                        transform: 'translateY(-1px)',
                       }}
                     >
                       {ws.name}
@@ -4094,32 +4117,26 @@ function App(): JSX.Element {
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      width: 18,
-                      height: 18,
-                      // Nudged 2px down so the × optically aligns with the
-                      // centre of the workspace-tab label (the 600-weight
-                      // title pushes the glyph above centre otherwise).
-                      marginTop: 2,
-                      marginBottom: 1,
+                      width: 16,
+                      height: 16,
                       border: 'none',
                       borderRadius: 4,
                       background: 'transparent',
-                      color: theme.text.disabled,
+                      color: 'currentColor',
                       cursor: 'pointer',
                       flexShrink: 0,
                       padding: 0,
                       transition: 'background 0.12s ease, color 0.12s ease',
                     }}
                     onMouseEnter={e => {
-                      e.currentTarget.style.background = theme.surface.hover
-                      e.currentTarget.style.color = theme.text.secondary
+                      e.currentTarget.style.background = isActive ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
                     }}
                     onMouseLeave={e => {
                       e.currentTarget.style.background = 'transparent'
-                      e.currentTarget.style.color = theme.text.disabled
+                      e.currentTarget.style.color = 'currentColor'
                     }}
                   >
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" style={{ display: 'block', transform: 'translateY(-0.5px)' }}>
                       <path d="M3 3l6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                     </svg>
                   </button>
@@ -4130,27 +4147,34 @@ function App(): JSX.Element {
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  maxWidth: 280,
+                  maxWidth: workspaceTabMaxWidth,
                   minWidth: 0,
-                  height: '100%',
-                  padding: '0 2px',
-                  marginBottom: 2,
-                  paddingTop: 4,
-                  color: theme.text.primary,
-                  fontSize: appFonts.size,
+                  height: 22,
+                  padding: '0 7px 0 9px',
+                  gap: 5,
+                  marginBottom: 7,
+                  borderRadius: 6,
+                  background: workspaceTabBackground,
+                  color: theme.text.inverse,
+                  fontSize: Math.max(11, workspaceTabLabelSize),
                   fontWeight: 600,
+                  lineHeight: 1,
                   letterSpacing: 0,
                 }}
               >
+                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12, lineHeight: 0, color: 'currentColor', flexShrink: 0 }}>
+                  <WorkspaceTabIcon size={12} />
+                </span>
                 <span
                   style={{
+                    display: 'flex',
+                    alignItems: 'center',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
-                    textDecorationLine: 'underline',
-                    textDecorationColor: theme.accent.base,
-                    textDecorationThickness: 1,
-                    textUnderlineOffset: 5,
+                    minWidth: 0,
+                    lineHeight: 1,
+                    transform: 'translateY(-1px)',
                   }}
                 >
                   {workspaceTitleFallback}
@@ -4163,14 +4187,15 @@ function App(): JSX.Element {
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  maxWidth: 280,
+                  maxWidth: workspaceTabMaxWidth,
                   minWidth: 0,
-                  height: '100%',
-                  padding: '0 2px 0 0',
-                  gap: 2,
-                  marginBottom: 5,
-                  paddingTop: 4,
-                  color: theme.text.primary,
+                  height: 22,
+                  padding: '0 9px',
+                  gap: 5,
+                  marginBottom: 7,
+                  borderRadius: 6,
+                  background: workspaceTabBackground,
+                  color: theme.text.inverse,
                 }}
               >
                 <button
@@ -4181,28 +4206,34 @@ function App(): JSX.Element {
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
+                    gap: 5,
+                    flex: 1,
                     minWidth: 0,
-                    maxWidth: 246,
-                    height: '100%',
-                    padding: '0 2px',
+                    height: 20,
+                    padding: 0,
                     border: 'none',
                     background: 'transparent',
                     color: 'inherit',
-                    fontSize: appFonts.size,
+                    fontSize: Math.max(11, workspaceTabLabelSize),
                     fontWeight: 600,
+                    lineHeight: 1,
                     letterSpacing: 0,
                     cursor: 'default',
                   }}
                 >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12, lineHeight: 0, color: 'currentColor', flexShrink: 0 }}>
+                    <Plus size={12} strokeWidth={2.1} />
+                  </span>
                   <span
                     style={{
+                      display: 'flex',
+                      alignItems: 'center',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
-                      textDecorationLine: 'underline',
-                      textDecorationColor: theme.accent.base,
-                      textDecorationThickness: 1,
-                      textUnderlineOffset: 5,
+                      minWidth: 0,
+                      lineHeight: 1,
+                      transform: 'translateY(-1px)',
                     }}
                   >
                     NEW WORKSPACE
@@ -4226,32 +4257,26 @@ function App(): JSX.Element {
                       display: 'inline-flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      width: 18,
-                      height: 18,
-                      // Nudged 2px down so the × optically aligns with the
-                      // centre of the workspace-tab label (the 600-weight
-                      // title pushes the glyph above centre otherwise).
-                      marginTop: 2,
-                      marginBottom: 1,
+                      width: 16,
+                      height: 16,
                       border: 'none',
                       borderRadius: 4,
                       background: 'transparent',
-                      color: theme.text.disabled,
+                      color: 'currentColor',
                       cursor: 'pointer',
                       flexShrink: 0,
                       padding: 0,
                       transition: 'background 0.12s ease, color 0.12s ease',
                     }}
                     onMouseEnter={e => {
-                      e.currentTarget.style.background = theme.surface.hover
-                      e.currentTarget.style.color = theme.text.secondary
+                      e.currentTarget.style.background = 'rgba(0,0,0,0.08)'
                     }}
                     onMouseLeave={e => {
                       e.currentTarget.style.background = 'transparent'
-                      e.currentTarget.style.color = theme.text.disabled
+                      e.currentTarget.style.color = 'currentColor'
                     }}
                   >
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" style={{ display: 'block', transform: 'translateY(-0.5px)' }}>
                       <path d="M3 3l6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                     </svg>
                   </button>

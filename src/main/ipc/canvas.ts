@@ -25,7 +25,7 @@ import { broadcastToRenderer } from '../utils/broadcast'
 import { isRelayHostActive } from '../relay/registration'
 import { syncWorkspaceRelayParticipants } from '../relay/service'
 import { daemonClient } from '../daemon/client'
-import { getIndexerStatus, indexAllSources } from '../db/thread-indexer'
+import { getIndexerStatus, indexAllSources, listThreadsFromDb, renameIndexedThread } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
 import { readArchivedSessionIds, writeArchivedSessionIds } from '../storage/sessionArchives'
 
@@ -284,11 +284,20 @@ function normalizeSessionPath(path: string | null | undefined): string | null {
   return normalized || null
 }
 
-function sessionBelongsToWorkspace(session: AggregatedSessionEntry, workspaceProjectPaths: Set<string>): boolean {
-  const projectPath = normalizeSessionPath(session.projectPath)
-  if (projectPath && workspaceProjectPaths.has(projectPath)) return true
-  if (session.scope === 'workspace' || session.scope === 'project') return true
-  return false
+function listIndexedSessionsForWorkspacePaths(workspaceProjectPaths: Set<string>): AggregatedSessionEntry[] {
+  const byId = new Map<string, AggregatedSessionEntry>()
+  for (const projectPath of workspaceProjectPaths) {
+    const normalizedPath = normalizeSessionPath(projectPath)
+    if (!normalizedPath) continue
+    const scopedEntries = listThreadsFromDb(normalizedPath)
+    for (const entry of scopedEntries) {
+      const existing = byId.get(entry.id)
+      if (!existing || entry.updatedAt > existing.updatedAt) {
+        byId.set(entry.id, entry)
+      }
+    }
+  }
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt)
 }
 
 function sessionIdentityAgent(entry: AggregatedSessionEntry): string {
@@ -442,13 +451,25 @@ export function registerCanvasIPC(): void {
       if (!session.projectPath) session.projectPath = workspacePath
     }
 
-    const nativeSessions = workspacePath
-      ? await daemonClient.listExternalSessions(workspacePath, forceRefresh).catch(() => [])
-      : []
+    let nativeSessions: AggregatedSessionEntry[] = []
+    if (workspaceProjectPaths.size > 0) {
+      if (forceRefresh) {
+        await indexAllSources().catch(error => {
+          console.warn('[sessions] thread index refresh failed:', error)
+        })
+      }
+
+      nativeSessions = listIndexedSessionsForWorkspacePaths(workspaceProjectPaths)
+      if (nativeSessions.length === 0) {
+        await indexAllSources().catch(error => {
+          console.warn('[sessions] initial thread index build failed:', error)
+        })
+        nativeSessions = listIndexedSessionsForWorkspacePaths(workspaceProjectPaths)
+      }
+    }
 
     const relevantNativeSessions = nativeSessions
       .filter(session => session.source !== 'codesurf')
-      .filter(session => sessionBelongsToWorkspace(session, workspaceProjectPaths))
       .map(session => ({
         ...session,
         projectPath: normalizeSessionPath(session.projectPath) ?? workspacePath,
@@ -508,7 +529,12 @@ export function registerCanvasIPC(): void {
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     }))
-    if (result.ok) broadcastSessionsChangedNow(workspaceId)
+    if (result.ok) {
+      await indexAllSources().catch(error => {
+        console.warn('[sessions] thread index refresh after delete failed:', error)
+      })
+      broadcastSessionsChangedNow(workspaceId)
+    }
     return result
   })
 
@@ -526,7 +552,12 @@ export function registerCanvasIPC(): void {
           error: error instanceof Error ? error.message : String(error),
         }))
 
-    if (result.ok) broadcastSessionsChangedNow(workspaceId)
+    if (result.ok) {
+      if (!(sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:'))) {
+        renameIndexedThread(sessionEntryId, title)
+      }
+      broadcastSessionsChangedNow(workspaceId)
+    }
     return result
   })
 

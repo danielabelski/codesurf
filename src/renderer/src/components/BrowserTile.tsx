@@ -565,6 +565,7 @@ interface Props {
   height: number
   zIndex: number
   isInteracting?: boolean
+  isVisible?: boolean
   connectedPeers?: string[]
   hideNavbar?: boolean
 }
@@ -574,7 +575,7 @@ type BrowserMode = 'desktop' | 'mobile'
 // ---------------------------------------------------------------------------
 // BrowserTile
 // ---------------------------------------------------------------------------
-export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zIndex: _zIndex, isInteracting, connectedPeers = [], hideNavbar = false }: Props): React.JSX.Element {
+export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zIndex: _zIndex, isInteracting, isVisible = true, connectedPeers = [], hideNavbar = false }: Props): React.JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
   const browserBackground = theme.surface.panel
@@ -1043,17 +1044,17 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     const container = wvContainerRef.current
     if (!webview) return
 
-    const blockPointerCapture = Boolean(isToolbarHovered || isAddressFocused || isInteracting)
-    const hideDuringInteraction = Boolean(isInteracting)
+    const blockPointerCapture = Boolean(!isVisible || isToolbarHovered || isAddressFocused || isInteracting)
+    const hideWebviewSurface = Boolean(!isVisible || isInteracting)
 
     webview.style.pointerEvents = blockPointerCapture ? 'none' : 'auto'
-    webview.style.visibility = hideDuringInteraction ? 'hidden' : 'visible'
-    webview.style.opacity = hideDuringInteraction ? '0' : '1'
+    webview.style.visibility = hideWebviewSurface ? 'hidden' : 'visible'
+    webview.style.opacity = hideWebviewSurface ? '0' : '1'
 
     if (container) {
       container.style.pointerEvents = blockPointerCapture ? 'none' : 'auto'
     }
-  }, [isToolbarHovered, isAddressFocused, isInteracting])
+  }, [isToolbarHovered, isAddressFocused, isInteracting, isVisible])
 
   // ---- navigation actions -----------------------------------------------
   const navigate = useCallback((rawUrl: string) => {

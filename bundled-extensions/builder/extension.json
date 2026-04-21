@@ -1,0 +1,41 @@
+{
+  "id": "builder",
+  "name": "Builder",
+  "version": "1.0.0",
+  "description": "Artifact builder for sketch enhancement and variant generation. Lives in chat as a tabbed surface beside Sketch.",
+  "author": "contex",
+  "tier": "safe",
+  "ui": { "mode": "custom" },
+  "contributes": {
+    "chatSurfaces": [
+      {
+        "id": "builder",
+        "label": "Builder",
+        "description": "Generate and iterate on HTML artifacts inside chat.",
+        "icon": "sparkles",
+        "entry": "surface/index.html",
+        "emits": "text",
+        "defaultHeight": 360,
+        "minHeight": 220
+      }
+    ],
+    "settings": [
+      { "key": "apiKey", "label": "API Key (OpenRouter/OpenAI)", "type": "string", "default": "" },
+      { "key": "model", "label": "Model", "type": "string", "default": "anthropic/claude-sonnet-4" },
+      { "key": "baseUrl", "label": "API Base URL", "type": "string", "default": "https://openrouter.ai/api/v1" }
+    ],
+    "context": {
+      "produces": ["ctx:builder"],
+      "consumes": ["ctx:design", "ctx:code", "ctx:research", "ctx:web", "ctx:sketch"]
+    },
+    "actions": [
+      { "name": "generate", "description": "Generate a builder artifact from a prompt. Params: { prompt: string }" },
+      { "name": "setHtml", "description": "Set the current builder HTML directly. Params: { html: string }" },
+      { "name": "getHtml", "description": "Get the current builder HTML" },
+      { "name": "getStatus", "description": "Get current builder generation status" },
+      { "name": "setPrompt", "description": "Set the current builder prompt without generating. Params: { prompt: string }" },
+      { "name": "setSettings", "description": "Update builder API settings. Params: { model?: string, baseUrl?: string, apiKey?: string }" }
+    ]
+  },
+  "permissions": ["network"]
+}

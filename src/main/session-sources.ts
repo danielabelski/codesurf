@@ -1159,7 +1159,18 @@ export async function findSessionEntryById(workspacePath: string | null, id: str
   // Last-resort: force-refresh the scoped cache in case the session was just
   // created and the prior entry is stale.
   const refreshed = await listExternalSessionEntries(workspacePath, { force: true })
-  return refreshed.find(entry => entry.id === id) ?? null
+  const refreshedHit = refreshed.find(entry => entry.id === id)
+  if (refreshedHit) return refreshedHit
+
+  // The sidebar list comes from the daemon's global view, so a user-scoped
+  // transcript can still be visible even when the workspace-scoped cache and
+  // its forced refresh don't contain it yet.
+  if (workspacePath) {
+    const refreshedGlobal = await listExternalSessionEntries(null, { force: true })
+    return refreshedGlobal.find(entry => entry.id === id) ?? null
+  }
+
+  return null
 }
 
 async function parseCodeSurfChatState(filePath: string): Promise<ImportedChatState | null> {

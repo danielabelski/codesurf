@@ -244,6 +244,10 @@ interface ActiveChatSurface {
     mime?: string
     ext?: string
   }
+  /** Lightweight local context store for chat-surface peer coordination. */
+  context: Record<string, unknown>
+  /** Actions registered by the surface via window.contex.actions.register(). */
+  registeredActions: Array<{ name: string; description: string }>
 }
 
 interface ChatSurfaceMenuEntry {
@@ -883,6 +887,16 @@ function buildOutgoingMessageContent(draftInput: string, draftAttachments: Pendi
     ? `Attached file paths:\n${draftAttachments.map(item => item.path).join('\n')}`
     : ''
   return [trimmedInput, attachmentBlock].filter(Boolean).join('\n\n').trim()
+}
+
+function encodeUtf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
 }
 
 function buildQueuedTurnPreview(content: string, attachmentCount: number): string {
@@ -1957,6 +1971,44 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const secondarySize = settings?.fonts?.secondary?.size ?? 11
   const secondaryLineHeight = settings?.fonts?.secondary?.lineHeight ?? 1.4
   const secondaryWeight = settings?.fonts?.secondary?.weight ?? 400
+  const chatSurfaceThemeColors = useMemo(() => ({
+    background: theme.surface.panelElevated,
+    panel: theme.surface.panelElevated,
+    border: theme.border.default,
+    text: theme.chat.text,
+    muted: theme.chat.muted,
+    accent: theme.accent.base,
+    mode: theme.mode,
+    success: theme.status.success,
+    warning: theme.status.warning,
+    danger: theme.status.danger,
+  }), [theme])
+  const chatSurfaceThemeVars = useMemo(() => ({
+    '--ct-bg': 'transparent',
+    '--ct-panel': theme.surface.panelElevated,
+    '--ct-panel-2': theme.surface.overlay,
+    '--ct-border': theme.border.default,
+    '--ct-border-2': theme.border.strong,
+    '--ct-text': theme.chat.text,
+    '--ct-muted': theme.chat.textSecondary,
+    '--ct-dim': theme.chat.muted,
+    '--ct-hover': theme.surface.hover,
+    '--ct-accent': theme.accent.base,
+    '--ct-accent-s': theme.accent.soft,
+    '--ct-success': theme.status.success,
+    '--ct-warning': theme.status.warning,
+    '--ct-danger': theme.status.danger,
+    '--ct-radius': '8px',
+    '--ct-font-sans': fontSans,
+    '--ct-font-mono': fontMono,
+    '--ct-font-size': `${fontSize}px`,
+    '--ct-font-line': String(fontLineHeight),
+    '--ct-font-weight': String(fontWeight),
+    '--ct-font-subtle-size': `${secondarySize}px`,
+    '--ct-font-title': fontSans,
+    '--ct-font-title-size': `${fontSize}px`,
+    '--ct-font-title-weight': String(Math.max(fontWeight, 600)),
+  }), [fontLineHeight, fontMono, fontSans, fontSize, fontWeight, secondarySize, theme])
   const initialRuntimeStateRef = useRef<ChatTilePersistedState | null>(getChatTileRuntimeState<ChatTilePersistedState>(tileId))
   const initialProvider = initialRuntimeStateRef.current?.provider ?? DEFAULT_PROVIDER_ID
   const initialModel = initialRuntimeStateRef.current?.model
@@ -2228,12 +2280,48 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [openclawAgents, setOpenclawAgents] = useState<ModelOption[]>(DEFAULT_MODELS.openclaw)
   const [modelFilter, setModelFilter] = useState('')
   const [attachments, setAttachments] = useState<PendingAttachment[]>(() => initialRuntimeStateRef.current?.attachments ?? [])
-  // Chat-surface extensions (e.g. Sketch) mounted above the composer. One at a time.
-  const [activeChatSurface, setActiveChatSurface] = useState<ActiveChatSurface | null>(null)
+  // Chat-surface extensions (e.g. Sketch, Builder) mounted above the composer.
+  // Multiple surfaces can stay open as tabs so a sketch can sit beside its
+  // enhanced builder output inside the same chat.
+  const [openChatSurfaces, setOpenChatSurfaces] = useState<ActiveChatSurface[]>([])
+  const [activeChatSurfaceId, setActiveChatSurfaceId] = useState<string | null>(null)
   const [chatSurfaceMenu, setChatSurfaceMenu] = useState<ChatSurfaceMenuEntry[]>([])
+  const openChatSurfacesRef = useRef<ActiveChatSurface[]>([])
+  useEffect(() => { openChatSurfacesRef.current = openChatSurfaces }, [openChatSurfaces])
+  const activeChatSurface = useMemo(
+    () => openChatSurfaces.find(surface => surface.instanceId === activeChatSurfaceId) ?? openChatSurfaces[openChatSurfaces.length - 1] ?? null,
+    [activeChatSurfaceId, openChatSurfaces],
+  )
   const activeChatSurfaceRef = useRef<ActiveChatSurface | null>(null)
   useEffect(() => { activeChatSurfaceRef.current = activeChatSurface }, [activeChatSurface])
-  const chatSurfaceIframeRef = useRef<HTMLIFrameElement | null>(null)
+  const chatSurfaceIframeRefs = useRef<Record<string, HTMLIFrameElement | null>>({})
+  const pendingChatSurfaceActionResultsRef = useRef(new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>())
+  const setChatSurfaceIframeRef = useCallback((instanceId: string, node: HTMLIFrameElement | null) => {
+    if (node) chatSurfaceIframeRefs.current[instanceId] = node
+    else delete chatSurfaceIframeRefs.current[instanceId]
+  }, [])
+  const getChatSurfaceIframe = useCallback((instanceId: string): HTMLIFrameElement | null => chatSurfaceIframeRefs.current[instanceId] ?? null, [])
+  const postToChatSurface = useCallback((instanceId: string, payload: Record<string, unknown>) => {
+    getChatSurfaceIframe(instanceId)?.contentWindow?.postMessage(payload, '*')
+  }, [getChatSurfaceIframe])
+  const getChatSurfacePeerEntries = useCallback((surfaceId: string) => {
+    return openChatSurfacesRef.current
+      .filter(surface => surface.instanceId !== surfaceId)
+      .map(surface => ({
+        peerId: surface.instanceId,
+        label: surface.label,
+        contextEntries: Object.entries(surface.context ?? {}).map(([key, value]) => ({ key, value })),
+      }))
+  }, [])
+  useEffect(() => {
+    if (openChatSurfaces.length === 0) {
+      if (activeChatSurfaceId !== null) setActiveChatSurfaceId(null)
+      return
+    }
+    if (!openChatSurfaces.some(surface => surface.instanceId === activeChatSurfaceId)) {
+      setActiveChatSurfaceId(openChatSurfaces[openChatSurfaces.length - 1]?.instanceId ?? null)
+    }
+  }, [activeChatSurfaceId, openChatSurfaces])
   const [queuedTurns, setQueuedTurns] = useState<QueuedChatTurn[]>(() => initialRuntimeStateRef.current?.queuedTurns ?? [])
   // Drag-reorder state for the queued-turn list. A row can be dropped above
   // ('before'), below ('after'), or onto ('into') another row — the last case
@@ -4026,6 +4114,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
   const openChatSurface = useCallback(async (entry: ChatSurfaceMenuEntry) => {
     setShowInsertMenu(false)
+    const existing = openChatSurfacesRef.current.find(surface => surface.extId === entry.extId && surface.surfaceId === entry.surfaceId)
+    if (existing) {
+      setActiveChatSurfaceId(existing.instanceId)
+      return
+    }
     const instanceId = `surf-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
     const extensionsApi = (window.electron as unknown as { extensions?: { chatSurfaceEntry?: (ext: string, id: string, inst: string) => Promise<string | null> } })?.extensions
     const url = extensionsApi?.chatSurfaceEntry
@@ -4035,7 +4128,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       // Surface could not be resolved (extension missing / disabled).
       return
     }
-    setActiveChatSurface({
+    setOpenChatSurfaces(prev => [...prev, {
       extId: entry.extId,
       surfaceId: entry.surfaceId,
       label: entry.label,
@@ -4045,58 +4138,228 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       height: Math.max(entry.minHeight, entry.defaultHeight),
       minHeight: entry.minHeight,
       payload: null,
+      context: {},
+      registeredActions: [],
+    }])
+    setActiveChatSurfaceId(instanceId)
+  }, [])
+  const openBuilderFromSketch = useCallback(async () => {
+    const builderEntry = chatSurfaceMenu.find(entry => entry.extId === 'builder' || entry.surfaceId === 'builder')
+    if (!builderEntry) return
+    await openChatSurface(builderEntry)
+  }, [chatSurfaceMenu, openChatSurface])
+
+  const closeChatSurface = useCallback((instanceId?: string) => {
+    const targetId = instanceId ?? activeChatSurfaceRef.current?.instanceId
+    if (!targetId) return
+    postToChatSurface(targetId, { type: 'contex-event', event: 'surface.clear', data: {} })
+    pendingChatSurfaceActionResultsRef.current.forEach((pending, requestId) => {
+      pending.reject(new Error('Chat surface closed'))
+      pendingChatSurfaceActionResultsRef.current.delete(requestId)
     })
-  }, [])
+    setOpenChatSurfaces(prev => prev.filter(surface => surface.instanceId !== targetId))
+    setActiveChatSurfaceId(prev => (prev === targetId ? null : prev))
+  }, [postToChatSurface])
 
-  const closeChatSurface = useCallback(() => {
-    setActiveChatSurface(null)
-  }, [])
-
-  // Listen for messages from the chat-surface iframe. We handle one method:
-  //   surface.setPayload  — caches the latest payload on the host.
-  // Other RPC methods fall through (the standard ExtensionTile bridge will
-  // answer them when/if the surface is promoted to a tile-style extension).
+  // Listen for messages from the chat-surface iframes. Beyond surface.setPayload,
+  // we support a small peer context/action model so Sketch and Builder can live
+  // together as tabs inside chat instead of isolated one-off panels.
   useEffect(() => {
-    const handler = (e: MessageEvent) => {
+    const handler = async (e: MessageEvent) => {
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
-      const surface = activeChatSurfaceRef.current
-      if (!surface) return
-      if (msg.type !== 'contex-rpc') return
-      if (msg.tileId !== surface.instanceId) return
-
+      const sourceWin = e.source as Window | null
       const reply = (result: unknown, error?: string) => {
-        const win = chatSurfaceIframeRef.current?.contentWindow
-        if (!win) return
-        win.postMessage({ type: 'contex-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
+        sourceWin?.postMessage({ type: 'contex-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
       }
 
-      if (msg.method === 'surface.setPayload') {
-        const payload = msg.params?.payload ?? null
-        setActiveChatSurface(prev => prev ? { ...prev, payload: payload && typeof payload === 'object' ? {
-          kind: payload.kind === 'text' ? 'text' : 'image',
-          data: String(payload.data ?? ''),
-          mime: typeof payload.mime === 'string' ? payload.mime : undefined,
-          ext: typeof payload.ext === 'string' ? payload.ext : undefined,
-        } : null } : prev)
-        reply(true)
+      if (msg.type === 'contex-bridge-ready' && typeof msg.tileId === 'string') {
+        const surface = openChatSurfacesRef.current.find(candidate => candidate.instanceId === msg.tileId)
+        if (!surface) return
+        sourceWin?.postMessage({ type: 'contex-theme-vars', vars: chatSurfaceThemeVars }, '*')
+        for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
+          for (const entry of peer.contextEntries) {
+            sourceWin?.postMessage({
+              type: 'contex-event',
+              event: 'context.peerChanged',
+              data: { peerId: peer.peerId, key: entry.key, value: entry.value },
+            }, '*')
+          }
+        }
         return
       }
 
-      // Minimal theme/meta support so extensions can still call these.
-      if (msg.method === 'tile.getMeta') {
-        reply({ tileId: surface.instanceId, extId: surface.extId, surfaceId: surface.surfaceId, kind: 'chat-surface' })
+      if (msg.type === 'contex-action-result' && typeof msg.requestId === 'string') {
+        const pending = pendingChatSurfaceActionResultsRef.current.get(msg.requestId)
+        if (!pending) return
+        pendingChatSurfaceActionResultsRef.current.delete(msg.requestId)
+        if (msg.error) pending.reject(new Error(String(msg.error)))
+        else pending.resolve(msg.result)
         return
       }
-      if (msg.method === 'theme.getColors') {
-        reply({})
-        return
+
+      if (msg.type !== 'contex-rpc' || typeof msg.tileId !== 'string') return
+      const surface = openChatSurfacesRef.current.find(candidate => candidate.instanceId === msg.tileId)
+      if (!surface) return
+
+      try {
+        if (msg.method === 'surface.setPayload') {
+          const payload = msg.params?.payload ?? null
+          setOpenChatSurfaces(prev => prev.map(candidate => candidate.instanceId === surface.instanceId ? {
+            ...candidate,
+            payload: payload && typeof payload === 'object' ? {
+              kind: payload.kind === 'text' ? 'text' : 'image',
+              data: String(payload.data ?? ''),
+              mime: typeof payload.mime === 'string' ? payload.mime : undefined,
+              ext: typeof payload.ext === 'string' ? payload.ext : undefined,
+            } : null,
+          } : candidate))
+          reply(true)
+          return
+        }
+
+        if (msg.method === 'tile.getMeta') {
+          reply({
+            tileId: surface.instanceId,
+            extId: surface.extId,
+            surfaceId: surface.surfaceId,
+            kind: 'chat-surface',
+            connectedPeers: getChatSurfacePeerEntries(surface.instanceId).map(peer => peer.peerId),
+          })
+          return
+        }
+
+        if (msg.method === 'theme.getColors') {
+          reply(chatSurfaceThemeColors)
+          return
+        }
+
+        if (msg.method === 'context.get') {
+          const key = String(msg.params?.key ?? '')
+          reply(Object.prototype.hasOwnProperty.call(surface.context, key) ? surface.context[key] ?? null : null)
+          return
+        }
+
+        if (msg.method === 'context.set') {
+          const key = String(msg.params?.key ?? '')
+          const value = msg.params?.value ?? null
+          setOpenChatSurfaces(prev => prev.map(candidate => candidate.instanceId === surface.instanceId
+            ? { ...candidate, context: { ...candidate.context, [key]: value } }
+            : candidate))
+          for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
+            postToChatSurface(peer.peerId, {
+              type: 'contex-event',
+              event: 'context.peerChanged',
+              data: { peerId: surface.instanceId, key, value },
+            })
+          }
+          reply(true)
+          return
+        }
+
+        if (msg.method === 'context.getAll') {
+          const tagPrefix = typeof msg.params?.tagPrefix === 'string' ? msg.params.tagPrefix : undefined
+          reply(Object.entries(surface.context)
+            .filter(([key]) => !tagPrefix || key.startsWith(tagPrefix))
+            .map(([key, value]) => ({ key, value })))
+          return
+        }
+
+        if (msg.method === 'context.delete') {
+          const key = String(msg.params?.key ?? '')
+          setOpenChatSurfaces(prev => prev.map(candidate => {
+            if (candidate.instanceId !== surface.instanceId) return candidate
+            const nextContext = { ...candidate.context }
+            delete nextContext[key]
+            return { ...candidate, context: nextContext }
+          }))
+          for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
+            postToChatSurface(peer.peerId, {
+              type: 'contex-event',
+              event: 'context.peerChanged',
+              data: { peerId: surface.instanceId, key, value: null },
+            })
+          }
+          reply(true)
+          return
+        }
+
+        if (msg.method === 'context.getPeerContext') {
+          const peerId = String(msg.params?.peerId ?? '')
+          const peer = openChatSurfacesRef.current.find(candidate => candidate.instanceId === peerId)
+          const tagPrefix = typeof msg.params?.tagPrefix === 'string' ? msg.params.tagPrefix : undefined
+          reply(peer
+            ? Object.entries(peer.context)
+              .filter(([key]) => !tagPrefix || key.startsWith(tagPrefix))
+              .map(([key, value]) => ({ key, value }))
+            : [])
+          return
+        }
+
+        if (msg.method === 'context.getAllPeerContext') {
+          const tagPrefix = typeof msg.params?.tagPrefix === 'string' ? msg.params.tagPrefix : undefined
+          const result: Record<string, Array<{ key: string; value: unknown }>> = {}
+          for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
+            result[peer.peerId] = peer.contextEntries.filter(entry => !tagPrefix || entry.key.startsWith(tagPrefix))
+          }
+          reply(result)
+          return
+        }
+
+        if (msg.method === 'actions.register') {
+          const name = String(msg.params?.name ?? '')
+          const description = String(msg.params?.description ?? '')
+          if (!name) throw new Error('Missing action name')
+          setOpenChatSurfaces(prev => prev.map(candidate => candidate.instanceId === surface.instanceId
+            ? {
+              ...candidate,
+              registeredActions: [
+                ...candidate.registeredActions.filter(action => action.name !== name),
+                { name, description },
+              ],
+            }
+            : candidate))
+          reply(true)
+          return
+        }
+
+        if (msg.method === 'actions.invoke') {
+          const peerId = String(msg.params?.peerId ?? '')
+          const action = String(msg.params?.action ?? '')
+          const peer = openChatSurfacesRef.current.find(candidate => candidate.instanceId === peerId)
+          if (!peerId || !action || !peer) throw new Error('Missing peerId or action')
+          if (!peer.registeredActions.some(candidate => candidate.name === action)) {
+            throw new Error(`Peer ${peer.label} has not registered action ${action}`)
+          }
+          const requestId = `${surface.instanceId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`
+          const result = await new Promise<unknown>((resolve, reject) => {
+            pendingChatSurfaceActionResultsRef.current.set(requestId, { resolve, reject })
+            postToChatSurface(peer.instanceId, {
+              type: 'contex-action-invoke',
+              action,
+              params: msg.params?.params ?? {},
+              requestId,
+            })
+            window.setTimeout(() => {
+              const pending = pendingChatSurfaceActionResultsRef.current.get(requestId)
+              if (!pending) return
+              pendingChatSurfaceActionResultsRef.current.delete(requestId)
+              reject(new Error(`Timed out waiting for ${peer.label}.${action}`))
+            }, 10000)
+          })
+          reply(result)
+          return
+        }
+
+        throw new Error(`Unsupported chat surface RPC method: ${String(msg.method ?? '')}`)
+      } catch (error) {
+        reply(null, error instanceof Error ? error.message : String(error))
       }
     }
+
     window.addEventListener('message', handler)
     return () => window.removeEventListener('message', handler)
-  }, [])
-  // ──────────────────────────────────────────────────────────────────────────
+  }, [chatSurfaceThemeColors, chatSurfaceThemeVars, getChatSurfacePeerEntries, postToChatSurface])
 
   const handleTileDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     // Ignore our own internal drags (queued-turn reorder, etc.) — they
@@ -4429,9 +4692,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       return
     }
 
-    // Flush any active chat-surface (e.g. Sketch) to a temp file and attach
-    // it before composing the outgoing message. Give the extension up to
-    // ~1s to respond to the requestFlush event with an updated payload.
+    // Flush the active chat-surface (Sketch / Builder) to a temp attachment
+    // before composing the outgoing message. When Builder is active we persist
+    // its HTML payload as a temporary .html file so the normal attachment path
+    // can carry it into the turn just like files dropped from Finder.
     let flushedAttachments = attachments
     const surface = activeChatSurfaceRef.current
     if (surface) {
@@ -4450,25 +4714,26 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             }
           }
           window.addEventListener('message', onceAck)
-          const iframe = chatSurfaceIframeRef.current
-          iframe?.contentWindow?.postMessage({ type: 'contex-event', event: 'surface.requestFlush', data: {} }, '*')
+          postToChatSurface(surface.instanceId, { type: 'contex-event', event: 'surface.requestFlush', data: {} })
         })
       } catch { /* best-effort */ }
 
       const latest = activeChatSurfaceRef.current
       const payload = latest?.payload
-      if (payload && payload.kind === 'image' && payload.data) {
+      if (payload?.data) {
         try {
           const chatApi = (window.electron as unknown as { chat?: { writeTempAttachment?: (p: { data: string; mime?: string; ext?: string; filenameHint?: string }) => Promise<{ ok: true; path: string } | { ok: false; error: string }> } }).chat
           if (chatApi?.writeTempAttachment) {
+            const attachmentData = payload.kind === 'text' ? encodeUtf8Base64(payload.data) : payload.data
+            const attachmentKind: PendingAttachment['kind'] = payload.kind === 'text' ? 'file' : 'image'
             const r = await chatApi.writeTempAttachment({
-              data: payload.data,
-              mime: payload.mime,
-              ext: payload.ext,
+              data: attachmentData,
+              mime: payload.kind === 'text' ? (payload.mime ?? 'text/html') : payload.mime,
+              ext: payload.kind === 'text' ? (payload.ext ?? 'html') : payload.ext,
               filenameHint: surface.label.toLowerCase().replace(/\s+/g, '-'),
             })
             if (r.ok) {
-              flushedAttachments = [...attachments, { path: r.path, kind: 'image' }]
+              flushedAttachments = [...attachments, { path: r.path, kind: attachmentKind }]
             }
           }
         } catch { /* best-effort */ }
@@ -4501,16 +4766,16 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setAcQuery('')
     setAttachments([])
 
-    // Tell the surface to clear itself for the next turn, then dismount.
-    if (surface) {
-      const iframe = chatSurfaceIframeRef.current
-      iframe?.contentWindow?.postMessage({ type: 'contex-event', event: 'surface.clear', data: {} }, '*')
-      setActiveChatSurface(null)
+    // Clear every open surface for the next turn, then reset the tab strip.
+    for (const openSurface of openChatSurfacesRef.current) {
+      postToChatSurface(openSurface.instanceId, { type: 'contex-event', event: 'surface.clear', data: {} })
     }
+    setOpenChatSurfaces([])
+    setActiveChatSurfaceId(null)
 
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
     await dispatchMessageContent(messageContent)
-  }, [isStreaming, input, attachments, queueCurrentDraft, dispatchMessageContent, exportNotesToClipboard])
+  }, [isStreaming, input, attachments, queueCurrentDraft, dispatchMessageContent, exportNotesToClipboard, postToChatSurface])
 
   const stopStreaming = useCallback(() => {
     window.electron?.chat?.stop?.(tileId)
@@ -6088,7 +6353,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           </div>
         )}
 
-        {activeChatSurface && (
+        {openChatSurfaces.length > 0 && activeChatSurface && (
           <div style={{
             padding: '8px 14px 0 14px',
           }}>
@@ -6104,33 +6369,109 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               flexDirection: 'column',
             }}>
               <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '6px 10px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 8px',
                 borderBottom: `1px solid ${theme.border.subtle}`,
                 background: theme.surface.overlay,
-                fontSize: 11, fontFamily: fontMono, color: theme.chat.muted,
+                fontSize: 11,
+                fontFamily: fontMono,
+                color: theme.chat.muted,
+                overflowX: 'auto',
               }}>
-                <span>{activeChatSurface.label}</span>
-                <button
-                  onClick={closeChatSurface}
-                  aria-label="Close"
-                  style={{
-                    width: 18, height: 18, borderRadius: 4,
-                    border: `1px solid ${theme.border.default}`, background: 'transparent',
-                    color: theme.chat.muted, cursor: 'pointer',
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    padding: 0, fontSize: 11, lineHeight: 1,
-                  }}
-                >×</button>
+                {openChatSurfaces.map(surface => {
+                  const isActive = surface.instanceId === activeChatSurface.instanceId
+                  return (
+                    <div
+                      key={surface.instanceId}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '4px 8px',
+                        borderRadius: 8,
+                        border: `1px solid ${isActive ? theme.border.strong : theme.border.subtle}`,
+                        background: isActive ? theme.chat.dropdownHoverBackground : 'transparent',
+                        color: isActive ? theme.chat.text : theme.chat.muted,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <button
+                        onClick={() => setActiveChatSurfaceId(surface.instanceId)}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          padding: 0,
+                          fontSize: 11,
+                          fontFamily: fontMono,
+                        }}
+                      >
+                        {surface.label}
+                      </button>
+                      <button
+                        onClick={() => closeChatSurface(surface.instanceId)}
+                        aria-label={`Close ${surface.label}`}
+                        style={{
+                          width: 16,
+                          height: 16,
+                          borderRadius: 4,
+                          border: `1px solid ${theme.border.default}`,
+                          background: 'transparent',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: 0,
+                          fontSize: 10,
+                          lineHeight: 1,
+                        }}
+                      >×</button>
+                    </div>
+                  )
+                })}
+                {activeChatSurface.extId === 'sketch' && chatSurfaceMenu.some(entry => entry.extId === 'builder' || entry.surfaceId === 'builder') && (
+                  <button
+                    onClick={() => { void openBuilderFromSketch() }}
+                    style={{
+                      border: `1px solid ${theme.border.default}`,
+                      background: theme.chat.dropdownHoverBackground,
+                      color: theme.chat.text,
+                      borderRadius: 8,
+                      padding: '4px 8px',
+                      cursor: 'pointer',
+                      fontSize: 11,
+                      fontFamily: fontMono,
+                      flexShrink: 0,
+                    }}
+                  >
+                    Enhance → Builder
+                  </button>
+                )}
               </div>
-              <iframe
-                key={activeChatSurface.instanceId}
-                ref={chatSurfaceIframeRef}
-                src={activeChatSurface.entryUrl}
-                title={activeChatSurface.label}
-                style={{ flex: 1, width: '100%', border: 'none', background: 'transparent' }}
-                sandbox="allow-scripts allow-same-origin"
-              />
+              <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+                {openChatSurfaces.map(surface => (
+                  <iframe
+                    key={surface.instanceId}
+                    ref={node => setChatSurfaceIframeRef(surface.instanceId, node)}
+                    src={surface.entryUrl}
+                    title={surface.label}
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      width: '100%',
+                      height: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      display: surface.instanceId === activeChatSurface.instanceId ? 'block' : 'none',
+                    }}
+                    sandbox="allow-scripts allow-same-origin"
+                  />
+                ))}
+              </div>
             </div>
           </div>
         )}

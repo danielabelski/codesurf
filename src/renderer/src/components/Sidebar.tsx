@@ -15,12 +15,64 @@ import {
   getSessionArchiveActionLabel,
 } from './sidebar/session-actions'
 import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
-import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS } from './sidebar/utils'
+import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SpinnerIcon } from './sidebar/utils'
 import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
 interface ExtensionEntrySummary { id: string; name: string }
+
+function getSessionSidebarIndicatorColor(session: SessionEntry, theme: ReturnType<typeof useTheme>): string {
+  const key = getSessionAgentKey(session)
+  if (key === 'codex') return '#6ea8ff'
+  if (key === 'claude') return '#d9a066'
+  if (key === 'cursor') return '#b792ff'
+  if (key === 'openclaw') return '#62cfa6'
+  if (key === 'opencode') return '#64d2ff'
+  if (key === 'codesurf') return '#95a1b3'
+  return theme.accent.base
+}
+
+function SessionSidebarIndicator({
+  session,
+  streaming,
+  muted = false,
+  theme,
+}: {
+  session: SessionEntry
+  streaming: boolean
+  muted?: boolean
+  theme: ReturnType<typeof useTheme>
+}): React.JSX.Element {
+  if (streaming) {
+    return <SpinnerIcon size={14} color={muted ? theme.text.disabled : theme.text.muted} />
+  }
+
+  const dotColor = getSessionSidebarIndicatorColor(session, theme)
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 14,
+        height: 14,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        opacity: muted ? 0.52 : 1,
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: dotColor,
+          boxShadow: `0 0 0 1px color-mix(in srgb, ${dotColor} 42%, transparent)`,
+        }}
+      />
+    </span>
+  )
+}
 
 interface Props {
   workspace: Workspace | null
@@ -112,6 +164,8 @@ export function Sidebar({
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
   const threadMenuRef = useRef<HTMLDivElement>(null)
+  const sessionLoadRequestSeqRef = useRef(0)
+  const latestSessionLoadTokenByWorkspaceRef = useRef(new Map<string, number>())
 
   useEffect(() => {
     let cancelled = false
@@ -281,8 +335,24 @@ export function Sidebar({
   }, [])
 
   const loadWorkspaceSessions = useCallback(async (workspaceEntry: Workspace, forceRefresh = false) => {
-    const items = await window.electron.canvas.listSessions(workspaceEntry.id, forceRefresh).catch(() => [])
-    const annotated = annotateSessions(workspaceEntry, items as Array<Omit<SessionEntry, 'workspaceId' | 'workspaceName' | 'workspacePath'>>)
+    const requestToken = sessionLoadRequestSeqRef.current + 1
+    sessionLoadRequestSeqRef.current = requestToken
+    latestSessionLoadTokenByWorkspaceRef.current.set(workspaceEntry.id, requestToken)
+
+    let items: Array<Omit<SessionEntry, 'workspaceId' | 'workspaceName' | 'workspacePath'>>
+    try {
+      items = await window.electron.canvas.listSessions(workspaceEntry.id, forceRefresh)
+    } catch (error) {
+      console.warn('[sidebar] failed to load sessions', {
+        workspaceId: workspaceEntry.id,
+        forceRefresh,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return
+    }
+
+    if (latestSessionLoadTokenByWorkspaceRef.current.get(workspaceEntry.id) !== requestToken) return
+    const annotated = annotateSessions(workspaceEntry, items)
     setSessions(prev => [...prev.filter(session => session.workspaceId !== workspaceEntry.id), ...annotated])
     setLoadedSessionWorkspaceIds(prev => prev.includes(workspaceEntry.id) ? prev : [...prev, workspaceEntry.id])
   }, [annotateSessions])
@@ -301,29 +371,9 @@ export function Sidebar({
     }
 
     const workspaceIdsToLoad = new Set<string>()
-    const activeProject = activeProjectId
-      ? (projectEntries.find(projectEntry => projectEntry.id === activeProjectId) ?? null)
-      : null
-
-    for (const workspaceId of activeProject?.workspaceIds ?? []) {
-      workspaceIdsToLoad.add(workspaceId)
-    }
-
-    if (threadOrganizeMode === 'project') {
-      for (const projectEntry of projectEntries) {
-        const group: SessionProjectGroup = {
-          projectId: projectEntry.id,
-          projectPath: projectEntry.path,
-          representativeWorkspaceId: projectEntry.representativeWorkspaceId,
-          key: projectEntry.id,
-          label: getProjectDisplayLabel(projectEntry),
-          sessions: [],
-        }
-        if (!isThreadGroupCollapsed(group)) {
-          for (const workspaceId of projectEntry.workspaceIds) {
-            workspaceIdsToLoad.add(workspaceId)
-          }
-        }
+    for (const projectEntry of projectEntries) {
+      for (const workspaceId of projectEntry.workspaceIds) {
+        workspaceIdsToLoad.add(workspaceId)
       }
     }
 
@@ -333,12 +383,9 @@ export function Sidebar({
       if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry)
     }
   }, [
-    activeProjectId,
-    isThreadGroupCollapsed,
     loadWorkspaceSessions,
     loadedSessionWorkspaceIdSet,
     projectEntries,
-    threadOrganizeMode,
     workspaceById,
   ])
 
@@ -1335,16 +1382,15 @@ export function Sidebar({
                       activeChatSessionId,
                       activeChatSessionEntryId,
                     })
+                    const isStreaming =
+                      (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
+                      || (session.sessionId ? streamingSnapshot.sessionIds.has(session.sessionId) : false)
+                      || streamingSnapshot.entryIds.has(session.id)
                     return (
                       <SidebarItem
                         key={session.id}
                         label={formatSessionTitleForSidebar(session.title)}
-                        icon={getSessionAgentIcon(session, {
-                          streaming:
-                            (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
-                            || (session.sessionId ? streamingSnapshot.sessionIds.has(session.sessionId) : false)
-                            || streamingSnapshot.entryIds.has(session.id),
-                        })}
+                        icon={<SessionSidebarIndicator session={session} streaming={isStreaming} muted={session.isArchived === true && !isSelected} theme={theme} />}
                         indent={Math.max(1, session.displayIndent + 1)}
                         indentUnit={6}
                         extraWidth={SESSION_ROW_EXTRA_WIDTH}

@@ -115,6 +115,39 @@ export function getAllTileIds(node: PanelNode): string[] {
   return node.children.flatMap(getAllTileIds)
 }
 
+function PanelTabIcon({ type, size = 12 }: { type: string; size?: number }): JSX.Element {
+  const stroke = 1.2
+
+  if (type === 'terminal') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M2 3l4 4-4 4" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" /><path d="M7 11h5" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" /></svg>
+  if (type === 'code') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M5 3 1 7l4 4M9 3l4 4-4 4" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" /></svg>
+  if (type === 'note') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="2" y="1.5" width="10" height="11" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><path d="M4.5 4.5h5M4.5 7h5M4.5 9.5h3" stroke="currentColor" strokeWidth="0.9" strokeLinecap="round" /></svg>
+  if (type === 'browser') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1" y="2" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><path d="M1 5h12" stroke="currentColor" strokeWidth={stroke} /></svg>
+  if (type === 'chat') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M2 2h10a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H5l-3 2.5V10H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="currentColor" strokeWidth={stroke} strokeLinejoin="round" /></svg>
+  if (type === 'files') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M1 3C1 2.17 1.67 1.5 2.5 1.5H5L6.5 3H11.5C12.33 3 13 3.67 13 4.5V11C13 11.83 12.33 12.5 11.5 12.5H2.5C1.67 12.5 1 11.83 1 11V3Z" stroke="currentColor" strokeWidth={stroke} /></svg>
+  if (type === 'kanban') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.1" /><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.1" /><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.1" /><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" strokeWidth="1.1" /></svg>
+  if (type === 'image') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><circle cx="5" cy="5" r="1.2" stroke="currentColor" strokeWidth="1" /><path d="M1.5 10l3-3 2 2 2.5-3 3.5 4" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" /></svg>
+  if (type === 'media') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><path d="M5.5 4.75 9 7l-3.5 2.25V4.75Z" fill="currentColor" /></svg>
+  if (type === 'customisation') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M7 2.25 8 1l1.15.55.1 1.55a4.8 4.8 0 0 1 1.1.64l1.47-.52.68 1.06-.99 1.2c.09.27.15.55.18.84l1.4.7-.2 1.25-1.56.21a4.91 4.91 0 0 1-.58 1.05l.56 1.48-1.05.68-1.21-.98c-.26.1-.54.17-.82.21L8 13H6.75l-.23-1.55a4.72 4.72 0 0 1-.82-.21l-1.21.98-1.05-.68.56-1.48a4.91 4.91 0 0 1-.58-1.05l-1.56-.2-.2-1.26 1.4-.7c.03-.29.09-.57.18-.84l-.99-1.2.68-1.06 1.47.52c.34-.27.71-.49 1.1-.64L4.85 1.55 6 1l1 1.25Z" stroke="currentColor" strokeWidth="0.95" strokeLinejoin="round" /><circle cx="7" cy="7" r="1.7" stroke="currentColor" strokeWidth="0.95" /></svg>
+  if (type === 'ext:artifact-builder') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+        <rect x="2" y="2" width="10" height="10" rx="1.9" stroke="currentColor" strokeWidth="1.25" />
+        <path d="M4.4 7.2 6.15 8.95 9.6 5.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  if (type.startsWith('ext:')) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+        <g transform="translate(7 7) scale(1.14) translate(-7 -7)">
+          <path d="M6 1.5h2a.5.5 0 0 1 .5.5v1.5H8a1 1 0 0 0-1 1 1 1 0 0 0 1 1h.5V7a.5.5 0 0 1-.5.5H6V7a1 1 0 0 0-1-1 1 1 0 0 0-1 1v.5H2.5A.5.5 0 0 1 2 7V5.5h.5a1 1 0 0 0 1-1 1 1 0 0 0-1-1H2V2a.5.5 0 0 1 .5-.5H6z" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
+        </g>
+      </svg>
+    )
+  }
+  return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" strokeWidth={stroke} /></svg>
+}
+
 function getNodeMinWidth(node: PanelNode, getTileType: (tileId: string) => string): number {
   if (node.type === 'leaf') {
     return node.tabs.some(tileId => getTileType(tileId) === 'chat') ? 360 : 0
@@ -309,6 +342,10 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
   const fonts = useAppFonts()
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const compactTabBackground = theme.accent.base
+  const compactTabInactiveBackground = `color-mix(in srgb, ${theme.accent.base} 18%, ${theme.surface.panelElevated})`
+  const compactTabHoverBackground = `color-mix(in srgb, ${theme.accent.base} 28%, ${theme.surface.panelElevated})`
+  const compactTabMaxWidth = 'min(180px, 18vw)'
 
   useEffect(() => {
     if (!ctxMenu) return
@@ -344,10 +381,12 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
       }}>
         {tabs.map(tab => {
           const isActive = tab.id === activeTab
+          const tileType = getTileType(tab.id)
           return (
             <div
               key={tab.id}
               data-tab-id={tab.id}
+              title={tab.label}
               onMouseDown={e => {
                 if (e.button !== 0) return
                 e.preventDefault()
@@ -360,41 +399,38 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                 setCtxMenu({ tileId: tab.id, tileType: getTileType(tab.id), x: e.clientX, y: e.clientY })
               }}
               style={{
-                display: 'flex', alignItems: 'center', gap: 3,
+                display: 'flex', alignItems: 'center', gap: 4,
                 height: 21,
-                padding: '0 2px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
-                fontSize: 10, color: isActive ? theme.text.primary : theme.text.muted,
-                background: 'transparent',
-                border: '1px solid transparent',
+                padding: '0 6px 0 7px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
+                fontSize: Math.max(9, fonts.secondarySize - 2), color: isActive ? theme.text.inverse : theme.text.secondary,
+                background: isActive ? compactTabBackground : compactTabInactiveBackground,
                 marginBottom: 3,
-                borderRadius: 0,
-                transition: 'color 0.15s, border-color 0.15s',
-                flexShrink: 0, maxWidth: 200,
-                fontWeight: isActive ? 700 : 500,
-                letterSpacing: 0.3,
-                textTransform: 'uppercase',
+                borderRadius: 6,
+                transition: 'color 0.15s, background 0.15s',
+                flexShrink: 0, maxWidth: compactTabMaxWidth,
+                fontWeight: isActive ? 650 : 550,
+                letterSpacing: 0,
               }}
               onMouseEnter={e => {
                 if (!isActive) {
-                  e.currentTarget.style.color = theme.text.secondary
+                  e.currentTarget.style.background = compactTabHoverBackground
                 }
               }}
               onMouseLeave={e => {
                 if (!isActive) {
-                  e.currentTarget.style.color = theme.text.muted
+                  e.currentTarget.style.background = compactTabInactiveBackground
                 }
               }}
             >
+              <span style={{ display: 'inline-flex', alignItems: 'center', color: 'currentColor', flexShrink: 0 }}>
+                <PanelTabIcon type={tileType} />
+              </span>
               <span
                 style={{
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                   minWidth: 0,
-                  textDecorationLine: isActive ? 'underline' : 'none',
-                  textDecorationColor: isActive ? theme.accent.base : 'transparent',
-                  textDecorationThickness: 1,
-                  textUnderlineOffset: 8,
                 }}
               >
                 {tab.label}
@@ -403,25 +439,18 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
                 onMouseDown={e => e.stopPropagation()}
                 onClick={e => { e.stopPropagation(); onClose(tab.id) }}
                 style={{
-                  width: 15, height: 15,
+                  width: 13, height: 13,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 15, lineHeight: 1,
-                  // Always dimmed — matches the muted × on the main tile
-                  // chrome close at the top. No active/inactive variation
-                  // so the × never competes with the tab label.
-                  color: theme.text.disabled,
+                  color: 'currentColor',
                   flexShrink: 0, cursor: 'pointer', transition: 'color 0.15s',
-                  // × is always rendered at normal weight — a bold × reads
-                  // as a heavy close target on the active tab. Keep the
-                  // active/inactive vertical nudges so both glyphs stay on
-                  // the label's optical centre-line.
-                  fontWeight: 400,
-                  marginTop: isActive ? -3 : 3,
+                  marginLeft: 0,
                 }}
-                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
+                onMouseEnter={e => { e.currentTarget.style.opacity = '0.72' }}
+                onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
               >
-                ×
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <path d="M3 3l6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
               </span>
             </div>
           )
@@ -704,7 +733,7 @@ function EmptyPanel({ onAddTile, onLaunchTemplate }: { onAddTile: (type: string)
 interface LeafPanelProps {
   leaf: PanelLeaf
   getTileLabel: (tileId: string) => string
-  renderTile: (tileId: string, options?: { isInteracting?: boolean }) => React.ReactNode
+  renderTile: (tileId: string, options?: { isInteracting?: boolean; isActive?: boolean }) => React.ReactNode
   isInteracting: boolean
   onActivate: (panelId: string, tileId: string) => void
   onCloseTab: (tileId: string) => void
@@ -791,7 +820,7 @@ function LeafPanel({ leaf, getTileLabel, renderTile, isInteracting, onActivate, 
                   pointerEvents: isActive ? 'auto' : 'none',
                 }}
               >
-                {renderTile(tileId, { isInteracting })}
+                {renderTile(tileId, { isInteracting, isActive })}
               </div>
             )
           })
@@ -807,7 +836,7 @@ function LeafPanel({ leaf, getTileLabel, renderTile, isInteracting, onActivate, 
 export interface PanelLayoutProps {
   root: PanelNode
   getTileLabel: (tileId: string) => string
-  renderTile: (tileId: string, options?: { isInteracting?: boolean }) => React.ReactNode
+  renderTile: (tileId: string, options?: { isInteracting?: boolean; isActive?: boolean }) => React.ReactNode
   onLayoutChange: (newRoot: PanelNode) => void
   onCloseTab: (tileId: string) => void
   onAddTile: (type: string) => void

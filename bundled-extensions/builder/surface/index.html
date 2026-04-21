@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --ct-bg: transparent; --ct-panel: rgba(0,0,0,0.04); --ct-panel-2: rgba(0,0,0,0.06); --ct-panel-3: rgba(0,0,0,0.09);
+    --ct-border: rgba(0,0,0,0.10); --ct-border-2: rgba(15,23,42,0.16);
+    --ct-text: #111111; --ct-muted: #334155; --ct-dim: #64748b;
+    --ct-accent: #4f46e5; --ct-accent-s: rgba(79,70,229,0.12);
+    --ct-success: #1f8f5f; --ct-danger: #dc2626;
+    --bg: var(--ct-bg); --surface: var(--ct-panel); --surface2: var(--ct-panel-2); --surface3: var(--ct-panel-3);
+    --border: var(--ct-border); --border-hi: var(--ct-border-2);
+    --text: var(--ct-text); --text2: var(--ct-muted); --text3: var(--ct-dim);
+    --accent: var(--ct-accent); --accent-dim: var(--ct-accent-s); --accent-border: color-mix(in srgb, var(--ct-accent) 30%, transparent);
+    --green: var(--ct-success); --red: var(--ct-danger);
+  }
+  html[data-ct-mode="dark"] {
+    --ct-panel: #0f0f18; --ct-panel-2: #16161f; --ct-panel-3: #1c1c28;
+    --ct-border: rgba(255,255,255,0.07); --ct-border-2: rgba(255,255,255,0.14);
+    --ct-text: #e8e8e8; --ct-muted: #aaaaaa; --ct-dim: #777777;
+    --ct-accent: #6E71FF; --ct-accent-s: rgba(110,113,255,0.12);
+    --ct-success: #34d399; --ct-danger: #f87171;
+  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; overflow: hidden; }
+  .left { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+  .header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .header-icon { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), rgba(110,113,255,0.65)); display: flex; align-items: center; justify-content: center; font-size: 11px; }
+  .header-title { font-size: 12px; font-weight: 700; flex: 1; }
+  .prompt-area { padding: 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .prompt-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 6px; }
+  .prompt-input { width: 100%; resize: none; border-radius: 7px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); padding: 8px 10px; font-size: 12px; line-height: 1.5; outline: none; font-family: inherit; }
+  .prompt-input:focus { border-color: var(--accent-border); }
+  .prompt-input::placeholder { color: var(--text3); }
+  .gen-btn { width: 100%; margin-top: 8px; padding: 8px; border-radius: 7px; border: none; background: linear-gradient(135deg, var(--accent), rgba(110,113,255,0.65)); color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .gen-btn:disabled { background: var(--accent-dim); color: var(--text3); cursor: default; }
+  .gen-btn .shortcut { font-size: 9px; opacity: 0.5; }
+  .examples { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .example-chip { padding: 2px 7px; border-radius: 20px; border: 1px solid var(--border); background: var(--surface3); color: var(--text3); font-size: 9px; cursor: pointer; transition: all 0.1s; }
+  .example-chip:hover { color: var(--accent); border-color: var(--accent-border); }
+  .error-box { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(248,113,113,0.07); border: 1px solid rgba(248,113,113,0.2); color: var(--red); font-size: 11px; line-height: 1.5; }
+  .source-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+  .source-header { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .source-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); }
+  .source-hint { font-size: 9px; color: var(--text3); opacity: 0.6; }
+  .source-editor { flex: 1; resize: none; border: none; background: var(--surface); color: var(--text); padding: 10px 12px; font-family: 'JetBrains Mono', 'SF Mono', monospace; font-size: 11.5px; line-height: 1.7; outline: none; }
+  .footer { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .save-btn { flex: 1; padding: 8px; border-radius: 7px; border: none; background: var(--green); color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px; }
+  .copy-btn { padding: 8px 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface2); color: var(--text2); font-size: 11px; cursor: pointer; }
+  .right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .preview-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .preview-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); }
+  .generating-text { font-size: 10px; color: var(--accent); display: flex; align-items: center; gap: 5px; }
+  .refresh-btn { margin-left: auto; padding: 3px 9px; border-radius: 4px; border: 1px solid var(--border); background: none; color: var(--text2); font-size: 11px; cursor: pointer; }
+  .refresh-btn:hover { border-color: var(--border-hi); color: var(--text); }
+  .preview-frame { flex: 1; overflow: hidden; background: var(--surface); }
+  .preview-frame iframe { width: 100%; height: 100%; border: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { width: 10px; height: 10px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.12); border-top-color: var(--accent); animation: spin 0.8s linear infinite; display: inline-block; }
+  .settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+  .settings-overlay.open { display: flex; }
+  .settings-panel { width: 380px; background: var(--surface); border: 1px solid var(--border-hi); border-radius: 12px; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+  .settings-title { font-size: 14px; font-weight: 700; margin-bottom: 14px; }
+  .settings-field { margin-bottom: 12px; }
+  .settings-field label { display: block; font-size: 10px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+  .settings-field input { width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-size: 12px; outline: none; font-family: inherit; }
+  .settings-field input:focus { border-color: var(--accent-border); }
+  .settings-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  .settings-actions button { padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .settings-save { border: none; background: var(--accent); color: #fff; font-weight: 600; }
+  .settings-cancel { border: 1px solid var(--border); background: var(--surface2); color: var(--text2); }
+</style>
+</head>
+<body>
+  <div class="left">
+    <div class="header">
+      <div class="header-icon">&#x2B21;</div>
+      <div class="header-title">Builder</div>
+      <button onclick="toggleSettings()" style="background:none;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer;padding:2px 6px;font-size:10px" title="Settings">&#x2699;</button>
+    </div>
+    <div class="prompt-area">
+      <div class="prompt-label">AI Generate</div>
+      <textarea id="prompt" class="prompt-input" rows="3" placeholder="Describe a component, chart, or UI element..."></textarea>
+      <button id="genBtn" class="gen-btn" onclick="generate()">&#x2728; Generate Component <span class="shortcut">Ctrl+Enter</span></button>
+      <div class="examples" id="examples"></div>
+      <div id="peerContextSummary" style="font-size:9px;color:var(--text3);margin-top:6px;padding:4px 0;"></div>
+      <div id="errorBox" class="error-box" style="display:none"></div>
+    </div>
+    <div class="source-area">
+      <div class="source-header">
+        <span class="source-label">HTML Source</span>
+        <span class="source-hint">edit directly or generate above</span>
+      </div>
+      <textarea id="htmlSource" class="source-editor" placeholder='<div style="text-align:center">&#10;  <h1>Your Component</h1>&#10;</div>'></textarea>
+    </div>
+    <div class="footer">
+      <button class="save-btn" id="saveBtn" onclick="copyHtml()">&#x2713; Copy HTML</button>
+      <button class="copy-btn" onclick="downloadHtml()">Download</button>
+    </div>
+  </div>
+  <div class="right">
+    <div class="preview-header">
+      <div class="status-dot" id="statusDot" style="background:rgba(255,255,255,0.15)"></div>
+      <span class="preview-label">Live Preview</span>
+      <span id="genStatus" class="generating-text" style="display:none"><span class="spinner"></span>generating...</span>
+      <button class="refresh-btn" onclick="refreshPreview()">Refresh</button>
+    </div>
+    <div class="preview-frame">
+      <iframe id="preview" sandbox="allow-scripts allow-same-origin" title="Component preview"></iframe>
+    </div>
+  </div>
+  <div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)toggleSettings()">
+    <div class="settings-panel">
+      <div class="settings-title">AI Settings</div>
+      <div class="settings-field"><label>API Key</label><input id="settApiKey" type="password" placeholder="sk-or-... or sk-..."></div>
+      <div class="settings-field"><label>Model</label><input id="settModel" placeholder="anthropic/claude-sonnet-4"></div>
+      <div class="settings-field"><label>API Base URL</label><input id="settBaseUrl" placeholder="https://openrouter.ai/api/v1"></div>
+      <div class="settings-actions">
+        <button class="settings-cancel" onclick="toggleSettings()">Cancel</button>
+        <button class="settings-save" onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+<script>
+// Config
+var DEFAULTS = { apiKey: '', model: 'anthropic/claude-sonnet-4', baseUrl: 'https://openrouter.ai/api/v1' };
+function loadConfig() { try { var r = localStorage.getItem('builder-config'); return r ? Object.assign({}, DEFAULTS, JSON.parse(r)) : Object.assign({}, DEFAULTS); } catch(e) { return Object.assign({}, DEFAULTS); } }
+function saveConfig(c) { localStorage.setItem('builder-config', JSON.stringify(c)); }
+var config = loadConfig();
+
+// Contex context + actions integration
+var contexReady = false;
+var inputContexts = {};
+function initContex() {
+  if (!window.contex) return;
+  contexReady = true;
+  publishArtifactContext(html ? 'ready' : 'empty', html || '', null);
+
+  // Listen for peer context changes
+  if (window.contex.context) {
+    window.contex.context.onPeerContextChanged(function(data) {
+      if (data.peerId && data.key) {
+        inputContexts[data.peerId] = inputContexts[data.peerId] || {};
+        inputContexts[data.peerId][data.key] = data.value;
+        onInputContextChanged();
+      }
+    });
+  }
+
+    // Register actions that connected tiles can invoke
+  if (window.contex.actions) {
+    window.contex.actions.register('generate', 'Generate an HTML artifact from a prompt', function(params) {
+      var p = params.prompt || params.description || '';
+      if (!p) return { ok: false, error: 'Missing prompt' };
+      var el = document.getElementById('prompt');
+      el.focus();
+      el.value = p;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      // Small delay so the UI updates visibly before generation starts
+      setTimeout(function() { generate(); }, 150);
+      return { ok: true, status: 'generating' };
+    });
+
+    window.contex.actions.register('setHtml', 'Set the artifact HTML directly', function(params) {
+      var h = params.html || params.content || '';
+      html = h;
+      document.getElementById('htmlSource').value = h;
+      updatePreview();
+      publishArtifactContext('ready', h, null);
+      return { ok: true };
+    });
+
+    window.contex.actions.register('getHtml', 'Get the current artifact HTML', function() {
+      return { html: html, status: generating ? 'generating' : 'ready' };
+    });
+
+    window.contex.actions.register('getStatus', 'Get current generation status', function() {
+      return { status: generating ? 'generating' : (html ? 'ready' : 'empty'), hasContent: !!html };
+    });
+
+    window.contex.actions.register('setPrompt', 'Set the prompt text without generating', function(params) {
+      document.getElementById('prompt').value = params.prompt || '';
+      return { ok: true };
+    });
+
+    window.contex.actions.register('setSettings', 'Update API settings (model, baseUrl, apiKey)', function(params) {
+      if (params.model) config.model = params.model;
+      if (params.baseUrl) config.baseUrl = params.baseUrl;
+      if (params.apiKey) config.apiKey = params.apiKey;
+      saveConfig(config);
+      checkReady();
+      publishArtifactContext(html ? 'ready' : 'empty', html || '', null);
+      return { ok: true, model: config.model };
+    });
+  }
+
+  if (window.contex.surface) {
+    window.contex.surface.onRequestFlush(function() {
+      publishArtifactContext(generating ? 'generating' : (html ? 'ready' : 'empty'), html || '', null);
+    });
+    window.contex.surface.onClear(function() {
+      if (abortCtrl) abortCtrl.abort();
+      abortCtrl = null;
+      html = '';
+      generating = false;
+      inputContexts = {};
+      document.getElementById('prompt').value = '';
+      document.getElementById('htmlSource').value = '';
+      updatePreview();
+      hideError();
+      setGenerating(false);
+      publishArtifactContext('empty', '', null);
+      onInputContextChanged();
+    });
+  }
+
+  publishArtifactContext(html ? 'ready' : 'empty', html || '', null);
+}
+function onInputContextChanged() {
+  var summaryDiv = document.getElementById('peerContextSummary');
+  if (!summaryDiv) return;
+  var count = 0;
+  for (var peerId in inputContexts) {
+    count += Object.keys(inputContexts[peerId] || {}).length;
+  }
+  summaryDiv.textContent = count > 0 ? count + ' context item' + (count !== 1 ? 's' : '') + ' from peers' : '';
+}
+function getFormattedInputContext() {
+  var parts = [];
+  for (var peerId in inputContexts) {
+    for (var key in inputContexts[peerId]) {
+      var val = inputContexts[peerId][key];
+      var keyShort = key.replace(/^ctx:/, '');
+      if (typeof val === 'string' && val.length > 100) {
+        parts.push(keyShort + ': ' + val.substring(0, 100) + '...');
+      } else {
+        parts.push(keyShort + ': ' + JSON.stringify(val));
+      }
+    }
+  }
+  return parts.length > 0 ? '\n\nInput context:\n' + parts.join('\n') : '';
+}
+function publishChatSurfacePayload(htmlVal) {
+  if (!window.contex || !window.contex.surface) return;
+  var cleanHtml = typeof htmlVal === 'string' ? htmlVal.trim() : '';
+  if (!cleanHtml) {
+    window.contex.surface.clear();
+    return;
+  }
+  window.contex.surface.setPayload({
+    kind: 'text',
+    data: cleanHtml,
+    mime: 'text/html',
+    ext: 'html',
+  });
+}
+function publishArtifactContext(status, htmlVal, errorMsg) {
+  if (!contexReady) return;
+  var modalities = ['html', 'ui', 'component', 'artifact', 'dashboard', 'chart'];
+  var actions = ['generate', 'setHtml', 'getHtml', 'getStatus', 'setPrompt', 'setSettings'];
+  window.contex.context.set('ctx:artifact:ready', true);
+  window.contex.context.set('ctx:artifact:availableActions', actions);
+  window.contex.context.set('ctx:output:primary', {
+    tile: 'builder',
+    preferredAction: 'generate',
+    modalities: modalities,
+    acceptsStreaming: true,
+  });
+  window.contex.context.set('ctx:output:modalities', modalities);
+  window.contex.context.set('ctx:output:preferredAction', 'generate');
+  if (status) window.contex.context.set('ctx:artifact:status', status);
+  if (htmlVal !== undefined) window.contex.context.set('ctx:artifact:html', htmlVal);
+  if (errorMsg !== undefined) window.contex.context.set('ctx:artifact:error', errorMsg || null);
+  publishChatSurfacePayload(htmlVal);
+}
+
+function toggleSettings() { var el = document.getElementById('settingsOverlay'); var open = el.classList.toggle('open'); if (open) { document.getElementById('settApiKey').value = config.apiKey; document.getElementById('settModel').value = config.model; document.getElementById('settBaseUrl').value = config.baseUrl; } }
+function saveSettings() { config.apiKey = document.getElementById('settApiKey').value.trim(); config.model = document.getElementById('settModel').value.trim() || DEFAULTS.model; config.baseUrl = document.getElementById('settBaseUrl').value.trim() || DEFAULTS.baseUrl; saveConfig(config); toggleSettings(); checkReady(); }
+
+// State
+var html = '', generating = false, abortCtrl = null;
+var EXAMPLES = ['Donut chart - market share','Animated counter with percentage','Dark glassmorphism pricing card','Gradient hero stat with icon','Interactive FAQ accordion','Timeline with glowing steps','Metric dashboard cards','Neon progress ring','Compare before/after table','Bar chart - quarterly revenue'];
+var SYSTEM_PROMPT = 'You are a frontend component generator. Return ONLY a valid HTML fragment or full HTML document that begins with an HTML tag and contains no prose before or after it. No markdown. No code fences. No explanations. No notes. No trailing commentary. No leading commentary. Your entire response must be HTML only.\n\nAvailable: Chart.js (window.Chart). CSS vars: --accent (#6E71FF), --green (#34d399), --blue (#60a5fa), --yellow (#fbbf24), --red (#f87171).\n\nRules: Dark theme (#060610 to #1a1a24 bg, light text). Self-contained (inline CSS/JS). Centered. Responsive. Beautiful (gradients, shadows, rounded corners, animations). For charts use Chart.js with <canvas>.';
+
+function stripFences(t) { if (!t) return ''; return t.replace(/^```[\w]*\s*\n?/gm, '').replace(/\n?\s*```\s*$/gm, '').trim(); }
+function extractHtmlOnly(raw) {
+  var text = stripFences(raw || '').trim();
+  if (!text) return '';
+  var docMatch = text.match(/<!doctype html[\s\S]*<\/html>/i);
+  if (docMatch) return docMatch[0].trim();
+  var htmlMatch = text.match(/<html[\s\S]*<\/html>/i);
+  if (htmlMatch) return htmlMatch[0].trim();
+  var firstTag = text.search(/</);
+  if (firstTag > 0) text = text.slice(firstTag).trim();
+  var lastTagClose = text.lastIndexOf('>');
+  if (lastTagClose >= 0) text = text.slice(0, lastTagClose + 1).trim();
+  return text;
+}
+function buildSrcdoc(raw, opts) {
+  opts = opts || {};
+  var disableAnimations = !!opts.disableAnimations;
+  var h = extractHtmlOnly(raw); if (!h || !h.trim()) return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#ffffff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui,sans-serif;color:rgba(15,23,42,0.45);font-size:12px;gap:8px;flex-direction:column}</style></head><body><div style="font-size:24px;opacity:0.3">&#x2B21;</div><div>Enter a prompt to generate</div></body></html>';
+  var animationGuard = disableAnimations ? '[data-artifact-streaming="true"], [data-artifact-streaming="true"] *, [data-artifact-streaming="true"] *::before, [data-artifact-streaming="true"] *::after{animation:none !important;transition:none !important;scroll-behavior:auto !important}' : '';
+  var t = h.trim().toLowerCase(); if (t.indexOf('<!doctype') === 0 || t.indexOf('<html') === 0) {
+    if (!disableAnimations) return h;
+    if (/<head[^>]*>/i.test(h)) return h.replace(/<head([^>]*)>/i, '<head$1><style>' + animationGuard + '</style>');
+    return '<style>' + animationGuard + '</style>' + h;
+  }
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"><\/script><style>*{margin:0;padding:0;box-sizing:border-box}:root{--accent:#4f46e5;--green:#1f8f5f;--blue:#2563eb;--yellow:#c07b12;--red:#dc2626}body{background:#ffffff;font-family:system-ui,-apple-system,sans-serif;color:#111111;line-height:1.5;width:100%;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:auto;padding:16px}::-webkit-scrollbar{width:5px;height:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(15,23,42,0.12);border-radius:3px}' + animationGuard + '</style></head><body data-artifact-streaming="' + (disableAnimations ? 'true' : 'false') + '">' + h + '</body></html>';
+}
+
+function updatePreview(opts) { document.getElementById('preview').srcdoc = buildSrcdoc(html, opts); document.getElementById('statusDot').style.background = html ? 'var(--green)' : 'rgba(255,255,255,0.15)'; }
+function refreshPreview() { updatePreview(); }
+function checkReady() { var ready = !!config.apiKey; document.getElementById('genBtn').disabled = !ready; if (!ready) showError('Set your API key in settings (gear icon) to enable generation.'); else hideError(); }
+function showError(m) { var el = document.getElementById('errorBox'); el.textContent = m; el.style.display = 'block'; }
+function hideError() { document.getElementById('errorBox').style.display = 'none'; }
+function setGenerating(v) { generating = v; document.getElementById('genBtn').disabled = v || !config.apiKey; document.getElementById('genBtn').textContent = v ? 'Generating...' : ''; if (!v) document.getElementById('genBtn').textContent = ''; document.getElementById('genBtn').replaceChildren(); if (v) { var sp = document.createElement('span'); sp.className = 'spinner'; document.getElementById('genBtn').appendChild(sp); document.getElementById('genBtn').appendChild(document.createTextNode(' Generating...')); } else { document.getElementById('genBtn').appendChild(document.createTextNode('\u2728 Generate Component ')); var sc = document.createElement('span'); sc.className = 'shortcut'; sc.textContent = 'Ctrl+Enter'; document.getElementById('genBtn').appendChild(sc); } document.getElementById('genStatus').style.display = v ? 'flex' : 'none'; }
+
+async function generate() {
+  var prompt = document.getElementById('prompt').value.trim();
+  if (!prompt || generating || !config.apiKey) return;
+  if (abortCtrl) abortCtrl.abort(); abortCtrl = new AbortController();
+  setGenerating(true); hideError(); html = ''; document.getElementById('htmlSource').value = ''; updatePreview({ disableAnimations: true });
+  publishArtifactContext('generating', '', null);
+  var accumulated = '';
+  try {
+    var url = config.baseUrl.replace(/\/+$/, '') + '/chat/completions';
+    var userPrompt = prompt + getFormattedInputContext();
+    var baseMessages = [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: userPrompt }];
+    var maxPasses = 4;
+    var pass = 0;
+    var shouldContinue = false;
+
+    do {
+      shouldContinue = false;
+      var messages = baseMessages.slice();
+      if (accumulated) {
+        messages.push({ role: 'assistant', content: accumulated });
+        messages.push({ role: 'user', content: 'Continue from exactly where you stopped. Output ONLY the remaining HTML. Do not repeat prior content. Do not explain anything.' });
+      }
+
+      var res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config.apiKey },
+        body: JSON.stringify({ model: config.model, messages: messages, stream: true, max_tokens: 16384 }),
+        signal: abortCtrl.signal,
+      });
+      if (!res.ok) { var j = await res.json().catch(function() { return {}; }); throw new Error((j.error && j.error.message) || 'API error ' + res.status); }
+
+      var reader = res.body.getReader(), decoder = new TextDecoder(), buf = '', finishReason = null;
+      while (true) {
+        var chunk = await reader.read(); if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true }); var lines = buf.split('\n'); buf = lines.pop();
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i].trim(); if (l.indexOf('data: ') !== 0) continue; var data = l.slice(6); if (data === '[DONE]') continue;
+          try {
+            var parsed = JSON.parse(data);
+            var choice = parsed.choices && parsed.choices[0] ? parsed.choices[0] : null;
+            var content = choice && choice.delta && choice.delta.content;
+            if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+            if (content) {
+              accumulated += content;
+              html = extractHtmlOnly(accumulated);
+              document.getElementById('htmlSource').value = html;
+              var iframe = document.getElementById('preview'); try { var doc = iframe.contentDocument; if (doc) { doc.open(); doc.write(buildSrcdoc(accumulated, { disableAnimations: true })); doc.close(); } } catch(e2) {}
+            }
+          } catch(e3) {}
+        }
+      }
+
+      pass++;
+      shouldContinue = finishReason === 'length' && pass < maxPasses;
+      if (shouldContinue) setStatus('Artifact output hit token limit — continuing (' + (pass + 1) + '/' + maxPasses + ')…', 'pill-pending');
+    } while (shouldContinue);
+
+    updatePreview({ disableAnimations: false });
+    publishArtifactContext('ready', html, null);
+  } catch(e) { if (e.name !== 'AbortError') { showError(e.message); publishArtifactContext('error', '', e.message); } } finally { setGenerating(false); }
+}
+
+function copyHtml() { navigator.clipboard.writeText(html || document.getElementById('htmlSource').value); var btn = document.getElementById('saveBtn'); btn.textContent = 'Copied!'; setTimeout(function() { btn.textContent = '\u2713 Copy HTML'; }, 1500); }
+function downloadHtml() { var content = buildSrcdoc(html || document.getElementById('htmlSource').value); var blob = new Blob([content], { type: 'text/html' }); var a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'artifact.html'; a.click(); URL.revokeObjectURL(a.href); }
+
+// Init
+var exContainer = document.getElementById('examples');
+EXAMPLES.forEach(function(ex) { var chip = document.createElement('button'); chip.className = 'example-chip'; chip.textContent = ex; chip.onclick = function() { document.getElementById('prompt').value = ex; document.getElementById('prompt').focus(); }; exContainer.appendChild(chip); });
+document.getElementById('htmlSource').addEventListener('input', function(e) { html = e.target.value; updatePreview(); publishArtifactContext('ready', html, null); });
+document.getElementById('prompt').addEventListener('keydown', function(e) { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) generate(); });
+updatePreview(); checkReady();
+
+var contexInitDone = false;
+function tryInitContex() {
+  if (contexInitDone || !window.contex) return;
+  contexInitDone = true;
+  initContex();
+}
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'contex-bridge-ready') tryInitContex();
+});
+tryInitContex();
+setTimeout(tryInitContex, 0);
+setTimeout(tryInitContex, 50);
+setTimeout(tryInitContex, 150);
+</script>
+</body>
+</html>
