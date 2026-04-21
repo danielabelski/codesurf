@@ -1,6 +1,7 @@
 import React from 'react'
 import type { Workspace } from '../../../../shared/types'
 import { basename } from '../../utils/dnd'
+import { compareSessionsWithSelectionPriority } from './session-ordering'
 import type { DisplaySessionEntry, ProjectListEntry, SessionEntry, ThreadSortMode } from './types'
 
 export function deriveProjectsFromWorkspaces(workspaces: Workspace[]): ProjectListEntry[] {
@@ -116,16 +117,20 @@ export function getSessionAgentLabel(session: SessionEntry): string {
   return session.sourceLabel || 'CodeSurf'
 }
 
-export function compareSessions(a: SessionEntry, b: SessionEntry, sortMode: ThreadSortMode): number {
-  if (sortMode === 'title') {
-    const titleCompare = a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
-    if (titleCompare !== 0) return titleCompare
-    return b.updatedAt - a.updatedAt
-  }
-  return b.updatedAt - a.updatedAt
+export function compareSessions(
+  a: SessionEntry,
+  b: SessionEntry,
+  sortMode: ThreadSortMode,
+  promotedAtById: Record<string, number> = {},
+): number {
+  return compareSessionsWithSelectionPriority(a, b, sortMode, promotedAtById)
 }
 
-export function buildNestedSessionList(sessions: SessionEntry[], sortMode: ThreadSortMode): DisplaySessionEntry[] {
+export function buildNestedSessionList(
+  sessions: SessionEntry[],
+  sortMode: ThreadSortMode,
+  promotedAtById: Record<string, number> = {},
+): DisplaySessionEntry[] {
   type SessionNode = {
     session: SessionEntry
     children: SessionNode[]
@@ -133,7 +138,7 @@ export function buildNestedSessionList(sessions: SessionEntry[], sortMode: Threa
     subtreeUpdatedAt: number
   }
 
-  const sorted = [...sessions].sort((a, b) => compareSessions(a, b, sortMode))
+  const sorted = [...sessions].sort((a, b) => compareSessions(a, b, sortMode, promotedAtById))
   const nodes = new Map<string, SessionNode>(sorted.map(session => [session.id, {
     session,
     children: [],
@@ -185,14 +190,14 @@ export function buildNestedSessionList(sessions: SessionEntry[], sortMode: Threa
     for (const child of node.children) {
       latest = Math.max(latest, computeSubtree(child))
     }
-    node.children.sort((a, b) => compareSessions(a.session, b.session, sortMode))
+    node.children.sort((a, b) => compareSessions(a.session, b.session, sortMode, promotedAtById))
     node.subtreeUpdatedAt = latest
     return latest
   }
 
   const roots = [...nodes.values()].filter(node => !node.parentId)
   for (const root of roots) computeSubtree(root)
-  roots.sort((a, b) => compareSessions(a.session, b.session, sortMode))
+  roots.sort((a, b) => compareSessions(a.session, b.session, sortMode, promotedAtById))
 
   const flattened: DisplaySessionEntry[] = []
   const walk = (node: SessionNode, depth: number) => {

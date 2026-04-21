@@ -7,6 +7,7 @@ import { ContextMenu, type MenuItem } from './ContextMenu'
 import { SidebarFooter } from './sidebar/SidebarFooter'
 import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS } from './sidebar/utils'
+import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
@@ -99,6 +100,7 @@ export function Sidebar({
   const [hoveredProjectRow, setHoveredProjectRow] = useState<string | null>(null)
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
+  const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
   const deleteConfirmTimerRef = useRef<number | null>(null)
   const threadMenuRef = useRef<HTMLDivElement>(null)
 
@@ -174,6 +176,53 @@ export function Sidebar({
   }, [projectEntries, workspace])
 
   const loadedSessionWorkspaceIdSet = useMemo(() => new Set(loadedSessionWorkspaceIds), [loadedSessionWorkspaceIds])
+
+  const scrollSessionsToTop = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ top: 0, behavior: 'auto' })
+    })
+  }, [])
+
+  const promoteSession = useCallback((session: SessionEntry | null | undefined) => {
+    if (!session) return
+    const promotedAt = Date.now()
+    setSessionPromotions(prev => {
+      const current = prev[session.id] ?? 0
+      if (current >= promotedAt) return prev
+      return {
+        ...prev,
+        [session.id]: promotedAt,
+      }
+    })
+    scrollSessionsToTop()
+  }, [scrollSessionsToTop])
+
+  useEffect(() => {
+    const validIds = new Set(sessions.map(session => session.id))
+    setSessionPromotions(prev => {
+      let changed = false
+      const next: Record<string, number> = {}
+      for (const [sessionId, promotedAt] of Object.entries(prev)) {
+        if (!validIds.has(sessionId)) {
+          changed = true
+          continue
+        }
+        next[sessionId] = promotedAt
+      }
+      return changed ? next : prev
+    })
+  }, [sessions])
+
+  useEffect(() => {
+    const activeSession = sessions.find(session => isSessionActive(session, {
+      activeChatTileId,
+      activeChatSessionId,
+      activeChatSessionEntryId,
+    }))
+    if (!activeSession) return
+    if ((sessionPromotions[activeSession.id] ?? 0) > 0) return
+    promoteSession(activeSession)
+  }, [sessions, activeChatTileId, activeChatSessionId, activeChatSessionEntryId, sessionPromotions, promoteSession])
 
   const isThreadGroupCollapsed = useCallback((group: SessionProjectGroup) => {
     const explicit = collapsedThreadGroups[group.key]
@@ -309,6 +358,13 @@ export function Sidebar({
   }, [loadWorkspaceSessions, loadedSessionWorkspaceIdSet, workspaceById])
 
   const openTileIdSet = useMemo(() => new Set(tiles.map(tile => tile.id)), [tiles])
+
+  const promotedSessions = useMemo(() => applySessionPromotions(sessions, sessionPromotions), [sessions, sessionPromotions])
+
+  const orderedProjectEntries = useMemo(
+    () => sortProjectEntriesByRecentSession(projectEntries, promotedSessions, getProjectDisplayLabel),
+    [projectEntries, promotedSessions],
+  )
 
   const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
     const items: MenuItem[] = []
@@ -465,7 +521,7 @@ export function Sidebar({
 
   const visibleSessions = useMemo(() => {
     const deduped = new Map<string, SessionEntry>()
-    for (const session of sessions) {
+    for (const session of promotedSessions) {
       const existing = deduped.get(session.id)
       if (!existing) {
         deduped.set(session.id, session)
@@ -487,8 +543,8 @@ export function Sidebar({
       if (threadOrganizeMode === 'project' && session.scope === 'user') return false
       return true
     })
-    return buildNestedSessionList(filtered, threadSortMode)
-  }, [sessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode])
+    return buildNestedSessionList(filtered, threadSortMode, sessionPromotions)
+  }, [promotedSessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode, sessionPromotions])
 
   const availableSessionAgents = useMemo(() => {
     const byKey = new Map<string, { key: string; label: string; icon: React.JSX.Element }>()
@@ -530,7 +586,7 @@ export function Sidebar({
   // Track full per-project counts so each group can render its own "More".
   const projectSessionTotals = useMemo(() => {
     const totals: Record<string, number> = {}
-    for (const projectEntry of projectEntries) {
+    for (const projectEntry of orderedProjectEntries) {
       const projectPath = normalizeSidebarPath(projectEntry.path)
       const workspaceIdSet = new Set(projectEntry.workspaceIds)
       totals[projectEntry.id] = visibleSessions.filter(session => {
@@ -540,7 +596,7 @@ export function Sidebar({
       }).length
     }
     return totals
-  }, [visibleSessions, projectEntries])
+  }, [visibleSessions, orderedProjectEntries])
 
   const displayedSessionGroups = useMemo<SessionProjectGroup[]>(() => {
     if (threadOrganizeMode === 'chronological') {
@@ -553,7 +609,7 @@ export function Sidebar({
         sessions: displayedSessions,
       }] : []
     }
-    return projectEntries
+    return orderedProjectEntries
       .map(projectEntry => {
         const projectPath = normalizeSidebarPath(projectEntry.path)
         const workspaceIdSet = new Set(projectEntry.workspaceIds)
@@ -572,7 +628,7 @@ export function Sidebar({
           sessions: allWorkspaceSessions.slice(0, count),
         }
       })
-  }, [visibleSessions, displayedSessions, projectEntries, threadOrganizeMode, getProjectCount])
+  }, [visibleSessions, displayedSessions, orderedProjectEntries, threadOrganizeMode, getProjectCount])
 
   // Search should hit ALL loaded sessions, not just the paged subset —
   // otherwise hidden-for-performance items would be unsearchable. When a
@@ -601,7 +657,7 @@ export function Sidebar({
       }]
     }
 
-    return projectEntries
+    return orderedProjectEntries
       .map(projectEntry => {
         const projectPath = normalizeSidebarPath(projectEntry.path)
         const workspaceIdSet = new Set(projectEntry.workspaceIds)
@@ -626,7 +682,7 @@ export function Sidebar({
         } as SessionProjectGroup
       })
       .filter(Boolean) as SessionProjectGroup[]
-  }, [displayedSessionGroups, projectSearch, threadOrganizeMode, visibleSessions, projectEntries])
+  }, [displayedSessionGroups, projectSearch, threadOrganizeMode, visibleSessions, orderedProjectEntries])
 
   const hasMoreSessions = threadOrganizeMode === 'chronological' && !projectSearch.trim()
     ? displayedSessions.length < visibleSessions.length
@@ -1063,15 +1119,11 @@ export function Sidebar({
                   )}
 
                   {(threadOrganizeMode !== 'project' || !isThreadGroupCollapsed(group)) && group.sessions.map(session => {
-                    const hasSpecificActiveSession = Boolean(activeChatSessionEntryId || activeChatSessionId)
-                    const emphasize = hasSpecificActiveSession
-                      ? (
-                          session.id === activeChatSessionEntryId
-                          || (Boolean(activeChatSessionId) && session.sessionId === activeChatSessionId)
-                        )
-                      : (
-                          Boolean(activeChatTileId) && session.tileId === activeChatTileId
-                        )
+                    const isSelected = isSessionActive(session, {
+                      activeChatTileId,
+                      activeChatSessionId,
+                      activeChatSessionEntryId,
+                    })
                     return (
                       <SidebarItem
                         key={session.id}
@@ -1081,8 +1133,9 @@ export function Sidebar({
                         indentUnit={6}
                         extraWidth={24}
                         title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}`}
-                        emphasize={emphasize || undefined}
+                        active={isSelected}
                         onClick={() => {
+                          promoteSession(session)
                           if (session.tileId && openTileIdSet.has(session.tileId)) {
                             onFocusTile(session.tileId)
                             return
