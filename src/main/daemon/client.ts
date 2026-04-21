@@ -225,6 +225,24 @@ export const daemonClient = {
       content: string
     }>
     prompt?: string
+    contextBuckets?: {
+      version: number
+      includedBuckets: string[]
+      buckets: Array<{
+        bucket: string
+        included: boolean
+        sectionCount: number
+        sections: Array<{
+          scope: string
+          displayPath: string
+          importedFrom?: string | null
+        }>
+      }>
+      inspect?: {
+        summary?: string
+        input?: string
+      }
+    }
   }> {
     return daemonRequest(`/memory/load?workspaceId=${encodeURIComponent(workspaceId)}&executionTarget=${encodeURIComponent(executionTarget)}`)
   },

@@ -2501,17 +2501,23 @@ const server = createServer(async (req, res) => {
         return
       }
       let request = body.request
-      if (!String(request?.memoryPrompt ?? '').trim() && typeof request?.workspaceId === 'string' && request.workspaceId.trim()) {
+      const needsMemoryPrompt = !String(request?.memoryPrompt ?? '').trim()
+      const needsContextBuckets = !(request?.contextBuckets && typeof request.contextBuckets === 'object')
+      if ((needsMemoryPrompt || needsContextBuckets) && typeof request?.workspaceId === 'string' && request.workspaceId.trim()) {
         try {
           const memoryContext = await loadWorkspaceMemoryContext(
             request.workspaceId.trim(),
             request.executionTarget === 'cloud' ? 'cloud' : 'local',
           )
           const prompt = String(memoryContext?.prompt ?? '').trim()
-          if (prompt) {
+          const contextBuckets = memoryContext?.contextBuckets && typeof memoryContext.contextBuckets === 'object'
+            ? memoryContext.contextBuckets
+            : null
+          if ((needsMemoryPrompt && prompt) || (needsContextBuckets && contextBuckets)) {
             request = {
               ...request,
-              memoryPrompt: prompt,
+              ...(needsMemoryPrompt && prompt ? { memoryPrompt: prompt } : {}),
+              ...(needsContextBuckets && contextBuckets ? { contextBuckets } : {}),
             }
           }
         } catch (error) {
