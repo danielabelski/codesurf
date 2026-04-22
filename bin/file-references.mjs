@@ -72,6 +72,9 @@ export async function expandFileReferences({
       displayPath: reference.displayPath,
       byteCount: reference.byteCount,
       truncated: reference.truncated,
+      binary: Boolean(reference.binary),
+      mediaType: reference.mediaType,
+      resolvedPath: reference.resolvedPath,
     })),
     summaryText: buildSummaryText(collected),
     inputText: buildInputText(collected),
@@ -213,6 +216,7 @@ function rangeOverlaps(candidate, ranges) {
 }
 
 async function loadWorkspaceReference(reference, workspaceRoot, maxBytesPerFile) {
+  const isAttachment = reference.source === 'attachment'
   const resolvedRequestedPath = resolveReferencePath(reference.candidatePath, workspaceRoot)
   let handle = null
 
@@ -224,7 +228,9 @@ async function loadWorkspaceReference(reference, workspaceRoot, maxBytesPerFile)
     }
 
     const resolvedPath = await fs.realpath(resolvedRequestedPath)
-    if (!isWithinRoot(resolvedPath, workspaceRoot)) {
+    // Attachments (dropped images, pasted screenshots, downloads, etc.) are allowed to
+    // live outside the workspace root. Text-mode `@file`/`@path` references stay strict.
+    if (!isAttachment && !isWithinRoot(resolvedPath, workspaceRoot)) {
       throw new Error(`File reference ${reference.source} resolves outside the workspace root`)
     }
 
@@ -234,21 +240,46 @@ async function loadWorkspaceReference(reference, workspaceRoot, maxBytesPerFile)
     }
 
     const buffer = await handle.readFile()
-    if (buffer.includes(0)) {
+    const isBinary = buffer.includes(0)
+
+    // Non-attachment references must be UTF-8 text.
+    if (isBinary && !isAttachment) {
       throw new Error(`File reference ${reference.source} must point to a UTF-8 text file`)
     }
 
     const byteCount = buffer.byteLength
+    const withinRoot = isWithinRoot(resolvedPath, workspaceRoot)
+    const displayPath = withinRoot
+      ? getDisplayPath(resolvedPath, workspaceRoot)
+      : (resolvedPath.split(sep).pop() || resolvedPath)
+
+    if (isBinary) {
+      // Binary attachment (image, pdf, archive, …). Don't inline its bytes; emit a
+      // structured reference so the agent knows the file is attached and where it is.
+      return {
+        source: normalizeReferenceSource(reference.source, displayPath),
+        resolvedPath,
+        displayPath,
+        byteCount,
+        truncated: false,
+        binary: true,
+        mediaType: guessMediaType(resolvedPath),
+        content: '',
+        previewByteCount: 0,
+      }
+    }
+
     const limitedBuffer = byteCount > maxBytesPerFile
       ? buffer.subarray(0, maxBytesPerFile)
       : buffer
 
     return {
-      source: normalizeReferenceSource(reference.source, getDisplayPath(resolvedPath, workspaceRoot)),
+      source: normalizeReferenceSource(reference.source, displayPath),
       resolvedPath,
-      displayPath: getDisplayPath(resolvedPath, workspaceRoot),
+      displayPath,
       byteCount,
       truncated: byteCount > maxBytesPerFile,
+      binary: false,
       content: normalizeFileContent(limitedBuffer.toString('utf8')),
       previewByteCount: limitedBuffer.byteLength,
     }
@@ -265,6 +296,27 @@ async function loadWorkspaceReference(reference, workspaceRoot, maxBytesPerFile)
     throw new Error(`Failed to read file reference ${reference.source}: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     await handle?.close().catch(() => {})
+  }
+}
+
+function guessMediaType(filePath) {
+  const ext = String(filePath).toLowerCase().split('.').pop() || ''
+  switch (ext) {
+    case 'png': return 'image/png'
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg'
+    case 'gif': return 'image/gif'
+    case 'webp': return 'image/webp'
+    case 'bmp': return 'image/bmp'
+    case 'svg': return 'image/svg+xml'
+    case 'heic': return 'image/heic'
+    case 'pdf': return 'application/pdf'
+    case 'zip': return 'application/zip'
+    case 'mp4': return 'video/mp4'
+    case 'mov': return 'video/quicktime'
+    case 'mp3': return 'audio/mpeg'
+    case 'wav': return 'audio/wav'
+    default: return 'application/octet-stream'
   }
 }
 
@@ -314,6 +366,14 @@ function buildExpandedMessage({ bodyText, executionTarget, references }) {
     lines.push('')
     lines.push(`### ${reference.displayPath}`)
     lines.push(`Source: ${reference.source}`)
+    if (reference.binary) {
+      const mediaType = reference.mediaType || 'application/octet-stream'
+      lines.push(`Type: ${mediaType}`)
+      lines.push(`Size: ${formatByteCount(reference.byteCount)}`)
+      lines.push(`Path: ${reference.resolvedPath}`)
+      lines.push(`(binary attachment — content not inlined)`)
+      continue
+    }
     lines.push(`<<<BEGIN FILE ${reference.displayPath}>>>`)
     lines.push(reference.content || '(empty file)')
     if (reference.truncated) {
@@ -334,7 +394,9 @@ function buildSummaryText(references) {
 function buildInputText(references) {
   return references.map(reference => {
     const sourceLabel = reference.source === 'attachment' ? 'attachment' : reference.source
-    const suffix = reference.truncated ? ', truncated' : ''
+    const suffix = reference.binary
+      ? `, ${reference.mediaType || 'binary'}`
+      : (reference.truncated ? ', truncated' : '')
     return `- ${sourceLabel} → ${reference.displayPath} (${formatByteCount(reference.byteCount)}${suffix})`
   }).join('\n')
 }
