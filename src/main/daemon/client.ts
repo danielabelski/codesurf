@@ -290,6 +290,9 @@ export const daemonClient = {
       displayPath: string
       byteCount: number
       truncated: boolean
+      binary?: boolean
+      mediaType?: string
+      resolvedPath?: string
     }>
     summaryText?: string
     inputText?: string

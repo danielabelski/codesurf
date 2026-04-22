@@ -111,6 +111,14 @@ interface ChatRequest {
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle
+  imageAttachments?: ChatImageAttachment[]
+}
+
+interface ChatImageAttachment {
+  path: string
+  mediaType: string
+  displayPath: string
+  byteCount: number
 }
 
 interface ChatContextBucketSection {
@@ -223,13 +231,44 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
     content: expansion.message,
   }
 
+  // Pull out binary image attachments so we can send them to Claude as real
+  // multimodal image blocks (the text expansion only has a `(binary attachment
+  // — content not inlined)` placeholder — the model can't see the pixels from
+  // that alone).
+  const imageAttachments: ChatImageAttachment[] = []
+  for (const reference of expansion.references ?? []) {
+    if (!reference.binary) continue
+    const mediaType = String(reference.mediaType ?? '')
+    if (!isSupportedVisionMediaType(mediaType)) continue
+    const resolvedPath = String(reference.resolvedPath ?? '').trim()
+    if (!resolvedPath) continue
+    imageAttachments.push({
+      path: resolvedPath,
+      mediaType,
+      displayPath: reference.displayPath,
+      byteCount: reference.byteCount,
+    })
+  }
+
   return {
     request: {
       ...req,
       expandedMessages,
+      ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
     },
     expansion,
   }
+}
+
+const ANTHROPIC_SUPPORTED_IMAGE_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+])
+
+function isSupportedVisionMediaType(mediaType: string): boolean {
+  return ANTHROPIC_SUPPORTED_IMAGE_TYPES.has(mediaType.toLowerCase())
 }
 
 function buildRuntimeSessionEntryId(req: ChatRequest): string {
@@ -661,6 +700,75 @@ function joinPromptSections(...sections: Array<string | undefined | null>): stri
     .map(section => String(section ?? '').trim())
     .filter(Boolean)
   return normalized.length > 0 ? normalized.join('\n\n') : undefined
+}
+
+// Anthropic limits: ~5 MB per image; keep a conservative per-request total so
+// we don't blow past context-window or HTTP payload limits on big screenshots.
+const MAX_IMAGE_BYTES_PER_FILE = 5 * 1024 * 1024
+const MAX_IMAGE_BYTES_PER_REQUEST = 20 * 1024 * 1024
+
+function buildClaudePromptWithImages(
+  text: string,
+  imageAttachments: ChatImageAttachment[] | undefined,
+): string | AsyncIterable<any> {
+  if (!imageAttachments || imageAttachments.length === 0) {
+    return text
+  }
+
+  // Read images off disk synchronously-at-start-of-async-gen so any read
+  // failure surfaces before we yield the message. We stream one user message
+  // containing text + image blocks, then close the input stream so the query
+  // proceeds to assistant generation.
+  async function* generator(): AsyncGenerator<any, void, unknown> {
+    const contentBlocks: Array<Record<string, unknown>> = []
+    const normalizedText = String(text ?? '').trim()
+    if (normalizedText) {
+      contentBlocks.push({ type: 'text', text: normalizedText })
+    }
+
+    let totalBytes = 0
+    for (const attachment of imageAttachments!) {
+      try {
+        if (attachment.byteCount > MAX_IMAGE_BYTES_PER_FILE) {
+          log(`skipping oversize image attachment (${attachment.byteCount} B > ${MAX_IMAGE_BYTES_PER_FILE}):`, attachment.displayPath)
+          continue
+        }
+        if (totalBytes + attachment.byteCount > MAX_IMAGE_BYTES_PER_REQUEST) {
+          log('per-request image byte limit reached; dropping remaining attachments')
+          break
+        }
+        const buffer = await fs.readFile(attachment.path)
+        totalBytes += buffer.byteLength
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: attachment.mediaType,
+            data: buffer.toString('base64'),
+          },
+        })
+      } catch (err) {
+        log('failed to load image attachment', attachment.path, (err as Error).message)
+      }
+    }
+
+    // Fallback: if every image failed and there was no text, send a minimal
+    // text block so the SDK has something to work with.
+    if (contentBlocks.length === 0) {
+      contentBlocks.push({ type: 'text', text: normalizedText || '(empty message)' })
+    }
+
+    yield {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: contentBlocks,
+      },
+      parent_tool_use_id: null,
+    }
+  }
+
+  return generator()
 }
 
 function buildAsyncExecutionPrompt(asyncExecution: ChatRequest['asyncExecution']): string | undefined {
@@ -1746,8 +1854,11 @@ function chatClaude(req: ChatRequest): void {
         }
       }
     }
-    const q = query({ prompt: lastUserMsg.content, options })
-    log('query() returned, consuming generator...')
+    const promptForQuery = buildClaudePromptWithImages(lastUserMsg.content, req.imageAttachments)
+    const q = query({ prompt: promptForQuery, options })
+    log('query() returned, consuming generator...', req.imageAttachments?.length
+      ? `(with ${req.imageAttachments.length} image attachment${req.imageAttachments.length === 1 ? '' : 's'})`
+      : '')
     activeQueries.set(req.cardId, q)
 
     // Consume the async generator in the background

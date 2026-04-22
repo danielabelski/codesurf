@@ -4167,6 +4167,7 @@ function App(): JSX.Element {
   const sidebarPanelBottomOffset = sidebarFooterBottom + sidebarFooterHeight - 12
   // 2px margin between the main panel's bottom edge and the footer top.
   const mainPanelBottomInset = sidebarFooterHeight-6
+  const mainPanelTop = 39
   const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
   const collapsedSidebarPillHeight = 32
@@ -4174,6 +4175,8 @@ function App(): JSX.Element {
   // right edge is at (6 + sidebarWidth). Adding 12 here puts the main-panel
   // left edge 6px to the right of the sidebar — a visible 6px gap.
   const expandedLayoutLeft = sidebarWidth + 12
+  const mainPanelLeft = sidebarCollapsed ? 6 : expandedLayoutLeft
+  const mainPanelRadius = 16
   const discoveryHighlightZIndex = 0
   const discoveryGlowZIndex = 0
   const discoveryPillZIndex = 99997
@@ -4754,16 +4757,24 @@ function App(): JSX.Element {
           </div>
         )}
 
-        {/* Canvas — fills entire window, sits behind sidebar & toolbar */}
+        {/* Canvas surface — inset to the same rounded content area as panel mode */}
         <div
           ref={canvasRef}
-          className="absolute inset-0 overflow-hidden"
+          className="absolute overflow-hidden"
           style={{
-            background: canvasLayerBackground,
+            top: mainPanelTop,
+            left: mainPanelLeft,
+            right: 6,
+            bottom: mainPanelBottomInset,
+            background: panelLayout ? 'transparent' : canvasLayerBackground,
+            borderRadius: mainPanelRadius,
+            border: `1px solid ${theme.border.default}`,
+            boxShadow: theme.shadow.panel,
             cursor: isDraggingCanvas ? 'grabbing' : (spaceHeld.current ? 'grab' : 'default'),
             userSelect: 'none',
             WebkitUserSelect: 'none',
             zIndex: 0,
+            transition: 'left 0.15s ease',
           } as React.CSSProperties}
           onMouseDown={handleCanvasMouseDown}
           onDoubleClick={handleCanvasDoubleClick}
@@ -5700,19 +5711,15 @@ function App(): JSX.Element {
 
           </div>{/* end canvas content wrapper */}
 
-          {/* Expanded panel layout — VS Code-style tabs + splits, inset to avoid sidebar + toolbar */}
+          {/* Expanded panel layout — shares the rounded content surface with canvas mode */}
           {panelLayout && (
             <div style={{
               position: 'absolute',
-              top: 39,
-              left: sidebarCollapsed ? 6 : expandedLayoutLeft,
-              right: 6,
+              inset: 0,
               // Wrapper reserves geometry only; each LeafPanel draws its own
               // 0.5px edge so splits appear as individually-rounded tiles with
-              // the app background visible in the 6px gutters between them.
-              bottom: mainPanelBottomInset,
+              // the shared panel surface visible in the 6px gutters between them.
               zIndex: 50,
-              transition: 'left 0.15s ease',
             }}>
             <Suspense fallback={null}>
               <LazyPanelLayout
