@@ -4768,7 +4768,7 @@ function App(): JSX.Element {
             bottom: mainPanelBottomInset,
             background: panelLayout ? 'transparent' : canvasLayerBackground,
             borderRadius: mainPanelRadius,
-            border: `1px solid ${theme.border.default}`,
+            border: `0.5px solid ${theme.border.subtle}`,
             boxShadow: theme.shadow.panel,
             cursor: isDraggingCanvas ? 'grabbing' : (spaceHeld.current ? 'grab' : 'default'),
             userSelect: 'none',
