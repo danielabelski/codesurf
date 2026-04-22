@@ -778,6 +778,7 @@ const TOOLBAR_PILL_ICON_SIZE = 14
 const TOOLBAR_TEXT_SIZE = 13
 const CHAT_FOOTER_TEXT_SIZE = 12
 const TOOL_BLOCK_MAX_WIDTH = 420
+const LIVE_TOOL_COLLAPSE_GRACE_MS = 5000
 const TOOLBAR_CHEVRON_SIZE = 12
 const GIT_STATE_CACHE_TTL_MS = 15_000
 const NON_SELECTABLE_UI_STYLE = {
@@ -2078,10 +2079,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(() => initialRuntimeStateRef.current?.isStreaming ?? false)
   // Subtle liveness tracking — when streaming, we bump `lastActivityAtRef` on
-  // every message/block mutation and tick a render loop so the composer can
-  // show a breathing dot + a "quiet for Xs" label when the server goes quiet.
+  // every message/block mutation so the quiet-indicator can show how long the
+  // server has been idle without forcing the whole transcript to rerender.
   const lastActivityAtRef = useRef<number>(Date.now())
-  const [activityTick, setActivityTick] = useState(0)
+  // Sparse ticker used only when a just-finished tool crosses the collapse
+  // grace window and the chip cluster needs to recompute once.
+  const [toolCollapseTick, setToolCollapseTick] = useState(0)
   // Progressive tool-chip collapse: remember when each ToolBlock first
   // flipped to 'done' so we can fold chips into a group summary only after
   // a grace period (keeps just-finished chips readable for a few seconds
@@ -3060,12 +3063,20 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     // to fold. Subsequent runs stamp freshly-completed tools with `now`
     // so live streaming still gets the full grace period.
     const initialRun = toolStampInitialRunRef.current
-    const stampValue = initialRun ? 0 : now
+    const liveStampValue = initialRun ? 0 : now
+    for (const msg of historicalMessages) {
+      for (const tb of msg.toolBlocks ?? []) {
+        seen.add(tb.id)
+        if (tb.status === 'done' && !toolCompletedAtRef.current.has(tb.id)) {
+          toolCompletedAtRef.current.set(tb.id, 0)
+        }
+      }
+    }
     for (const msg of messages) {
       for (const tb of msg.toolBlocks ?? []) {
         seen.add(tb.id)
         if (tb.status === 'done' && !toolCompletedAtRef.current.has(tb.id)) {
-          toolCompletedAtRef.current.set(tb.id, stampValue)
+          toolCompletedAtRef.current.set(tb.id, liveStampValue)
         }
       }
     }
@@ -3075,7 +3086,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     for (const id of Array.from(toolCompletedAtRef.current.keys())) {
       if (!seen.has(id)) toolCompletedAtRef.current.delete(id)
     }
-  }, [messages])
+  }, [historicalMessages, messages])
 
   // Auto-collapse the queue when it crosses into "too many" territory, and
   // auto-expand when it drops back down so a lone queued item isn't hidden
@@ -3217,7 +3228,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   useEffect(() => {
     if (isStreaming) {
       lastActivityAtRef.current = Date.now()
-      setActivityTick(0)
     }
   }, [isStreaming])
 
@@ -3243,29 +3253,34 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     void window.electron?.chat?.setPermissionMode?.({ cardId: tileId, mode })
   }, [mode, isStreaming, provider, tileId])
 
-  // Tick every 500ms while streaming (and for ~7s afterwards) so time-based
-  // UI can recompute: the quiet-indicator's "quiet for Xs" counter, and the
-  // progressive-collapse logic that folds just-finished tool chips into a
-  // group summary after a short grace period. Shuts off in fully-idle
-  // sessions to avoid wasteful re-renders.
+  // Re-arm a one-shot timer for the soonest tool chip that is still inside
+  // the live-collapse grace window. This avoids the old 500ms parent-level
+  // rerender loop that made the transcript pulse while streaming.
   useEffect(() => {
-    let stopAt = 0
-    if (isStreaming) {
-      stopAt = Infinity
-    } else {
-      // Keep ticking a little longer so chips that just flipped 'done' have
-      // a chance to age past COLLAPSE_GRACE_MS and fold cleanly.
-      stopAt = Date.now() + 7000
-    }
-    const id = setInterval(() => {
-      if (Date.now() > stopAt) {
-        clearInterval(id)
-        return
+    const sourceMessages = historicalMessages.length > 0
+      ? [...historicalMessages, ...messages]
+      : messages
+    const now = Date.now()
+    let nextDeadline: number | null = null
+
+    for (const msg of sourceMessages) {
+      for (const tb of msg.toolBlocks ?? []) {
+        if (tb.status !== 'done') continue
+        const completedAt = toolCompletedAtRef.current.get(tb.id)
+        if (completedAt == null || completedAt === 0) continue
+        const deadline = completedAt + LIVE_TOOL_COLLAPSE_GRACE_MS
+        if (deadline <= now) continue
+        if (nextDeadline == null || deadline < nextDeadline) nextDeadline = deadline
       }
-      setActivityTick(n => (n + 1) & 0xffff)
-    }, 500)
-    return () => clearInterval(id)
-  }, [isStreaming])
+    }
+
+    if (nextDeadline == null) return
+    const timeoutMs = Math.max(0, nextDeadline - now) + 10
+    const id = window.setTimeout(() => {
+      setToolCollapseTick(n => (n + 1) & 0xffff)
+    }, timeoutMs)
+    return () => window.clearTimeout(id)
+  }, [historicalMessages, messages, toolCollapseTick])
 
   useEffect(() => {
     if (!workspaceId || !stateLoadedRef.current || isChatTileRuntimeStateDisposed(tileId)) return
@@ -5168,6 +5183,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           flex: 1, overflowY: 'auto', padding: '12px 14px',
           overflowX: 'hidden',
           minHeight: 0,
+          // Keep the centered transcript column from jumping left/right when
+          // timed streaming UI causes the vertical scrollbar to appear/disappear.
+          scrollbarGutter: 'stable both-edges',
         }}
       >
         <div style={{
@@ -5244,16 +5262,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             // before it tucks into the summary, so the user can click it
             // while it's still fresh.
             const nodes: JSX.Element[] = []
-            // Read activityTick so the 500ms tick re-runs this memoless
-            // builder and the time-based collapse settles without new
-            // message mutations.
-            void activityTick
+            // Read toolCollapseTick so the transcript only recomputes when a
+            // just-finished tool actually crosses the collapse grace window.
+            void toolCollapseTick
 
             // Progressive-collapse tuning. Deliberately conservative so
             // short focused turns don't collapse at all.
             const COLLAPSE_MIN_ITEMS = 5   // cluster must have ≥ this to collapse
             const COLLAPSE_TAIL_SIZE = 2   // always keep at least this many expanded
-            const COLLAPSE_GRACE_MS = 5000 // don't fold a chip until this long after it completes
 
             // Typed item used to represent one chip slot between extraction
             // and final render. Carries enough data for both live-collapse
@@ -5360,7 +5376,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 if (item.kind === 'tool-single') {
                   if (item.block.status !== 'done') return false
                   const at = toolCompletedAtRef.current.get(item.block.id) ?? now
-                  return now - at >= COLLAPSE_GRACE_MS
+                  return now - at >= LIVE_TOOL_COLLAPSE_GRACE_MS
                 }
                 return true // already-grouped chips are always foldable
               }
@@ -6726,44 +6742,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               Stop button while streaming. If the server has been quiet for
               >2.5s we also surface a tiny "Xs" counter so the user knows the
               turn is still alive even when nothing visible has changed. */}
-          {isStreaming && (() => {
-            // activityTick is read so the elapsed value recomputes every 500ms.
-            void activityTick
-            const quietMs = Date.now() - lastActivityAtRef.current
-            const showCounter = quietMs > 2500
-            const elapsedSec = Math.floor(quietMs / 1000)
-            return (
-              <div
-                title={showCounter
-                  ? `Waiting on server — ${elapsedSec}s since last update`
-                  : 'Working…'}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  marginRight: 4,
-                  color: theme.chat.muted,
-                  fontSize: 10.5,
-                  fontFamily: fontSans,
-                  lineHeight: 1,
-                  userSelect: 'none',
-                  flexShrink: 0,
-                }}
-              >
-                <span style={{
-                  width: 6, height: 6, borderRadius: '50%',
-                  background: showCounter ? theme.status.warning : theme.accent.base,
-                  animation: 'chat-pulse 1.6s ease-in-out infinite',
-                  display: 'inline-block',
-                }} />
-                {showCounter && (
-                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                    {elapsedSec}s
-                  </span>
-                )}
-              </div>
-            )
-          })()}
+          {isStreaming && <StreamingLivenessIndicator lastActivityAtMs={lastActivityAtRef.current} />}
 
           {/* Stop / Send */}
           {isStreaming ? (
@@ -7429,6 +7408,59 @@ const WorkingChipView = React.memo(function WorkingChipView({ message }: { messa
       <ShimmerText baseColor={theme.accent.hover} style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
         {label}
       </ShimmerText>
+    </div>
+  )
+})
+
+const StreamingLivenessIndicator = React.memo(function StreamingLivenessIndicator({ lastActivityAtMs }: {
+  lastActivityAtMs: number
+}): JSX.Element {
+  const fonts = useFonts()
+  const theme = useTheme()
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setTick(t => (t + 1) & 0xffff)
+    }, 500)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const quietMs = Math.max(0, Date.now() - lastActivityAtMs)
+  const showCounter = quietMs > 2500
+  const elapsedSec = Math.floor(quietMs / 1000)
+
+  return (
+    <div
+      title={showCounter
+        ? `Waiting on server — ${elapsedSec}s since last update`
+        : 'Working…'}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        marginRight: 4,
+        color: theme.chat.muted,
+        fontSize: 10.5,
+        fontFamily: fonts.sans,
+        lineHeight: 1,
+        userSelect: 'none',
+        flexShrink: 0,
+      }}
+    >
+      <span style={{
+        width: 6,
+        height: 6,
+        borderRadius: '50%',
+        background: showCounter ? theme.status.warning : theme.accent.base,
+        animation: 'chat-pulse 1.6s ease-in-out infinite',
+        display: 'inline-block',
+      }} />
+      {showCounter && (
+        <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {elapsedSec}s
+        </span>
+      )}
     </div>
   )
 })

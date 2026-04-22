@@ -12,7 +12,7 @@ import { FontProvider, FontTokenProvider, SANS_DEFAULT, MONO_DEFAULT } from './F
 import { ThemeProvider } from './ThemeContext'
 import { DEFAULT_THEME_ID, getThemeById, resolveEffectiveThemeId, registerCustomTheme, unregisterCustomTheme } from './theme'
 import type { PanelNode } from './components/PanelLayout'
-import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf, closeOthersInLeaf, closeToRightInLeaf, findLeafById } from './components/PanelLayout'
+import { createLeaf, removeTileFromTree, addTabToLeaf, getAllTileIds, splitLeaf, closeOthersInLeaf, closeToRightInLeaf, findLeafById, setActiveTab } from './components/PanelLayout'
 import { basename, getDroppedPaths, toFileUrl, isMediaFile } from './utils/dnd'
 import { CODESURF_OPEN_LINK_EVENT, normalizeLocalPathCandidate, type CodeSurfOpenLinkDetail } from './utils/links'
 import { disposeChatTileRuntimeState, getChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
@@ -118,8 +118,128 @@ function sanitizePanelLayout(root: PanelNode | null | undefined, tileIds: string
   }
 }
 
+function findLeafIdContainingTile(root: PanelNode, tileId: string): string | null {
+  if (root.type === 'leaf') return root.tabs.includes(tileId) ? root.id : null
+  for (const child of root.children) {
+    const found = findLeafIdContainingTile(child, tileId)
+    if (found) return found
+  }
+  return null
+}
+
+function replaceLeafInPanelTree(root: PanelNode, targetPanelId: string, replacement: PanelNode): PanelNode {
+  if (root.type === 'leaf') {
+    return root.id === targetPanelId ? replacement : root
+  }
+  return {
+    ...root,
+    children: root.children.map(child => replaceLeafInPanelTree(child, targetPanelId, replacement)),
+  }
+}
+
 function normalizeWorkspacePath(path: string | null | undefined): string {
   return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function getWorkspaceProjectPaths(workspace: Workspace): string[] {
+  const seen = new Set<string>()
+  const next: string[] = []
+  const push = (path: string | null | undefined) => {
+    const normalized = normalizeWorkspacePath(path)
+    if (!normalized || seen.has(normalized)) return
+    seen.add(normalized)
+    next.push(normalized)
+  }
+  push(workspace.path)
+  for (const projectPath of workspace.projectPaths ?? []) push(projectPath)
+  return next
+}
+
+function isLayoutVariantWorkspace(workspace: Workspace, projectPath?: string | null): boolean {
+  const normalizedProjectPath = normalizeWorkspacePath(projectPath ?? workspace.path)
+  const projectBase = basename(normalizedProjectPath)
+  const workspaceName = workspace.name?.trim() ?? ''
+  if (!normalizedProjectPath || !projectBase || !workspaceName.startsWith(`${projectBase}:`)) return false
+  const projectPaths = getWorkspaceProjectPaths(workspace)
+  return projectPaths.length === 1 && projectPaths[0] === normalizedProjectPath
+}
+
+function getCanonicalWorkspaceId(workspaceList: Workspace[], workspaceId: string | null | undefined): string | null {
+  if (!workspaceId) return null
+  const target = workspaceList.find(candidate => candidate.id === workspaceId) ?? null
+  if (!target) return null
+
+  const normalizedProjectPath = normalizeWorkspacePath(target.path)
+  if (!normalizedProjectPath || !isLayoutVariantWorkspace(target, normalizedProjectPath)) return target.id
+
+  const canonical = workspaceList.find(candidate =>
+    candidate.id !== target.id
+    && normalizeWorkspacePath(candidate.path) === normalizedProjectPath
+    && !isLayoutVariantWorkspace(candidate, normalizedProjectPath),
+  ) ?? null
+
+  return canonical?.id ?? target.id
+}
+
+function resolveWorkspaceCandidateForProjectPath(workspaceList: Workspace[], projectPath: string | null | undefined, currentWorkspaceId?: string | null): Workspace | null {
+  const normalizedProjectPath = normalizeWorkspacePath(projectPath)
+  if (!normalizedProjectPath) {
+    const canonicalCurrentId = getCanonicalWorkspaceId(workspaceList, currentWorkspaceId)
+    return canonicalCurrentId
+      ? (workspaceList.find(candidate => candidate.id === canonicalCurrentId) ?? null)
+      : null
+  }
+
+  const canonicalCurrentId = getCanonicalWorkspaceId(workspaceList, currentWorkspaceId)
+  const currentWorkspace = canonicalCurrentId
+    ? (workspaceList.find(candidate => candidate.id === canonicalCurrentId) ?? null)
+    : null
+
+  const currentWorkspacePath = normalizeWorkspacePath(currentWorkspace?.path)
+  const currentWorkspaceProjects = currentWorkspace ? new Set(getWorkspaceProjectPaths(currentWorkspace)) : new Set<string>()
+
+  if (currentWorkspace && currentWorkspaceProjects.has(normalizedProjectPath) && currentWorkspacePath !== normalizedProjectPath) {
+    return currentWorkspace
+  }
+
+  if (currentWorkspace && currentWorkspacePath === normalizedProjectPath && !isLayoutVariantWorkspace(currentWorkspace, normalizedProjectPath)) {
+    return currentWorkspace
+  }
+
+  const exactMatches = workspaceList.filter(candidate => normalizeWorkspacePath(candidate.path) === normalizedProjectPath)
+  const canonicalExactMatch = exactMatches.find(candidate => !isLayoutVariantWorkspace(candidate, normalizedProjectPath)) ?? null
+  if (canonicalExactMatch) return canonicalExactMatch
+
+  if (currentWorkspace && exactMatches.some(candidate => candidate.id === currentWorkspace.id)) {
+    return currentWorkspace
+  }
+  if (exactMatches.length > 0) return exactMatches[0]
+
+  if (currentWorkspace && currentWorkspaceProjects.has(normalizedProjectPath)) {
+    return currentWorkspace
+  }
+
+  const projectMatches = workspaceList.filter(candidate => getWorkspaceProjectPaths(candidate).includes(normalizedProjectPath))
+  const canonicalProjectMatch = projectMatches.find(candidate => !isLayoutVariantWorkspace(candidate, normalizedProjectPath)) ?? null
+  return canonicalProjectMatch ?? projectMatches[0] ?? null
+}
+
+function dedupeLockedConnections(connections: LockedConnection[]): LockedConnection[] {
+  const seen = new Set<string>()
+  const next: LockedConnection[] = []
+  for (const connection of connections) {
+    const sourceTileId = connection.sourceTileId?.trim()
+    const targetTileId = connection.targetTileId?.trim()
+    if (!sourceTileId || !targetTileId || sourceTileId === targetTileId) continue
+    const [left, right] = sourceTileId < targetTileId
+      ? [sourceTileId, targetTileId]
+      : [targetTileId, sourceTileId]
+    const key = `${left}::${right}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    next.push({ sourceTileId, targetTileId })
+  }
+  return next
 }
 
 function WorkspaceTabIcon({ size = 14 }: { size?: number }): React.JSX.Element {
@@ -869,14 +989,30 @@ function App(): JSX.Element {
   useEffect(() => {
     if (workspace?.id) setOpenWorkspaceIds(prev => prev.includes(workspace.id) ? prev : [...prev, workspace.id])
   }, [workspace?.id])
+  useEffect(() => {
+    const canonicalCurrentWorkspaceId = getCanonicalWorkspaceId(workspaces, workspace?.id)
+    if (workspace?.id && canonicalCurrentWorkspaceId && canonicalCurrentWorkspaceId !== workspace.id) return
+
+    setOpenWorkspaceIds(prev => {
+      const next = Array.from(new Set(
+        prev
+          .map(id => getCanonicalWorkspaceId(workspaces, id) ?? id)
+          .filter(id => workspaces.some(workspaceEntry => workspaceEntry.id === id)),
+      ))
+      if (next.length === prev.length && next.every((id, index) => id === prev[index])) return prev
+      return next
+    })
+  }, [workspace?.id, workspaces])
 
   useEffect(() => {
     if (!workspaceTabsHydratedRef.current) return
+    const canonicalWorkspaceId = getCanonicalWorkspaceId(workspaces, workspace?.id) ?? workspace?.id ?? null
+    const canonicalWorkspacePickerReturnId = getCanonicalWorkspaceId(workspaces, workspacePickerReturnWorkspaceId) ?? workspacePickerReturnWorkspaceId ?? null
     persistWorkspaceTabState({
       openWorkspaceIds,
-      currentWorkspaceId: workspace?.id ?? workspacePickerReturnWorkspaceId ?? openWorkspaceIds[0] ?? null,
+      currentWorkspaceId: canonicalWorkspaceId ?? canonicalWorkspacePickerReturnId ?? openWorkspaceIds[0] ?? null,
     })
-  }, [openWorkspaceIds, workspace?.id, workspacePickerReturnWorkspaceId])
+  }, [openWorkspaceIds, workspace?.id, workspacePickerReturnWorkspaceId, workspaces])
 
   // ─── Auto Agent Mode Effect ───────────────────────────────────────────────
   // Automatically enables agentMode on chat tiles when they get close to compatible tiles
@@ -1231,12 +1367,18 @@ function App(): JSX.Element {
       if (savedSettings) setSettings(withDefaultSettings(savedSettings))
       setWorkspaces(wsList)
       const workspaceById = new Map(wsList.map(entry => [entry.id, entry]))
-      const restoredWorkspace = persistedWorkspaceTabs.currentWorkspaceId
-        ? (workspaceById.get(persistedWorkspaceTabs.currentWorkspaceId) ?? null)
+      const restoredWorkspaceId = getCanonicalWorkspaceId(wsList, persistedWorkspaceTabs.currentWorkspaceId)
+      const activeWorkspaceId = getCanonicalWorkspaceId(wsList, active?.id ?? null)
+      const fallbackWorkspaceId = getCanonicalWorkspaceId(wsList, wsList[0]?.id ?? null)
+      const restoredWorkspace = restoredWorkspaceId
+        ? (workspaceById.get(restoredWorkspaceId) ?? null)
         : null
-      const targetWorkspace = restoredWorkspace ?? active ?? wsList[0] ?? null
+      const targetWorkspace = restoredWorkspace
+        ?? (activeWorkspaceId ? (workspaceById.get(activeWorkspaceId) ?? null) : null)
+        ?? (fallbackWorkspaceId ? (workspaceById.get(fallbackWorkspaceId) ?? null) : null)
       const restoredOpenWorkspaceIds = persistedWorkspaceTabs.openWorkspaceIds
-        .filter(id => workspaceById.has(id))
+        .map(id => getCanonicalWorkspaceId(wsList, id))
+        .filter((id): id is string => Boolean(id) && workspaceById.has(id))
 
       if (targetWorkspace && !restoredOpenWorkspaceIds.includes(targetWorkspace.id)) {
         restoredOpenWorkspaceIds.push(targetWorkspace.id)
@@ -2253,20 +2395,24 @@ function App(): JSX.Element {
 
   // ─── Workspace switching ──────────────────────────────────────────────────
   const handleSwitchWorkspace = useCallback(async (id: string) => {
-    await window.electron.workspace.setActive(id)
-    let ws = workspaces.find(w => w.id === id) ?? null
+    let workspaceList = workspaces
+    let targetWorkspaceId = getCanonicalWorkspaceId(workspaceList, id) ?? id
+    let ws = workspaceList.find(w => w.id === targetWorkspaceId) ?? null
     if (!ws) {
       const refreshed = await window.electron.workspace.list().catch(() => [])
       if (refreshed.length > 0) {
         setWorkspaces(refreshed)
-        ws = refreshed.find(w => w.id === id) ?? null
+        workspaceList = refreshed
+        targetWorkspaceId = getCanonicalWorkspaceId(refreshed, targetWorkspaceId) ?? targetWorkspaceId
+        ws = refreshed.find(w => w.id === targetWorkspaceId) ?? null
       }
     }
+    await window.electron.workspace.setActive(targetWorkspaceId)
     setWorkspace(ws)
     setShowWorkspacePickerTab(false)
     setWorkspacePickerReturnWorkspaceId(null)
     if (ws) {
-      const saved = await window.electron.canvas.load(id)
+      const saved = await window.electron.canvas.load(targetWorkspaceId)
       const savedTiles = saved?.tiles ?? []
       void window.electron.collab.pruneOrphanedTileDirs(ws.path, savedTiles.map(tile => tile.id))
       if (saved) {
@@ -2361,28 +2507,20 @@ function App(): JSX.Element {
     })
   }, [workspaces, openWorkspaceIds, handleSwitchWorkspace])
 
-  // Launch a layout template as a new view within the current project
+  // Launch a layout template into the current workspace instead of creating a
+  // separate "Project:Layout" workspace tab.
   const handleLaunchTemplate = useCallback(async (template: import('../../shared/types').LayoutTemplate) => {
-    // Inherit the current workspace's project path so the new view stays in the same project.
-    // Name it "ProjectBase:LayoutName" so the tab bar makes the relationship clear.
-    const currentPath = workspace?.path ?? ''
-    const projectBase = currentPath ? currentPath.split('/').filter(Boolean).pop() ?? '' : ''
-    const viewName = projectBase ? `${projectBase}:${template.name}` : template.name
-    const ws = await window.electron.workspace.createWithPath(viewName, currentPath)
-    const updatedList = await window.electron.workspace.list()
-    setWorkspaces(updatedList)
-
-    // Generate tiles from template tree
+    const baseId = Date.now()
     const generatedTiles: TileState[] = []
-    let zIdx = 1
+    let zIdx = workspace?.id ? nextZIndexRef.current : 1
     const VW = 1600, VH = 900
-    let counter = 0
+    let tileCounter = 0
 
     const generateTiles = (node: import('../../shared/types').LayoutTemplateNode, x: number, y: number, w: number, h: number) => {
       if (node.type === 'leaf') {
         for (const slot of node.slots) {
           generatedTiles.push({
-            id: `tile-${Date.now()}-${counter++}`,
+            id: `tile-template-${baseId}-${tileCounter++}`,
             type: slot.tileType,
             x: Math.round(x), y: Math.round(y),
             width: Math.round(w), height: Math.round(h),
@@ -2408,66 +2546,130 @@ function App(): JSX.Element {
 
     generateTiles(template.tree, 0, 0, VW, VH)
 
-    // Generate PanelNode tree from template
+    let panelCounter = 0
     const generatePanel = (node: import('../../shared/types').LayoutTemplateNode, tileIdx: { v: number }): PanelNode => {
       if (node.type === 'leaf') {
         const tabs = node.slots.map(() => generatedTiles[tileIdx.v++]?.id).filter(Boolean)
-        return { type: 'leaf', id: `panel-${Date.now()}-${tileIdx.v}`, tabs, activeTab: tabs[0] ?? '' }
+        return { type: 'leaf', id: `panel-template-${baseId}-${panelCounter++}`, tabs, activeTab: tabs[0] ?? '' }
       }
       return {
         type: 'split',
-        id: `split-${Date.now()}-${tileIdx.v}`,
+        id: `split-template-${baseId}-${panelCounter++}`,
         direction: node.direction,
         children: node.children.map(c => generatePanel(c, tileIdx)),
         sizes: node.sizes,
       }
     }
 
-    const panelTree = generatePanel(template.tree, { v: 0 })
+    const generatedPanelLayout = generatePanel(template.tree, { v: 0 })
+    const generatedActivePanelId = findFirstLeafId(generatedPanelLayout)
+    if (!generatedActivePanelId) return
 
-    // Generate locked connections for adjacent tiles
-    const connections: Array<{ sourceTileId: string; targetTileId: string }> = []
+    const generatedConnections: LockedConnection[] = []
     for (let i = 0; i < generatedTiles.length; i++) {
       for (let j = i + 1; j < generatedTiles.length; j++) {
         const a = generatedTiles[i], b = generatedTiles[j]
         const touchH = (Math.round(a.x + a.width) === b.x || Math.round(b.x + b.width) === a.x) && !(a.y + a.height <= b.y || b.y + b.height <= a.y)
         const touchV = (Math.round(a.y + a.height) === b.y || Math.round(b.y + b.height) === a.y) && !(a.x + a.width <= b.x || b.x + b.width <= a.x)
         if (touchH || touchV) {
-          connections.push({ sourceTileId: a.id, targetTileId: b.id })
+          generatedConnections.push({ sourceTileId: a.id, targetTileId: b.id })
         }
       }
     }
 
-    // Save canvas state
-    const firstLeafId = panelTree.type === 'leaf' ? panelTree.id
-      : (function findFirst(n: PanelNode): string { return n.type === 'leaf' ? n.id : findFirst(n.children[0]) })(panelTree)
+    if (!workspace?.id) {
+      const workspaceName = template.name.trim() || 'Workspace'
+      const ws = await window.electron.workspace.create(workspaceName)
+      const updatedList = await window.electron.workspace.list()
+      setWorkspaces(updatedList)
 
-    const state: CanvasState = {
-      tiles: generatedTiles,
-      groups: [],
-      viewport: { tx: 0, ty: 0, zoom: 1 },
-      nextZIndex: zIdx,
-      panelLayout: panelTree,
-      activePanelId: firstLeafId,
-      tabViewActive: true,
-      lockedConnections: connections.length > 0 ? connections : undefined,
+      const nextState: CanvasState = {
+        tiles: generatedTiles,
+        groups: [],
+        viewport: { tx: 0, ty: 0, zoom: 1 },
+        nextZIndex: zIdx,
+        panelLayout: generatedPanelLayout,
+        activePanelId: generatedActivePanelId,
+        tabViewActive: true,
+        expandedTileId: null,
+        lockedConnections: generatedConnections.length > 0 ? generatedConnections : undefined,
+      }
+
+      await window.electron.canvas.save(ws.id, nextState)
+      await window.electron.workspace.setActive(ws.id)
+      setWorkspace(ws)
+      setTiles(generatedTiles)
+      setGroups([])
+      setLockedConnections(generatedConnections)
+      setViewport({ tx: 0, ty: 0, zoom: 1 })
+      setNextZIndex(zIdx)
+      savedLayoutRef.current = generatedPanelLayout
+      setPanelLayout(generatedPanelLayout)
+      setActivePanelId(generatedActivePanelId)
+      setExpandedTileId(null)
+      setOpenWorkspaceIds(prev => prev.includes(ws.id) ? prev : [...prev, ws.id])
+      return
     }
-    await window.electron.canvas.save(ws.id, state)
 
-    // Switch to new workspace — set state directly since the ws is new and not in the old closure
-    await window.electron.workspace.setActive(ws.id)
-    setWorkspace(ws)
-    setTiles(generatedTiles)
-    setGroups([])
-    setLockedConnections(connections)
-    setViewport({ tx: 0, ty: 0, zoom: 1 })
+    const currentLayout = panelLayoutRef.current
+    const currentPanelId = activePanelIdRef.current
+    const activeLeaf = currentLayout && currentPanelId ? findLeafById(currentLayout, currentPanelId) : null
+    const canInsertIntoActiveLeaf = Boolean(currentLayout && activeLeaf && activeLeaf.tabs.length === 0)
+    const canReplaceWorkspaceState = !currentLayout && tilesRef.current.length === 0 && groupsRef.current.length === 0
+    if (!canInsertIntoActiveLeaf && !canReplaceWorkspaceState) return
+
+    const nextTiles = canInsertIntoActiveLeaf
+      ? [...tilesRef.current, ...generatedTiles]
+      : generatedTiles
+    const nextGroups = canInsertIntoActiveLeaf ? groupsRef.current : []
+    const nextViewport = canInsertIntoActiveLeaf ? viewportRef.current : { tx: 0, ty: 0, zoom: 1 }
+    const nextConnections = canInsertIntoActiveLeaf
+      ? dedupeLockedConnections([...lockedConnectionsRef.current, ...generatedConnections])
+      : generatedConnections
+    const nextPanelLayout = canInsertIntoActiveLeaf && currentLayout && activeLeaf
+      ? replaceLeafInPanelTree(currentLayout, activeLeaf.id, generatedPanelLayout)
+      : generatedPanelLayout
+
+    const nextState: CanvasState = {
+      tiles: nextTiles,
+      groups: nextGroups,
+      viewport: nextViewport,
+      nextZIndex: zIdx,
+      panelLayout: nextPanelLayout,
+      activePanelId: generatedActivePanelId,
+      tabViewActive: true,
+      expandedTileId: null,
+      lockedConnections: nextConnections.length > 0 ? nextConnections : undefined,
+    }
+
+    setTiles(nextTiles)
+    setGroups(nextGroups)
+    setLockedConnections(nextConnections)
+    setViewport(nextViewport)
     setNextZIndex(zIdx)
-    savedLayoutRef.current = panelTree
-    setPanelLayout(panelTree)
-    setActivePanelId(firstLeafId)
+    savedLayoutRef.current = nextPanelLayout
+    setPanelLayout(nextPanelLayout)
+    setActivePanelId(generatedActivePanelId)
     setExpandedTileId(null)
-    setOpenWorkspaceIds(prev => prev.includes(ws.id) ? prev : [...prev, ws.id])
+    await window.electron.canvas.save(workspace.id, nextState).catch(() => {})
   }, [workspace])
+
+  const focusTileInWorkspace = useCallback((tileId: string) => {
+    bringToFront(tileId)
+
+    const currentLayout = panelLayoutRef.current
+    if (currentLayout) {
+      const leafId = findLeafIdContainingTile(currentLayout, tileId)
+      if (leafId) {
+        setActivePanelId(leafId)
+        setPanelLayout(prev => prev ? setActiveTab(prev, leafId, tileId) : prev)
+      }
+    }
+
+    if (expandedTileIdRef.current) {
+      setExpandedTileId(tileId)
+    }
+  }, [bringToFront])
 
   const handleOpenFile = useCallback((filePath: string) => {
     setSidebarSelectedPath(filePath)
@@ -2475,55 +2677,18 @@ function App(): JSX.Element {
     // If this file is already open in a tile, focus it instead of creating a duplicate
     const existing = tilesRef.current.find(t => t.filePath === filePath)
     if (existing) {
-      bringToFront(existing.id)
-      // In panel mode, switch to the tab containing this tile
-      if (panelLayout && activePanelId) {
-        // Find which leaf contains this tile and activate it
-        const allIds = getAllTileIds(panelLayout)
-        if (allIds.includes(existing.id)) {
-          // Find the leaf containing this tile and set it as active tab
-          const findLeafContaining = (node: PanelNode, tileId: string): string | null => {
-            if ('tabs' in node) return node.tabs.includes(tileId) ? node.id : null
-            for (const child of node.children) {
-              const found = findLeafContaining(child, tileId)
-              if (found) return found
-            }
-            return null
-          }
-          const leafId = findLeafContaining(panelLayout, existing.id)
-          if (leafId) {
-            setActivePanelId(leafId)
-            setPanelLayout(prev => {
-              if (!prev) return prev
-              const setActiveTab = (node: PanelNode): PanelNode => {
-                if ('tabs' in node) {
-                  return node.id === leafId ? { ...node, activeTab: existing.id } : node
-                }
-                return { ...node, children: node.children.map(setActiveTab) }
-              }
-              return setActiveTab(prev)
-            })
-          }
-        }
-      }
+      focusTileInWorkspace(existing.id)
       return
     }
 
     void resolveFileTileType(filePath).then(type => addTile(type, filePath))
-  }, [addTile, bringToFront, panelLayout, activePanelId])
+  }, [addTile, focusTileInWorkspace])
 
   const resolveWorkspaceForProjectPath = useCallback(async (projectPath: string | null | undefined): Promise<Workspace | null> => {
     const normalizedProjectPath = normalizeWorkspacePath(projectPath)
     if (!normalizedProjectPath) return workspace ?? null
 
-    const currentWorkspacePath = normalizeWorkspacePath(workspace?.path)
-    const currentWorkspaceProjects = new Set((workspace?.projectPaths ?? []).map(normalizeWorkspacePath))
-    if (workspace && (currentWorkspacePath === normalizedProjectPath || currentWorkspaceProjects.has(normalizedProjectPath))) return workspace
-
-    const existingWorkspace = workspaces.find(candidate => {
-      if (normalizeWorkspacePath(candidate.path) === normalizedProjectPath) return true
-      return (candidate.projectPaths ?? []).some(path => normalizeWorkspacePath(path) === normalizedProjectPath)
-    }) ?? null
+    const existingWorkspace = resolveWorkspaceCandidateForProjectPath(workspaces, normalizedProjectPath, workspace?.id)
     if (existingWorkspace) return existingWorkspace
 
     const workspaceName = basename(normalizedProjectPath) || 'Project'
@@ -2538,9 +2703,10 @@ function App(): JSX.Element {
       ? session.workspaceId
       : null
     if (workspaceId) {
-      const directWorkspace = workspaces.find(candidate => candidate.id === workspaceId) ?? null
+      const canonicalWorkspaceId = getCanonicalWorkspaceId(workspaces, workspaceId) ?? workspaceId
+      const directWorkspace = workspaces.find(candidate => candidate.id === canonicalWorkspaceId) ?? null
       if (directWorkspace) return directWorkspace
-      if (workspace?.id === workspaceId) return workspace
+      if (workspace?.id === canonicalWorkspaceId) return workspace
     }
     return resolveWorkspaceForProjectPath(session.projectPath)
   }, [resolveWorkspaceForProjectPath, workspace, workspaces])
@@ -2556,7 +2722,7 @@ function App(): JSX.Element {
       tailLimit: usePagedLinkedHistory ? INITIAL_EXTERNAL_SESSION_TAIL_LOAD : undefined,
     }).catch(() => null)
     if (!state) {
-      if (session.filePath) handleOpenFile(session.filePath)
+      if (!session.id.startsWith('codesurf-') && session.filePath) handleOpenFile(session.filePath)
       return
     }
 
@@ -2596,23 +2762,23 @@ function App(): JSX.Element {
       isStreaming: typeof state.isStreaming === 'boolean' ? state.isStreaming : false,
     }
 
-    const activeFullscreenChatTileId = (() => {
-      const currentLayout = panelLayoutRef.current
-      const currentPanelId = activePanelIdRef.current
-      if (!currentLayout || !currentPanelId) return null
-      const activeLeaf = findLeafById(currentLayout, currentPanelId)
-      const activeTileId = activeLeaf?.activeTab ?? expandedTileIdRef.current
-      if (!activeTileId) return null
-      const activeTile = tilesRef.current.find(tile => tile.id === activeTileId)
-      return activeTile?.type === 'chat' ? activeTile.id : null
-    })()
+    const matchingChatTileId = tilesRef.current.find(tile => {
+      if (tile.type !== 'chat') return false
+      const remembered = chatTileSessionMatches[tile.id]
+      const runtimeState = getChatTileRuntimeState<{ sessionId?: string | null; linkedSessionEntryId?: string | null }>(tile.id)
+      if (remembered?.entryId === session.id || runtimeState?.linkedSessionEntryId === session.id) return true
+      const requestedSessionId = nextChatState.sessionId
+      return Boolean(requestedSessionId && (remembered?.sessionId === requestedSessionId || runtimeState?.sessionId === requestedSessionId))
+    })?.id ?? null
 
-    if (activeFullscreenChatTileId) {
-      rememberChatTileSessionMatch(activeFullscreenChatTileId, session, nextChatState.sessionId ?? null)
-      setChatTileRuntimeState(activeFullscreenChatTileId, nextChatState)
-      await window.electron.canvas.saveTileState(workspaceId, activeFullscreenChatTileId, nextChatState).catch(() => {})
-      setChatReloadTokens(prev => ({ ...prev, [activeFullscreenChatTileId]: (prev[activeFullscreenChatTileId] ?? 0) + 1 }))
-      bringToFront(activeFullscreenChatTileId)
+    const reusableChatTileId = matchingChatTileId ?? activeChatTileId
+
+    if (reusableChatTileId) {
+      rememberChatTileSessionMatch(reusableChatTileId, session, nextChatState.sessionId ?? null)
+      setChatTileRuntimeState(reusableChatTileId, nextChatState)
+      await window.electron.canvas.saveTileState(workspaceId, reusableChatTileId, nextChatState).catch(() => {})
+      setChatReloadTokens(prev => ({ ...prev, [reusableChatTileId]: (prev[reusableChatTileId] ?? 0) + 1 }))
+      focusTileInWorkspace(reusableChatTileId)
       return
     }
 
@@ -2622,7 +2788,7 @@ function App(): JSX.Element {
       ...nextChatState,
     }).catch(() => {})
     bringToFront(chatTileId)
-  }, [addTile, bringToFront, handleOpenFile, rememberChatTileSessionMatch])
+  }, [activeChatTileId, addTile, bringToFront, chatTileSessionMatches, focusTileInWorkspace, handleOpenFile, rememberChatTileSessionMatch])
 
   const openSessionInChat = useCallback(async (session: SessionTargetEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)

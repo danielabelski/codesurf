@@ -14,6 +14,7 @@ import {
   tileSessionSummaryPath,
   tileStatePath,
 } from '../storage/workspaceArtifacts'
+import { writeJsonArtifactAtomic } from '../storage/jsonArtifacts'
 import {
   appendQueuedMessageEvent,
   listActiveQueuedMessages,
@@ -191,7 +192,7 @@ async function writeTileSessionSummary(storageId: string, tileId: string, state:
     ...next,
     updatedAt: previous ? Date.now() : next.updatedAt,
   }
-  await fs.writeFile(summaryPath, JSON.stringify(summaryToWrite, null, 2))
+  await writeJsonArtifactAtomic(summaryPath, summaryToWrite)
   tileSessionSummaryCache.set(summaryPath, summaryToWrite)
   return { changed: true, summary: summaryToWrite }
 }
@@ -354,7 +355,7 @@ export function registerCanvasIPC(): void {
     const storageId = storageIds[0] ?? workspaceId
     const path = canvasStatePath(storageId)
     await fs.mkdir(dirname(path), { recursive: true })
-    await fs.writeFile(path, JSON.stringify(state, null, 2))
+    await writeJsonArtifactAtomic(path, state)
 
     if (isRelayHostActive() && state && typeof state === 'object' && Array.isArray((state as { tiles?: unknown }).tiles)) {
       const tiles = (state as { tiles: TileState[] }).tiles
@@ -385,7 +386,7 @@ export function registerCanvasIPC(): void {
     const storageId = storageIds[0] ?? workspaceId
     const path = kanbanStatePath(storageId, tileId)
     await fs.mkdir(dirname(path), { recursive: true })
-    await fs.writeFile(path, JSON.stringify(state, null, 2))
+    await writeJsonArtifactAtomic(path, state)
   })
 
   ipcMain.handle('canvas:loadTileState', async (_, workspaceId: string, tileId: string) => {
@@ -505,7 +506,13 @@ export function registerCanvasIPC(): void {
     const workspacePath = await getWorkspacePathById(workspaceId)
 
     if (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
-      return await daemonClient.getLocalSessionState(workspaceId, sessionEntryId).catch(() => null)
+      const local = await daemonClient.getLocalSessionState(workspaceId, sessionEntryId).catch(() => null)
+      if (local) return local
+      if (sessionEntryId.startsWith('codesurf-tile:tile-state-')) {
+        const tileId = sessionEntryId.replace('codesurf-tile:tile-state-', '').replace(/\.json$/, '')
+        return await loadWorkspaceTileState(workspaceId, tileId, null)
+      }
+      return null
     }
 
     // For external sessions (claude, codex, cursor, openclaw, opencode) parse

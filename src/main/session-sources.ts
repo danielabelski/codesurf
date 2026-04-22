@@ -1683,7 +1683,10 @@ function parseCodexChatStateFromLines(lines: string[], entry: AggregatedSessionE
 
   const flushAssistantArtifacts = (index: number, timestamp: number, content = '') => {
     const next = makeImportedRichMessage({
-      id: `codex-${index}`,
+      // Assistant artifact flushes can happen immediately before a user
+      // message at the same absolute line index, so they need their own id
+      // namespace to keep React keys stable.
+      id: `codex-assistant-${index}`,
       role: 'assistant',
       content,
       timestamp,

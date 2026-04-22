@@ -2,6 +2,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { CONTEX_HOME } from '../paths'
 import { getWorkspaceStorageIds } from '../ipc/workspace'
+import { readJsonArtifact, writeJsonArtifactAtomic } from './jsonArtifacts'
 
 export function assertSafeWorkspaceArtifactId(id: string): void {
   if (/[\/\\]|\.\./.test(id)) throw new Error(`Unsafe ID: ${id}`)
@@ -90,11 +91,13 @@ export function sessionArchiveStatePath(storageId: string): string {
 export async function loadWorkspaceTileState<T>(workspaceId: string, tileId: string, fallback: T): Promise<T> {
   const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
   for (const storageId of storageIds) {
-    try {
-      const raw = await fs.readFile(tileStatePath(storageId, tileId), 'utf8')
-      return JSON.parse(raw) as T
-    } catch {
-      // try next alias storage dir
+    const path = tileStatePath(storageId, tileId)
+    const parsed = await readJsonArtifact<T>(path)
+    if (parsed) {
+      if (parsed.recovered) {
+        await writeJsonArtifactAtomic(path, parsed.value).catch(() => {})
+      }
+      return parsed.value
     }
   }
   return fallback
@@ -106,6 +109,6 @@ export async function saveWorkspaceTileState(workspaceId: string, tileId: string
   const dir = join(CONTEX_HOME, 'workspaces', storageId, '.contex')
   const path = tileStatePath(storageId, tileId)
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(path, JSON.stringify(state, null, 2))
+  await writeJsonArtifactAtomic(path, state)
   return { storageId, path }
 }

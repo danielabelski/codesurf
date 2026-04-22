@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { getChatStreamingSnapshot, subscribeChatStreaming } from './chatStreamingStore'
 import { getChatMessageSentSnapshot, subscribeChatMessageSent } from './chatMessageSentStore'
 import type { ProjectRecord, Workspace, TileState } from '../../../shared/types'
@@ -21,6 +22,14 @@ import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type Sessi
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
 interface ExtensionEntrySummary { id: string; name: string; icon?: string | null; enabled: boolean }
+interface SidebarTextDialogState {
+  title: string
+  description?: string
+  confirmLabel: string
+  initialValue: string
+  placeholder?: string
+  submit: (value: string) => Promise<void> | void
+}
 const GENERIC_SESSION_SOURCE_DETAILS = new Set(['transcript', 'conversation', 'project session', 'user session'])
 
 function getSessionSidebarIndicatorColor(session: SessionEntry, theme: ReturnType<typeof useTheme>): string {
@@ -240,6 +249,173 @@ function SessionSidebarRow({
   )
 }
 
+function SidebarTextDialog({
+  state,
+  onClose,
+}: {
+  state: SidebarTextDialogState
+  onClose: () => void
+}): React.JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [value, setValue] = useState(state.initialValue)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setValue(state.initialValue)
+    setBusy(false)
+    setError(null)
+  }, [state])
+
+  useEffect(() => {
+    const raf = window.requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.select()
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [state])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || busy) return
+      event.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [busy, onClose])
+
+  const handleSubmit = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await state.submit(value)
+      onClose()
+    } catch (submitError) {
+      setBusy(false)
+      setError(submitError instanceof Error ? submitError.message : String(submitError))
+    }
+  }, [busy, onClose, state, value])
+
+  return createPortal(
+    <div
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !busy) onClose()
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 100000,
+        background: 'rgba(0, 0, 0, 0.48)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <form
+        onSubmit={handleSubmit}
+        style={{
+          width: '100%',
+          maxWidth: 420,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+          padding: 18,
+          borderRadius: 12,
+          border: `1px solid ${theme.border.default}`,
+          background: theme.surface.panelElevated,
+          boxShadow: theme.shadow.panel,
+          color: theme.text.primary,
+          fontFamily: fonts.primary,
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ fontSize: fonts.size + 2, fontWeight: Math.min(900, fonts.weight + 100), color: theme.text.primary }}>
+            {state.title}
+          </div>
+          {state.description && (
+            <div style={{ fontSize: fonts.secondarySize, lineHeight: 1.45, color: theme.text.muted }}>
+              {state.description}
+            </div>
+          )}
+        </div>
+
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={event => setValue(event.target.value)}
+          placeholder={state.placeholder}
+          spellCheck={false}
+          disabled={busy}
+          style={{
+            width: '100%',
+            padding: '10px 12px',
+            borderRadius: 8,
+            border: `1px solid ${error ? theme.status.danger : theme.border.default}`,
+            background: theme.surface.hover,
+            color: theme.text.primary,
+            outline: 'none',
+            fontFamily: fonts.primary,
+            fontSize: fonts.size,
+            boxSizing: 'border-box',
+          }}
+        />
+
+        {error && (
+          <div style={{ fontSize: fonts.secondarySize, color: theme.status.danger }}>
+            {error}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: `1px solid ${theme.border.default}`,
+              background: 'transparent',
+              color: theme.text.secondary,
+              cursor: busy ? 'default' : 'pointer',
+              fontFamily: fonts.primary,
+              fontSize: fonts.size,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            style={{
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: 'none',
+              background: theme.accent.base,
+              color: theme.mode === 'light' ? '#fff' : '#0b1118',
+              cursor: busy ? 'default' : 'pointer',
+              opacity: busy ? 0.7 : 1,
+              fontFamily: fonts.primary,
+              fontSize: fonts.size,
+              fontWeight: Math.min(900, fonts.weight + 100),
+            }}
+          >
+            {busy ? 'Working…' : state.confirmLabel}
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+}
+
 interface Props {
   workspace: Workspace | null
   workspaces: Workspace[]
@@ -327,6 +503,7 @@ export function Sidebar({
   const [archivingSessionId, setArchivingSessionId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
+  const [textDialog, setTextDialog] = useState<SidebarTextDialogState | null>(null)
   const threadMenuRef = useRef<HTMLDivElement>(null)
   const sessionLoadRequestSeqRef = useRef(0)
   const latestSessionLoadTokenByWorkspaceRef = useRef(new Map<string, number>())
@@ -393,6 +570,13 @@ export function Sidebar({
   }, [projects, workspaces, workspace?.id])
 
   const workspaceById = useMemo(() => new Map(workspaces.map(workspaceEntry => [workspaceEntry.id, workspaceEntry] as const)), [workspaces])
+
+  const refreshProjects = useCallback(async () => {
+    const listProjects = window.electron.workspace.listProjects
+    if (typeof listProjects !== 'function') return
+    const next = await listProjects().catch(() => null)
+    if (next) setProjects(next)
+  }, [])
 
   const activeProjectId = useMemo(() => {
     const primaryProjectPath = normalizeSidebarPath(workspace?.path)
@@ -913,16 +1097,23 @@ export function Sidebar({
     items.push({
       label: 'Rename Thread',
       action: () => {
-        const nextTitle = window.prompt('Rename thread', session.title)?.trim()
-        if (!nextTitle || nextTitle === session.title) return
-        void window.electron.canvas.renameSession(session.workspaceId, session.id, nextTitle).then(result => {
-          if (!result?.ok) return
-          setSessions(prev => prev.map(entry => entry.id === session.id && entry.workspaceId === session.workspaceId
-            ? { ...entry, title: nextTitle }
-            : entry))
-          const workspaceEntry = workspaceById.get(session.workspaceId)
-          if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry, true)
-        }).catch(() => {})
+        setTextDialog({
+          title: 'Rename Thread',
+          description: 'Update the title shown in the sidebar for this conversation.',
+          confirmLabel: 'Rename',
+          initialValue: session.title,
+          submit: async (rawValue: string) => {
+            const nextTitle = rawValue.trim()
+            if (!nextTitle || nextTitle === session.title) return
+            const result = await window.electron.canvas.renameSession(session.workspaceId, session.id, nextTitle)
+            if (!result?.ok) throw new Error(result?.error || 'Failed to rename thread.')
+            setSessions(prev => prev.map(entry => entry.id === session.id && entry.workspaceId === session.workspaceId
+              ? { ...entry, title: nextTitle }
+              : entry))
+            const workspaceEntry = workspaceById.get(session.workspaceId)
+            if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
+          },
+        })
       },
     })
 
@@ -958,26 +1149,25 @@ export function Sidebar({
         label: 'Create permanent worktree',
         action: () => {
           if (!projectPath) return
-          const name = window.prompt(`Worktree name for ${group.label}`, '')?.trim()
-          if (!name) return
-          const safeName = name.replace(/[^A-Za-z0-9._/-]/g, '-')
-          if (!safeName) { window.alert('Invalid worktree name.'); return }
-          void window.electron.workspace.createProjectWorktree({
-            projectId: projectEntry?.id,
-            projectPath,
-            name: safeName,
-          }).then(async result => {
-            if (!result?.ok) {
-              window.alert(result?.error || 'Failed to create worktree.')
-              return
-            }
-            const listProjects = window.electron.workspace.listProjects
-            if (typeof listProjects === 'function') {
-              const next = await listProjects().catch(() => null)
-              if (next) setProjects(next)
-            }
-          }).catch(error => {
-            window.alert(error instanceof Error ? error.message : String(error))
+          setTextDialog({
+            title: 'Create Permanent Worktree',
+            description: `Create a named worktree for ${group.label}. Invalid characters will be replaced with "-".`,
+            confirmLabel: 'Create',
+            initialValue: '',
+            placeholder: 'feature/my-branch',
+            submit: async (rawValue: string) => {
+              const name = rawValue.trim()
+              if (!name) return
+              const safeName = name.replace(/[^A-Za-z0-9._/-]/g, '-')
+              if (!safeName) throw new Error('Invalid worktree name.')
+              const result = await window.electron.workspace.createProjectWorktree({
+                projectId: projectEntry?.id,
+                projectPath,
+                name: safeName,
+              })
+              if (!result?.ok) throw new Error(result?.error || 'Failed to create worktree.')
+              await refreshProjects()
+            },
           })
         },
       },
@@ -985,24 +1175,22 @@ export function Sidebar({
         label: 'Rename project',
         action: () => {
           const currentName = projectEntry?.name ?? group.label
-          const nextName = window.prompt('Rename project', currentName)?.trim()
-          if (!nextName || nextName === currentName) return
-          void window.electron.workspace.renameProject({
-            projectId: projectEntry?.id,
-            projectPath,
-            name: nextName,
-          }).then(async result => {
-            if (!result?.ok) {
-              window.alert(result?.error || 'Failed to rename project.')
-              return
-            }
-            const listProjects = window.electron.workspace.listProjects
-            if (typeof listProjects === 'function') {
-              const next = await listProjects().catch(() => null)
-              if (next) setProjects(next)
-            }
-          }).catch(error => {
-            window.alert(error instanceof Error ? error.message : String(error))
+          setTextDialog({
+            title: 'Rename Project',
+            description: 'Change the display name used for this project in the sidebar.',
+            confirmLabel: 'Rename',
+            initialValue: currentName,
+            submit: async (rawValue: string) => {
+              const nextName = rawValue.trim()
+              if (!nextName || nextName === currentName) return
+              const result = await window.electron.workspace.renameProject({
+                projectId: projectEntry?.id,
+                projectPath,
+                name: nextName,
+              })
+              if (!result?.ok) throw new Error(result?.error || 'Failed to rename project.')
+              await refreshProjects()
+            },
           })
         },
       },
@@ -1674,6 +1862,13 @@ export function Sidebar({
 
       {projectCtx && (
         <ContextMenu x={projectCtx.x} y={projectCtx.y} items={projectContextMenuItems(projectCtx.group)} onClose={() => setProjectCtx(null)} />
+      )}
+
+      {textDialog && (
+        <SidebarTextDialog
+          state={textDialog}
+          onClose={() => setTextDialog(null)}
+        />
       )}
 
       {/* Resize handle */}
