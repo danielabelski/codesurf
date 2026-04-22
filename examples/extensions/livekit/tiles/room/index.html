@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveKit Room</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--ct-font-primary, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+    font-size: var(--ct-font-primary-size, 13px);
+    line-height: var(--ct-font-primary-line, 1.5);
+    background: var(--ct-bg, transparent);
+    color: var(--ct-text, #1a1a2e);
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .shell {
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .card {
+    background: var(--ct-panel, #f8f8fa);
+    border: 1px solid var(--ct-border, #e2e2e8);
+    border-radius: var(--ct-radius, 10px);
+  }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+  }
+
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+  .status-dot.stopped { background: var(--ct-muted, #888); }
+  .status-dot.starting { background: var(--ct-warning, #f59e0b); }
+  .status-dot.running { background: var(--ct-success, #22a55a); }
+  .status-dot.error { background: var(--ct-danger, #dc3545); }
+
+  .title-block {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .title {
+    font-size: 14px;
+    font-weight: 700;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .subtitle {
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--ct-border, #d6d8df);
+    background: var(--ct-panel-2, #fff);
+    color: var(--ct-text, #111827);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .btn:hover { background: var(--ct-hover, #f0f0f4); }
+  .btn.primary {
+    background: var(--ct-accent, #4f46e5);
+    border-color: var(--ct-accent, #4f46e5);
+    color: #fff;
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    padding: 14px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .field.span-2 {
+    grid-column: 1 / -1;
+  }
+
+  .field label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ct-muted, #6b7280);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+
+  .field input,
+  .field select,
+  .field textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--ct-border, #d6d8df);
+    border-radius: 8px;
+    background: var(--ct-panel-2, #fff);
+    color: var(--ct-text, #111827);
+    font: inherit;
+    outline: none;
+  }
+  .field textarea {
+    min-height: 110px;
+    resize: vertical;
+  }
+  .field input:focus,
+  .field select:focus,
+  .field textarea:focus {
+    border-color: var(--ct-accent, #4f46e5);
+  }
+
+  .meta {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  .participants {
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .participants-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--ct-border, #e2e2e8);
+  }
+
+  .participants-title {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  .participants-list {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .participant {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--ct-border, #ececf2);
+  }
+  .participant:last-child {
+    border-bottom: 0;
+  }
+
+  .participant-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .participant-name {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .participant-state {
+    font-size: 11px;
+    color: var(--ct-muted, #6b7280);
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+  }
+
+  .tracks {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  .empty {
+    padding: 20px 14px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  .footnote {
+    padding: 0 14px 14px;
+    font-size: 11px;
+    color: var(--ct-muted, #6b7280);
+  }
+
+  @media (max-width: 760px) {
+    .shell {
+      grid-template-rows: auto auto minmax(220px, 1fr) auto;
+    }
+
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="card topbar">
+    <div class="status-dot stopped" id="statusDot"></div>
+    <div class="title-block">
+      <div class="title" id="roomTitle">No room selected</div>
+      <div class="subtitle" id="roomSubtitle">Choose a room from the LiveKit Rooms tile or type one below.</div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="refreshBtn" type="button">Refresh</button>
+      <button class="btn primary" id="tokenBtn" type="button">Generate Token</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="grid">
+      <div class="field span-2">
+        <label for="roomInput">Room</label>
+        <input id="roomInput" type="text" placeholder="Room name">
+      </div>
+      <div class="field">
+        <label for="identityInput">Identity</label>
+        <input id="identityInput" type="text" placeholder="Display name">
+      </div>
+      <div class="field">
+        <label for="roleSelect">Role</label>
+        <select id="roleSelect">
+          <option value="participant">Participant</option>
+          <option value="host">Host</option>
+          <option value="agent">Agent</option>
+        </select>
+      </div>
+      <div class="field span-2">
+        <label for="wsInput">WebSocket URL</label>
+        <input id="wsInput" type="text" readonly placeholder="Generated with the token">
+      </div>
+      <div class="field span-2">
+        <label for="tokenOutput">Join Token</label>
+        <textarea id="tokenOutput" readonly placeholder="Generate a token to inspect or copy connection details."></textarea>
+      </div>
+      <div class="field span-2">
+        <div class="meta">
+          <span id="serverStatusText">Server: stopped</span>
+          <span id="participantMeta">Participants: 0</span>
+          <span id="errorText"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card participants">
+    <div class="participants-head">
+      <div class="participants-title">Participants</div>
+      <div class="subtitle" id="participantsHint">Refresh to query the LiveKit API for the selected room.</div>
+    </div>
+    <div class="participants-list" id="participantsList">
+      <div class="empty">No room selected.</div>
+    </div>
+  </section>
+
+  <div class="footnote">
+    This tile restores the missing room panel referenced by the LiveKit manifest. It tracks the active room context, surfaces participant state, and can mint join tokens through the extension host.
+  </div>
+</div>
+
+<script>
+  const state = {
+    roomName: '',
+    identity: '',
+    role: 'participant',
+    wsUrl: '',
+    token: '',
+    participants: [],
+    serverStatus: 'stopped',
+    error: '',
+  }
+
+  const els = {
+    statusDot: document.getElementById('statusDot'),
+    roomTitle: document.getElementById('roomTitle'),
+    roomSubtitle: document.getElementById('roomSubtitle'),
+    roomInput: document.getElementById('roomInput'),
+    identityInput: document.getElementById('identityInput'),
+    roleSelect: document.getElementById('roleSelect'),
+    wsInput: document.getElementById('wsInput'),
+    tokenOutput: document.getElementById('tokenOutput'),
+    serverStatusText: document.getElementById('serverStatusText'),
+    participantMeta: document.getElementById('participantMeta'),
+    errorText: document.getElementById('errorText'),
+    participantsList: document.getElementById('participantsList'),
+    refreshBtn: document.getElementById('refreshBtn'),
+    tokenBtn: document.getElementById('tokenBtn'),
+    participantsHint: document.getElementById('participantsHint'),
+  }
+
+  function esc(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
+  function normalizeResult(value) {
+    if (typeof value !== 'string') return value
+    try {
+      return JSON.parse(value)
+    } catch {
+      return value
+    }
+  }
+
+  function trackSummary(participant) {
+    const tracks = Array.isArray(participant?.tracks) ? participant.tracks : []
+    if (tracks.length === 0) return 'No published tracks'
+    return tracks.map(track => {
+      const source = track?.source || track?.type || 'track'
+      return `${source}${track?.muted ? ' (muted)' : ''}`
+    }).join(', ')
+  }
+
+  function applyBusState(payload) {
+    if (!payload || typeof payload !== 'object') return
+    if (typeof payload.serverStatus === 'string') state.serverStatus = payload.serverStatus
+
+    if (!state.roomName || !Array.isArray(payload.rooms)) return
+    const room = payload.rooms.find(entry => entry && entry.name === state.roomName)
+    if (!room) return
+    if (Array.isArray(room.participants)) state.participants = room.participants
+  }
+
+  function renderParticipants() {
+    if (!state.roomName) {
+      els.participantsList.innerHTML = '<div class="empty">No room selected.</div>'
+      return
+    }
+
+    if (!Array.isArray(state.participants) || state.participants.length === 0) {
+      els.participantsList.innerHTML = '<div class="empty">No participants reported for this room yet.</div>'
+      return
+    }
+
+    els.participantsList.innerHTML = state.participants.map(participant => `
+      <div class="participant">
+        <div class="participant-row">
+          <div class="participant-name">${esc(participant?.name || participant?.identity || 'Unknown')}</div>
+          <div class="participant-state">${esc(participant?.state || 'connected')}</div>
+        </div>
+        <div class="tracks">${esc(trackSummary(participant))}</div>
+      </div>
+    `).join('')
+  }
+
+  function render() {
+    els.statusDot.className = `status-dot ${state.serverStatus || 'stopped'}`
+    els.roomTitle.textContent = state.roomName || 'No room selected'
+    els.roomSubtitle.textContent = state.roomName
+      ? 'Active room pulled from shared context. You can refresh participants or mint a token below.'
+      : 'Choose a room from the LiveKit Rooms tile or type one below.'
+
+    els.roomInput.value = state.roomName
+    els.identityInput.value = state.identity
+    els.roleSelect.value = state.role
+    els.wsInput.value = state.wsUrl
+    els.tokenOutput.value = state.token
+    els.serverStatusText.textContent = `Server: ${state.serverStatus || 'stopped'}`
+    els.participantMeta.textContent = `Participants: ${Array.isArray(state.participants) ? state.participants.length : 0}`
+    els.errorText.textContent = state.error || ''
+    els.participantsHint.textContent = state.roomName
+      ? `Selected room: ${state.roomName}`
+      : 'Refresh to query the LiveKit API for the selected room.'
+    renderParticipants()
+  }
+
+  async function persistFormState() {
+    if (!window.contex?.tile?.setState) return
+    await Promise.allSettled([
+      window.contex.tile.setState('roomName', state.roomName),
+      window.contex.tile.setState('identity', state.identity),
+      window.contex.tile.setState('role', state.role),
+    ])
+  }
+
+  async function refreshParticipants() {
+    state.error = ''
+    if (!state.roomName) {
+      state.participants = []
+      render()
+      return
+    }
+
+    try {
+      const result = normalizeResult(await window.contex.ext.invoke('listParticipants', state.roomName))
+      state.participants = Array.isArray(result) ? result : []
+    } catch (error) {
+      state.error = error && error.message ? error.message : String(error)
+    }
+
+    render()
+  }
+
+  async function generateToken() {
+    state.roomName = els.roomInput.value.trim()
+    state.identity = els.identityInput.value.trim()
+    state.role = els.roleSelect.value
+    state.error = ''
+
+    if (!state.roomName) {
+      state.error = 'Room name is required'
+      render()
+      return
+    }
+
+    if (!state.identity) {
+      state.error = 'Identity is required'
+      render()
+      return
+    }
+
+    try {
+      const result = normalizeResult(
+        await window.contex.ext.invoke('generateToken', state.roomName, state.identity, state.role),
+      )
+      state.token = result?.token || ''
+      state.wsUrl = result?.wsUrl || ''
+      await Promise.allSettled([
+        persistFormState(),
+        window.contex?.context?.set?.('ctx:livekit:active-room', { name: state.roomName }),
+      ])
+      await refreshParticipants()
+    } catch (error) {
+      state.error = error && error.message ? error.message : String(error)
+      render()
+    }
+  }
+
+  async function loadInitialState() {
+    if (!window.contex) return
+
+    try {
+      const [savedRoom, savedIdentity, savedRole, activeRoom, livekitState] = await Promise.all([
+        window.contex.tile.getState('roomName').catch(() => ''),
+        window.contex.tile.getState('identity').catch(() => ''),
+        window.contex.tile.getState('role').catch(() => 'participant'),
+        window.contex.context?.get?.('ctx:livekit:active-room').catch(() => null),
+        window.contex.ext.invoke('getState').catch(() => null),
+      ])
+
+      state.roomName = activeRoom?.name || savedRoom || ''
+      state.identity = savedIdentity || ''
+      state.role = savedRole || 'participant'
+      applyBusState(normalizeResult(livekitState))
+      render()
+
+      if (state.roomName) {
+        await refreshParticipants()
+      }
+    } catch (error) {
+      state.error = error && error.message ? error.message : String(error)
+      render()
+    }
+  }
+
+  function wireBusAndContext() {
+    if (!window.contex) return
+
+    if (window.contex.bus?.subscribe) {
+      window.contex.bus.subscribe('livekit').catch(() => {})
+    }
+
+    if (window.contex.context?.onPeerContextChanged) {
+      window.contex.context.onPeerContextChanged(async data => {
+        if (data?.key !== 'ctx:livekit:active-room' || !data?.value?.name) return
+        state.roomName = data.value.name
+        state.error = ''
+        await persistFormState()
+        render()
+        await refreshParticipants()
+      })
+    }
+  }
+
+  window.addEventListener('message', event => {
+    if (event.data?.type === 'contex-bridge-ready') {
+      loadInitialState().then(wireBusAndContext)
+    }
+
+    if (event.data?.type === 'contex-event' && event.data?.event === 'bus.event.livekit') {
+      const payload = event.data?.data?.payload || event.data?.data
+      applyBusState(payload)
+      render()
+    }
+  })
+
+  if (window.contex) {
+    loadInitialState().then(wireBusAndContext)
+  }
+
+  els.refreshBtn.addEventListener('click', async () => {
+    state.roomName = els.roomInput.value.trim()
+    await persistFormState()
+    await refreshParticipants()
+  })
+
+  els.tokenBtn.addEventListener('click', generateToken)
+  els.roomInput.addEventListener('change', async () => {
+    state.roomName = els.roomInput.value.trim()
+    state.error = ''
+    await persistFormState()
+    render()
+  })
+  els.identityInput.addEventListener('change', async () => {
+    state.identity = els.identityInput.value.trim()
+    await persistFormState()
+  })
+  els.roleSelect.addEventListener('change', async () => {
+    state.role = els.roleSelect.value
+    await persistFormState()
+  })
+</script>
+</body>
+</html>

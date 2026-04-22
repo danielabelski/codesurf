@@ -28,6 +28,8 @@ import {
 } from '../config/providers'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
 import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote, FileChange } from '../../../shared/chat-types'
+import type { SessionEntryHint } from '../../../shared/session-types'
+import { buildChatMessageHistoryFingerprint } from '../../../shared/chat-history'
 import { BlockNoteAffordance } from './chat/BlockNoteAffordance'
 import { getChatTileRuntimeState, setChatTileRuntimeState, reviveChatTileRuntimeState, isChatTileRuntimeStateDisposed } from './chatTileRuntimeState'
 import { setChatStreaming } from './chatStreamingStore'
@@ -45,6 +47,7 @@ import {
   type ToolPermissionDecision,
   type ToolPermissionRequest,
 } from './ai-elements/ToolPermission'
+import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 
 const CHAT_SLASH_COMMANDS = [
   { value: '/compact', description: 'Compact conversation' },
@@ -298,6 +301,8 @@ interface ChatTilePersistedState {
   autoAgentMode: boolean
   preserveSessionSummary?: boolean
   linkedSessionEntryId?: string | null
+  linkedSessionHint?: SessionEntryHint | null
+  hasEarlierMessages?: boolean
   sessionId: string | null
   jobId?: string | null
   jobSequence?: number
@@ -743,6 +748,9 @@ const FONT_SIZE_DEFAULT = 13
 const MONO_SIZE_DEFAULT = 13
 const CHAT_MESSAGE_MAX_WIDTH = 800
 const CHAT_RENDER_WINDOW = 80
+const LINKED_SESSION_LIVE_TAIL_LIMIT = 40
+const LINKED_SESSION_HISTORY_PAGE_SIZE = 20
+const LINKED_SESSION_HISTORY_LOAD_THRESHOLD = 32
 const CHAT_MEMORY_MESSAGE_LIMIT = 120
 const CHAT_MEMORY_CHAR_LIMIT = 180_000
 const CHAT_MEMORY_SINGLE_MESSAGE_LIMIT = 80_000
@@ -1300,6 +1308,32 @@ function normalizeMessagesForMemory(messages: ChatMessage[]): ChatMessage[] {
     timestamp: normalized[start]?.timestamp ?? Date.now(),
   }
   return [notice, ...normalized.slice(start)]
+}
+
+function canUsePagedLinkedHistory(
+  linkedSessionEntryId: string | null | undefined,
+  linkedSessionHint: SessionEntryHint | null | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!linkedSessionEntryId || !linkedSessionHint || !sessionId) return false
+  return linkedSessionHint.source !== 'codesurf'
+}
+
+function mergeHistoricalMessages(
+  previous: ChatMessage[],
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  if (incoming.length === 0) return previous
+  const seen = new Set<string>()
+  const out: ChatMessage[] = []
+  for (const message of [...previous, ...incoming]) {
+    const key = buildChatMessageHistoryFingerprint(message)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(message)
+  }
+  out.sort((a, b) => a.timestamp - b.timestamp)
+  return out
 }
 
 function getRelativeMentionPath(filePath: string, workspaceDir: string): string {
@@ -1953,6 +1987,7 @@ function ensureChatMdStyle(): void {
 
 export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, width: _width, height: _height, reloadToken = 0, settings, isConnected, isAutoConnected, connectedPeers = [] }: Props): JSX.Element {
   const theme = useTheme()
+  const chatViewportBackground = theme.surface.panel
   const composerBackground = theme.chat.input
   const composerBorder = theme.chat.inputBorder
   const dropdownBackground = theme.chat.dropdownBackground
@@ -2249,7 +2284,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [showContextMenu, setShowContextMenu] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(() => initialRuntimeStateRef.current?.sessionId ?? null)
   const [linkedSessionEntryId, setLinkedSessionEntryId] = useState<string | null>(() => initialRuntimeStateRef.current?.linkedSessionEntryId ?? null)
+  const [linkedSessionHint, setLinkedSessionHint] = useState<SessionEntryHint | null>(() => initialRuntimeStateRef.current?.linkedSessionHint ?? null)
   const [preserveSessionSummary, setPreserveSessionSummary] = useState<boolean>(() => initialRuntimeStateRef.current?.preserveSessionSummary === true)
+  const [hasEarlierMessages, setHasEarlierMessages] = useState<boolean>(() => initialRuntimeStateRef.current?.hasEarlierMessages === true)
+  const pagedLinkedHistoryEnabled = canUsePagedLinkedHistory(linkedSessionEntryId, linkedSessionHint, sessionId)
 
   // Publish this tile's streaming state so the sidebar can swap the row icon
   // for a spinner while the thread is active.
@@ -2257,22 +2295,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setChatStreaming(tileId, isStreaming, { sessionId, entryId: linkedSessionEntryId })
     return () => { setChatStreaming(tileId, false) }
   }, [tileId, isStreaming, sessionId, linkedSessionEntryId])
-  // Compacted-session history archive. Claude Agent SDK returns a condensed
-  // transcript on resume (just the last couple of messages); the SDK already
-  // holds the rest in its internal compacted state, so we don't feed earlier
-  // turns back into live context. This is purely a read-only visual archive
-  // — a show/hide toggle lets the human scroll back and read prior turns.
-  const [historicalMessages, setHistoricalMessages] = useState<Array<{
-    id: string
-    role: 'user' | 'assistant' | 'system'
-    content: string
-    timestamp: number
-    tools?: string[]
-    hasToolResult?: boolean
-  }>>([])
-  const [showHistory, setShowHistory] = useState(false)
+  // Older messages are loaded on demand and prepended into the same transcript
+  // list. They stay out of the live model context and persistence hot path,
+  // but render with the normal chat UI once loaded.
+  const [historicalMessages, setHistoricalMessages] = useState<ChatMessage[]>([])
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [earlierLoadError, setEarlierLoadError] = useState<string | null>(null)
+  const pendingHistoryPrependRef = useRef<{ previousHeight: number; previousTop: number } | null>(null)
+  const loadEarlierMessagesRef = useRef<() => Promise<void>>(async () => {})
   const [jobId, setJobId] = useState<string | null>(() => initialJobId)
   const [jobSequence, setJobSequence] = useState<number>(() => initialJobSequence)
   const [executionHosts, setExecutionHosts] = useState<import('../../../shared/types').ExecutionHostRecord[]>([])
@@ -2340,10 +2370,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [branchFilter, setBranchFilter] = useState('')
   const [gitStatus, setGitStatus] = useState<GitStatusSummary>(() => getCachedGitState(_workspaceDir)?.status ?? createEmptyGitState(_workspaceDir).status)
   const [gitBranches, setGitBranches] = useState<GitBranchSummary>(() => getCachedGitState(_workspaceDir)?.branches ?? createEmptyGitState(_workspaceDir).branches)
+  const pagedLinkedHistoryEnabledRef = useRef(pagedLinkedHistoryEnabled)
+  pagedLinkedHistoryEnabledRef.current = pagedLinkedHistoryEnabled
   const setMessagesSafe = useCallback((updater: React.SetStateAction<ChatMessage[]>) => {
-    setMessages(prev => normalizeMessagesForMemory(typeof updater === 'function'
-      ? (updater as (prev: ChatMessage[]) => ChatMessage[])(prev)
-      : updater))
+    setMessages(prev => {
+      const next = typeof updater === 'function'
+        ? (updater as (prev: ChatMessage[]) => ChatMessage[])(prev)
+        : updater
+      return pagedLinkedHistoryEnabledRef.current ? next : normalizeMessagesForMemory(next)
+    })
   }, [])
   const stateLoadedRef = useRef(false)
   const lastJobSequenceRef = useRef<number>(initialJobSequence)
@@ -2401,6 +2436,61 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const branchMenuRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const latestGitWorkspaceKeyRef = useRef(normalizeGitWorkspaceKey(_workspaceDir))
+
+  const loadEarlierMessages = useCallback(async () => {
+    if (!pagedLinkedHistoryEnabled || !workspaceId || !linkedSessionEntryId || !hasEarlierMessages || loadingEarlier) return
+    const api = window.electron?.chat?.loadSessionHistory
+    if (typeof api !== 'function') {
+      setEarlierLoadError('History loader unavailable')
+      return
+    }
+
+    const oldestLoadedMessage = historicalMessages[0] ?? messages[0] ?? null
+    const beforeFingerprint = oldestLoadedMessage
+      ? buildChatMessageHistoryFingerprint(oldestLoadedMessage)
+      : null
+    const scroller = messagesRef.current
+    if (scroller) {
+      pendingHistoryPrependRef.current = {
+        previousHeight: scroller.scrollHeight,
+        previousTop: scroller.scrollTop,
+      }
+    }
+
+    setLoadingEarlier(true)
+    setEarlierLoadError(null)
+    try {
+      const res = await api({
+        workspaceId,
+        sessionEntryId: linkedSessionEntryId,
+        entryHint: linkedSessionHint ?? null,
+        beforeFingerprint,
+        limit: LINKED_SESSION_HISTORY_PAGE_SIZE,
+      })
+      if (!res?.ok || !Array.isArray(res.messages)) {
+        setEarlierLoadError(res?.error || 'Could not load earlier messages')
+        pendingHistoryPrependRef.current = null
+        return
+      }
+      const liveFingerprints = new Set(messages.map(message => buildChatMessageHistoryFingerprint(message)))
+      const olderPage = (res.messages as ChatMessage[]).filter(message => !liveFingerprints.has(buildChatMessageHistoryFingerprint(message)))
+      if (olderPage.length === 0) {
+        pendingHistoryPrependRef.current = null
+      } else {
+        setHistoricalMessages(prev => mergeHistoricalMessages(prev, olderPage))
+      }
+      setHasEarlierMessages(res.hasMore === true)
+    } catch (err: any) {
+      pendingHistoryPrependRef.current = null
+      setEarlierLoadError(String(err?.message ?? err ?? 'Load failed'))
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }, [pagedLinkedHistoryEnabled, workspaceId, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, loadingEarlier, historicalMessages, messages])
+
+  useEffect(() => {
+    loadEarlierMessagesRef.current = loadEarlierMessages
+  }, [loadEarlierMessages])
 
   // Slash commands
   const SLASH_COMMANDS = CHAT_SLASH_COMMANDS
@@ -2464,9 +2554,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       : []
 
   const renderedMessages = useMemo(() => {
-    if (messages.length <= CHAT_RENDER_WINDOW) return messages
-    return messages.slice(-CHAT_RENDER_WINDOW)
-  }, [messages])
+    const combined = historicalMessages.length > 0
+      ? [...historicalMessages, ...messages]
+      : messages
+
+    if (pagedLinkedHistoryEnabled) return combined
+    if (combined.length <= CHAT_RENDER_WINDOW) return combined
+    return combined.slice(-CHAT_RENDER_WINDOW)
+  }, [historicalMessages, messages, pagedLinkedHistoryEnabled])
 
   const mergeDrawerFileChanges = useCallback((fileChanges: FileChange[]): FileChange[] => {
     const merged = new Map<string, FileChange>()
@@ -2484,7 +2579,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     return Array.from(merged.values())
   }, [])
 
-  const hiddenMessageCount = Math.max(0, messages.length - renderedMessages.length)
+  const hiddenMessageCount = pagedLinkedHistoryEnabled
+    ? 0
+    : Math.max(0, messages.length - renderedMessages.length)
   const latestChangeDrawer = useMemo<LatestChangeDrawerState | null>(() => {
     const batchMessages: ChatMessage[] = []
     for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
@@ -2837,12 +2934,28 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [settings?.execution])
 
   useEffect(() => {
+    if (pagedLinkedHistoryEnabled) return
     const normalized = normalizeMessagesForMemory(messages)
     if (normalized !== messages) {
       setMessages(normalized)
       return
     }
-  }, [messages])
+  }, [messages, pagedLinkedHistoryEnabled])
+
+  useEffect(() => {
+    if (!pagedLinkedHistoryEnabled || isStreaming) return
+    if (messages.length <= LINKED_SESSION_LIVE_TAIL_LIMIT) return
+
+    const overflowCount = messages.length - LINKED_SESSION_LIVE_TAIL_LIMIT
+    if (overflowCount <= 0) return
+
+    const overflowMessages = messages.slice(0, overflowCount)
+    if (overflowMessages.length === 0) return
+
+    setHistoricalMessages(prev => mergeHistoricalMessages(prev, overflowMessages))
+    setMessages(prev => prev.slice(-LINKED_SESSION_LIVE_TAIL_LIMIT))
+    setHasEarlierMessages(true)
+  }, [pagedLinkedHistoryEnabled, isStreaming, messages])
 
   useEffect(() => {
     latestStateRef.current = {
@@ -2860,6 +2973,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       autoAgentMode,
       preserveSessionSummary,
       linkedSessionEntryId,
+      linkedSessionHint,
+      hasEarlierMessages,
       sessionId,
       jobId,
       jobSequence,
@@ -2870,7 +2985,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (isChatTileRuntimeStateDisposed(tileId)) return
       setChatTileRuntimeState(tileId, latestStateRef.current)
     }
-  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
+  }, [tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, jobId, jobSequence, cloudHostId, isStreaming])
 
   // Publish latest TodoWrite todos for this tile so external chrome (tab bar,
   // sidebar) can surface the agent's current todo list without drilling into
@@ -3007,6 +3122,26 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (typeof saved.autoAgentMode === 'boolean') setAutoAgentMode(saved.autoAgentMode)
       if (typeof saved.preserveSessionSummary === 'boolean') setPreserveSessionSummary(saved.preserveSessionSummary)
       if (typeof saved.linkedSessionEntryId === 'string' || saved.linkedSessionEntryId === null) setLinkedSessionEntryId(saved.linkedSessionEntryId ?? null)
+      if (saved.linkedSessionHint === null) {
+        setLinkedSessionHint(null)
+      } else if (saved.linkedSessionHint && typeof saved.linkedSessionHint === 'object') {
+        const hint = saved.linkedSessionHint as Partial<SessionEntryHint>
+        if (typeof hint.id === 'string' && typeof hint.source === 'string') {
+          setLinkedSessionHint({
+            id: hint.id,
+            source: hint.source as SessionEntryHint['source'],
+            filePath: typeof hint.filePath === 'string' ? hint.filePath : undefined,
+            sessionId: typeof hint.sessionId === 'string' || hint.sessionId === null ? hint.sessionId : null,
+            provider: typeof hint.provider === 'string' ? hint.provider : '',
+            model: typeof hint.model === 'string' ? hint.model : '',
+            messageCount: typeof hint.messageCount === 'number' ? hint.messageCount : 0,
+            title: typeof hint.title === 'string' ? hint.title : '',
+            projectPath: typeof hint.projectPath === 'string' || hint.projectPath === null ? hint.projectPath : null,
+          })
+        }
+      }
+      if (typeof saved.hasEarlierMessages === 'boolean') setHasEarlierMessages(saved.hasEarlierMessages)
+      else if (saved.linkedSessionEntryId == null) setHasEarlierMessages(false)
       if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId)
       if (typeof saved.jobId === 'string' || saved.jobId === null) setJobId(saved.jobId ?? null)
       if (typeof saved.jobSequence === 'number') {
@@ -3043,13 +3178,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (!workspaceId || !linkedSessionEntryId) return
     if (isStreaming) return
 
+    const usePagedHistory = canUsePagedLinkedHistory(linkedSessionEntryId, linkedSessionHint, sessionId)
     let cancelled = false
-    void window.electron.canvas.getSessionState(workspaceId, linkedSessionEntryId)
+    void window.electron.canvas.getSessionState(workspaceId, linkedSessionEntryId, {
+      entryHint: linkedSessionHint ?? null,
+      tailLimit: usePagedHistory ? LINKED_SESSION_HISTORY_PAGE_SIZE : undefined,
+    })
       .then((saved: any) => {
         if (cancelled || !saved) return
         if (Array.isArray(saved.messages)) setMessagesSafe(saved.messages)
         if (typeof saved.provider === 'string') setProvider(saved.provider)
         if (typeof saved.model === 'string') setModel(saved.model)
+        if (typeof saved.hasEarlierMessages === 'boolean') setHasEarlierMessages(saved.hasEarlierMessages)
         if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null)
         if (saved.executionTarget === 'local' || saved.executionTarget === 'cloud') setExecutionTarget(saved.executionTarget)
         if (typeof saved.cloudHostId === 'string' || saved.cloudHostId === null) setCloudHostId(saved.cloudHostId ?? null)
@@ -3057,7 +3197,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       .catch(() => {})
 
     return () => { cancelled = true }
-  }, [workspaceId, linkedSessionEntryId, reloadToken, isStreaming, setMessagesSafe])
+  }, [workspaceId, linkedSessionEntryId, linkedSessionHint, reloadToken, isStreaming, sessionId, setMessagesSafe])
 
   // Reset the "last activity" clock every time streaming toggles on so the
   // quiet-indicator starts from zero for each new turn. The message-change
@@ -3129,7 +3269,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         persistTimerRef.current = null
       }
     }
-  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
+  }, [workspaceId, tileId, messages, input, attachments, queuedTurns, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
 
   useEffect(() => {
     return () => {
@@ -3568,7 +3708,28 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const atLatest = isNearLatest(el)
     stickToBottomRef.current = atLatest
     syncScrollToLatestVisibility(!atLatest)
-  }, [isNearLatest, syncScrollToLatestVisibility])
+    if (pagedLinkedHistoryEnabled && hasEarlierMessages && !loadingEarlier && el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD) {
+      void loadEarlierMessagesRef.current()
+    }
+  }, [isNearLatest, syncScrollToLatestVisibility, pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier])
+
+  useLayoutEffect(() => {
+    const pending = pendingHistoryPrependRef.current
+    const el = messagesRef.current
+    if (!pending || !el) return
+    pendingHistoryPrependRef.current = null
+    const delta = el.scrollHeight - pending.previousHeight
+    el.scrollTop = pending.previousTop + delta
+  }, [historicalMessages])
+
+  useEffect(() => {
+    if (!pagedLinkedHistoryEnabled || !hasEarlierMessages || loadingEarlier) return
+    const el = messagesRef.current
+    if (!el) return
+    if (el.scrollHeight <= el.clientHeight + LINKED_SESSION_HISTORY_LOAD_THRESHOLD) {
+      void loadEarlierMessagesRef.current()
+    }
+  }, [pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier, historicalMessages.length, messages.length])
 
   // Tracks whether a block-note composer is currently active (open AND has
   // non-empty text). While true, auto-scroll is suppressed so the viewport
@@ -3618,7 +3779,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const nextNote: BlockNote | null = text && text.trim().length > 0
       ? { text: text.trim(), createdAt: Date.now() }
       : null
-    setMessagesSafe(prev => prev.map(msg => {
+    const applyToCollection = (collection: ChatMessage[]): ChatMessage[] => collection.map(msg => {
       if (msg.id !== target.messageId) return msg
       if (target.kind === 'message') {
         if (nextNote) {
@@ -3657,7 +3818,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         return rest
       })
       return { ...msg, thinkingBlocks }
-    }))
+    })
+    setMessagesSafe(prev => applyToCollection(prev))
+    setHistoricalMessages(prev => applyToCollection(prev))
   }, [setMessagesSafe])
 
   /**
@@ -3674,7 +3837,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     note: BlockNote
   }> => {
     const out: Array<{ kind: 'message' | 'tool' | 'thinking'; messageId: string; blockId?: string; role?: string; context: string; note: BlockNote }> = []
-    for (const m of messages) {
+    const sourceMessages = historicalMessages.length > 0
+      ? [...historicalMessages, ...messages]
+      : messages
+    for (const m of sourceMessages) {
       if (m.note) {
         const snippet = m.content.trim().slice(0, 200)
         out.push({ kind: 'message', messageId: m.id, role: m.role, context: snippet, note: m.note })
@@ -3693,7 +3859,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       }
     }
     return out
-  }, [messages])
+  }, [historicalMessages, messages])
 
   /** Copies a Markdown-formatted export of all attached notes to the clipboard. */
   const exportNotesToClipboard = useCallback(async () => {
@@ -4204,34 +4370,27 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (!surface) return
 
       try {
-        if (msg.method === 'surface.setPayload') {
-          const payload = msg.params?.payload ?? null
-          setOpenChatSurfaces(prev => prev.map(candidate => candidate.instanceId === surface.instanceId ? {
-            ...candidate,
-            payload: payload && typeof payload === 'object' ? {
-              kind: payload.kind === 'text' ? 'text' : 'image',
-              data: String(payload.data ?? ''),
-              mime: typeof payload.mime === 'string' ? payload.mime : undefined,
-              ext: typeof payload.ext === 'string' ? payload.ext : undefined,
-            } : null,
-          } : candidate))
-          reply(true)
-          return
-        }
-
-        if (msg.method === 'tile.getMeta') {
-          reply({
-            tileId: surface.instanceId,
-            extId: surface.extId,
-            surfaceId: surface.surfaceId,
-            kind: 'chat-surface',
-            connectedPeers: getChatSurfacePeerEntries(surface.instanceId).map(peer => peer.peerId),
-          })
-          return
-        }
-
-        if (msg.method === 'theme.getColors') {
-          reply(chatSurfaceThemeColors)
+        const basicRpc = await handleBasicChatSurfaceRpc({
+          method: String(msg.method ?? ''),
+          params: msg.params,
+          surface,
+          connectedPeerIds: getChatSurfacePeerEntries(surface.instanceId).map(peer => peer.peerId),
+          workspaceId,
+          workspacePath: _workspaceDir,
+          themeColors: chatSurfaceThemeColors,
+          extensionsApi: {
+            invoke: window.electron?.extensions?.invoke,
+            getSettings: window.electron?.extensions?.getSettings,
+            setSettings: window.electron?.extensions?.setSettings,
+          },
+        })
+        if (basicRpc.handled) {
+          if ('payload' in basicRpc) {
+            setOpenChatSurfaces(prev => prev.map(candidate => candidate.instanceId === surface.instanceId
+              ? { ...candidate, payload: basicRpc.payload ?? null }
+              : candidate))
+          }
+          reply(basicRpc.result)
           return
         }
 
@@ -4453,6 +4612,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       autoAgentMode: state?.autoAgentMode ?? autoAgentMode,
       preserveSessionSummary: linkedSessionEntryId ? true : false,
       linkedSessionEntryId,
+      linkedSessionHint,
+      hasEarlierMessages,
       sessionId: activeSessionId,
       jobId: null,
       jobSequence: 0,
@@ -4549,7 +4710,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       focusComposer()
       return false
     }
-  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, linkedSessionEntryId, persistLatestState])
+  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, persistLatestState])
 
   const logQueueEvent = useCallback((
     type: 'enqueue' | 'dispatch' | 'delete' | 'complete' | 'clear' | 'reorder',
@@ -4795,63 +4956,25 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     logQueueEvent('clear')
     setPreserveSessionSummary(false)
     setLinkedSessionEntryId(null)
+    setLinkedSessionHint(null)
+    setHasEarlierMessages(false)
     setSessionId(null)
     setJobId(null)
     setJobSequence(0)
     lastJobSequenceRef.current = 0
     setHistoricalMessages([])
-    setShowHistory(false)
+    setLoadingEarlier(false)
     setEarlierLoadError(null)
     window.electron?.chat?.clearSession?.(tileId)
   }, [isStreaming, tileId, flushQueueStateNow, logQueueEvent])
 
-  // Drop any cached history archive whenever the resumed session changes
-  // so the toggle reverts to its fresh state for a new thread.
+  // Drop any previously-loaded older pages whenever the backing linked
+  // session changes so the next thread starts from a clean tail view.
   useEffect(() => {
     setHistoricalMessages([])
-    setShowHistory(false)
     setEarlierLoadError(null)
-  }, [sessionId])
-
-  const toggleEarlierMessages = useCallback(async () => {
-    // Already have the archive cached — just flip visibility.
-    if (historicalMessages.length > 0) {
-      setShowHistory(v => !v)
-      return
-    }
-    if (!sessionId || loadingEarlier) return
-    const api = (window as any).electron?.chat?.loadSessionHistory
-    if (typeof api !== 'function') {
-      setEarlierLoadError('History loader unavailable')
-      return
-    }
-    setLoadingEarlier(true)
-    setEarlierLoadError(null)
-    try {
-      const res = await api({ sessionId, limit: 500 })
-      if (!res?.ok || !Array.isArray(res.messages)) {
-        setEarlierLoadError(res?.error || 'Could not load earlier messages')
-        return
-      }
-      // Drop transcript entries whose content matches the already-rendered
-      // tail so the visible overlap between live messages and archive is 0.
-      const liveKeys = new Set(messages.map(m => `${m.role}::${(m.content ?? '').slice(0, 200)}`))
-      const archive = (res.messages as Array<{
-        id: string
-        role: 'user' | 'assistant' | 'system'
-        content: string
-        timestamp: number
-        tools?: string[]
-        hasToolResult?: boolean
-      }>).filter(m => !liveKeys.has(`${m.role}::${(m.content ?? '').slice(0, 200)}`))
-      setHistoricalMessages(archive)
-      setShowHistory(true)
-    } catch (err: any) {
-      setEarlierLoadError(String(err?.message ?? err ?? 'Load failed'))
-    } finally {
-      setLoadingEarlier(false)
-    }
-  }, [sessionId, loadingEarlier, historicalMessages.length, messages])
+    pendingHistoryPrependRef.current = null
+  }, [sessionId, linkedSessionEntryId])
 
   useEffect(() => {
     if (isStreaming || queuedTurns.length === 0 || isFlushingQueuedTurnRef.current) return
@@ -5002,7 +5125,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       style={{
         width: '100%', height: '100%',
         display: 'flex', flexDirection: 'column',
-        background: theme.chat.background, color: theme.chat.text,
+        background: chatViewportBackground, color: theme.chat.text,
         fontFamily: fontSans, fontSize, lineHeight: fontLineHeight, fontWeight,
         position: 'relative',
       }}
@@ -5070,12 +5193,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             </div>
           )}
 
-          {/* Compacted-session archive — purely visual. The SDK still has
-              the full compacted context internally; this button just toggles
-              a read-only rendering of the on-disk .jsonl transcript so the
-              human can scroll back and read prior turns. It never feeds
-              content back into live context. */}
-          {sessionId && messages.length > 0 && (
+          {pagedLinkedHistoryEnabled && (loadingEarlier || earlierLoadError) && (
             <div style={{
               alignSelf: 'center',
               display: 'flex',
@@ -5084,131 +5202,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               gap: 4,
               padding: '6px 0 2px',
             }}>
-              <button
-                onClick={() => { void toggleEarlierMessages() }}
-                disabled={loadingEarlier}
-                style={{
-                  appearance: 'none',
-                  border: `1px solid ${theme.chat.divider}`,
-                  background: theme.chat.userBubble,
-                  color: theme.chat.muted,
-                  padding: '6px 14px',
-                  borderRadius: 999,
-                  fontSize: 11,
-                  cursor: loadingEarlier ? 'default' : 'pointer',
-                  opacity: loadingEarlier ? 0.6 : 1,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-                title="Show previous turns from the on-disk session transcript (read-only)"
-              >
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
-                  <path d="M6 2v4l2.5 1.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                  <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2" />
-                </svg>
-                {loadingEarlier
-                  ? 'Loading earlier messages…'
-                  : historicalMessages.length > 0
-                    ? (showHistory
-                        ? `Hide earlier messages (${historicalMessages.length})`
-                        : `Show earlier messages (${historicalMessages.length})`)
-                    : 'Show earlier messages'}
-              </button>
-              {earlierLoadError && (
-                <span style={{ fontSize: 10, color: theme.chat.muted, opacity: 0.8 }}>{earlierLoadError}</span>
-              )}
-            </div>
-          )}
-
-          {showHistory && historicalMessages.length > 0 && (
-            <div style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-              padding: '10px 0 14px',
-              borderBottom: `1px dashed ${theme.chat.divider}`,
-              marginBottom: 8,
-              opacity: 0.78,
-            }}>
               <div style={{
-                alignSelf: 'center',
-                fontSize: 10,
-                letterSpacing: 0.4,
-                textTransform: 'uppercase',
-                color: theme.chat.subtle,
+                padding: '6px 12px',
+                borderRadius: 999,
+                border: `1px solid ${theme.chat.divider}`,
+                background: theme.chat.userBubble,
+                color: theme.chat.muted,
+                fontSize: 11,
+                textAlign: 'center',
               }}>
-                Archive — read-only
+                {loadingEarlier ? 'Loading older messages…' : earlierLoadError}
               </div>
-              {historicalMessages.map(msg => {
-                // Skip empty-text user tool-result turns entirely — their
-                // metadata is already reflected by the sibling assistant's
-                // tool chips.
-                if (!msg.content && msg.role === 'user' && msg.hasToolResult && !(msg.tools && msg.tools.length > 0)) {
-                  return null
-                }
-                return (
-                  <div
-                    key={`hist-${msg.id}`}
-                    style={{
-                      alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                      maxWidth: CHAT_MESSAGE_MAX_WIDTH,
-                      padding: '8px 12px',
-                      borderRadius: 10,
-                      border: `1px solid ${theme.chat.divider}`,
-                      background: msg.role === 'user' ? theme.chat.userBubble : 'transparent',
-                      color: theme.chat.text,
-                      fontSize: 12,
-                      lineHeight: 1.5,
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    <div style={{
-                      fontSize: 9,
-                      letterSpacing: 0.3,
-                      textTransform: 'uppercase',
-                      color: theme.chat.subtle,
-                      marginBottom: 4,
-                    }}>
-                      {msg.role}
-                    </div>
-                    {msg.content && <div>{msg.content}</div>}
-                    {msg.tools && msg.tools.length > 0 && (
-                      <div style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        gap: 4,
-                        marginTop: msg.content ? 6 : 0,
-                      }}>
-                        {msg.tools.map((toolName, idx) => (
-                          <span
-                            key={`${msg.id}-tool-${idx}`}
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 4,
-                              padding: '2px 8px',
-                              borderRadius: 999,
-                              border: `1px solid ${theme.chat.divider}`,
-                              background: theme.chat.userBubble,
-                              color: theme.chat.muted,
-                              fontSize: 10,
-                              lineHeight: 1.4,
-                              letterSpacing: 0.2,
-                            }}
-                          >
-                            <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
-                              <rect x="1" y="1" width="6" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1" />
-                            </svg>
-                            {toolName}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
             </div>
           )}
 

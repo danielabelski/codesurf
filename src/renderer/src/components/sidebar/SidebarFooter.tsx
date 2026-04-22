@@ -1,10 +1,40 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Pin, Settings, Package, Puzzle } from 'lucide-react'
+import { Bot, Folder, GitBranch, Globe, MessageSquare, Package, Pencil, Puzzle, Settings, Sparkles, TerminalSquare, Wrench } from 'lucide-react'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
 import { TILE_ICONS } from './utils'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
+
+function renderExtensionToolbarIcon(icon?: string): React.ReactNode {
+  const raw = String(icon ?? '').trim()
+  if (!raw) return <Puzzle size={12} />
+
+  const normalized = raw.toLowerCase()
+  const namedIcons: Record<string, React.ComponentType<{ size?: number }>> = {
+    sparkles: Sparkles,
+    pencil: Pencil,
+    folder: Folder,
+    'git-branch': GitBranch,
+    wrench: Wrench,
+    globe: Globe,
+    bot: Bot,
+    package: Package,
+    puzzle: Puzzle,
+    settings: Settings,
+    'message-square': MessageSquare,
+    terminal: TerminalSquare,
+  }
+  const Icon = namedIcons[normalized]
+  if (Icon) return <Icon size={12} />
+
+  const looksLikeTextToken = /^[a-z0-9-]+$/i.test(raw)
+  if (!looksLikeTextToken) {
+    return <span style={{ fontSize: 12, lineHeight: 1 }}>{raw}</span>
+  }
+
+  return <Puzzle size={12} />
+}
 
 export interface SidebarFooterProps {
   onNewTerminal: () => void
@@ -34,6 +64,8 @@ export function SidebarFooter({
   const [showExtMenu, setShowExtMenu] = useState(false)
   const extMenuRef = useRef<HTMLDivElement>(null)
   const footerIconColor = theme.text.secondary
+  const galleryButtonHoverBackground = `color-mix(in srgb, ${theme.surface.selection} 72%, ${theme.surface.hover})`
+  const galleryButtonBorder = `1px solid color-mix(in srgb, ${theme.accent.base} 18%, transparent)`
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -58,12 +90,12 @@ export function SidebarFooter({
             display: 'inline-flex',
             alignItems: 'center',
             gap: 5,
-            height: 22,
-            padding: '0 9px',
-            borderRadius: 6,
-            border: `1px solid ${theme.accent.base}`,
-            background: theme.accent.base,
-            color: theme.text.inverse,
+            height: 24,
+            padding: '0 10px',
+            borderRadius: 8,
+            border: galleryButtonBorder,
+            background: theme.surface.selection,
+            color: theme.accent.base,
             fontSize: Math.max(11, fonts.size - 1),
             fontWeight: 600,
             fontFamily: fonts.primary,
@@ -71,9 +103,11 @@ export function SidebarFooter({
             cursor: 'pointer',
             whiteSpace: 'nowrap',
             flexShrink: 0,
+            transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
+            boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 10%, transparent)`,
           }}
-          onMouseEnter={e => { e.currentTarget.style.filter = 'brightness(1.08)' }}
-          onMouseLeave={e => { e.currentTarget.style.filter = 'none' }}
+          onMouseEnter={e => { e.currentTarget.style.background = galleryButtonHoverBackground }}
+          onMouseLeave={e => { e.currentTarget.style.background = theme.surface.selection }}
         >
           <Package size={12} />
           <span>Get Extensions</span>
@@ -84,13 +118,17 @@ export function SidebarFooter({
           onClick={onOpenGallery}
           title="Get Extensions"
           style={{
-            width: 24, height: 24, borderRadius: 6,
-            border: `1px solid ${theme.accent.base}`,
-            background: theme.accent.base,
-            color: theme.text.inverse,
+            width: 24, height: 24, borderRadius: 8,
+            border: galleryButtonBorder,
+            background: theme.surface.selection,
+            color: theme.accent.base,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'pointer',
+            transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
+            boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 10%, transparent)`,
           }}
+          onMouseEnter={e => { e.currentTarget.style.background = galleryButtonHoverBackground }}
+          onMouseLeave={e => { e.currentTarget.style.background = theme.surface.selection }}
         >
           <Package size={12} />
         </button>
@@ -140,7 +178,7 @@ export function SidebarFooter({
               onMouseEnter={e => { if (!disabled) e.currentTarget.style.color = theme.text.primary }}
               onMouseLeave={e => { e.currentTarget.style.color = disabled ? theme.text.disabled : footerIconColor }}
             >
-              {ext.icon ? <span style={{ fontSize: 12, lineHeight: 1 }}>{ext.icon}</span> : <Puzzle size={12} />}
+              {renderExtensionToolbarIcon(ext.icon)}
             </button>
           )
         })}

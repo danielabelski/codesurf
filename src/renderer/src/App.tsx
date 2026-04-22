@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
 import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus, Package } from 'lucide-react'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionEntryHint, WorkspaceSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
 import { withDefaultSettings, DEFAULT_SETTINGS } from '../../shared/types'
@@ -21,8 +21,32 @@ import { MainStatusBar } from './components/MainStatusBar'
 const LazyPanelLayout = React.lazy(() => import('./components/PanelLayout').then(m => ({ default: m.PanelLayout })))
 
 type PendingSessionOpen =
-  | { kind: 'chat'; session: AggregatedSessionEntry; workspaceId: string }
-  | { kind: 'app'; session: AggregatedSessionEntry; workspaceId: string }
+  | { kind: 'chat'; session: SessionTargetEntry; workspaceId: string }
+  | { kind: 'app'; session: SessionTargetEntry; workspaceId: string }
+
+type SessionTargetEntry = AggregatedSessionEntry | WorkspaceSessionEntry
+
+const INITIAL_EXTERNAL_SESSION_TAIL_LOAD = 20
+
+function isRuntimeSessionEntryId(sessionEntryId: string): boolean {
+  return sessionEntryId.startsWith('codesurf-runtime:')
+    || sessionEntryId.startsWith('codesurf-tile:')
+    || sessionEntryId.startsWith('codesurf-job:')
+}
+
+function buildSessionEntryHint(session: AggregatedSessionEntry): SessionEntryHint {
+  return {
+    id: session.id,
+    source: session.source,
+    filePath: session.filePath,
+    sessionId: session.sessionId,
+    provider: session.provider,
+    model: session.model,
+    messageCount: session.messageCount,
+    title: session.title,
+    projectPath: session.projectPath ?? null,
+  }
+}
 
 const LazyTileChrome = React.lazy(() => import('./components/TileChrome').then(m => ({ default: m.TileChrome })))
 const LazySidebar = React.lazy(() => import('./components/Sidebar').then(m => ({ default: m.Sidebar })))
@@ -2497,12 +2521,28 @@ function App(): JSX.Element {
     return created
   }, [workspace, workspaces])
 
-  const resolveWorkspaceForSession = useCallback(async (session: AggregatedSessionEntry): Promise<Workspace | null> => {
+  const resolveWorkspaceForSession = useCallback(async (session: SessionTargetEntry): Promise<Workspace | null> => {
+    const workspaceId = 'workspaceId' in session && typeof session.workspaceId === 'string'
+      ? session.workspaceId
+      : null
+    if (workspaceId) {
+      const directWorkspace = workspaces.find(candidate => candidate.id === workspaceId) ?? null
+      if (directWorkspace) return directWorkspace
+      if (workspace?.id === workspaceId) return workspace
+    }
     return resolveWorkspaceForProjectPath(session.projectPath)
-  }, [resolveWorkspaceForProjectPath])
+  }, [resolveWorkspaceForProjectPath, workspace, workspaces])
 
   const openSessionInChatCurrentWorkspace = useCallback(async (session: AggregatedSessionEntry, workspaceId: string) => {
-    const state = await window.electron.canvas.getSessionState(workspaceId, session.id).catch(() => null)
+    const sessionHint = buildSessionEntryHint(session)
+    const usePagedLinkedHistory = !isRuntimeSessionEntryId(session.id)
+      && session.source !== 'codesurf'
+      && Boolean(session.sessionId)
+
+    const state = await window.electron.canvas.getSessionState(workspaceId, session.id, {
+      entryHint: sessionHint,
+      tailLimit: usePagedLinkedHistory ? INITIAL_EXTERNAL_SESSION_TAIL_LOAD : undefined,
+    }).catch(() => null)
     if (!state) {
       if (session.filePath) handleOpenFile(session.filePath)
       return
@@ -2528,10 +2568,14 @@ function App(): JSX.Element {
       thinking: 'adaptive',
       agentMode: false,
       autoAgentMode: false,
-      linkedSessionEntryId: session.id.startsWith('codesurf-runtime:') || session.id.startsWith('codesurf-tile:') || session.id.startsWith('codesurf-job:')
+      linkedSessionEntryId: isRuntimeSessionEntryId(session.id)
         ? null
         : session.id,
-      preserveSessionSummary: !(session.id.startsWith('codesurf-runtime:') || session.id.startsWith('codesurf-tile:') || session.id.startsWith('codesurf-job:')),
+      linkedSessionHint: isRuntimeSessionEntryId(session.id) ? null : sessionHint,
+      hasEarlierMessages: usePagedLinkedHistory
+        ? (state.hasEarlierMessages === true || session.messageCount > (Array.isArray(state.messages) ? state.messages.length : 0))
+        : false,
+      preserveSessionSummary: !isRuntimeSessionEntryId(session.id),
       sessionId: typeof state.sessionId === 'string' || state.sessionId === null ? state.sessionId : session.sessionId,
       jobId: typeof state.jobId === 'string' || state.jobId === null ? state.jobId : null,
       jobSequence: typeof state.jobSequence === 'number' ? state.jobSequence : 0,
@@ -2568,7 +2612,7 @@ function App(): JSX.Element {
     bringToFront(chatTileId)
   }, [addTile, bringToFront, handleOpenFile, rememberChatTileSessionMatch])
 
-  const openSessionInChat = useCallback(async (session: AggregatedSessionEntry) => {
+  const openSessionInChat = useCallback(async (session: SessionTargetEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
     if (!targetWorkspace?.id) return
 
@@ -2590,7 +2634,7 @@ function App(): JSX.Element {
     bringToFront(tileId)
   }, [addTile, bringToFront])
 
-  const openSessionInApp = useCallback(async (session: AggregatedSessionEntry) => {
+  const openSessionInApp = useCallback(async (session: SessionTargetEntry) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
     if (!targetWorkspace?.id) return
 
@@ -3792,9 +3836,11 @@ function App(): JSX.Element {
   const workspaceTitleFallback = workspace?.name?.trim() || 'WORKSPACES'
   const showTopWorkspacePickerTab = showWorkspacePickerTab || (!workspace && openWorkspaceTabs.length === 0)
   const workspaceTabLabelSize = Math.max(12, appFonts.size - 1)
-  const workspaceTabBackground = theme.accent.base
-  const workspaceTabInactiveBackground = `color-mix(in srgb, ${theme.accent.base} 18%, ${theme.surface.panelElevated})`
-  const workspaceTabInactiveHoverBackground = `color-mix(in srgb, ${theme.accent.base} 28%, ${theme.surface.panelElevated})`
+  const workspaceTabBackground = theme.surface.selection
+  const workspaceTabInactiveBackground = 'transparent'
+  const workspaceTabInactiveHoverBackground = theme.surface.hover
+  const workspaceTabActiveOutline = `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 16%, transparent)`
+  const workspaceTabCloseHoverBackground = `color-mix(in srgb, ${theme.surface.selection} 70%, ${theme.surface.hover})`
   const workspaceTabMaxWidth = 'min(248px, 24vw)'
   // Discovery connection colors — adapt to theme mode
   const dsc = theme.mode === 'light'
@@ -3874,11 +3920,9 @@ function App(): JSX.Element {
         <div style={{
           width: '100%',
           height: '100%',
-          background: expandedTileId
-            ? 'transparent'
-            : `color-mix(in srgb, ${theme.surface.app.includes('gradient') ? theme.surface.panelMuted : theme.surface.app} 60%, transparent)`,
-          backdropFilter: 'blur(2px)',
-          WebkitBackdropFilter: 'blur(2px)',
+          background: 'transparent',
+          backdropFilter: 'none',
+          WebkitBackdropFilter: 'none',
           borderRadius: 12,
           border: 'none',
           paddingTop: 8,
@@ -4059,14 +4103,15 @@ function App(): JSX.Element {
                     alignItems: 'center',
                     maxWidth: workspaceTabMaxWidth,
                     minWidth: 0,
-                    height: 22,
-                    padding: '0 7px 0 9px',
+                    height: 24,
+                    padding: '0 8px 0 10px',
                     gap: 5,
                     marginBottom: 7,
-                    borderRadius: 6,
+                    borderRadius: 8,
                     background: isActive ? workspaceTabBackground : workspaceTabInactiveBackground,
-                    color: isActive ? theme.text.inverse : theme.text.secondary,
-                    transition: 'color 0.12s ease, background 0.12s ease',
+                    color: isActive ? theme.accent.base : theme.text.secondary,
+                    transition: 'color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease',
+                    boxShadow: isActive ? workspaceTabActiveOutline : 'none',
                   }}
                   onMouseEnter={e => {
                     if (!isActive) e.currentTarget.style.background = workspaceTabInactiveHoverBackground
@@ -4142,7 +4187,7 @@ function App(): JSX.Element {
                       transition: 'background 0.12s ease, color 0.12s ease',
                     }}
                     onMouseEnter={e => {
-                      e.currentTarget.style.background = isActive ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)'
+                      e.currentTarget.style.background = workspaceTabCloseHoverBackground
                     }}
                     onMouseLeave={e => {
                       e.currentTarget.style.background = 'transparent'
@@ -4162,17 +4207,18 @@ function App(): JSX.Element {
                   alignItems: 'center',
                   maxWidth: workspaceTabMaxWidth,
                   minWidth: 0,
-                  height: 22,
-                  padding: '0 7px 0 9px',
+                  height: 24,
+                  padding: '0 8px 0 10px',
                   gap: 5,
                   marginBottom: 7,
-                  borderRadius: 6,
+                  borderRadius: 8,
                   background: workspaceTabBackground,
-                  color: theme.text.inverse,
+                  color: theme.accent.base,
                   fontSize: Math.max(11, workspaceTabLabelSize),
                   fontWeight: 600,
                   lineHeight: 1,
                   letterSpacing: 0,
+                  boxShadow: workspaceTabActiveOutline,
                 }}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12, lineHeight: 0, color: 'currentColor', flexShrink: 0 }}>
@@ -4202,13 +4248,14 @@ function App(): JSX.Element {
                   alignItems: 'center',
                   maxWidth: workspaceTabMaxWidth,
                   minWidth: 0,
-                  height: 22,
-                  padding: '0 9px',
+                  height: 24,
+                  padding: '0 10px',
                   gap: 5,
                   marginBottom: 7,
-                  borderRadius: 6,
+                  borderRadius: 8,
                   background: workspaceTabBackground,
-                  color: theme.text.inverse,
+                  color: theme.accent.base,
+                  boxShadow: workspaceTabActiveOutline,
                 }}
               >
                 <button
@@ -4282,7 +4329,7 @@ function App(): JSX.Element {
                       transition: 'background 0.12s ease, color 0.12s ease',
                     }}
                     onMouseEnter={e => {
-                      e.currentTarget.style.background = 'rgba(0,0,0,0.08)'
+                      e.currentTarget.style.background = workspaceTabCloseHoverBackground
                     }}
                     onMouseLeave={e => {
                       e.currentTarget.style.background = 'transparent'

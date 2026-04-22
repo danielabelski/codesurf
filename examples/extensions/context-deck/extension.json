@@ -1,0 +1,24 @@
+{
+  "id": "context-deck",
+  "name": "Context Deck",
+  "version": "1.0.0",
+  "description": "AirJelly-style structured context composer for the next chat turn. Build a concise brief with goals, constraints, files, and questions, then attach it as markdown.",
+  "author": "contex",
+  "tier": "safe",
+  "ui": { "mode": "native" },
+  "contributes": {
+    "chatSurfaces": [
+      {
+        "id": "context-deck",
+        "label": "Context Deck",
+        "description": "Compose a structured markdown brief for your next chat message.",
+        "icon": "layers-3",
+        "entry": "surface/index.html",
+        "emits": "text",
+        "defaultHeight": 320,
+        "minHeight": 220
+      }
+    ]
+  },
+  "permissions": []
+}

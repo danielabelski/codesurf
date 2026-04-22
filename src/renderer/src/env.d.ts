@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
- import type { AggregatedSessionEntry } from '../../shared/session-types'
+ import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
  import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord } from '../../shared/types'
 
 interface ElectronAPI {
@@ -87,6 +87,22 @@ interface ElectronAPI {
       decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
     }): Promise<{ ok: boolean; error?: string }>
     setPermissionMode(payload: { cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
+    loadSessionHistory(payload: {
+      workspaceId?: string
+      sessionEntryId?: string
+      entryHint?: SessionEntryHint | null
+      beforeFingerprint?: string | null
+      limit?: number
+    }): Promise<{
+      ok: boolean
+      error?: string
+      total?: number
+      hasMore?: boolean
+      provider?: string
+      model?: string
+      sessionId?: string | null
+      messages: import('../../shared/chat-types').ChatMessage[]
+    }>
   }
   shell?: {
     openExternal(url: string): Promise<void>
@@ -125,7 +141,14 @@ interface ElectronAPI {
     deleteTileArtifacts(workspaceId: string, tileId: string): Promise<void>
     listSessions(workspaceId: string, forceRefresh?: boolean): Promise<AggregatedSessionEntry[]>
     onSessionsChanged(cb: (payload: { workspaceId: string }) => void): () => void
-    getSessionState(workspaceId: string, sessionEntryId: string): Promise<any>
+    getSessionState(
+      workspaceId: string,
+      sessionEntryId: string,
+      options?: {
+        tailLimit?: number
+        entryHint?: SessionEntryHint | null
+      },
+    ): Promise<any>
     deleteSession(workspaceId: string, sessionEntryId: string): Promise<{ ok: boolean; error?: string }>
     setSessionArchived(workspaceId: string, sessionEntryId: string, archived: boolean): Promise<{ ok: boolean; changed?: boolean; archived?: boolean; error?: string }>
     renameSession(workspaceId: string, sessionEntryId: string, title: string): Promise<{ ok: boolean; error?: string; title?: string }>

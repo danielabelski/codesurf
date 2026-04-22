@@ -177,14 +177,16 @@ async function runScan(): Promise<void> {
       source_mtime_ms: number
       source_size_bytes: number
       project_path: string | null
+      deleted_at: string | null
     }>()
     for (const row of db.prepare(
-      `SELECT entry_id, source_mtime_ms, source_size_bytes, project_path FROM thread_index WHERE deleted_at IS NULL`,
-    ).all() as Array<{ entry_id: string; source_mtime_ms: number; source_size_bytes: number; project_path: string | null }>) {
+      `SELECT entry_id, source_mtime_ms, source_size_bytes, project_path, deleted_at FROM thread_index`,
+    ).all() as Array<{ entry_id: string; source_mtime_ms: number; source_size_bytes: number; project_path: string | null; deleted_at: string | null }>) {
       existing.set(row.entry_id, {
         source_mtime_ms: row.source_mtime_ms,
         source_size_bytes: row.source_size_bytes,
         project_path: row.project_path,
+        deleted_at: row.deleted_at,
       })
     }
 
@@ -230,6 +232,7 @@ async function runScan(): Promise<void> {
         source_mtime_ms    = @source_mtime_ms,
         source_size_bytes  = @source_size_bytes,
         source_updated_ms  = @source_updated_ms,
+        deleted_at         = NULL,
         updated_at         = @now,
         version            = version + 1
       WHERE entry_id = @entry_id
@@ -245,7 +248,12 @@ async function runScan(): Promise<void> {
 
     const txn = db.transaction(() => {
       const seenIds = new Set<string>()
+      const duplicateIds = new Set<string>()
       for (const entry of entries) {
+        if (seenIds.has(entry.id)) {
+          duplicateIds.add(entry.id)
+          continue
+        }
         seenIds.add(entry.id)
         const prev = existing.get(entry.id)
         const mtime = Number.isFinite(entry.updatedAt) ? entry.updatedAt : 0
@@ -281,10 +289,12 @@ async function runScan(): Promise<void> {
           insert.run(params)
           inserts += 1
         } else if (
-          prev.source_mtime_ms !== mtime
+          prev.deleted_at !== null
+          // Revive rows that were previously tombstoned.
           // Also refresh when project_path derivation has changed (e.g. we
           // started parsing cwd from Claude transcripts) so rows that were
           // previously globally-scoped get pinned to the right workspace.
+          || prev.source_mtime_ms !== mtime
           || (prev.project_path ?? null) !== (entry.projectPath ?? null)
         ) {
           update.run(params)
@@ -294,9 +304,15 @@ async function runScan(): Promise<void> {
         }
       }
 
+      if (duplicateIds.size > 0) {
+        // eslint-disable-next-line no-console
+        console.warn('[threads] scan skipped duplicate entry ids:', Array.from(duplicateIds).slice(0, 20))
+      }
+
       // Tombstone entries that were indexed before but didn't reappear.
       let tombstoned = 0
-      for (const entry_id of existing.keys()) {
+      for (const [entry_id, prev] of existing.entries()) {
+        if (prev.deleted_at !== null) continue
         if (!seenIds.has(entry_id)) {
           tombstone.run({ entry_id, now })
           tombstoned += 1

@@ -1,0 +1,65 @@
+{
+  "id": "rewind-lite",
+  "name": "Rewind Lite",
+  "version": "1.0.0",
+  "description": "AirJelly-inspired workspace rewind digest for CodeSurf. Summarises git state, canvas shape, recent commits, and project metadata into a compact tile.",
+  "author": "contex",
+  "tier": "power",
+  "ui": { "mode": "native" },
+  "main": "main.js",
+  "contributes": {
+    "tiles": [
+      {
+        "type": "rewind-lite",
+        "label": "Rewind Lite",
+        "icon": "history",
+        "entry": "tiles/main/index.html",
+        "defaultSize": { "w": 560, "h": 460 },
+        "minSize": { "w": 380, "h": 300 }
+      }
+    ],
+    "chatSurfaces": [
+      {
+        "id": "rewind-digest",
+        "label": "Rewind Digest",
+        "description": "Generate and attach a workspace rewind digest from the extension backend.",
+        "icon": "history",
+        "entry": "surface/index.html",
+        "emits": "text",
+        "defaultHeight": 280,
+        "minHeight": 180
+      }
+    ],
+    "contextMenu": [
+      { "label": "New Rewind Lite", "action": "createTile", "tileType": "ext:rewind-lite" }
+    ],
+    "settings": [
+      { "key": "commitLimit", "label": "Recent commits", "type": "number", "default": 5 },
+      { "key": "autoPublishContext", "label": "Auto publish digest context", "type": "boolean", "default": true }
+    ],
+    "context": {
+      "produces": ["ctx:rewind:snapshot"],
+      "consumes": ["ctx:task", "ctx:builder", "ctx:design"]
+    },
+    "actions": [
+      { "name": "refresh", "description": "Refresh the Rewind Lite snapshot for the current workspace." },
+      { "name": "getDigest", "description": "Return the latest markdown digest for the current workspace." }
+    ],
+    "mcpTools": [
+      {
+        "name": "rewind_lite_digest",
+        "description": "Return a concise workspace rewind digest. Params: { workspacePath: string, workspaceId?: string, commitLimit?: number }",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "workspacePath": { "type": "string" },
+            "workspaceId": { "type": "string" },
+            "commitLimit": { "type": "number" }
+          },
+          "required": ["workspacePath"]
+        }
+      }
+    ]
+  },
+  "permissions": ["filesystem:read", "process"]
+}

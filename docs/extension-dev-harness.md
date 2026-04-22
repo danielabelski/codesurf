@@ -26,13 +26,24 @@ node server.mjs 5000     # custom port
 
 Open `http://localhost:4040` in any browser.
 
+Quick validation from the repo root:
+
+```bash
+npm run validate-extension -- --all
+npm run validate-extension -- examples/extensions/pomodoro
+```
+
+This checks `extension.json` structure, verifies referenced files exist, and confirms each tile
+entry is served by the harness.
+
 ## Harness UI
 
 **Toolbar**
 - Extension dropdown — auto-discovers all `extension.json` files under `examples/extensions/`
-- Tile dropdown — populated from the selected extension's `contributes.tiles`
-- W/H inputs — tile preview size
-- Load — renders the tile in an iframe at `/<ext-dir>/<tile-entry>`
+- Mode dropdown — choose whether to load a contributed tile or a contributed chat surface
+- Entry dropdown — populated from either `contributes.tiles` or `contributes.chatSurfaces`
+- W/H inputs — preview size
+- Load — renders the selected entry in an iframe at `/<ext-dir>/<entry>`
 - Refresh — reloads the iframe without changing settings
 
 **RPC Log tab** (default)  
@@ -55,6 +66,11 @@ Lists every action the tile has registered via `window.contex.actions.register()
 to populate the name field and invoke it. You can also manually fill in name + params JSON and
 click "Invoke Action".
 
+**Surface tab**  
+Only relevant for chat surfaces. Shows the last payload emitted through
+`window.contex.surface.setPayload(...)` and provides buttons to simulate the host-side
+`surface.requestFlush` and `surface.clear` events.
+
 ## What the harness simulates
 
 | Bridge API | Status | Notes |
@@ -67,6 +83,9 @@ click "Invoke Action".
 | `actions.invoke` | Logged | Logged; no real peer to invoke |
 | `settings.get/set` | Full | Persisted in `localStorage` per ext ID |
 | `tile.getMeta/getSize` | Full | Uses harness tile ID and W/H input values |
+| `surface.setPayload` | Full | Captured in the Surface tab |
+| `surface.requestFlush` | Full | Triggered from the Surface tab |
+| `surface.clear` | Full | Triggered from the Surface tab |
 | `tile.getState/setState` | Logged | Logged; no persistence |
 | `canvas.listTiles` | Stub | Returns `[]` |
 | `canvas.createTile` | Logged | Returns fake ID |
@@ -89,8 +108,12 @@ examples/extensions/_harness/
   index.html     # Harness UI — single-file, no build step
 ```
 
-The server serves `examples/extensions/` as its root. Extension tiles are loaded at:
-`http://localhost:4040/<ext-dir>/<tile-entry-path>`
+The server serves `examples/extensions/` as its root. Extension entries are loaded at:
+`http://localhost:4040/<ext-dir>/<entry-path>`
+
+This works for both:
+- tile entries from `contributes.tiles`
+- chat-surface entries from `contributes.chatSurfaces`
 
 ## Isolated agent workflow
 
@@ -108,9 +131,9 @@ directory — they are explicitly told not to touch anything outside their exten
 ## Writing a new extension manually
 
 1. Create `examples/extensions/<id>/extension.json` (see schema below)
-2. Create one tile: `examples/extensions/<id>/tiles/main/index.html`
-3. Run the harness and load your extension
-4. Iterate based on the RPC Log
+2. Create one tile or chat surface entry HTML
+3. Run the harness and load your extension in the desired mode
+4. Iterate based on the RPC Log and Surface payload tab
 
 ### extension.json schema
 
@@ -129,6 +152,16 @@ directory — they are explicitly told not to touch anything outside their exten
         "entry": "tiles/main/index.html",
         "defaultSize": { "w": 400, "h": 300 },
         "minSize": { "w": 200, "h": 150 }
+      }
+    ],
+    "chatSurfaces": [
+      {
+        "id": "my-ext-surface",
+        "label": "Composer Surface",
+        "entry": "surface/index.html",
+        "emits": "text",
+        "defaultHeight": 260,
+        "minHeight": 160
       }
     ],
     "contextMenu": [

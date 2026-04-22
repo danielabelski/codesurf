@@ -256,19 +256,27 @@ export function ExtensionsGallery({ onClose, workspacePath, onSettingsChange }: 
                     borderRadius: 8,
                     border: 'none',
                     background: active ? theme.surface.selection : 'transparent',
-                    color: active ? theme.text.primary : theme.text.secondary,
+                    color: active ? theme.accent.base : theme.text.secondary,
                     fontSize: fonts.size,
                     fontWeight: 600,
                     cursor: 'pointer',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: 6,
+                    boxShadow: active ? `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 14%, transparent)` : 'none',
+                    transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
+                  }}
+                  onMouseEnter={e => {
+                    if (!active) e.currentTarget.style.background = theme.surface.hover
+                  }}
+                  onMouseLeave={e => {
+                    if (!active) e.currentTarget.style.background = 'transparent'
                   }}
                 >
                   {t.label}
                   <span style={{
                     fontSize: Math.max(10, fonts.secondarySize - 1),
-                    color: active ? theme.text.secondary : theme.text.disabled,
+                    color: active ? theme.text.muted : theme.text.disabled,
                     fontVariantNumeric: 'tabular-nums',
                   }}>
                     {counts[t.id]}

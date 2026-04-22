@@ -1,6 +1,18 @@
 export type SessionSource = 'codesurf' | 'claude' | 'codex' | 'cursor' | 'openclaw' | 'opencode'
 export type SessionScope = 'workspace' | 'project' | 'user'
 
+export interface SessionEntryHint {
+  id: string
+  source: SessionSource
+  filePath?: string
+  sessionId: string | null
+  provider: string
+  model: string
+  messageCount: number
+  title: string
+  projectPath?: string | null
+}
+
 export interface AggregatedSessionEntry {
   id: string
   source: SessionSource

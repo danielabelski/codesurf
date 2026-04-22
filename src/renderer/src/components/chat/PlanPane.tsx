@@ -45,7 +45,7 @@ export function PlanPane({ todos, updatedAt, width = 320, onClose }: PlanPanePro
         display: 'flex',
         flexDirection: 'column',
         borderLeft: `1px solid ${theme.border.subtle}`,
-        background: theme.chat.background,
+        background: theme.surface.panel,
         overflow: 'hidden',
       }}
     >

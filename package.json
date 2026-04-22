@@ -32,6 +32,7 @@
     "release:github": "npm run build && electron-builder --mac dmg zip --publish always",
     "dogfood": "electron-vite build && electron-vite preview",
     "preview": "electron-vite preview",
+    "validate-extension": "node scripts/validate-extension.mjs",
     "rebuild": "node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty",
     "postinstall": "node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty"
   },

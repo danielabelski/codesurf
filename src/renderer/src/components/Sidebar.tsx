@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { getChatStreamingSnapshot, subscribeChatStreaming } from './chatStreamingStore'
 import { getChatMessageSentSnapshot, subscribeChatMessageSent } from './chatMessageSentStore'
-import { Pin } from 'lucide-react'
 import type { ProjectRecord, Workspace, TileState } from '../../../shared/types'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
@@ -14,7 +13,7 @@ import {
   formatSessionSidebarRelativeTime,
   getSessionArchiveActionLabel,
 } from './sidebar/session-actions'
-import { SectionHeader, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
+import { SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SpinnerIcon } from './sidebar/utils'
 import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
@@ -124,13 +123,15 @@ interface Props {
   activeChatSessionEntryId?: string | null
 }
 
+const SESSION_FOCUS_REFRESH_STALE_MS = 15_000
+
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 export function Sidebar({
   workspace, workspaces, tiles, onSwitchWorkspace: _onSwitchWorkspace, onDeleteWorkspace: _onDeleteWorkspace, onNewWorkspace: _onNewWorkspace, onOpenFolder, onOpenFile, onFocusTile, onUpdateTile: _onUpdateTile, onCloseTile: _onCloseTile,
   onNewTerminal, onNewKanban, onNewBrowser, onNewChat, onNewChatForProject, onNewFiles, onOpenSettings,
   onOpenSessionInChat, onOpenSessionInApp,
-  extensionTiles, extensionEntries, onAddExtensionTile, pinnedExtensionIds, onTogglePinnedExtension,
+  extensionTiles, onAddExtensionTile, pinnedExtensionIds = [],
   collapsed, width, onWidthChange, minWidth = 270, maxWidth = 520, onResizeStateChange, onToggleCollapse: _onToggleCollapse, onScrollMetricsChange, showFooter = true,
   activeChatTileId = null,
   activeChatSessionId = null,
@@ -141,10 +142,8 @@ export function Sidebar({
   const widthRef = useRef(width)
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
+  void pinnedExtensionIds
   useEffect(() => { widthRef.current = width }, [width])
-  const [sectionsCollapsed, setSectionsCollapsed] = useState<Record<string, boolean>>({})
-  const [extGroupsCollapsed, setExtGroupsCollapsed] = useState<Record<string, boolean>>({})
-  const [extSearch, setExtSearch] = useState('')
   const [projectSearch, setProjectSearch] = useState('')
   const [sessionCtx, setSessionCtx] = useState<{ x: number; y: number; session: SessionEntry } | null>(null)
   const [projectCtx, setProjectCtx] = useState<{ x: number; y: number; group: SessionProjectGroup } | null>(null)
@@ -166,6 +165,7 @@ export function Sidebar({
   const threadMenuRef = useRef<HTMLDivElement>(null)
   const sessionLoadRequestSeqRef = useRef(0)
   const latestSessionLoadTokenByWorkspaceRef = useRef(new Map<string, number>())
+  const lastSessionLoadAtByWorkspaceRef = useRef(new Map<string, number>())
 
   useEffect(() => {
     let cancelled = false
@@ -299,10 +299,12 @@ export function Sidebar({
     if (match) promoteSession(match)
   }, [sentSnapshot, sessions, promoteSession])
 
-  const isThreadGroupCollapsed = useCallback((group: SessionProjectGroup) => {
-    const explicit = collapsedThreadGroups[group.key]
+  const isThreadGroupCollapsed = useCallback((group: SessionProjectGroup | ProjectListEntry) => {
+    const groupKey = 'key' in group ? group.key : group.id
+    const projectId = 'projectId' in group ? group.projectId : group.id
+    const explicit = collapsedThreadGroups[groupKey]
     if (typeof explicit === 'boolean') return explicit
-    return group.projectId !== activeProjectId
+    return projectId !== activeProjectId
   }, [collapsedThreadGroups, activeProjectId])
 
   useEffect(() => {
@@ -354,6 +356,7 @@ export function Sidebar({
     if (latestSessionLoadTokenByWorkspaceRef.current.get(workspaceEntry.id) !== requestToken) return
     const annotated = annotateSessions(workspaceEntry, items)
     setSessions(prev => [...prev.filter(session => session.workspaceId !== workspaceEntry.id), ...annotated])
+    lastSessionLoadAtByWorkspaceRef.current.set(workspaceEntry.id, Date.now())
     setLoadedSessionWorkspaceIds(prev => prev.includes(workspaceEntry.id) ? prev : [...prev, workspaceEntry.id])
   }, [annotateSessions])
 
@@ -406,7 +409,18 @@ export function Sidebar({
     })
 
     const onFocus = () => {
+      const now = Date.now()
+      const visibleWorkspaceIds = new Set<string>()
+      if (workspace?.id) visibleWorkspaceIds.add(workspace.id)
+      for (const projectEntry of projectEntries) {
+        if (isThreadGroupCollapsed(projectEntry)) continue
+        for (const workspaceId of projectEntry.workspaceIds) visibleWorkspaceIds.add(workspaceId)
+      }
+
       for (const workspaceId of loadedSessionWorkspaceIdSet) {
+        if (!visibleWorkspaceIds.has(workspaceId)) continue
+        const lastLoadedAt = lastSessionLoadAtByWorkspaceRef.current.get(workspaceId) ?? 0
+        if ((now - lastLoadedAt) < SESSION_FOCUS_REFRESH_STALE_MS) continue
         const workspaceEntry = workspaceById.get(workspaceId)
         if (workspaceEntry) void loadWorkspaceSessions(workspaceEntry, true)
       }
@@ -417,7 +431,7 @@ export function Sidebar({
       unsubscribe()
       window.removeEventListener('focus', onFocus)
     }
-  }, [loadWorkspaceSessions, loadedSessionWorkspaceIdSet, workspaceById])
+  }, [isThreadGroupCollapsed, loadWorkspaceSessions, loadedSessionWorkspaceIdSet, projectEntries, workspace?.id, workspaceById])
 
   const openTileIdSet = useMemo(() => new Set(tiles.map(tile => tile.id)), [tiles])
 
@@ -432,7 +446,6 @@ export function Sidebar({
   const startX = useRef(0)
   const startWidth = useRef(0)
 
-  const toggleSection = (key: string) => setSectionsCollapsed(prev => ({ ...prev, [key]: !prev[key] }))
   const toggleThreadGroup = useCallback((key: string) => {
     const projectEntry = projectEntries.find(entry => entry.id === key) ?? null
     const nextCollapsed = !(collapsedThreadGroups[key] ?? (key !== activeProjectId))
@@ -469,62 +482,6 @@ export function Sidebar({
       window.removeEventListener('mouseup', onUp)
     }
   }, [onResizeStateChange, onWidthChange])
-
-  const extensionInstances = useMemo(() => tiles.filter(t => t.type.startsWith('ext:')), [tiles])
-
-  // Group extension tiles by type
-  const extGroups = useMemo(() => {
-    const groups: Record<string, TileState[]> = {}
-    for (const t of extensionInstances) {
-      if (!groups[t.type]) groups[t.type] = []
-      groups[t.type].push(t)
-    }
-    return groups
-  }, [extensionInstances])
-
-  const extensionNameById = useMemo(() => {
-    const entries = (extensionEntries ?? []).map(ext => [ext.id, ext.name] as const)
-    return new Map(entries)
-  }, [extensionEntries])
-
-  const pinnedExtensionIdSet = useMemo(() => new Set(pinnedExtensionIds ?? []), [pinnedExtensionIds])
-
-  const isPinnedExtensionEntry = useCallback((entry: ExtTileEntry) => {
-    return pinnedExtensionIdSet.has(entry.extId) || pinnedExtensionIdSet.has(entry.type)
-  }, [pinnedExtensionIdSet])
-
-  const groupedExtensions = useMemo(() => {
-    const groups = new Map<string, ExtTileEntry[]>()
-    for (const ext of extensionTiles ?? []) {
-      const existing = groups.get(ext.extId) ?? []
-      existing.push(ext)
-      groups.set(ext.extId, existing)
-    }
-    return [...groups.entries()]
-      .map(([extId, items]) => ({
-        extId,
-        name: extensionNameById.get(extId) ?? extId.replace(/[-_]+/g, ' ').replace(/\b\w/g, char => char.toUpperCase()),
-        items: items.slice().sort((a, b) => a.label.localeCompare(b.label)),
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [extensionTiles, extensionNameById])
-
-  const filteredGroupedExtensions = useMemo(() => {
-    const q = extSearch.trim().toLowerCase()
-    if (!q) return groupedExtensions
-    return groupedExtensions
-      .map(group => {
-        if (group.name.toLowerCase().includes(q)) return group
-        const matchedItems = group.items.filter(item => item.label.toLowerCase().includes(q))
-        if (matchedItems.length === 0) return null
-        return { ...group, items: matchedItems }
-      })
-      .filter(Boolean) as typeof groupedExtensions
-  }, [groupedExtensions, extSearch])
-
-  const toggleExtGroup = useCallback((extId: string) => {
-    setExtGroupsCollapsed(prev => ({ ...prev, [extId]: !prev[extId] }))
-  }, [])
 
   const visibleSessions = useMemo(() => {
     // Dedup across workspaces: the same underlying chat can be surfaced by
@@ -964,7 +921,7 @@ export function Sidebar({
 
   useEffect(() => {
     emitScrollMetrics()
-  }, [emitScrollMetrics, sessions.length, visibleSessions.length, displayedSessions.length, tiles.length, extensionTiles?.length, groupedExtensions.length])
+  }, [emitScrollMetrics, sessions.length, visibleSessions.length, displayedSessions.length, tiles.length])
 
   useEffect(() => {
     const scrollEl = scrollRef.current
@@ -1007,29 +964,6 @@ export function Sidebar({
         style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', paddingTop: 6, scrollbarWidth: 'none', msOverflowStyle: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
       >
         <div ref={scrollContentRef} style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
-
-        {/* ── PINNED EXTENSIONS ── */}
-        {pinnedExtensionIds && pinnedExtensionIds.length > 0 && (() => {
-          const pinned = (extensionTiles ?? []).filter(isPinnedExtensionEntry)
-          if (pinned.length === 0) return null
-          return (
-            <>
-              <SectionHeader label="Extensions" collapsed={!!sectionsCollapsed.extensions} onToggle={() => toggleSection('extensions')} />
-              {!sectionsCollapsed.extensions && (
-                <div style={{ paddingBottom: 6 }}>
-                  {pinned.map(ext => (
-                    <SidebarItem
-                      key={ext.type}
-                      label={ext.label}
-                      icon={<svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M6 1.5h2a.5.5 0 01.5.5v1.5H8a1 1 0 00-1 1 1 1 0 001 1h.5V7a.5.5 0 01-.5.5H6V7a1 1 0 00-1-1 1 1 0 00-1 1v.5H2.5A.5.5 0 012 7V5.5h.5a1 1 0 001-1 1 1 0 00-1-1H2V2a.5.5 0 01.5-.5H6z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round"/></svg>}
-                      onClick={() => onAddExtensionTile?.(ext.type)}
-                    />
-                  ))}
-                </div>
-              )}
-            </>
-          )
-        })()}
 
         <div style={{ padding: '8px 8px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
@@ -1599,258 +1533,6 @@ export function Sidebar({
           )}
         </div>
 
-        {/* ── EXTENSIONS ── (hidden when extensionTiles is empty and no instances) */}
-        {(extensionInstances.length > 0 || (extensionTiles && extensionTiles.length > 0)) && (
-          <>
-            <SectionHeader label="Extensions" collapsed={!!sectionsCollapsed.extensions} onToggle={() => toggleSection('extensions')} />
-            {!sectionsCollapsed.extensions && (
-              <div style={{ paddingBottom: 6 }}>
-                {/* Search filter */}
-                {(groupedExtensions.length > 3) && (
-                  <div style={{ padding: '2px 6px 4px', margin: '0 4px' }}>
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '4px 8px',
-                      borderRadius: 6,
-                      background: theme.surface.hover,
-                      border: `1px solid ${theme.border.subtle}`,
-                    }}>
-                      <svg width="12" height="12" viewBox="0 0 14 14" fill="none" style={{ flexShrink: 0, opacity: 0.5 }}>
-                        <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.3" />
-                        <path d="M9.5 9.5L13 13" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                      </svg>
-                      <input
-                        type="text"
-                        placeholder="Filter extensions..."
-                        value={extSearch}
-                        onChange={e => setExtSearch(e.target.value)}
-                        style={{
-                          flex: 1,
-                          background: 'transparent',
-                          border: 'none',
-                          outline: 'none',
-                          color: theme.text.primary,
-                          fontSize: fonts.secondarySize,
-                          fontFamily: 'inherit',
-                          padding: 0,
-                          minWidth: 0,
-                        }}
-                      />
-                      {extSearch && (
-                        <button
-                          type="button"
-                          onClick={() => setExtSearch('')}
-                          style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: theme.text.disabled,
-                            cursor: 'pointer',
-                            padding: 0,
-                            display: 'flex',
-                            alignItems: 'center',
-                            flexShrink: 0,
-                          }}
-                        >
-                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                            <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                          </svg>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {/* Installed extensions with instances */}
-                {filteredGroupedExtensions.map(group => {
-                  const multiBlock = group.items.length > 1
-                  const groupPinned = pinnedExtensionIdSet.has(group.extId)
-                  const groupCollapsed = !!extGroupsCollapsed[group.extId] && !extSearch
-                  if (!multiBlock) {
-                    const ext = group.items[0]
-                    const instances = extGroups[ext.type] ?? []
-                    const blockPinned = isPinnedExtensionEntry(ext)
-                    return (
-                      <React.Fragment key={ext.type}>
-                        <SidebarItem
-                          label={ext.label}
-                          muted={instances.length === 0}
-                          icon={<svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M6 1.5h2a.5.5 0 01.5.5v1.5H8a1 1 0 00-1 1v0a1 1 0 001 1h.5V7a.5.5 0 01-.5.5H6V7a1 1 0 00-1-1v0a1 1 0 00-1 1v.5H2.5A.5.5 0 012 7V5.5h.5a1 1 0 001-1v0a1 1 0 00-1-1H2V2a.5.5 0 01.5-.5H6z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" /></svg>}
-                          onClick={() => instances[0] ? onFocusTile(instances[0].id) : onAddExtensionTile?.(ext.type)}
-                          extra={(
-                            <button
-                              type="button"
-                              title={blockPinned ? 'Unpin from canvas menu' : 'Pin to canvas menu'}
-                              onClick={e => {
-                                e.stopPropagation()
-                                onTogglePinnedExtension?.(ext.type)
-                              }}
-                              style={{
-                                width: 20,
-                                height: 20,
-                                borderRadius: 5,
-                                border: 'none',
-                                background: blockPinned ? theme.surface.accentSoft : 'transparent',
-                                color: blockPinned ? theme.accent.base : theme.text.disabled,
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                padding: 0,
-                                flexShrink: 0,
-                              }}
-                            >
-                              <Pin size={12} />
-                            </button>
-                          )}
-                          extraAlwaysVisible={blockPinned}
-                        />
-                        {instances.length > 1 && instances.map(tile => (
-                          <SidebarItem
-                            key={tile.id}
-                            label={`Instance ${tile.id.split('-').pop()}`}
-                            muted
-                            indent={1}
-                            onClick={() => onFocusTile(tile.id)}
-                          />
-                        ))}
-                      </React.Fragment>
-                    )
-                  }
-
-                  return (
-                    <React.Fragment key={group.extId}>
-                      <div
-                        onClick={() => toggleExtGroup(group.extId)}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          padding: '6px 8px 4px 8px',
-                          margin: '0 4px',
-                          cursor: 'pointer',
-                          userSelect: 'none',
-                          WebkitUserSelect: 'none',
-                          borderRadius: 6,
-                        }}
-                      >
-                        <svg
-                          width="8" height="8" viewBox="0 0 8 8"
-                          style={{ transition: 'transform 0.15s ease', transform: groupCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', opacity: 0.4, flexShrink: 0 }}
-                        >
-                          <path d="M2 1l4 3-4 3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                        <span style={{ color: theme.text.muted, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
-                          <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M6 1.5h2a.5.5 0 01.5.5v1.5H8a1 1 0 00-1 1v0a1 1 0 001 1h.5V7a.5.5 0 01-.5.5H6V7a1 1 0 00-1-1v0a1 1 0 00-1 1v.5H2.5A.5.5 0 012 7V5.5h.5a1 1 0 001-1v0a1 1 0 00-1-1H2V2a.5.5 0 01.5-.5H6z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" /></svg>
-                        </span>
-                        <span style={{
-                          fontSize: fonts.secondarySize - 2,
-                          fontWeight: 700,
-                          color: theme.text.disabled,
-                          letterSpacing: 1.2,
-                          textTransform: 'uppercase',
-                          flex: 1,
-                          minWidth: 0,
-                        }}>
-                          {group.name}
-                        </span>
-                        <button
-                          type="button"
-                          title={groupPinned ? 'Unpin all blocks from canvas menu' : 'Pin all blocks to canvas menu'}
-                          onClick={e => {
-                            e.stopPropagation()
-                            onTogglePinnedExtension?.(group.extId)
-                          }}
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: 5,
-                            border: 'none',
-                            background: groupPinned ? theme.surface.accentSoft : 'transparent',
-                            color: groupPinned ? theme.accent.base : theme.text.disabled,
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            padding: 0,
-                            flexShrink: 0,
-                          }}
-                        >
-                          <Pin size={12} />
-                        </button>
-                      </div>
-                      {!groupCollapsed && group.items.map(ext => {
-                        const instances = extGroups[ext.type] ?? []
-                        const explicitBlockPinned = pinnedExtensionIdSet.has(ext.type)
-                        const blockPinned = groupPinned || explicitBlockPinned
-                        return (
-                          <React.Fragment key={ext.type}>
-                            <SidebarItem
-                              label={ext.label}
-                              muted={instances.length === 0}
-                              indent={1}
-                              icon={<svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M6 1.5h2a.5.5 0 01.5.5v1.5H8a1 1 0 00-1 1v0a1 1 0 001 1h.5V7a.5.5 0 01-.5.5H6V7a1 1 0 00-1-1v0a1 1 0 00-1 1v.5H2.5A.5.5 0 012 7V5.5h.5a1 1 0 001-1v0a1 1 0 00-1-1H2V2a.5.5 0 01.5-.5H6z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" /></svg>}
-                              onClick={() => instances[0] ? onFocusTile(instances[0].id) : onAddExtensionTile?.(ext.type)}
-                              extra={(
-                                <button
-                                  type="button"
-                                  title={
-                                    groupPinned && !explicitBlockPinned
-                                      ? 'Pinned via extension'
-                                      : blockPinned
-                                        ? 'Unpin this block from canvas menu'
-                                        : 'Pin this block to canvas menu'
-                                  }
-                                  onClick={e => {
-                                    e.stopPropagation()
-                                    if (groupPinned && !explicitBlockPinned) return
-                                    onTogglePinnedExtension?.(ext.type)
-                                  }}
-                                  style={{
-                                    width: 20,
-                                    height: 20,
-                                    borderRadius: 5,
-                                    border: 'none',
-                                    background: blockPinned ? theme.surface.accentSoft : 'transparent',
-                                    color: blockPinned ? theme.accent.base : theme.text.disabled,
-                                    cursor: groupPinned && !explicitBlockPinned ? 'default' : 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    padding: 0,
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  <Pin size={12} />
-                                </button>
-                              )}
-                              extraAlwaysVisible={blockPinned}
-                            />
-                            {instances.length > 1 && instances.map(tile => (
-                              <SidebarItem
-                                key={tile.id}
-                                label={`Instance ${tile.id.split('-').pop()}`}
-                                muted
-                                indent={2}
-                                onClick={() => onFocusTile(tile.id)}
-                              />
-                            ))}
-                          </React.Fragment>
-                        )
-                      })}
-                    </React.Fragment>
-                  )
-                })}
-                {filteredGroupedExtensions.length === 0 && extSearch && (
-                  <div style={{ padding: '4px 12px', fontSize: fonts.secondarySize, color: theme.text.disabled }}>No matching extensions</div>
-                )}
-                {extensionInstances.length === 0 && !extensionTiles?.length && (
-                  <div style={{ padding: '4px 12px', fontSize: fonts.secondarySize, color: theme.text.disabled }}>No extensions</div>
-                )}
-              </div>
-            )}
-          </>
-        )}
         </div>
       </div>
 

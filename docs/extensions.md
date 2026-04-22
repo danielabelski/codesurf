@@ -15,6 +15,7 @@ The active workspace path is rescanned by the renderer hook, so dropping a folde
 Via `extension.json`:
 
 - tiles
+- chat surfaces (mounted above the chat composer)
 - context menu items
 - settings defaults
 - declarative MCP tools

@@ -3,7 +3,8 @@ import { homedir } from 'os'
 import { basename, extname, join } from 'path'
 import { createInterface } from 'readline'
 import Database from 'better-sqlite3'
-import type { AggregatedSessionEntry, SessionScope, SessionSource } from '../shared/session-types'
+import type { AggregatedSessionEntry, SessionEntryHint, SessionScope } from '../shared/session-types'
+import { buildChatMessageHistoryFingerprint } from '../shared/chat-history'
 import { CONTEX_HOME } from './paths'
 
 export type ChatRole = 'user' | 'assistant' | 'system'
@@ -70,6 +71,7 @@ export type ImportedContentBlock =
 const STANDARD_CODESURF_SUBDIRS = ['sessions', 'agents', 'skills', 'tools', 'plugins', 'extensions'] as const
 const EXTERNAL_SESSION_CACHE_MS = 30_000
 const EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES = 64
+const EXTERNAL_SESSION_FULL_STATE_CACHE_MAX_ENTRIES = 8
 const LARGE_EXTERNAL_SESSION_BYTES = 6 * 1024 * 1024
 const EXTERNAL_SESSION_HEAD_SAMPLE_BYTES = 128 * 1024
 const EXTERNAL_SESSION_TAIL_SAMPLE_BYTES = 4 * 1024 * 1024
@@ -77,6 +79,7 @@ const MAX_SESSION_LISTING_JSON_BYTES = 2 * 1024 * 1024
 const MAX_SESSION_LISTING_TEXT_SAMPLE_BYTES = 16 * 1024
 const externalSessionCache = new Map<string, { at: number; entries: AggregatedSessionEntry[] }>()
 const externalSessionStateCache = new Map<string, CachedExternalSessionState>()
+const externalSessionFullStateCache = new Map<string, CachedExternalSessionState>()
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
 
 function getProjectCodeSurfDir(workspacePath: string): string {
@@ -174,39 +177,63 @@ async function statSafe(path: string): Promise<import('fs').Stats | null> {
   }
 }
 
-function touchExternalSessionStateCache(key: string, value: CachedExternalSessionState): ImportedChatState | null {
-  externalSessionStateCache.delete(key)
-  externalSessionStateCache.set(key, value)
-  while (externalSessionStateCache.size > EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES) {
-    const oldestKey = externalSessionStateCache.keys().next().value
+function touchCachedExternalSessionState(
+  cache: Map<string, CachedExternalSessionState>,
+  maxEntries: number,
+  key: string,
+  value: CachedExternalSessionState,
+): ImportedChatState | null {
+  cache.delete(key)
+  cache.set(key, value)
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value
     if (!oldestKey) break
-    externalSessionStateCache.delete(oldestKey)
+    cache.delete(oldestKey)
   }
   return value.state
 }
 
 async function getCachedExternalSessionChatState(
+  cache: Map<string, CachedExternalSessionState>,
+  maxEntries: number,
   cacheKey: string,
   filePath: string,
   load: () => Promise<ImportedChatState | null>,
 ): Promise<ImportedChatState | null> {
   const stat = await statSafe(filePath)
   if (!stat?.isFile()) {
-    externalSessionStateCache.delete(cacheKey)
+    cache.delete(cacheKey)
     return null
   }
 
-  const cached = externalSessionStateCache.get(cacheKey)
+  const cached = cache.get(cacheKey)
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-    return touchExternalSessionStateCache(cacheKey, cached)
+    return touchCachedExternalSessionState(cache, maxEntries, cacheKey, cached)
   }
 
   const state = await load()
-  return touchExternalSessionStateCache(cacheKey, {
+  return touchCachedExternalSessionState(cache, maxEntries, cacheKey, {
     mtimeMs: stat.mtimeMs,
     size: stat.size,
     state,
   })
+}
+
+async function getFreshCachedExternalSessionChatState(
+  cache: Map<string, CachedExternalSessionState>,
+  maxEntries: number,
+  cacheKey: string,
+  filePath: string,
+): Promise<ImportedChatState | null> {
+  const stat = await statSafe(filePath)
+  if (!stat?.isFile()) {
+    cache.delete(cacheKey)
+    return null
+  }
+
+  const cached = cache.get(cacheKey)
+  if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) return null
+  return touchCachedExternalSessionState(cache, maxEntries, cacheKey, cached)
 }
 
 async function scanJsonlFile(
@@ -1139,6 +1166,39 @@ export async function listExternalSessionEntries(
   return entries
 }
 
+function buildEntryFromHint(workspacePath: string | null, hint: SessionEntryHint): AggregatedSessionEntry {
+  return {
+    id: hint.id,
+    source: hint.source,
+    scope: pathScope(workspacePath, hint.projectPath ?? null, 'user'),
+    tileId: null,
+    sessionId: hint.sessionId,
+    provider: hint.provider,
+    model: hint.model,
+    messageCount: hint.messageCount,
+    lastMessage: null,
+    updatedAt: 0,
+    filePath: hint.filePath,
+    title: hint.title,
+    projectPath: hint.projectPath ?? null,
+    sourceLabel: hint.provider || hint.source,
+    canOpenInChat: true,
+    canOpenInApp: false,
+  }
+}
+
+async function resolveSessionEntry(
+  workspacePath: string | null,
+  id: string,
+  entryHint?: SessionEntryHint | null,
+): Promise<AggregatedSessionEntry | null> {
+  if (entryHint && entryHint.id === id && entryHint.filePath) {
+    const stat = await statSafe(entryHint.filePath)
+    if (stat?.isFile()) return buildEntryFromHint(workspacePath, entryHint)
+  }
+  return findSessionEntryById(workspacePath, id)
+}
+
 export async function findSessionEntryById(workspacePath: string | null, id: string): Promise<AggregatedSessionEntry | null> {
   // First try the workspace-scoped list — fast path for the common case.
   const scoped = await listExternalSessionEntries(workspacePath)
@@ -1217,11 +1277,15 @@ async function parseCodeSurfChatState(filePath: string): Promise<ImportedChatSta
   }
 }
 
-async function parseClaudeChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
+async function parseClaudeChatState(
+  filePath: string,
+  entry: AggregatedSessionEntry,
+  options?: { full?: boolean },
+): Promise<ImportedChatState | null> {
   const stat = await statSafe(filePath)
   if (!stat?.isFile()) return null
 
-  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+  if (!options?.full && stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
     const [headRaw, tailRaw] = await Promise.all([
       readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
       readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
@@ -1370,11 +1434,15 @@ function parseCodexChatStateFromLines(lines: string[], entry: AggregatedSessionE
   }
 }
 
-async function parseCodexChatState(filePath: string, entry: AggregatedSessionEntry): Promise<ImportedChatState | null> {
+async function parseCodexChatState(
+  filePath: string,
+  entry: AggregatedSessionEntry,
+  options?: { full?: boolean },
+): Promise<ImportedChatState | null> {
   const stat = await statSafe(filePath)
   if (!stat?.isFile()) return null
 
-  if (stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
+  if (!options?.full && stat.size > LARGE_EXTERNAL_SESSION_BYTES) {
     const [headRaw, tailRaw] = await Promise.all([
       readTextPreviewSafe(filePath, EXTERNAL_SESSION_HEAD_SAMPLE_BYTES),
       readTextTailSafe(filePath, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES),
@@ -1459,23 +1527,146 @@ export function invalidateExternalSessionCache(workspacePath?: string | null): v
     for (const key of externalSessionStateCache.keys()) {
       if (key.startsWith(`${workspacePath}::`)) externalSessionStateCache.delete(key)
     }
+    for (const key of externalSessionFullStateCache.keys()) {
+      if (key.startsWith(`${workspacePath}::`)) externalSessionFullStateCache.delete(key)
+    }
     return
   }
   externalSessionCache.clear()
   externalSessionStateCache.clear()
+  externalSessionFullStateCache.clear()
 }
 
-export async function getExternalSessionChatState(workspacePath: string | null, id: string): Promise<ImportedChatState | null> {
-  const entry = await findSessionEntryById(workspacePath, id)
+async function loadCachedExternalSessionState(entry: AggregatedSessionEntry, cacheKey: string): Promise<ImportedChatState | null> {
+  if (!entry.filePath) return null
+
+  return await getCachedExternalSessionChatState(
+    externalSessionStateCache,
+    EXTERNAL_SESSION_STATE_CACHE_MAX_ENTRIES,
+    cacheKey,
+    entry.filePath,
+    async () => {
+      if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath!)
+      if (entry.source === 'claude') return parseClaudeChatState(entry.filePath!, entry)
+      if (entry.source === 'codex') return parseCodexChatState(entry.filePath!, entry)
+      if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath!, entry)
+      if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath!, entry)
+      return null
+    },
+  )
+}
+
+async function loadCachedFullExternalSessionState(entry: AggregatedSessionEntry, cacheKey: string): Promise<ImportedChatState | null> {
+  if (!entry.filePath) return null
+
+  return await getCachedExternalSessionChatState(
+    externalSessionFullStateCache,
+    EXTERNAL_SESSION_FULL_STATE_CACHE_MAX_ENTRIES,
+    `${cacheKey}::full`,
+    entry.filePath,
+    async () => {
+      if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath!)
+      if (entry.source === 'claude') return parseClaudeChatState(entry.filePath!, entry, { full: true })
+      if (entry.source === 'codex') return parseCodexChatState(entry.filePath!, entry, { full: true })
+      if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath!, entry)
+      if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath!, entry)
+      return null
+    },
+  )
+}
+
+function inferHasEarlierMessages(entry: AggregatedSessionEntry, loadedCount: number, tailLimit?: number): boolean {
+  if (tailLimit == null) return false
+  if (loadedCount > tailLimit) return true
+  return Number.isFinite(entry.messageCount) && entry.messageCount > Math.max(loadedCount, tailLimit)
+}
+
+export async function getExternalSessionChatState(
+  workspacePath: string | null,
+  id: string,
+  options?: { entryHint?: SessionEntryHint | null; tailLimit?: number },
+): Promise<(ImportedChatState & { hasEarlierMessages?: boolean }) | null> {
+  const entry = await resolveSessionEntry(workspacePath, id, options?.entryHint)
   if (!entry?.filePath || !entry.canOpenInChat) return null
   const cacheKey = `${workspacePath ?? '__no_workspace__'}::${entry.source}::${entry.filePath}`
+  const tailLimit = typeof options?.tailLimit === 'number' && options.tailLimit > 0
+    ? Math.max(1, Math.floor(options.tailLimit))
+    : null
 
-  return await getCachedExternalSessionChatState(cacheKey, entry.filePath, async () => {
-    if (entry.source === 'codesurf') return parseCodeSurfChatState(entry.filePath)
-    if (entry.source === 'claude') return parseClaudeChatState(entry.filePath, entry)
-    if (entry.source === 'codex') return parseCodexChatState(entry.filePath, entry)
-    if (entry.source === 'openclaw') return parseOpenClawChatState(entry.filePath, entry)
-    if (entry.source === 'opencode') return parseOpenCodeChatState(entry.filePath, entry)
-    return null
-  })
+  const cachedFullState = tailLimit == null
+    ? null
+    : await getFreshCachedExternalSessionChatState(
+        externalSessionFullStateCache,
+        EXTERNAL_SESSION_FULL_STATE_CACHE_MAX_ENTRIES,
+        `${cacheKey}::full`,
+        entry.filePath,
+      )
+
+  const state = cachedFullState ?? await loadCachedExternalSessionState(entry, cacheKey)
+  if (!state) return null
+
+  if (tailLimit == null || state.messages.length <= tailLimit) {
+    return {
+      ...state,
+      hasEarlierMessages: inferHasEarlierMessages(entry, state.messages.length, tailLimit ?? undefined),
+    }
+  }
+
+  return {
+    ...state,
+    messages: state.messages.slice(-tailLimit),
+    hasEarlierMessages: true,
+  }
+}
+
+export async function loadExternalSessionMessagesPage(
+  workspacePath: string | null,
+  id: string,
+  options: {
+    entryHint?: SessionEntryHint | null
+    beforeFingerprint?: string | null
+    limit?: number
+  },
+): Promise<{
+  provider: string
+  model: string
+  sessionId: string | null
+  total: number
+  hasMore: boolean
+  messages: ImportedChatMessage[]
+} | null> {
+  const entry = await resolveSessionEntry(workspacePath, id, options.entryHint)
+  if (!entry?.filePath || !entry.canOpenInChat) return null
+
+  const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)))
+  const cacheKey = `${workspacePath ?? '__no_workspace__'}::${entry.source}::${entry.filePath}`
+  const state = await loadCachedFullExternalSessionState(entry, cacheKey)
+  if (!state) return null
+
+  const beforeFingerprint = String(options.beforeFingerprint ?? '').trim()
+  let endIndex = state.messages.length
+  if (beforeFingerprint) {
+    const matchIndex = state.messages.findIndex(message => buildChatMessageHistoryFingerprint(message as any) === beforeFingerprint)
+    if (matchIndex < 0) {
+      return {
+        provider: state.provider,
+        model: state.model,
+        sessionId: state.sessionId,
+        total: state.messages.length,
+        hasMore: false,
+        messages: [],
+      }
+    }
+    endIndex = matchIndex
+  }
+
+  const startIndex = Math.max(0, endIndex - limit)
+  return {
+    provider: state.provider,
+    model: state.model,
+    sessionId: state.sessionId,
+    total: state.messages.length,
+    hasMore: startIndex > 0,
+    messages: state.messages.slice(startIndex, endIndex),
+  }
 }

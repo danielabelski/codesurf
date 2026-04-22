@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+  }
+  body {
+    color: var(--ct-text, #111);
+    font-family: var(--ct-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    overflow: hidden;
+  }
+  .app {
+    display: grid;
+    grid-template-columns: minmax(280px, 1.1fr) minmax(260px, 0.9fr);
+    gap: 12px;
+    height: 100%;
+    padding: 10px;
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    gap: 10px;
+  }
+  .toolbar-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .segmented {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .segmented button {
+    border-radius: 999px;
+    padding: 5px 10px;
+    font-size: 11px;
+  }
+  .grid {
+    display: grid;
+    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+  }
+  .field.full {
+    grid-column: 1 / -1;
+  }
+  .field label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ct-dim, #888);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  textarea {
+    width: 100%;
+    min-height: 74px;
+    resize: vertical;
+    line-height: 1.45;
+  }
+  .preview {
+    white-space: pre-wrap;
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+    line-height: 1.5;
+    font-size: 12px;
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--ct-dim, #888);
+    line-height: 1.45;
+  }
+  .empty {
+    color: var(--ct-dim, #888);
+    font-style: italic;
+  }
+  @media (max-width: 860px) {
+    .app {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+    <section class="panel ct-card">
+      <div class="toolbar-row">
+        <div>
+          <div class="ct-toolbar-title">Context Deck</div>
+          <div class="hint">AirJelly-style structured brief builder for the next turn.</div>
+        </div>
+        <div class="segmented" id="templateButtons"></div>
+      </div>
+      <div class="grid">
+        <div class="field full">
+          <label for="goal">Goal</label>
+          <textarea id="goal" placeholder="What are we trying to get done?"></textarea>
+        </div>
+        <div class="field">
+          <label for="constraints">Constraints</label>
+          <textarea id="constraints" placeholder="Known limits, rules, or non-goals."></textarea>
+        </div>
+        <div class="field">
+          <label for="files">Files / Paths</label>
+          <textarea id="files" placeholder="One path or artifact per line."></textarea>
+        </div>
+        <div class="field">
+          <label for="questions">Open Questions</label>
+          <textarea id="questions" placeholder="What still needs answering?"></textarea>
+        </div>
+        <div class="field">
+          <label for="notes">Notes</label>
+          <textarea id="notes" placeholder="Extra context, edge cases, observations."></textarea>
+        </div>
+      </div>
+      <div class="toolbar-row">
+        <div class="hint">The generated markdown becomes a temporary attachment on the next send.</div>
+        <button id="clearBtn" type="button">Clear</button>
+      </div>
+    </section>
+
+    <section class="panel ct-card">
+      <div class="toolbar-row">
+        <div>
+          <div class="ct-toolbar-title">Preview</div>
+          <div class="hint" id="statusText">Empty</div>
+        </div>
+        <div class="ct-pill" id="lineCountPill">0 lines</div>
+      </div>
+      <div id="preview" class="preview empty">Start typing to generate a structured markdown brief.</div>
+    </section>
+  </div>
+
+<script>
+  const TEMPLATES = {
+    plan: {
+      goal: 'Plan the work in small controlled bursts and identify the safest sequence.',
+      constraints: '- Keep changes scoped\n- Avoid unrelated refactors\n- Verify before handoff',
+      files: '',
+      questions: '- What is the smallest end-to-end slice?\n- What should be deferred?',
+      notes: ''
+    },
+    debug: {
+      goal: 'Find the root cause and ship a verified fix.',
+      constraints: '- Reproduce before changing code\n- Preserve working behavior\n- Keep blast radius small',
+      files: '',
+      questions: '- What changed recently?\n- Can we isolate the failing seam?',
+      notes: ''
+    },
+    review: {
+      goal: 'Review the implementation for correctness, risks, and missing verification.',
+      constraints: '- Focus on concrete defects\n- Avoid cosmetic churn',
+      files: '',
+      questions: '- What is most likely to break?\n- What evidence is missing?',
+      notes: ''
+    }
+  }
+
+  const fields = ['goal', 'constraints', 'files', 'questions', 'notes']
+
+  function $(id) {
+    return document.getElementById(id)
+  }
+
+  function normalizeMultiline(text) {
+    return String(text || '')
+      .split(/\r?\n/)
+      .map(line => line.trimEnd())
+      .join('\n')
+      .trim()
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  function collectValues() {
+    const result = {}
+    fields.forEach(function(field) {
+      result[field] = normalizeMultiline($(field).value)
+    })
+    return result
+  }
+
+  function toBulletList(value) {
+    return value
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => line.startsWith('- ') || line.startsWith('* ') ? line : '- ' + line)
+      .join('\n')
+  }
+
+  function buildMarkdown(values) {
+    const sections = []
+    if (values.goal) {
+      sections.push('## Goal\n' + values.goal)
+    }
+    if (values.constraints) {
+      sections.push('## Constraints\n' + toBulletList(values.constraints))
+    }
+    if (values.files) {
+      sections.push('## Files / Paths\n' + toBulletList(values.files))
+    }
+    if (values.questions) {
+      sections.push('## Open Questions\n' + toBulletList(values.questions))
+    }
+    if (values.notes) {
+      sections.push('## Notes\n' + values.notes)
+    }
+    return sections.join('\n\n').trim()
+  }
+
+  function publishPayload(markdown) {
+    if (!window.contex || !window.contex.surface) return
+    if (!markdown) {
+      window.contex.surface.clear()
+      return
+    }
+    window.contex.surface.setPayload({
+      kind: 'text',
+      data: markdown,
+      mime: 'text/markdown',
+      ext: 'md'
+    })
+  }
+
+  function render() {
+    const values = collectValues()
+    const markdown = buildMarkdown(values)
+    const preview = $('preview')
+    const lineCount = markdown ? markdown.split(/\r?\n/).length : 0
+    $('lineCountPill').textContent = lineCount + (lineCount === 1 ? ' line' : ' lines')
+    $('statusText').textContent = markdown ? 'Ready to attach' : 'Empty'
+    if (!markdown) {
+      preview.classList.add('empty')
+      preview.textContent = 'Start typing to generate a structured markdown brief.'
+      publishPayload('')
+      return
+    }
+    preview.classList.remove('empty')
+    preview.innerHTML = escapeHtml(markdown)
+    publishPayload(markdown)
+  }
+
+  function applyTemplate(name) {
+    const template = TEMPLATES[name]
+    if (!template) return
+    fields.forEach(function(field) {
+      $(field).value = template[field] || ''
+    })
+    render()
+  }
+
+  function clearAll() {
+    fields.forEach(function(field) {
+      $(field).value = ''
+    })
+    render()
+  }
+
+  function init() {
+    const buttons = $('templateButtons')
+    Object.keys(TEMPLATES).forEach(function(name) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = name[0].toUpperCase() + name.slice(1)
+      button.onclick = function() { applyTemplate(name) }
+      buttons.appendChild(button)
+    })
+    fields.forEach(function(field) {
+      $(field).addEventListener('input', render)
+    })
+    $('clearBtn').onclick = clearAll
+
+    if (window.contex && window.contex.surface) {
+      window.contex.surface.onRequestFlush(render)
+      window.contex.surface.onClear(clearAll)
+    }
+
+    render()
+  }
+
+  let initialized = false
+  function maybeInit() {
+    if (initialized || !window.contex) return
+    initialized = true
+    init()
+  }
+
+  window.addEventListener('message', function(event) {
+    if (event.data && event.data.type === 'contex-bridge-ready') maybeInit()
+  })
+
+  maybeInit()
+  setTimeout(maybeInit, 0)
+  setTimeout(maybeInit, 50)
+</script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
 import type { TileState } from '../../shared/types'
 import {
   assertSafeWorkspaceArtifactId,
@@ -493,7 +493,15 @@ export function registerCanvasIPC(): void {
     }
   })
 
-  ipcMain.handle('canvas:getSessionState', async (_, workspaceId: string, sessionEntryId: string) => {
+  ipcMain.handle('canvas:getSessionState', async (
+    _,
+    workspaceId: string,
+    sessionEntryId: string,
+    options?: {
+      tailLimit?: number
+      entryHint?: SessionEntryHint | null
+    },
+  ) => {
     const workspacePath = await getWorkspacePathById(workspaceId)
 
     if (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:')) {
@@ -505,7 +513,10 @@ export function registerCanvasIPC(): void {
     // its own walker cache misses the file, which falls back to opening the
     // raw JSONL. Parsing locally avoids the round-trip entirely and always
     // uses fresh data from disk.
-    const local = await getExternalSessionChatState(workspacePath, sessionEntryId).catch(() => null)
+    const local = await getExternalSessionChatState(workspacePath, sessionEntryId, {
+      entryHint: options?.entryHint ?? null,
+      tailLimit: typeof options?.tailLimit === 'number' ? options.tailLimit : undefined,
+    }).catch(() => null)
     if (local) return local
     // Keep daemon as last-resort fallback in case a provider type is only
     // supported there (e.g. future cloud-only sources).

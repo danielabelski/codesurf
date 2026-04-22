@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 import { homedir } from 'os'
-import type { AggregatedSessionEntry } from '../shared/session-types'
+import type { AggregatedSessionEntry, SessionEntryHint } from '../shared/session-types'
 import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
 
 function channelMatches(pattern: string, channel: string): boolean {
@@ -121,7 +121,14 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('canvas:sessionsChanged', handler)
       return () => ipcRenderer.removeListener('canvas:sessionsChanged', handler)
     },
-    getSessionState: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:getSessionState', workspaceId, sessionEntryId),
+    getSessionState: (
+      workspaceId: string,
+      sessionEntryId: string,
+      options?: {
+        tailLimit?: number
+        entryHint?: SessionEntryHint | null
+      },
+    ) => ipcRenderer.invoke('canvas:getSessionState', workspaceId, sessionEntryId, options),
     deleteSession: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:deleteSession', workspaceId, sessionEntryId),
     setSessionArchived: (workspaceId: string, sessionEntryId: string, archived: boolean) => ipcRenderer.invoke('canvas:setSessionArchived', workspaceId, sessionEntryId, archived),
     renameSession: (workspaceId: string, sessionEntryId: string, title: string) => ipcRenderer.invoke('canvas:renameSession', workspaceId, sessionEntryId, title),
@@ -237,20 +244,22 @@ contextBridge.exposeInMainWorld('electron', {
     }) => ipcRenderer.invoke('chat:answerToolPermission', payload) as Promise<{ ok: boolean; error?: string }>,
     setPermissionMode: (payload: { cardId: string; mode: string }) =>
       ipcRenderer.invoke('chat:setPermissionMode', payload) as Promise<{ ok: boolean; error?: string }>,
-    loadSessionHistory: (payload: { sessionId: string; limit?: number }) =>
+    loadSessionHistory: (payload: {
+      workspaceId?: string
+      sessionEntryId?: string
+      entryHint?: SessionEntryHint | null
+      beforeFingerprint?: string | null
+      limit?: number
+    }) =>
       ipcRenderer.invoke('chat:loadSessionHistory', payload) as Promise<{
         ok: boolean
         error?: string
-        filePath?: string
         total?: number
-        messages: Array<{
-          id: string
-          role: 'user' | 'assistant' | 'system'
-          content: string
-          timestamp: number
-          tools?: string[]
-          hasToolResult?: boolean
-        }>
+        hasMore?: boolean
+        provider?: string
+        model?: string
+        sessionId?: string | null
+        messages: Array<import('../shared/chat-types').ChatMessage>
       }>,
   },
 

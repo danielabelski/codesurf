@@ -12,7 +12,7 @@ import { spawn, ChildProcess, execFileSync, execFile } from 'child_process'
 import * as http from 'http'
 import * as net from 'net'
 import { promises as fs, existsSync } from 'fs'
-import { homedir, tmpdir } from 'os'
+import { tmpdir } from 'os'
 import { basename, dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { getMCPPort, getMCPToken, getContexMcpToolNames } from '../mcp-server'
@@ -25,11 +25,13 @@ import {
   buildProviderContextPolicy,
   describeProjectContextEnvelope,
 } from '../privacy/provider-context-policy'
+import { loadExternalSessionMessagesPage } from '../session-sources'
+import type { SessionEntryHint } from '../../shared/session-types'
 import type { ExecutionHostRecord, ExecutionPreference, ExtensionChatTransportConfig } from '../../shared/types'
 import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
-import { readSettingsSync } from './workspace'
+import { getWorkspacePathById, readSettingsSync } from './workspace'
 import {
   requestToolPermissionDetailed,
   resolveStoredPermission,
@@ -3507,103 +3509,72 @@ export function registerChatIPC(): void {
   })
 
   /**
-   * Reads the raw Claude transcript jsonl for a given sessionId and returns a
-   * lightweight ChatMessage[] reconstruction of the pre-compaction history.
-   *
-   * Why: the Claude Agent SDK periodically compacts long sessions, so when a
-   * user re-opens a chat they may see only the summary + last turn. The full
-   * jsonl is still on disk — this handler exposes it so the renderer can
-   * prepend "earlier messages" on demand.
-   *
-   * Scope is intentionally conservative: we reconstruct text content only
-   * (role + concatenated text blocks), tagging tool_use with a
-   * "[Used tool: name]" breadcrumb. Full ToolBlock / fileChange reconstruction
-   * would require replaying the stream and is out of scope here.
+   * Loads one older transcript page for a linked external session. The
+   * renderer prepends these pages into the same chat list so upward scrolling
+   * feels like a normal continuous transcript rather than a separate archive.
    */
-  ipcMain.handle('chat:loadSessionHistory', async (_, payload: { sessionId: string; limit?: number }) => {
-    const sessionId = String(payload?.sessionId || '').trim()
-    if (!sessionId) return { ok: false, error: 'sessionId required', messages: [] }
-    const limit = Math.max(1, Math.min(2000, payload?.limit ?? 500))
+  ipcMain.handle('chat:loadSessionHistory', async (
+    _,
+    payload: {
+      workspaceId?: string
+      sessionEntryId?: string
+      entryHint?: SessionEntryHint | null
+      beforeFingerprint?: string | null
+      limit?: number
+    },
+  ) => {
+    const workspaceId = String(payload?.workspaceId || '').trim()
+    const sessionEntryId = String(payload?.sessionEntryId || '').trim()
+    if (!sessionEntryId) return { ok: false, error: 'sessionEntryId required', messages: [], total: 0, hasMore: false }
 
-    // Search common Claude transcript locations. Different SDK versions have
-    // used different layouts, so we check both.
-    const candidates = [
-      join(homedir(), '.claude', 'transcripts', `${sessionId}.jsonl`),
-    ]
-    // Also scan ~/.claude/projects/<hash>/<sessionId>.jsonl
-    try {
-      const projectsRoot = join(homedir(), '.claude', 'projects')
-      if (existsSync(projectsRoot)) {
-        const entries = await fs.readdir(projectsRoot, { withFileTypes: true })
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue
-          candidates.push(join(projectsRoot, entry.name, `${sessionId}.jsonl`))
+    const rawHint = payload?.entryHint
+    const entryHint: SessionEntryHint | null = rawHint && typeof rawHint === 'object' && typeof rawHint.id === 'string' && typeof rawHint.source === 'string'
+      ? {
+          id: rawHint.id,
+          source: rawHint.source as SessionEntryHint['source'],
+          filePath: typeof rawHint.filePath === 'string' ? rawHint.filePath : undefined,
+          sessionId: typeof rawHint.sessionId === 'string' || rawHint.sessionId === null ? rawHint.sessionId : null,
+          provider: typeof rawHint.provider === 'string' ? rawHint.provider : '',
+          model: typeof rawHint.model === 'string' ? rawHint.model : '',
+          messageCount: typeof rawHint.messageCount === 'number' ? rawHint.messageCount : 0,
+          title: typeof rawHint.title === 'string' ? rawHint.title : '',
+          projectPath: typeof rawHint.projectPath === 'string' || rawHint.projectPath === null ? rawHint.projectPath : null,
         }
+      : null
+
+    const workspacePath = workspaceId
+      ? await getWorkspacePathById(workspaceId).catch(() => null)
+      : null
+
+    const page = await loadExternalSessionMessagesPage(workspacePath, sessionEntryId, {
+      entryHint,
+      beforeFingerprint: typeof payload?.beforeFingerprint === 'string' ? payload.beforeFingerprint : null,
+      limit: typeof payload?.limit === 'number' ? payload.limit : undefined,
+    }).catch(error => {
+      return {
+        error: error instanceof Error ? error.message : String(error),
       }
-    } catch { /* ignore */ }
+    })
 
-    const filePath = candidates.find(p => existsSync(p))
-    if (!filePath) return { ok: false, error: 'transcript not found', messages: [] }
-
-    let raw: string
-    try { raw = await fs.readFile(filePath, 'utf8') }
-    catch (err) { return { ok: false, error: err instanceof Error ? err.message : 'read failed', messages: [] } }
-
-    const lines = raw.split('\n').filter(Boolean).slice(0, limit)
-    const messages: Array<{
-      id: string
-      role: 'user' | 'assistant' | 'system'
-      content: string
-      timestamp: number
-      tools?: string[]
-      hasToolResult?: boolean
-    }> = []
-
-    for (let i = 0; i < lines.length; i += 1) {
-      try {
-        const evt = JSON.parse(lines[i])
-        // Event shape varies across versions. We pick up both the top-level
-        // shape ({type:'user', message:{role, content}}) and the flattened
-        // shape ({role, content}).
-        const role: string | undefined = evt?.message?.role ?? evt?.role ?? (evt?.type === 'user' ? 'user' : evt?.type === 'assistant' ? 'assistant' : undefined)
-        if (role !== 'user' && role !== 'assistant' && role !== 'system') continue
-
-        const rawContent = evt?.message?.content ?? evt?.content
-        let text = ''
-        const tools: string[] = []
-        let hasToolResult = false
-        if (typeof rawContent === 'string') {
-          text = rawContent
-        } else if (Array.isArray(rawContent)) {
-          for (const part of rawContent) {
-            if (!part || typeof part !== 'object') continue
-            if (part.type === 'text' && typeof part.text === 'string') text += part.text
-            else if (part.type === 'tool_use' && typeof part.name === 'string') tools.push(part.name)
-            else if (part.type === 'tool_result') hasToolResult = true
-          }
-        }
-        text = text.trim()
-        // Skip pure tool_result turns on the user side — they're redundant
-        // alongside the assistant's tool_use chips and only add clutter.
-        if (!text && tools.length === 0) continue
-        if (!text && hasToolResult && tools.length === 0) continue
-
-        const ts = typeof evt?.timestamp === 'string' ? Date.parse(evt.timestamp)
-          : typeof evt?.timestamp === 'number' ? evt.timestamp
-          : Date.now()
-
-        messages.push({
-          id: typeof evt?.uuid === 'string' ? evt.uuid : `history-${i}`,
-          role: role as 'user' | 'assistant' | 'system',
-          content: text,
-          timestamp: Number.isFinite(ts) ? ts : Date.now(),
-          ...(tools.length > 0 ? { tools } : {}),
-          ...(hasToolResult ? { hasToolResult: true } : {}),
-        })
-      } catch { /* skip malformed line */ }
+    if (!page || 'error' in page) {
+      return {
+        ok: false,
+        error: (page && 'error' in page) ? page.error : 'Could not load earlier messages',
+        messages: [],
+        total: 0,
+        hasMore: false,
+      }
     }
 
-    return { ok: true, filePath, messages, total: messages.length }
+    return {
+      ok: true,
+      messages: page.messages,
+      total: page.total,
+      hasMore: page.hasMore,
+      provider: page.provider,
+      model: page.model,
+      sessionId: page.sessionId,
+    }
   })
 
   ipcMain.handle('chat:opencodeModels', async () => {
