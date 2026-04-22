@@ -792,7 +792,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width, height, o
   }, [dragging, tileId])
 
   return (
-    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: theme.surface.panelMuted, overflow: 'hidden', position: 'relative' }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', background: theme.surface.panel, overflow: 'hidden', position: 'relative' }}>
 
       {mode === 'board' && (
         <button

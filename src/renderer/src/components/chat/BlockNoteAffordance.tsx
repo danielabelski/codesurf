@@ -61,6 +61,8 @@ export function BlockNoteAffordance({
 }: BlockNoteAffordanceProps): React.JSX.Element {
   const theme = useTheme()
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const iconButtonRef = useRef<HTMLButtonElement>(null)
+  const composerSurfaceRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [isHovering, setIsHovering] = useState(false)
   const [composerOpen, setComposerOpen] = useState(false)
@@ -156,6 +158,32 @@ export function BlockNoteAffordance({
     setDraft('')
   }, [])
 
+  useEffect(() => {
+    if (!composerOpen) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (composerSurfaceRef.current?.contains(target)) return
+      if (iconButtonRef.current?.contains(target)) return
+      closeComposer()
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeComposer()
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [composerOpen, closeComposer])
+
   const submitDraft = useCallback(() => {
     const trimmed = draft.trim()
     if (trimmed) {
@@ -231,6 +259,7 @@ export function BlockNoteAffordance({
 
       {/* Hover-triggered note icon */}
       <button
+        ref={iconButtonRef}
         type="button"
         aria-label={note ? 'Edit note' : 'Add note'}
         title={note ? 'Edit note' : 'Add note'}
@@ -325,6 +354,7 @@ export function BlockNoteAffordance({
       {/* Composer popover */}
       {composerOpen && (
         <div
+          ref={composerSurfaceRef}
           onClick={(ev) => ev.stopPropagation()}
           style={{
             position: 'absolute',

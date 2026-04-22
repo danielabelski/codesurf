@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
 
+export const SIDEBAR_MENU_WIDTH = 264
+
 export function SectionHeader({ label, collapsed, onToggle, extra }: { label: string; collapsed: boolean; onToggle: () => void; extra?: React.ReactNode }): React.JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
@@ -32,7 +34,7 @@ export function ThreadMenuSectionLabel({ children }: { children: React.ReactNode
   const theme = useTheme()
   const fonts = useAppFonts()
   return (
-    <div style={{ padding: '6px 12px 4px', fontFamily: fonts.secondary, fontSize: Math.max(11, fonts.secondarySize + 1), fontWeight: 500, color: theme.text.disabled, userSelect: 'none', WebkitUserSelect: 'none' }}>
+    <div style={{ padding: '4px 12px 2px', fontFamily: fonts.secondary, fontSize: Math.max(10, fonts.secondarySize), fontWeight: 500, color: theme.text.disabled, userSelect: 'none', WebkitUserSelect: 'none' }}>
       {children}
     </div>
   )
@@ -49,15 +51,15 @@ export function ThreadMenuItem({ icon, label, active = false, onClick }: { icon:
       onMouseLeave={() => setHovered(false)}
       style={{
         width: '100%', border: 'none', background: hovered ? theme.surface.hover : 'transparent', color: active ? theme.text.primary : theme.text.secondary,
-        display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
-        userSelect: 'none', WebkitUserSelect: 'none', fontFamily: fonts.primary, fontSize: Math.max(fonts.size, 14),
+        display: 'flex', alignItems: 'center', gap: 8, padding: '7px 12px', borderRadius: 8, cursor: 'pointer',
+        userSelect: 'none', WebkitUserSelect: 'none', fontFamily: fonts.primary, fontSize: fonts.size,
         lineHeight: fonts.lineHeight, fontWeight: fonts.weight, textAlign: 'left',
       }}
     >
-      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 18, color: theme.text.muted, flexShrink: 0 }}>{icon}</span>
+      <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 16, color: theme.text.muted, flexShrink: 0 }}>{icon}</span>
       <span style={{ flex: 1, minWidth: 0 }}>{label}</span>
-      <span style={{ width: 14, color: theme.text.secondary, opacity: active ? 1 : 0, flexShrink: 0 }}>
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <span style={{ width: 12, color: theme.text.secondary, opacity: active ? 1 : 0, flexShrink: 0 }}>
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
           <path d="M3 7.3 5.7 10 11 4.7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </span>
@@ -76,7 +78,7 @@ export function SidebarMenuPortal({ anchorRef, children }: { anchorRef: React.Re
         return
       }
       const rect = anchor.getBoundingClientRect()
-      const estimatedMenuWidth = 292
+      const estimatedMenuWidth = SIDEBAR_MENU_WIDTH
       setPosition({
         top: rect.bottom + 6,
         left: Math.min(Math.max(8, rect.right - estimatedMenuWidth), Math.max(8, window.innerWidth - estimatedMenuWidth - 8)),

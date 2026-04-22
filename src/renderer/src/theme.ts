@@ -110,6 +110,26 @@ export interface AppTheme {
   }
 }
 
+function normalizePanelSurfaceTheme(theme: AppTheme): AppTheme {
+  const panelBackground = theme.surface.panel
+  return {
+    ...theme,
+    terminal: {
+      ...theme.terminal,
+      background: panelBackground,
+      cursorAccent: panelBackground,
+    },
+    editor: {
+      ...theme.editor,
+      background: panelBackground,
+    },
+    extension: {
+      ...theme.extension,
+      background: panelBackground,
+    },
+  }
+}
+
 const THEMES: Record<string, AppTheme> = {
   'default-dark': {
     id: 'default-dark',
@@ -1967,6 +1987,10 @@ const THEMES: Record<string, AppTheme> = {
   },
 }
 
+for (const [themeId, theme] of Object.entries(THEMES)) {
+  THEMES[themeId] = normalizePanelSurfaceTheme(theme)
+}
+
 export type AppearanceMode = 'dark' | 'light' | 'system'
 
 /** Which theme id to apply given appearance mode, saved dark preset, and OS dark preference. */
@@ -1999,12 +2023,13 @@ export const THEME_OPTIONS = THEME_PRESETS.map(({ id, label, mode, description }
 /** Register or update a custom (extension-provided) theme at runtime. Builtins are immutable. */
 export function registerCustomTheme(theme: AppTheme): void {
   if (BUILTIN_THEME_IDS.has(theme.id)) return
-  THEMES[theme.id] = theme
+  const normalizedTheme = normalizePanelSurfaceTheme(theme)
+  THEMES[theme.id] = normalizedTheme
   const presetIndex = THEME_PRESETS.findIndex(t => t.id === theme.id)
-  if (presetIndex >= 0) THEME_PRESETS[presetIndex] = theme
-  else THEME_PRESETS.push(theme)
+  if (presetIndex >= 0) THEME_PRESETS[presetIndex] = normalizedTheme
+  else THEME_PRESETS.push(normalizedTheme)
 
-  const option = { id: theme.id, label: theme.label, mode: theme.mode, description: theme.description }
+  const option = { id: normalizedTheme.id, label: normalizedTheme.label, mode: normalizedTheme.mode, description: normalizedTheme.description }
   const optionIndex = THEME_OPTIONS.findIndex(t => t.id === theme.id)
   if (optionIndex >= 0) THEME_OPTIONS[optionIndex] = option
   else THEME_OPTIONS.push(option)

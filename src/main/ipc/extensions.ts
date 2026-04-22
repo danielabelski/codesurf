@@ -88,6 +88,8 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       entries: manifests.map(m => ({
         id: m.id,
         name: m.name,
+        icon: m.contributes?.tiles?.[0]?.icon ?? m.contributes?.chatSurfaces?.[0]?.icon ?? null,
+        enabled: m._enabled !== false,
       })),
       tiles: manifests
         .filter(m => m._enabled !== false)

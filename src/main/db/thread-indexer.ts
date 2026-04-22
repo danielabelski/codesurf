@@ -76,6 +76,7 @@ function rowToEntry(row: Record<string, unknown>): AggregatedSessionEntry {
     messageCount: (row.message_count as number) ?? 0,
     lastMessage: (row.preview as string | null) ?? null,
     updatedAt: (row.source_updated_ms as number) ?? 0,
+    sizeBytes: (row.source_size_bytes as number) ?? 0,
     filePath: (row.file_path as string | undefined) ?? undefined,
     title: (row.title_override as string | null) ?? (row.title as string),
     projectPath: (row.project_path as string | null) ?? undefined,
@@ -257,6 +258,7 @@ async function runScan(): Promise<void> {
         seenIds.add(entry.id)
         const prev = existing.get(entry.id)
         const mtime = Number.isFinite(entry.updatedAt) ? entry.updatedAt : 0
+        const sizeBytes = Number.isFinite(entry.sizeBytes) ? Number(entry.sizeBytes) : 0
         const params = {
           id: randomUUID(),
           device_id: deviceId,
@@ -281,7 +283,7 @@ async function runScan(): Promise<void> {
           resume_bin: entry.resumeBin ?? null,
           resume_args_json: entry.resumeArgs ? JSON.stringify(entry.resumeArgs) : null,
           source_mtime_ms: mtime,
-          source_size_bytes: 0, // aggregator doesn't expose size yet
+          source_size_bytes: sizeBytes,
           source_updated_ms: mtime,
           now,
         }
@@ -295,6 +297,7 @@ async function runScan(): Promise<void> {
           // started parsing cwd from Claude transcripts) so rows that were
           // previously globally-scoped get pinned to the right workspace.
           || prev.source_mtime_ms !== mtime
+          || prev.source_size_bytes !== sizeBytes
           || (prev.project_path ?? null) !== (entry.projectPath ?? null)
         ) {
           update.run(params)

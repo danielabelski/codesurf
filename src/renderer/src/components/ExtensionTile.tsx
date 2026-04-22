@@ -76,9 +76,10 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   const contentHeight = renderedSize.h
   const contentWidth = renderedSize.w
+  const extensionSurfaceBackground = theme.surface.panel
 
   const themeColors = useMemo(() => ({
-    background: theme.extension.background,
+    background: extensionSurfaceBackground,
     panel: theme.extension.panel,
     border: theme.extension.border,
     text: theme.extension.text,
@@ -88,11 +89,11 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     success: theme.status.success,
     warning: theme.status.warning,
     danger: theme.status.danger,
-  }), [theme])
+  }), [extensionSurfaceBackground, theme])
 
   // CSS variables pushed into every extension iframe — auto light/dark compatible
   const themeCssVars = useMemo(() => ({
-    '--ct-bg':        'transparent',
+    '--ct-bg':        extensionSurfaceBackground,
     '--ct-panel':     theme.extension.panel,
     '--ct-panel-2':   theme.surface.panelElevated,
     '--ct-border':    theme.extension.border,
@@ -134,7 +135,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     '--ct-font-subtle': fontTokens.secondary?.family ?? 'system-ui, sans-serif',
     '--ct-font-subtle-size': `${fontTokens.secondary?.size ?? 11}px`,
     '--ct-mode':      `"${theme.mode}"`,
-  }), [theme, fontTokens])
+  }), [extensionSurfaceBackground, theme, fontTokens])
 
   // Keep ref in sync; push vars to iframe whenever theme changes (must be after both memos)
   themeCssVarsRef.current = themeCssVars
@@ -665,6 +666,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         width: '100%', height: '100%',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: theme.text.disabled, fontSize: fonts.secondarySize,
+        background: extensionSurfaceBackground,
       }}>
         Loading extension…
       </div>
@@ -677,6 +679,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         width: '100%', height: '100%',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         color: theme.status.danger, fontSize: fonts.secondarySize, padding: 20, textAlign: 'center',
+        background: extensionSurfaceBackground,
       }}>
         {error}
       </div>
@@ -690,7 +693,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       position: 'relative',
       width: '100%', height: '100%',
       overflow: 'hidden',
-      background: theme.extension.background,
+      background: extensionSurfaceBackground,
     }}>
       <iframe
         ref={iframeRef}

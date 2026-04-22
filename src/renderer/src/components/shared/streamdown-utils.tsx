@@ -548,6 +548,44 @@ export function useModifierPathOpenHandler(ref: React.RefObject<HTMLElement | nu
 
 // --- ChatMarkdown component -------------------------------------------------------
 // Renders markdown content with Streamdown, applying theme patches for code blocks and tables.
+const ThemedMarkdownLink = React.memo(function ThemedMarkdownLink({
+  children,
+  node: _node,
+  onMouseEnter,
+  onMouseLeave,
+  style,
+  ...props
+}: React.ComponentPropsWithoutRef<'a'> & { node?: unknown }): JSX.Element {
+  const theme = useTheme()
+
+  const handleMouseEnter: React.MouseEventHandler<HTMLAnchorElement> = event => {
+    event.currentTarget.style.color = theme.accent.hover
+    onMouseEnter?.(event)
+  }
+
+  const handleMouseLeave: React.MouseEventHandler<HTMLAnchorElement> = event => {
+    event.currentTarget.style.color = theme.accent.base
+    onMouseLeave?.(event)
+  }
+
+  return (
+    <a
+      {...props}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      style={{
+        ...style,
+        color: theme.accent.base,
+        opacity: 1,
+        textDecoration: 'underline',
+        textUnderlineOffset: '2px',
+      }}
+    >
+      {children}
+    </a>
+  )
+})
+
 function ChatStreamdown({ text, isStreaming, className }: {
   text: string
   isStreaming?: boolean
@@ -557,6 +595,7 @@ function ChatStreamdown({ text, isStreaming, className }: {
   return (
     <Streamdown
       className={`chat-md ${className ?? ''}`}
+      components={{ a: ThemedMarkdownLink }}
       plugins={streamdownPlugins}
       mode={isStreaming ? 'streaming' : 'static'}
       shikiTheme={tokens.shikiTheme}

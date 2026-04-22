@@ -1,6 +1,19 @@
 export const SESSION_ACTION_BUTTON_SIZE = 28
 export const SESSION_ACTION_ICON_SIZE = 16
-export const SESSION_ROW_EXTRA_WIDTH = 72
+const SESSION_CHECKPOINT_PILL_WIDTH = 36
+const SESSION_CHECKPOINT_RESTORE_BUTTON_WIDTH = 18
+const SESSION_ROW_EXTRA_GAP = 6
+
+export function getSessionRowExtraWidth(checkpointCount: number | null | undefined): number {
+  if ((checkpointCount ?? 0) > 0) {
+    return SESSION_CHECKPOINT_PILL_WIDTH
+      + SESSION_ROW_EXTRA_GAP
+      + SESSION_CHECKPOINT_RESTORE_BUTTON_WIDTH
+      + SESSION_ROW_EXTRA_GAP
+      + SESSION_ACTION_BUTTON_SIZE
+  }
+  return SESSION_ACTION_BUTTON_SIZE
+}
 
 export function getSessionArchiveActionLabel(isArchived: boolean): string {
   return isArchived ? 'Unarchive conversation' : 'Archive conversation'

@@ -6,20 +6,22 @@ import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { SidebarFooter } from './sidebar/SidebarFooter'
+import { sidebarPathBelongsToProject } from './sidebar/path-utils'
 import {
   SESSION_ACTION_BUTTON_SIZE,
   SESSION_ACTION_ICON_SIZE,
-  SESSION_ROW_EXTRA_WIDTH,
   formatSessionSidebarRelativeTime,
+  getSessionRowExtraWidth,
   getSessionArchiveActionLabel,
 } from './sidebar/session-actions'
-import { SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
+import { SIDEBAR_MENU_WIDTH, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SpinnerIcon } from './sidebar/utils'
 import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
 import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
-interface ExtensionEntrySummary { id: string; name: string }
+interface ExtensionEntrySummary { id: string; name: string; icon?: string | null; enabled: boolean }
+const GENERIC_SESSION_SOURCE_DETAILS = new Set(['transcript', 'conversation', 'project session', 'user session'])
 
 function getSessionSidebarIndicatorColor(session: SessionEntry, theme: ReturnType<typeof useTheme>): string {
   const key = getSessionAgentKey(session)
@@ -73,6 +75,171 @@ function SessionSidebarIndicator({
   )
 }
 
+function formatSessionSidebarSize(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return ''
+  if (bytes < 1024) return `${Math.round(bytes)}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 0 : 1)}KB`
+  if (bytes < 10 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  if (bytes < 100 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  return `${Math.round(bytes / (1024 * 1024))}MB`
+}
+
+function formatSessionSidebarMeta(session: SessionEntry): string {
+  const parts: string[] = []
+  const relativeTime = formatSessionSidebarRelativeTime(session.updatedAt)
+  const detail = String(session.sourceDetail ?? '').trim()
+  const normalizedDetail = detail.toLowerCase()
+  const sizeLabel = formatSessionSidebarSize(session.sizeBytes)
+
+  if (relativeTime) parts.push(relativeTime)
+  if (detail && !GENERIC_SESSION_SOURCE_DETAILS.has(normalizedDetail)) {
+    parts.push(detail)
+  }
+  if (sizeLabel) parts.push(sizeLabel)
+
+  return parts.join(' • ')
+}
+
+function SessionSidebarRow({
+  label,
+  meta,
+  icon,
+  active,
+  muted,
+  emphasize,
+  onClick,
+  onContextMenu,
+  indent = 0,
+  indentUnit = 10,
+  extra,
+  extraWidth,
+  title,
+}: {
+  label: string
+  meta?: string
+  icon?: React.ReactNode
+  active?: boolean
+  muted?: boolean
+  emphasize?: boolean
+  onClick: () => void
+  onContextMenu?: (e: React.MouseEvent) => void
+  indent?: number
+  indentUnit?: number
+  extra?: React.ReactNode
+  extraWidth?: number
+  title?: string
+}): React.JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const [hovered, setHovered] = useState(false)
+  const labelWeight = active
+    ? Math.min(900, fonts.weight + 100)
+    : emphasize === true
+      ? Math.min(900, fonts.weight + 100)
+      : fonts.weight
+  const labelColor = active
+    ? theme.accent.base
+    : muted
+      ? theme.text.disabled
+      : emphasize === true
+        ? theme.text.primary
+        : emphasize === false
+          ? theme.text.muted
+          : theme.text.secondary
+  const metaColor = muted
+    ? theme.text.disabled
+    : active
+      ? theme.text.secondary
+      : theme.text.disabled
+
+  return (
+    <div
+      title={title}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        paddingTop: meta ? 6 : 4,
+        paddingBottom: meta ? 6 : 4,
+        paddingLeft: 8 + indent * indentUnit,
+        paddingRight: extra ? 6 + (extraWidth ?? 20) : 6,
+        minHeight: meta ? 40 : 28,
+        cursor: 'pointer',
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
+        borderRadius: 6,
+        margin: '0 4px',
+        background: active ? theme.surface.selection : hovered ? theme.surface.hover : 'transparent',
+        transition: 'background 0.1s ease',
+        position: 'relative',
+      }}
+    >
+      {icon && (
+        <span
+          style={{
+            color: active ? theme.accent.base : muted ? theme.text.disabled : theme.text.muted,
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+          }}
+        >
+          {icon}
+        </span>
+      )}
+      <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: meta ? 2 : 0 }}>
+        <span style={{
+          fontSize: fonts.size,
+          fontWeight: labelWeight,
+          lineHeight: fonts.lineHeight,
+          color: labelColor,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {label}
+        </span>
+        {meta && (
+          <span style={{
+            fontSize: Math.max(10, fonts.secondarySize - 1),
+            fontWeight: 500,
+            lineHeight: 1.25,
+            color: metaColor,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {meta}
+          </span>
+        )}
+      </div>
+      {extra && (
+        <span style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          width: extraWidth,
+          minWidth: 20,
+          minHeight: 20,
+          position: 'absolute',
+          right: 5,
+          top: '50%',
+          transform: 'translateY(-50%)',
+          opacity: hovered ? 1 : 0,
+          visibility: hovered ? 'visible' : 'hidden',
+          pointerEvents: hovered ? 'auto' : 'none',
+          transition: 'opacity 0.1s ease',
+        }}>
+          {extra}
+        </span>
+      )}
+    </div>
+  )
+}
+
 interface Props {
   workspace: Workspace | null
   workspaces: Workspace[]
@@ -111,7 +278,6 @@ interface Props {
   maxWidth?: number
   onResizeStateChange?: (resizing: boolean) => void
   onToggleCollapse: () => void
-  onScrollMetricsChange?: (metrics: { hasOverflow: boolean; topRatio: number; thumbRatio: number }) => void
   showFooter?: boolean
   /**
    * Tile id of the currently focused chat, or null when the focus isn't on a
@@ -131,8 +297,8 @@ export function Sidebar({
   workspace, workspaces, tiles, onSwitchWorkspace: _onSwitchWorkspace, onDeleteWorkspace: _onDeleteWorkspace, onNewWorkspace: _onNewWorkspace, onOpenFolder, onOpenFile, onFocusTile, onUpdateTile: _onUpdateTile, onCloseTile: _onCloseTile,
   onNewTerminal, onNewKanban, onNewBrowser, onNewChat, onNewChatForProject, onNewFiles, onOpenSettings,
   onOpenSessionInChat, onOpenSessionInApp,
-  extensionTiles, onAddExtensionTile, pinnedExtensionIds = [],
-  collapsed, width, onWidthChange, minWidth = 270, maxWidth = 520, onResizeStateChange, onToggleCollapse: _onToggleCollapse, onScrollMetricsChange, showFooter = true,
+  extensionTiles, extensionEntries, onAddExtensionTile, pinnedExtensionIds = [],
+  collapsed, width, onWidthChange, minWidth = 270, maxWidth = 520, onResizeStateChange, onToggleCollapse: _onToggleCollapse, showFooter = true,
   activeChatTileId = null,
   activeChatSessionId = null,
   activeChatSessionEntryId = null,
@@ -141,7 +307,6 @@ export function Sidebar({
   const theme = useTheme()
   const widthRef = useRef(width)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const scrollContentRef = useRef<HTMLDivElement>(null)
   void pinnedExtensionIds
   useEffect(() => { widthRef.current = width }, [width])
   const [projectSearch, setProjectSearch] = useState('')
@@ -530,7 +695,6 @@ export function Sidebar({
       if (!showCronSessions && isCronSession(session)) return false
       if (!showSubagentSessions && isSubagentSession(session)) return false
       if (hiddenSessionAgents[getSessionAgentKey(session)] === true) return false
-      if (threadOrganizeMode === 'project' && session.scope === 'user') return false
       return true
     })
     return buildNestedSessionList(filtered, threadSortMode, sessionPromotions)
@@ -551,7 +715,8 @@ export function Sidebar({
   }, [sessions])
 
   // Chronological mode uses a single flat list with one paginator.
-  // Project mode paginates per-project (see projectVisibleCounts below).
+  // Project mode renders the full project thread list and relies on the
+  // sidebar scroller instead of a second per-project paging layer.
   useEffect(() => {
     setVisibleSessionCount(SESSION_PAGE_SIZE)
   }, [workspace?.id, showArchivedSessions, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode])
@@ -560,33 +725,6 @@ export function Sidebar({
     if (threadOrganizeMode !== 'chronological') return visibleSessions
     return visibleSessions.slice(0, visibleSessionCount)
   }, [visibleSessions, visibleSessionCount, threadOrganizeMode])
-
-  // Per-project pagination — each project keeps its own "show more" count.
-  // Keyed by projectId; entries persist across refetches.
-  const [projectVisibleCounts, setProjectVisibleCounts] = useState<Record<string, number>>({})
-  const getProjectCount = useCallback((projectId: string): number => {
-    return projectVisibleCounts[projectId] ?? SESSION_PAGE_SIZE
-  }, [projectVisibleCounts])
-  const bumpProjectCount = useCallback((projectId: string) => {
-    setProjectVisibleCounts(prev => ({
-      ...prev,
-      [projectId]: (prev[projectId] ?? SESSION_PAGE_SIZE) + SESSION_PAGE_SIZE,
-    }))
-  }, [])
-  // Track full per-project counts so each group can render its own "More".
-  const projectSessionTotals = useMemo(() => {
-    const totals: Record<string, number> = {}
-    for (const projectEntry of orderedProjectEntries) {
-      const projectPath = normalizeSidebarPath(projectEntry.path)
-      const workspaceIdSet = new Set(projectEntry.workspaceIds)
-      totals[projectEntry.id] = visibleSessions.filter(session => {
-        const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
-        if (sessionProjectPath) return sessionProjectPath === projectPath
-        return workspaceIdSet.has(session.workspaceId)
-      }).length
-    }
-    return totals
-  }, [visibleSessions, orderedProjectEntries])
 
   const displayedSessionGroups = useMemo<SessionProjectGroup[]>(() => {
     if (threadOrganizeMode === 'chronological') {
@@ -605,20 +743,19 @@ export function Sidebar({
         const workspaceIdSet = new Set(projectEntry.workspaceIds)
         const allWorkspaceSessions = visibleSessions.filter(session => {
           const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
-          if (sessionProjectPath) return sessionProjectPath === projectPath
+          if (sessionProjectPath) return sidebarPathBelongsToProject(projectPath, sessionProjectPath)
           return workspaceIdSet.has(session.workspaceId)
         })
-        const count = getProjectCount(projectEntry.id)
         return {
           projectId: projectEntry.id,
           projectPath: projectEntry.path,
           representativeWorkspaceId: projectEntry.representativeWorkspaceId,
           key: projectEntry.id,
           label: getProjectDisplayLabel(projectEntry),
-          sessions: allWorkspaceSessions.slice(0, count),
+          sessions: allWorkspaceSessions,
         }
       })
-  }, [visibleSessions, displayedSessions, orderedProjectEntries, threadOrganizeMode, getProjectCount])
+  }, [visibleSessions, displayedSessions, orderedProjectEntries, threadOrganizeMode])
 
   // Search should hit ALL loaded sessions, not just the paged subset —
   // otherwise hidden-for-performance items would be unsearchable. When a
@@ -653,7 +790,7 @@ export function Sidebar({
         const workspaceIdSet = new Set(projectEntry.workspaceIds)
         const allWorkspaceSessions = visibleSessions.filter(session => {
           const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
-          if (sessionProjectPath) return sessionProjectPath === projectPath
+          if (sessionProjectPath) return sidebarPathBelongsToProject(projectPath, sessionProjectPath)
           return workspaceIdSet.has(session.workspaceId)
         })
         const label = getProjectDisplayLabel(projectEntry)
@@ -874,7 +1011,7 @@ export function Sidebar({
         action: () => {
           const projectSessions = sessions.filter(session => {
             const normalizedProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
-            if (normalizedProjectPath && projectPath) return normalizedProjectPath === normalizeSidebarPath(projectPath)
+            if (normalizedProjectPath && projectPath) return sidebarPathBelongsToProject(projectPath, normalizedProjectPath)
             return workspaceIds.includes(session.workspaceId)
           }).filter(session => session.isArchived !== true)
           if (projectSessions.length === 0) return
@@ -903,45 +1040,6 @@ export function Sidebar({
     ]
   }, [projectEntries, sessions, setSessionArchived])
 
-  const emitScrollMetrics = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) {
-      onScrollMetricsChange?.({ hasOverflow: false, topRatio: 0, thumbRatio: 1 })
-      return
-    }
-
-    const { scrollTop, scrollHeight, clientHeight } = el
-    const maxScroll = Math.max(0, scrollHeight - clientHeight)
-    const hasOverflow = maxScroll > 1
-    const topRatio = hasOverflow ? Math.min(1, Math.max(0, scrollTop / maxScroll)) : 0
-    const thumbRatio = hasOverflow ? Math.min(1, Math.max(0.14, clientHeight / scrollHeight)) : 1
-
-    onScrollMetricsChange?.({ hasOverflow, topRatio, thumbRatio })
-  }, [onScrollMetricsChange])
-
-  useEffect(() => {
-    emitScrollMetrics()
-  }, [emitScrollMetrics, sessions.length, visibleSessions.length, displayedSessions.length, tiles.length])
-
-  useEffect(() => {
-    const scrollEl = scrollRef.current
-    const contentEl = scrollContentRef.current
-    if (!scrollEl) return
-
-    emitScrollMetrics()
-    const handleScroll = () => emitScrollMetrics()
-    scrollEl.addEventListener('scroll', handleScroll, { passive: true })
-
-    const observer = new ResizeObserver(() => emitScrollMetrics())
-    observer.observe(scrollEl)
-    if (contentEl) observer.observe(contentEl)
-
-    return () => {
-      scrollEl.removeEventListener('scroll', handleScroll)
-      observer.disconnect()
-    }
-  }, [emitScrollMetrics])
-
   return (
     <div style={{
       width: collapsed ? 0 : Math.max(width, minWidth),
@@ -960,10 +1058,9 @@ export function Sidebar({
       {/* Scrollable sections */}
       <div
         ref={scrollRef}
-        className="sidebar-scroll-container"
-        style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', paddingTop: 6, scrollbarWidth: 'none', msOverflowStyle: 'none', userSelect: 'none', WebkitUserSelect: 'none' }}
+        style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', paddingTop: 6, userSelect: 'none', WebkitUserSelect: 'none' }}
       >
-        <div ref={scrollContentRef} style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
+        <div style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
 
         <div style={{ padding: '8px 8px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
@@ -978,7 +1075,40 @@ export function Sidebar({
             }}>
               Projects
             </span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={threadMenuRef}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                title="Collapse sidebar"
+                aria-label="Collapse sidebar"
+                onClick={_onToggleCollapse}
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 9,
+                  border: 'none',
+                  background: 'transparent',
+                  color: theme.text.disabled,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: 0.85,
+                  flexShrink: 0,
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = theme.surface.hover
+                  e.currentTarget.style.color = theme.text.secondary
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'transparent'
+                  e.currentTarget.style.color = theme.text.disabled
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={threadMenuRef}>
               <button
                 title="Filter and sort projects and threads"
                 aria-label="Filter and sort projects and threads"
@@ -1029,12 +1159,12 @@ export function Sidebar({
               {threadMenuOpen && (
                 <SidebarMenuPortal anchorRef={threadMenuRef}>
                   <div style={{
-                    width: 292,
+                    width: SIDEBAR_MENU_WIDTH,
                     background: theme.surface.panelElevated,
                     border: `1px solid ${theme.border.default}`,
                     borderRadius: 14,
                     boxShadow: theme.shadow.panel,
-                    padding: 8,
+                    padding: 6,
                   }}>
                   <ThreadMenuSectionLabel>Organize</ThreadMenuSectionLabel>
                   <ThreadMenuItem
@@ -1049,7 +1179,7 @@ export function Sidebar({
                     active={threadOrganizeMode === 'chronological'}
                     onClick={() => setThreadOrganizeMode('chronological')}
                   />
-                  <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                  <div style={{ height: 1, background: theme.border.default, margin: '6px 4px' }} />
                   <ThreadMenuSectionLabel>Sort by</ThreadMenuSectionLabel>
                   <ThreadMenuItem
                     icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.5 12.5V6.2M3.5 6.2l-1.8 1.8M3.5 6.2 5.3 8" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /><rect x="7" y="3.25" width="6" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /><rect x="7" y="7" width="4.5" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /><rect x="7" y="10.75" width="3" height="2" rx="1" stroke="currentColor" strokeWidth="1.15" /></svg>}
@@ -1063,7 +1193,7 @@ export function Sidebar({
                     active={threadSortMode === 'title'}
                     onClick={() => setThreadSortMode('title')}
                   />
-                  <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                  <div style={{ height: 1, background: theme.border.default, margin: '6px 4px' }} />
                   <ThreadMenuSectionLabel>Show</ThreadMenuSectionLabel>
                   <ThreadMenuItem
                     icon={<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><path d="M5.5 2.75h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /><path d="M6.25 7.25h3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg>}
@@ -1085,7 +1215,7 @@ export function Sidebar({
                   />
                   {availableSessionAgents.length > 0 && (
                     <>
-                      <div style={{ height: 1, background: theme.border.default, margin: '8px 4px' }} />
+                      <div style={{ height: 1, background: theme.border.default, margin: '6px 4px' }} />
                       <ThreadMenuSectionLabel>Agents</ThreadMenuSectionLabel>
                       {availableSessionAgents.map(agent => (
                         <ThreadMenuItem
@@ -1106,6 +1236,7 @@ export function Sidebar({
                   </div>
                 </SidebarMenuPortal>
               )}
+              </div>
             </div>
           </div>
 
@@ -1327,16 +1458,17 @@ export function Sidebar({
                       (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
                       || (session.sessionId ? streamingSnapshot.sessionIds.has(session.sessionId) : false)
                       || streamingSnapshot.entryIds.has(session.id)
+                    const sessionMeta = formatSessionSidebarMeta(session)
                     return (
-                      <SidebarItem
+                      <SessionSidebarRow
                         key={session.id}
                         label={formatSessionTitleForSidebar(session.title)}
+                        meta={sessionMeta}
                         icon={<SessionSidebarIndicator session={session} streaming={isStreaming} muted={session.isArchived === true && !isSelected} theme={theme} />}
                         indent={Math.max(1, session.displayIndent + 1)}
                         indentUnit={6}
-                        extraWidth={SESSION_ROW_EXTRA_WIDTH}
-                        idleExtra={formatSessionSidebarRelativeTime(session.updatedAt)}
-                        title={`${session.title}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}`}
+                        extraWidth={getSessionRowExtraWidth(session.checkpointCount)}
+                        title={`${session.title}${sessionMeta ? `\n${sessionMeta}` : ''}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}`}
                         active={isSelected}
                         muted={session.isArchived === true && !isSelected}
                         onClick={() => {
@@ -1472,36 +1604,6 @@ export function Sidebar({
                     </div>
                   )}
 
-                  {/* Per-project "show more". Only renders when this specific
-                      project has more threads than currently displayed. Hidden
-                      while searching because search already spans the full
-                      session list, not just the paged subset. */}
-                  {threadOrganizeMode === 'project'
-                    && !projectSearch.trim()
-                    && !isThreadGroupCollapsed(group)
-                    && (projectSessionTotals[group.projectId] ?? 0) > group.sessions.length && (
-                    <button
-                      type="button"
-                      onClick={() => bumpProjectCount(group.projectId)}
-                      style={{
-                        marginLeft: 24,
-                        marginTop: 2,
-                        padding: '2px 6px',
-                        border: 'none',
-                        background: 'transparent',
-                        color: theme.text.disabled,
-                        cursor: 'pointer',
-                        fontSize: fonts.secondarySize,
-                        fontFamily: 'inherit',
-                        textAlign: 'left',
-                        alignSelf: 'flex-start',
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                      onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
-                    >
-                      More ({(projectSessionTotals[group.projectId] ?? 0) - group.sessions.length})
-                    </button>
-                  )}
                 </div>
               ))}
 
@@ -1560,7 +1662,9 @@ export function Sidebar({
           onNewTerminal={onNewTerminal} onNewKanban={onNewKanban} onNewBrowser={onNewBrowser}
           onNewChat={onNewChat} onNewFiles={onNewFiles}
           onOpenSettings={onOpenSettings}
-          extensionTiles={extensionTiles} onAddExtensionTile={onAddExtensionTile}
+          extensionTiles={extensionTiles}
+          extensionEntries={extensionEntries}
+          onAddExtensionTile={onAddExtensionTile}
         />
       )}
 

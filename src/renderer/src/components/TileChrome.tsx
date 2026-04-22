@@ -1014,6 +1014,8 @@ export function TileChrome({
   const [data, setData] = useState<DrawerData>({ tasks: [], tools: [], availableTools: [], skills: [], context: [], messages: [] })
   const hasDrawer = DRAWER_TYPES.has(tile.type)
   const peerIds = React.useMemo(() => [...new Set((connectedPeers ?? []).filter(Boolean))], [connectedPeers])
+  const busPopupButtonRef = useRef<HTMLButtonElement>(null)
+  const busPopupRef = useRef<HTMLDivElement>(null)
 
   const toggle = () => {
     const next = !expanded
@@ -1062,6 +1064,29 @@ export function TileChrome({
 
   useEffect(() => { regenerateObjective() }, [regenerateObjective])
   useEffect(() => () => { if (regenTimer.current) clearTimeout(regenTimer.current) }, [])
+
+  useEffect(() => {
+    if (!showBusPopup || !onBusPopupToggle) return
+
+    const dismiss = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (busPopupRef.current?.contains(target)) return
+      if (busPopupButtonRef.current?.contains(target)) return
+      onBusPopupToggle()
+    }
+
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onBusPopupToggle()
+    }
+
+    document.addEventListener('mousedown', dismiss)
+    document.addEventListener('keydown', dismissOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', dismiss)
+      document.removeEventListener('keydown', dismissOnEscape)
+    }
+  }, [showBusPopup, onBusPopupToggle])
 
   // ── Collab: ensure per-tile protocol dirs; state watcher only for drawer tiles ──
   useEffect(() => {
@@ -1460,6 +1485,7 @@ export function TileChrome({
           {/* Bus event indicator */}
           {(busUnreadCount ?? 0) > 0 && (
             <button
+              ref={busPopupButtonRef}
               data-no-drag=""
               onClick={e => { e.stopPropagation(); onBusPopupToggle?.() }}
               onMouseDown={e => e.stopPropagation()}
@@ -1550,6 +1576,7 @@ export function TileChrome({
         {/* Bus event popup */}
         {showBusPopup && busEvents && (
           <div
+            ref={busPopupRef}
             data-no-drag=""
             onMouseDown={e => e.stopPropagation()}
             style={{

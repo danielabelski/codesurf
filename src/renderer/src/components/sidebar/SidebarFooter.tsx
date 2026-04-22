@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Bot, Folder, GitBranch, Globe, MessageSquare, Package, Pencil, Puzzle, Settings, Sparkles, TerminalSquare, Wrench } from 'lucide-react'
+import { Bot, Folder, GitBranch, Globe, History, Layers3, MessageSquare, Package, Pencil, Puzzle, Settings, Sparkles, TerminalSquare, Wrench } from 'lucide-react'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
 import { TILE_ICONS } from './utils'
+import { buildFooterExtensions, type FooterExtensionEntrySummary, type FooterTileEntry } from './footerExtensions'
 
-interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
+interface ExtTileEntry extends FooterTileEntry {}
+interface ExtensionEntrySummary extends FooterExtensionEntrySummary {}
 
 function renderExtensionToolbarIcon(icon?: string): React.ReactNode {
   const raw = String(icon ?? '').trim()
@@ -24,6 +26,8 @@ function renderExtensionToolbarIcon(icon?: string): React.ReactNode {
     settings: Settings,
     'message-square': MessageSquare,
     terminal: TerminalSquare,
+    history: History,
+    'layers-3': Layers3,
   }
   const Icon = namedIcons[normalized]
   if (Icon) return <Icon size={12} />
@@ -44,6 +48,7 @@ export interface SidebarFooterProps {
   onNewFiles: () => void
   onOpenSettings: (tab: string) => void
   extensionTiles?: ExtTileEntry[]
+  extensionEntries?: ExtensionEntrySummary[]
   onAddExtensionTile?: (type: string) => void
   collapsed?: boolean
   /** When true, replaces the legacy extension flyout with a prominent "Get Extensions" button. */
@@ -54,7 +59,7 @@ export interface SidebarFooterProps {
 export function SidebarFooter({
   onNewTerminal, onNewKanban, onNewBrowser, onNewChat, onNewFiles,
   onOpenSettings,
-  extensionTiles, onAddExtensionTile,
+  extensionTiles, extensionEntries, onAddExtensionTile,
   collapsed,
   galleryEnabled,
   onOpenGallery,
@@ -78,7 +83,9 @@ export function SidebarFooter({
 
   useEffect(() => {
     setShowExtMenu(false)
-  }, [extensionTiles])
+  }, [extensionEntries, extensionTiles])
+
+  const footerExtensions = buildFooterExtensions(extensionTiles ?? [], extensionEntries ?? [])
 
   return (
     <div style={{ padding: '14px 8px 2px', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: collapsed ? 6 : 10, flexDirection: 'row', width: 'fit-content' }}>
@@ -160,13 +167,20 @@ export function SidebarFooter({
         ))}
 
         {/* Installed extensions render inline in the toolbar (surface: toolbar.bottomLeft). */}
-        {galleryEnabled && extensionTiles && extensionTiles.length > 0 && extensionTiles.map(ext => {
-          const disabled = ext.type === 'ext:artifact-builder'
+        {galleryEnabled && footerExtensions.length > 0 && footerExtensions.map(ext => {
+          const disabled = ext.tileType === 'ext:artifact-builder'
+          const action = () => {
+            if (ext.tileType) {
+              onAddExtensionTile?.(ext.tileType)
+              return
+            }
+            onOpenSettings('extensions')
+          }
           return (
             <button
-              key={ext.type}
-              title={disabled ? `${ext.label} disabled` : ext.label}
-              onClick={disabled ? undefined : () => onAddExtensionTile?.(ext.type)}
+              key={ext.id}
+              title={disabled ? `${ext.label} disabled` : ext.tileType ? ext.label : `${ext.label} settings`}
+              onClick={disabled ? undefined : action}
               style={{
                 width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent',
                 color: disabled ? theme.text.disabled : footerIconColor,
@@ -183,7 +197,7 @@ export function SidebarFooter({
           )
         })}
 
-        {!galleryEnabled && extensionTiles && extensionTiles.length > 0 && (
+        {!galleryEnabled && footerExtensions.length > 0 && (
           <div style={{ position: 'relative' }} ref={extMenuRef}>
             <button title="Extensions" style={{
               width: 28, height: 28, borderRadius: 6, border: 'none', background: 'transparent',
@@ -205,10 +219,17 @@ export function SidebarFooter({
                 background: theme.surface.panelElevated, border: `1px solid ${theme.border.default}`, borderRadius: 8,
                 padding: 4, boxShadow: theme.shadow.panel, zIndex: 1000,
               }}>
-                {extensionTiles.map(ext => {
-                  const disabled = ext.type === 'ext:artifact-builder'
+                {footerExtensions.map(ext => {
+                  const disabled = ext.tileType === 'ext:artifact-builder'
+                  const action = () => {
+                    if (ext.tileType) {
+                      onAddExtensionTile?.(ext.tileType)
+                      return
+                    }
+                    onOpenSettings('extensions')
+                  }
                   return (
-                    <button key={ext.type} onClick={disabled ? undefined : () => { onAddExtensionTile?.(ext.type); setShowExtMenu(false) }} style={{
+                    <button key={ext.id} onClick={disabled ? undefined : () => { action(); setShowExtMenu(false) }} style={{
                       display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '6px 10px', borderRadius: 6,
                       border: 'none', background: 'transparent', color: disabled ? theme.text.disabled : theme.text.secondary, fontSize: fonts.size, cursor: disabled ? 'not-allowed' : 'pointer', textAlign: 'left',
                       opacity: disabled ? 0.45 : 1,
@@ -222,8 +243,11 @@ export function SidebarFooter({
                         e.currentTarget.style.background = 'transparent'
                         e.currentTarget.style.color = disabled ? theme.text.disabled : theme.text.secondary
                       }}
-                      title={disabled ? `${ext.label} disabled` : ext.label}
+                      title={disabled ? `${ext.label} disabled` : ext.tileType ? ext.label : `${ext.label} settings`}
                     >
+                      <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 14, height: 14, color: 'currentColor', flexShrink: 0 }}>
+                        {renderExtensionToolbarIcon(ext.icon)}
+                      </span>
                       <span>{ext.label}</span>
                     </button>
                   )

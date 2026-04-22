@@ -84,9 +84,10 @@ const AGENTS = [
 
 interface AgentSetupProps {
   onComplete: () => void
+  onDismiss?: () => void
 }
 
-export function AgentSetup({ onComplete }: AgentSetupProps) {
+export function AgentSetup({ onComplete, onDismiss }: AgentSetupProps) {
   const fonts = useAppFonts()
   const [config, setConfig] = useState<AgentPathsConfig | null>(null)
   const [loading, setLoading] = useState(true)
@@ -107,6 +108,15 @@ export function AgentSetup({ onComplete }: AgentSetupProps) {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    if (!onDismiss) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onDismiss()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [onDismiss])
 
   const handleRedetect = async () => {
     setDetecting(true)
@@ -158,7 +168,11 @@ export function AgentSetup({ onComplete }: AgentSetupProps) {
       background: 'rgba(0,0,0,0.6)',
       backdropFilter: 'blur(8px)',
       WebkitAppRegion: 'no-drag',
-    } as React.CSSProperties}>
+    } as React.CSSProperties}
+      onClick={event => {
+        if (event.target === event.currentTarget) onDismiss?.()
+      }}
+    >
       <div style={{
         background: '#1e1e1e',
         border: '1px solid #333',

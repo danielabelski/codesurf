@@ -24,6 +24,7 @@ export interface AggregatedSessionEntry {
   messageCount: number
   lastMessage: string | null
   updatedAt: number
+  sizeBytes?: number
   filePath?: string
   title: string
   projectPath?: string | null

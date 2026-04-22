@@ -12,6 +12,8 @@ const EXTENSIONS_CHANGED_EVENT = 'codesurf:extensions-changed'
 type ExtensionEntrySummary = {
   id: string
   name: string
+  icon?: string | null
+  enabled: boolean
 }
 
 export function useExtensions(workspacePath?: string | null, enabled = true) {
@@ -33,7 +35,12 @@ export function useExtensions(workspacePath?: string | null, enabled = true) {
           setExtensionTiles(sidebarData.tiles)
         }
         if (!cancelledRef?.current && sidebarData?.entries) {
-          setExtensionEntries(sidebarData.entries.map((entry: ExtensionEntrySummary) => ({ id: entry.id, name: entry.name })))
+          setExtensionEntries(sidebarData.entries.map((entry: ExtensionEntrySummary) => ({
+            id: entry.id,
+            name: entry.name,
+            icon: entry.icon ?? null,
+            enabled: entry.enabled !== false,
+          })))
         }
         return
       }
@@ -47,7 +54,12 @@ export function useExtensions(workspacePath?: string | null, enabled = true) {
         setExtensionTiles(tiles)
       }
       if (!cancelledRef?.current && entries) {
-        setExtensionEntries(entries.map((entry: ExtensionEntrySummary) => ({ id: entry.id, name: entry.name })))
+        setExtensionEntries(entries.map((entry: ExtensionEntrySummary) => ({
+          id: entry.id,
+          name: entry.name,
+          icon: null,
+          enabled: entry.enabled !== false,
+        })))
       }
     } catch (err) {
       console.warn('[useExtensions] Failed to load extension tiles:', err)

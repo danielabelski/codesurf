@@ -13,7 +13,7 @@ import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, Cog, DollarSign,
-  FileText, Folder, GripVertical, Lock, Paperclip, Pencil, Plus, Trash2, Wrench
+  FileText, Folder, GripVertical, Lock, Paperclip, Pencil, Plus, Sparkles, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
 import { useAppFonts } from '../FontContext'
@@ -235,6 +235,7 @@ interface ActiveChatSurface {
   extId: string
   surfaceId: string
   label: string
+  icon?: string
   instanceId: string
   entryUrl: string
   emits: 'image' | 'text'
@@ -895,6 +896,14 @@ function buildOutgoingMessageContent(draftInput: string, draftAttachments: Pendi
     ? `Attached file paths:\n${draftAttachments.map(item => item.path).join('\n')}`
     : ''
   return [trimmedInput, attachmentBlock].filter(Boolean).join('\n\n').trim()
+}
+
+function renderChatSurfaceIcon(icon: string | undefined, size = 14): JSX.Element {
+  const name = String(icon ?? '').toLowerCase()
+  if (name === 'sparkles' || name === 'builder') return <Sparkles size={size} />
+  if (name === 'pencil' || name === 'sketch') return <Pencil size={size} />
+  if (name === 'settings' || name === 'cog') return <Cog size={size} />
+  return <Wrench size={size} />
 }
 
 function encodeUtf8Base64(text: string): string {
@@ -1968,8 +1977,11 @@ function ensureChatMdStyle(): void {
     .chat-md ul:last-child, .chat-md ol:last-child { margin-bottom: 0; }
     .chat-md li { line-height: 1.55; margin-bottom: 2px; }
     .chat-md li > p { margin: 0; }
-    .chat-md a { color: var(--chat-link-color, #4f8cff); opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
-    .chat-md a:hover { color: var(--chat-link-hover-color, #77a2ff); opacity: 1; }
+    .chat-md a,
+    .chat-md a:any-link,
+    .chat-md a:visited { color: var(--chat-link-color, #4f8cff) !important; opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
+    .chat-md a:hover,
+    .chat-md a:focus-visible { color: var(--chat-link-hover-color, #77a2ff) !important; opacity: 1; }
     .chat-md blockquote {
       border-left: 3px solid rgba(128,128,128,0.4); padding-left: 10px;
       margin: 6px 0; opacity: 0.85;
@@ -1988,7 +2000,7 @@ function ensureChatMdStyle(): void {
 export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, width: _width, height: _height, reloadToken = 0, settings, isConnected, isAutoConnected, connectedPeers = [] }: Props): JSX.Element {
   const theme = useTheme()
   const chatViewportBackground = theme.surface.panel
-  const composerBackground = theme.chat.input
+  const composerBackground = theme.mode === 'dark' ? theme.surface.panel : theme.chat.input
   const composerBorder = theme.chat.inputBorder
   const dropdownBackground = theme.chat.dropdownBackground
   const dropdownBorder = theme.chat.dropdownBorder
@@ -4299,6 +4311,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       extId: entry.extId,
       surfaceId: entry.surfaceId,
       label: entry.label,
+      icon: entry.icon,
       instanceId,
       entryUrl: url,
       emits: entry.emits,
@@ -6412,9 +6425,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                           padding: 0,
                           fontSize: 11,
                           fontFamily: fontMono,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
                         }}
                       >
-                        {surface.label}
+                        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                          {renderChatSurfaceIcon(surface.icon ?? surface.surfaceId, 13)}
+                        </span>
+                        <span>{surface.label}</span>
                       </button>
                       <button
                         onClick={() => closeChatSurface(surface.instanceId)}
@@ -8513,7 +8532,9 @@ function ComposerInsertMenu({
                   onMouseLeave={e => { e.currentTarget.style.background = active ? theme.chat.dropdownHoverBackground : 'transparent' }}
                   title={entry.description ?? entry.label}
                 >
-                  <Pencil size={14} color={theme.chat.muted} />
+                  <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: theme.chat.muted }}>
+                    {renderChatSurfaceIcon(entry.icon ?? entry.surfaceId, 14)}
+                  </span>
                   <span style={{ fontSize: 12, fontFamily: fonts.sans }}>Add {entry.label}</span>
                 </button>
               )
@@ -8571,7 +8592,6 @@ function ModelDropdown({ models, activeId, filter, onFilterChange, providerIcon,
       )}
       <div style={{
         maxHeight: 240, overflowY: 'auto', overflowX: 'hidden',
-        scrollbarWidth: 'thin',
       }}>
         {filtered.length === 0 && (
           <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fonts.sans }}>

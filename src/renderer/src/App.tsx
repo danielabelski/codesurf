@@ -6,6 +6,7 @@ import { TileColorProvider } from './TileColorContext'
 import { withDefaultSettings, DEFAULT_SETTINGS } from '../../shared/types'
 import type { MenuItem } from './components/ContextMenu'
 import { useExtensions } from './hooks/useExtensions'
+import { useAutoHideScrollbars } from './hooks/useAutoHideScrollbars'
 import { getTileNodeTools, withCapabilityPrefix, stripCapabilityPrefix, getAllNodeTools } from '../../shared/nodeTools'
 import { FontProvider, FontTokenProvider, SANS_DEFAULT, MONO_DEFAULT } from './FontContext'
 import { ThemeProvider } from './ThemeContext'
@@ -732,6 +733,8 @@ function findDiscoveryMatch(sourceTileId: string, tileList: TileState[], hiddenT
 }
 
 function App(): JSX.Element {
+  useAutoHideScrollbars()
+
   const [tiles, setTiles] = useState<TileState[]>([])
   const [groups, setGroups] = useState<GroupState[]>([])
   const [lockedConnections, setLockedConnections] = useState<Array<{ sourceTileId: string; targetTileId: string }>>([])
@@ -768,7 +771,6 @@ function App(): JSX.Element {
   const [sidebarWidth, setSidebarWidth] = useState(280)
   const [sidebarResizing, setSidebarResizing] = useState(false)
   const [sidebarPillVisible, setSidebarPillVisible] = useState(true)
-  const [sidebarScrollMetrics, setSidebarScrollMetrics] = useState({ hasOverflow: false, topRatio: 0, thumbRatio: 1 })
   const [sidebarSelectedPath, setSidebarSelectedPath] = useState<string | null>(null)
   const [canvasArrangeMode, setCanvasArrangeMode] = useState<'grid' | 'column' | 'row' | null>(null)
   const [guides, setGuides] = useState<{ x?: number; y?: number }[]>([])
@@ -786,6 +788,16 @@ function App(): JSX.Element {
     () => new Map((extensionEntries ?? []).map(entry => [entry.id, entry.name] as const)),
     [extensionEntries],
   )
+  const visibleSidebarExtensionTiles = useMemo(() => {
+    if (settings.extensionsDisabled) return []
+    const hidden = new Set(settings.hiddenFromSidebarExtIds ?? [])
+    return extensionTiles.filter(entry => !hidden.has(entry.extId))
+  }, [settings.extensionsDisabled, settings.hiddenFromSidebarExtIds, extensionTiles])
+  const visibleSidebarExtensionEntries = useMemo(() => {
+    if (settings.extensionsDisabled) return []
+    const hidden = new Set(settings.hiddenFromSidebarExtIds ?? [])
+    return extensionEntries.filter(entry => entry.enabled !== false && !hidden.has(entry.id))
+  }, [settings.extensionsDisabled, settings.hiddenFromSidebarExtIds, extensionEntries])
   const [systemPrefersDark, setSystemPrefersDark] = useState(true)
   const [brandWordmarkIndex, setBrandWordmarkIndex] = useState(1)
   const [brandPaletteIndex, setBrandPaletteIndex] = useState(0)
@@ -3807,21 +3819,7 @@ function App(): JSX.Element {
   const mainPanelBottomInset = sidebarFooterHeight-6
   const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
-  const openSidebarPillLeft = sidebarWidth - 5
-  const sidebarScrollTrackTop = 48
-  const sidebarScrollTrackBottom = sidebarFooterHeight + 10
   const collapsedSidebarPillHeight = 32
-  const sidebarScrollIndicatorMinRatio = 0.045
-  const sidebarScrollIndicatorMaxRatio = 0.11
-  const sidebarScrollIndicatorRatio = sidebarScrollMetrics.hasOverflow
-    ? Math.max(
-        sidebarScrollIndicatorMinRatio,
-        Math.min(sidebarScrollIndicatorMaxRatio, sidebarScrollMetrics.thumbRatio * 0.42),
-      )
-    : 0
-  const sidebarScrollIndicatorTop = sidebarScrollMetrics.hasOverflow
-    ? `${sidebarScrollMetrics.topRatio * (1 - sidebarScrollIndicatorRatio) * 100}%`
-    : `calc(50% - ${collapsedSidebarPillHeight / 2}px)`
   // Sidebar's absolute wrapper sits at left: 6 with width sidebarWidth, so its
   // right edge is at (6 + sidebarWidth). Adding 12 here puts the main-panel
   // left edge 6px to the right of the sidebar — a visible 6px gap.
@@ -3990,8 +3988,8 @@ function App(): JSX.Element {
                 onOpenSettings={(tab) => setShowSettings(tab)}
                 onOpenSessionInChat={openSessionInChat}
                 onOpenSessionInApp={openSessionInApp}
-                extensionTiles={settings.extensionsDisabled ? [] : extensionTiles.filter(e => e.type !== 'ext:md-preview' && !(settings.hiddenFromSidebarExtIds ?? []).includes(e.extId))}
-                extensionEntries={settings.extensionsDisabled ? [] : extensionEntries}
+                extensionTiles={visibleSidebarExtensionTiles}
+                extensionEntries={visibleSidebarExtensionEntries}
                 onAddExtensionTile={(type) => addTile(type as TileType)}
                 pinnedExtensionIds={settings.extensionsDisabled ? [] : (settings.pinnedExtensionIds ?? [])}
                 onTogglePinnedExtension={(key) => {
@@ -4009,7 +4007,6 @@ function App(): JSX.Element {
                 onWidthChange={setSidebarWidth}
                 onResizeStateChange={setSidebarResizing}
                 onToggleCollapse={() => setSidebarCollapsed(p => !p)}
-                onScrollMetricsChange={setSidebarScrollMetrics}
                 showFooter={false}
               />
             </Suspense>
@@ -4040,7 +4037,8 @@ function App(): JSX.Element {
             onNewChat={() => addTile('chat')}
             onNewFiles={() => addTile('files')}
             onOpenSettings={(tab) => setShowSettings(tab)}
-            extensionTiles={settings.extensionsDisabled ? [] : extensionTiles.filter(e => e.type !== 'ext:md-preview' && !(settings.hiddenFromSidebarExtIds ?? []).includes(e.extId))}
+            extensionTiles={visibleSidebarExtensionTiles}
+            extensionEntries={visibleSidebarExtensionEntries}
             onAddExtensionTile={(type) => addTile(type as TileType)}
             collapsed={sidebarCollapsed}
             galleryEnabled={settings.extensionsGalleryEnabled !== false}
@@ -4368,8 +4366,8 @@ function App(): JSX.Element {
           </div>
         </div>
 
-        {/* Sidebar collapse pill / scroll indicator */}
-        {sidebarCollapsed ? (
+        {/* Sidebar collapse pill */}
+        {sidebarCollapsed && (
           <div
             onClick={() => setSidebarCollapsed(p => !p)}
             style={{
@@ -4403,55 +4401,6 @@ function App(): JSX.Element {
               opacity: 0.9,
               transition: 'opacity 0.12s ease',
             }} />
-          </div>
-        ) : (
-          <div
-            style={{
-              display: !sidebarPillVisible ? 'none' : 'block',
-              position: 'absolute',
-              left: openSidebarPillLeft,
-              top: sidebarScrollTrackTop,
-              bottom: sidebarScrollTrackBottom,
-              width: 6,
-              zIndex: 200,
-              pointerEvents: 'none',
-              transition: 'left 0.15s ease, opacity 0.12s ease',
-            }}
-          >
-            <div
-              onClick={() => setSidebarCollapsed(p => !p)}
-              style={{
-                position: 'absolute',
-                left: 0,
-                right: 0,
-                top: sidebarScrollIndicatorTop,
-                height: sidebarScrollMetrics.hasOverflow
-                  ? `${sidebarScrollIndicatorRatio * 100}%`
-                  : collapsedSidebarPillHeight,
-                minHeight: sidebarScrollMetrics.hasOverflow ? 24 : collapsedSidebarPillHeight,
-                background: theme.surface.panelElevated,
-                border: `1px solid ${theme.border.strong}`,
-                borderRadius: 9999,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: theme.text.disabled,
-                userSelect: 'none',
-                pointerEvents: 'auto',
-              }}
-              onMouseEnter={e => { e.currentTarget.style.background = theme.surface.panelMuted }}
-              onMouseLeave={e => { e.currentTarget.style.background = theme.surface.panelElevated }}
-            >
-              <span style={{
-                width: 2,
-                height: sidebarScrollMetrics.hasOverflow ? 12 : 14,
-                borderRadius: 999,
-                background: theme.text.disabled,
-                opacity: 0.9,
-                transition: 'opacity 0.12s ease',
-              }} />
-            </div>
           </div>
         )}
 
@@ -5424,9 +5373,11 @@ function App(): JSX.Element {
                   const t = tiles.find(ti => ti.id === tileId)
                   if (!t) return null
                   return (
-                    <Suspense fallback={<div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: 12, background: theme.surface.panelMuted }}>Loading block…</div>}>
-                      {renderTileBody(t)}
-                    </Suspense>
+                    <div style={{ width: '100%', height: '100%', background: theme.surface.panel }}>
+                      <Suspense fallback={<div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: 12, background: theme.surface.panel }}>Loading block…</div>}>
+                        {renderTileBody(t)}
+                      </Suspense>
+                    </div>
                   )
                 }}
                 onLayoutChange={setPanelLayout}
@@ -5536,7 +5487,10 @@ function App(): JSX.Element {
       </Suspense>
       {showAgentSetup && (
         <Suspense fallback={null}>
-          <LazyAgentSetup onComplete={() => setShowAgentSetup(false)} />
+          <LazyAgentSetup
+            onComplete={() => setShowAgentSetup(false)}
+            onDismiss={() => setShowAgentSetup(false)}
+          />
         </Suspense>
       )}
       {skillInstallPath && (

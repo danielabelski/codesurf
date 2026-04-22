@@ -11,288 +11,684 @@
     padding: 0;
     background: transparent;
   }
+
   body {
-    display: flex;
-    flex-direction: column;
-    color: var(--ct-text, #111);
     font-family: var(--ct-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+    color: var(--ct-text, #111);
     overflow: hidden;
   }
+
   .app {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    width: 100%;
     height: 100%;
     padding: 10px;
   }
-  .controls {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .prompt {
+
+  .surface {
     width: 100%;
-    min-height: 88px;
-    resize: vertical;
-    line-height: 1.5;
-  }
-  .controls-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .segmented {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px;
-    border-radius: 999px;
-    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
-    background: var(--ct-panel-2, rgba(0,0,0,.06));
-  }
-  .segmented button {
-    min-width: 34px;
-    height: 28px;
-    padding: 0 10px;
-    border: none;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--ct-muted, #666);
-    font-size: 11px;
-    font-family: inherit;
-  }
-  .segmented button.active {
-    background: var(--ct-accent-s, rgba(79,70,229,.12));
-    color: var(--ct-accent, #4f46e5);
-    border: 1px solid color-mix(in srgb, var(--ct-accent, #4f46e5) 22%, transparent);
-  }
-  .variant-tabs {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    padding-bottom: 2px;
-  }
-  .variant-tab {
-    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
-    background: var(--ct-panel-2, rgba(0,0,0,.06));
-    color: var(--ct-muted, #666);
-    border-radius: 999px;
-    padding: 6px 10px;
-    font-size: 11px;
-    white-space: nowrap;
-  }
-  .variant-tab.active {
-    background: var(--ct-accent-s, rgba(79,70,229,.12));
-    color: var(--ct-accent, #4f46e5);
-    border-color: color-mix(in srgb, var(--ct-accent, #4f46e5) 22%, transparent);
-  }
-  .preview-card {
+    height: 100%;
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    flex: 1;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 16px;
+    background: var(--ct-panel, rgba(0,0,0,.04));
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
     overflow: hidden;
   }
-  .preview-meta {
+
+  .surface-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    justify-content: space-between;
-    margin-bottom: 8px;
-  }
-  .preview-meta-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-  .status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
-    background: var(--ct-dim, #999);
+    gap: 10px;
+    min-height: 28px;
     flex-shrink: 0;
   }
-  .status-dot.ready { background: var(--ct-success, #1f8f5f); }
-  .status-dot.generating { background: var(--ct-accent, #4f46e5); }
-  .status-dot.error { background: var(--ct-danger, #dc2626); }
-  .preview-title {
+
+  .surface-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ct-accent-s, rgba(79,70,229,.12));
+    color: var(--ct-accent, #4f46e5);
+    border: 1px solid color-mix(in srgb, var(--ct-accent, #4f46e5) 18%, transparent);
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .surface-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .surface-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ct-text, #111);
+  }
+
+  .surface-subtitle {
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--ct-dim, #999);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .variant-region {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow: hidden;
+  }
+
+  .variant-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 24px;
+    flex-shrink: 0;
+  }
+
+  .variant-head-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .variant-head-title {
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
+    color: var(--ct-text, #111);
+  }
+
+  .variant-head-subtitle {
+    font-size: 11px;
+    color: var(--ct-dim, #999);
+    line-height: 1.35;
+  }
+
+  .variant-grid-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .variant-grid {
+    display: grid;
+    gap: 10px;
+    min-height: 100%;
+  }
+
+  .variant-card {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 12px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel-2, rgba(0,0,0,.06));
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+  }
+
+  .variant-card:hover {
+    border-color: var(--ct-border-2, rgba(0,0,0,.16));
+    background: var(--ct-hover, rgba(0,0,0,.08));
+  }
+
+  .variant-card.active {
+    border-color: color-mix(in srgb, var(--ct-accent, #4f46e5) 28%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ct-accent, #4f46e5) 14%, transparent);
+  }
+
+  .variant-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .variant-title {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 700;
     color: var(--ct-text, #111);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview-subtitle {
-    font-size: 10px;
-    color: var(--ct-dim, #999);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+
+  .variant-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
   }
-  .preview-frame {
-    flex: 1;
-    min-height: 0;
+
+  .control-btn,
+  .segment-btn,
+  .send-btn {
+    appearance: none;
     border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel-2, rgba(0,0,0,.06));
+    color: var(--ct-text, #111);
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .control-btn:hover,
+  .segment-btn:hover,
+  .send-btn:hover {
+    background: var(--ct-hover, rgba(0,0,0,.08));
+    border-color: var(--ct-border-2, rgba(0,0,0,.16));
+  }
+
+  .control-btn {
+    height: 28px;
+    padding: 0 9px;
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .control-btn.active {
+    border-color: color-mix(in srgb, var(--ct-accent, #4f46e5) 24%, transparent);
+    background: var(--ct-accent-s, rgba(79,70,229,.12));
+    color: var(--ct-accent, #4f46e5);
+  }
+
+  .variant-preview {
+    flex: 1;
+    min-height: 160px;
     border-radius: 10px;
     overflow: hidden;
-    background: var(--ct-panel-2, rgba(0,0,0,.06));
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel, rgba(0,0,0,.04));
   }
-  .preview-frame iframe {
+
+  .variant-preview iframe {
     width: 100%;
     height: 100%;
     border: none;
     background: transparent;
   }
-  .empty {
+
+  .empty-state {
     display: flex;
     align-items: center;
     justify-content: center;
+    min-height: 180px;
     height: 100%;
-    text-align: center;
-    color: var(--ct-dim, #999);
-    font-size: 12px;
     padding: 24px;
-  }
-  .hint {
-    font-size: 11px;
+    border-radius: 12px;
+    border: 1px dashed var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel-2, rgba(0,0,0,.06));
     color: var(--ct-dim, #999);
+    text-align: center;
     line-height: 1.45;
   }
+
+  .composer {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--ct-border, rgba(0,0,0,.1));
+  }
+
+  .wanted-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-height: 0;
+  }
+
+  .wanted-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel-2, rgba(0,0,0,.06));
+    font-size: 10px;
+    color: var(--ct-text, #111);
+  }
+
+  .wanted-chip button {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .composer-frame {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: transparent;
+  }
+
+  .composer-input {
+    width: 100%;
+    min-height: 42px;
+    max-height: 120px;
+    resize: none;
+    border: none;
+    background: transparent;
+    color: var(--ct-text, #111);
+    font: inherit;
+    line-height: 1.45;
+    outline: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    overflow-y: auto;
+  }
+
+  .composer-input:focus {
+    outline: none;
+    box-shadow: none;
+  }
+
+  .composer-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .segmented {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px;
+    border-radius: 999px;
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel-2, rgba(0,0,0,.06));
+    flex-shrink: 0;
+  }
+
+  .segment-btn {
+    min-width: 30px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--ct-dim, #999);
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  .segment-btn.active {
+    background: var(--ct-accent-s, rgba(79,70,229,.12));
+    border-color: color-mix(in srgb, var(--ct-accent, #4f46e5) 20%, transparent);
+    color: var(--ct-accent, #4f46e5);
+  }
+
+  .composer-meta {
+    min-width: 0;
+    flex: 1;
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--ct-dim, #999);
+  }
+
+  .send-btn {
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
+    padding: 0;
+    border-radius: 999px;
+    border: none;
+    background: var(--ct-accent, #4f46e5);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .send-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
   .error {
     display: none;
-    color: var(--ct-danger, #dc2626);
     font-size: 11px;
     line-height: 1.45;
+    color: var(--ct-danger, #dc2626);
   }
-  .settings-overlay {
+
+  .settings-overlay,
+  .expand-overlay {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0,0,0,0.35);
+    background: rgba(0,0,0,.36);
     align-items: center;
     justify-content: center;
     padding: 20px;
     z-index: 100;
   }
-  .settings-panel {
-    width: min(420px, 100%);
+
+  .settings-panel,
+  .expand-panel {
+    width: min(520px, 100%);
+    max-height: 100%;
+    overflow: hidden;
   }
+
   .settings-body {
     display: flex;
     flex-direction: column;
     gap: 10px;
     padding: 12px;
   }
-  .settings-actions {
+
+  .settings-actions,
+  .expand-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    padding: 12px;
+  }
+
+  .expand-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 12px 12px 0 12px;
+  }
+
+  .expand-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ct-text, #111);
+  }
+
+  .expand-subtitle {
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--ct-dim, #999);
+  }
+
+  .expand-preview {
+    height: min(72vh, 720px);
+    padding: 12px;
+  }
+
+  .expand-preview-frame {
+    width: 100%;
+    height: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    background: var(--ct-panel, rgba(0,0,0,.04));
+  }
+
+  .expand-preview-frame iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    background: transparent;
+  }
+
+  html[data-render-mode="chat"] .app {
+    padding: 8px;
+  }
+
+  html[data-render-mode="chat"] .surface {
+    padding: 8px;
+    gap: 6px;
+    border-radius: 14px;
+  }
+
+  html[data-render-mode="chat"] .surface-header {
+    display: none;
+  }
+
+  html[data-render-mode="chat"] .variant-head-subtitle {
+    display: none;
+  }
+
+  html[data-render-mode="chat"] .variant-preview {
+    min-height: 132px;
+  }
+
+  html[data-render-mode="chat"] .composer {
+    gap: 6px;
+    padding-top: 6px;
+  }
+
+  html[data-render-mode="chat"] .composer-frame {
+    padding: 8px 10px;
+    border-radius: 14px;
+  }
+
+  html[data-render-mode="chat"] .composer-input {
+    min-height: 38px;
+    max-height: 88px;
+  }
+
+  html[data-render-mode="chat"] .composer-meta {
+    display: none;
+  }
+
+  html[data-render-mode="chat"] .settings-label {
+    display: none;
+  }
+
+  html[data-render-mode="canvas"] .variant-preview,
+  html[data-render-mode="docked"] .variant-preview {
+    min-height: 220px;
+  }
+
+  @media (max-width: 980px) {
+    .variant-grid {
+      grid-template-columns: 1fr !important;
+    }
   }
 </style>
 </head>
 <body>
   <div class="app">
-    <div class="ct-toolbar">
-      <div class="ct-toolbar-title">Builder</div>
-      <div class="ct-pill" id="statusPill">empty</div>
-      <button id="settingsBtn" type="button">Settings</button>
-    </div>
-
-    <div class="controls">
-      <div class="ct-card">
-        <div class="section-title" style="margin-bottom:8px;">Prompt</div>
-        <textarea id="prompt" class="prompt" placeholder="Describe the design you want to generate or enhance."></textarea>
-        <div class="controls-row" style="margin-top:10px;">
-          <div class="segmented" id="variantCountControl">
-            <button type="button" data-count="1">1</button>
-            <button type="button" data-count="2">2</button>
-            <button type="button" data-count="3">3</button>
-          </div>
-          <button id="generateBtn" type="button" class="primary">Generate</button>
+    <div class="surface">
+      <div class="surface-header">
+        <div class="surface-icon">✦</div>
+        <div class="surface-copy">
+          <div class="surface-title">Builder</div>
+          <div class="surface-subtitle">Generate variants, want references, and request changes from the bottom composer.</div>
         </div>
-        <div class="hint" id="peerContextSummary" style="margin-top:10px;">The selected variant becomes the HTML attachment for the next chat send.</div>
-        <div class="error" id="errorBox" style="margin-top:8px;"></div>
       </div>
 
-      <div id="variantTabs" class="variant-tabs" style="display:none;"></div>
-    </div>
+      <div class="variant-region">
+        <div class="variant-head">
+          <div class="variant-head-copy">
+            <div class="variant-head-title">Variants</div>
+            <div class="variant-head-subtitle">Large previews side by side in the active light or dark theme.</div>
+          </div>
+          <div id="variantCounter" class="ct-pill">0 variants</div>
+        </div>
+        <div class="variant-grid-wrap">
+          <div id="variantGrid" class="variant-grid"></div>
+          <div id="emptyState" class="empty-state">Enter a prompt below, choose 1 / 2 / 3, and generate.</div>
+        </div>
+      </div>
 
-    <div class="ct-card preview-card">
-      <div class="preview-meta">
-        <div class="preview-meta-left">
-          <span id="statusDot" class="status-dot"></span>
-          <div style="min-width:0;">
-            <div id="previewTitle" class="preview-title">No variants yet</div>
-            <div id="previewSubtitle" class="preview-subtitle">Generate 1, 2, or 3 variants from a single prompt.</div>
+      <div class="composer">
+        <div id="wantedChips" class="wanted-chips"></div>
+        <div class="composer-frame">
+          <textarea id="prompt" class="composer-input" rows="2" placeholder="Describe the design you want, or request changes to wanted variants."></textarea>
+          <div class="composer-row">
+            <div id="variantCountControl" class="segmented">
+              <button type="button" class="segment-btn" data-count="1">1</button>
+              <button type="button" class="segment-btn" data-count="2">2</button>
+              <button type="button" class="segment-btn" data-count="3">3</button>
+            </div>
+            <div id="peerContextSummary" class="composer-meta"></div>
+            <button id="settingsBtn" type="button" class="control-btn" title="Settings">⚙ <span class="settings-label">Settings</span></button>
+            <button id="generateBtn" type="button" class="send-btn" title="Generate variants" aria-label="Generate variants">↑</button>
           </div>
         </div>
-        <div class="ct-pill" id="variantCounter">0 variants</div>
-      </div>
-      <div class="preview-frame">
-        <iframe id="preview" sandbox="allow-scripts allow-same-origin" title="Builder preview"></iframe>
-        <div id="emptyState" class="empty">Enter a prompt, choose 1 / 2 / 3 variants, and generate.</div>
+        <div id="errorBox" class="error"></div>
       </div>
     </div>
   </div>
 
   <div id="settingsOverlay" class="settings-overlay">
     <div class="ct-card settings-panel">
-      <div class="ct-toolbar" style="padding:0 0 10px 0;border-bottom:none;">
-        <div class="ct-toolbar-title">Builder settings</div>
+      <div class="ct-toolbar" style="padding:12px 12px 0 12px;border-bottom:none;">
+        <div class="ct-toolbar-title">⚙ Builder settings</div>
       </div>
       <div class="settings-body">
         <label>
-          <div class="section-title" style="margin-bottom:6px;">API Key</div>
+          <div class="ct-toolbar-title" style="font-size:11px;margin-bottom:6px;">API Key</div>
           <input id="settApiKey" type="password" placeholder="sk-or-... or sk-...">
         </label>
         <label>
-          <div class="section-title" style="margin-bottom:6px;">Model</div>
+          <div class="ct-toolbar-title" style="font-size:11px;margin-bottom:6px;">Model</div>
           <input id="settModel" type="text" placeholder="anthropic/claude-sonnet-4">
         </label>
         <label>
-          <div class="section-title" style="margin-bottom:6px;">API Base URL</div>
+          <div class="ct-toolbar-title" style="font-size:11px;margin-bottom:6px;">API Base URL</div>
           <input id="settBaseUrl" type="text" placeholder="https://openrouter.ai/api/v1">
         </label>
-        <div class="settings-actions">
-          <button id="settingsCancelBtn" type="button">Cancel</button>
-          <button id="settingsSaveBtn" type="button" class="primary">Save</button>
+      </div>
+      <div class="settings-actions">
+        <button id="settingsCancelBtn" type="button">Cancel</button>
+        <button id="settingsSaveBtn" type="button" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="expandOverlay" class="expand-overlay">
+    <div class="ct-card expand-panel">
+      <div class="expand-copy">
+        <div id="expandTitle" class="expand-title">Variant</div>
+        <div id="expandSubtitle" class="expand-subtitle">Expanded preview</div>
+      </div>
+      <div class="expand-preview">
+        <div class="expand-preview-frame">
+          <iframe id="expandPreview" sandbox="allow-scripts allow-same-origin" title="Expanded variant preview"></iframe>
         </div>
+      </div>
+      <div class="expand-actions">
+        <button id="expandCloseBtn" type="button">Close</button>
       </div>
     </div>
   </div>
 
 <script>
   var DEFAULTS = { apiKey: '', model: 'anthropic/claude-sonnet-4', baseUrl: 'https://openrouter.ai/api/v1' };
-  var EXAMPLES = [
-    'A premium onboarding card',
-    'A dark analytics summary module',
-    'A glassy settings panel',
-    'A compact dashboard hero',
-    'A nicer version of this sketch'
-  ];
-  var SYSTEM_PROMPT = 'You are an expert UI builder. Return ONLY valid HTML or a full HTML document. Never return markdown, code fences, or prose. Produce polished, product-facing UI with strong hierarchy, restrained styling, and clean spacing. If asked for multiple variants, make each one meaningfully different in layout, hierarchy, and emphasis while preserving the same product intent.';
+  var SYSTEM_PROMPT = 'You are an expert UI builder. Return ONLY valid HTML or a full HTML document. Never return markdown, code fences, or prose. Produce polished, product-facing UI with strong hierarchy, careful spacing, and restrained styling. Default to the host theme provided in the prompt unless the prompt explicitly asks for a different visual theme. IMPORTANT: match the requested scope. If the prompt asks for a component, control, tab bar, nav bar, card, panel, or other partial UI, output only that component at natural bounds. Do NOT wrap small UI in a full phone screen, browser window, device mockup, or giant empty application shell unless the prompt explicitly asks for that whole screen.';
 
   var state = {
+    renderMode: deriveRenderMode(),
     config: loadConfig(),
     contexReady: false,
     variantCount: 3,
     variants: [],
     activeVariantId: null,
+    wantedRefs: [],
+    expandedVariantId: null,
     generating: false,
     abortCtrl: null,
     peerContext: {},
   };
 
+  document.documentElement.setAttribute('data-render-mode', state.renderMode);
+
   function $(id) { return document.getElementById(id); }
-  function loadConfig() { try { var raw = localStorage.getItem('builder-config'); return raw ? Object.assign({}, DEFAULTS, JSON.parse(raw)) : Object.assign({}, DEFAULTS); } catch (e) { return Object.assign({}, DEFAULTS); } }
-  function saveConfig(config) { localStorage.setItem('builder-config', JSON.stringify(config)); }
-  function uid(prefix) { return prefix + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
-  function activeVariant() { return state.variants.find(function(variant) { return variant.id === state.activeVariantId; }) || null; }
-  function escapeHtml(text) { return String(text || '').replace(/[&<>"']/g, function(ch) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]; }); }
-  function truncate(text, len) { var value = String(text || '').trim(); return value.length > len ? value.slice(0, len - 1) + '…' : value; }
+
+  function deriveRenderMode() {
+    try {
+      var params = new URLSearchParams(window.location.search || '');
+      var explicit = params.get('renderMode');
+      if (explicit === 'chat' || explicit === 'canvas' || explicit === 'docked') return explicit;
+      if (params.get('surfaceKind') === 'chat') return 'chat';
+    } catch (err) {}
+    return 'canvas';
+  }
+
+  function loadConfig() {
+    try {
+      var raw = localStorage.getItem('builder-config');
+      return raw ? Object.assign({}, DEFAULTS, JSON.parse(raw)) : Object.assign({}, DEFAULTS);
+    } catch (e) {
+      return Object.assign({}, DEFAULTS);
+    }
+  }
+
+  function saveConfig(config) {
+    localStorage.setItem('builder-config', JSON.stringify(config));
+  }
+
+  function uid(prefix) {
+    return prefix + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function truncate(text, len) {
+    var value = String(text || '').trim();
+    return value.length > len ? value.slice(0, len - 1) + '…' : value;
+  }
+
+  function escapeHtml(text) {
+    return String(text || '').replace(/[&<>"']/g, function(ch) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+    });
+  }
+
+  function currentThemeMode() {
+    return document.documentElement.getAttribute('data-ct-mode') || 'light';
+  }
+
+  function activeVariant() {
+    return state.variants.find(function(variant) { return variant.id === state.activeVariantId; }) || null;
+  }
+
+  function wantedRefs() {
+    return state.wantedRefs || [];
+  }
+
+  function syncPromptHeight() {
+    var input = $('prompt');
+    if (!input) return;
+    input.style.height = 'auto';
+    var minHeight = state.renderMode === 'chat' ? 38 : 42;
+    var maxHeight = state.renderMode === 'chat' ? 88 : 120;
+    input.style.height = Math.max(minHeight, Math.min(input.scrollHeight, maxHeight)) + 'px';
+  }
 
   function stripFences(text) {
     if (!text) return '';
@@ -316,9 +712,12 @@
   function buildSrcdoc(raw) {
     var html = extractHtmlOnly(raw || '');
     if (!html) return '';
+    var mode = currentThemeMode();
+    var bg = mode === 'dark' ? '#0f1117' : '#ffffff';
+    var text = mode === 'dark' ? '#f3f5fb' : '#111111';
     var trimmed = html.trim().toLowerCase();
     if (trimmed.indexOf('<!doctype') === 0 || trimmed.indexOf('<html') === 0) return html;
-    return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"><\/script><style>*{box-sizing:border-box}body{margin:0;padding:16px;font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#111;min-height:100vh;display:flex;align-items:center;justify-content:center}</style></head><body>' + html + '</body></html>';
+    return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"><\/script><style>*{box-sizing:border-box}html,body{margin:0;padding:0;background:' + bg + ';color:' + text + ';font-family:system-ui,-apple-system,sans-serif}body{display:block;min-height:0}.preview-root{display:block;padding:0;min-height:0}</style></head><body><div class="preview-root">' + html + '</div></body></html>';
   }
 
   function showError(message) {
@@ -335,14 +734,47 @@
     state.generating = value;
     $('generateBtn').disabled = value || !state.config.apiKey;
     $('statusPill').textContent = value ? 'generating' : (state.variants.length ? 'ready' : 'empty');
-    $('statusDot').className = 'status-dot ' + (value ? 'generating' : (state.variants.length ? 'ready' : ''));
   }
 
   function setVariantCount(count) {
     state.variantCount = count;
-    Array.prototype.forEach.call(document.querySelectorAll('#variantCountControl button'), function(button) {
+    Array.prototype.forEach.call(document.querySelectorAll('#variantCountControl .segment-btn'), function(button) {
       button.classList.toggle('active', Number(button.getAttribute('data-count')) === count);
     });
+  }
+
+  function selectVariant(id) {
+    state.activeVariantId = id;
+    render();
+  }
+
+  function toggleWantedRef(variant) {
+    var existingIndex = state.wantedRefs.findIndex(function(item) { return item.sourceId === variant.id; });
+    if (existingIndex >= 0) {
+      state.wantedRefs = state.wantedRefs.filter(function(item) { return item.sourceId !== variant.id; });
+    } else {
+      state.wantedRefs = state.wantedRefs.concat({
+        sourceId: variant.id,
+        label: variant.label,
+        html: variant.html,
+      });
+    }
+    render();
+  }
+
+  function openExpandedVariant(id) {
+    state.expandedVariantId = id;
+    renderExpandedVariant();
+    $('expandOverlay').style.display = 'flex';
+  }
+
+  function closeExpandedVariant() {
+    $('expandOverlay').style.display = 'none';
+    state.expandedVariantId = null;
+  }
+
+  function isVariantWanted(variantId) {
+    return state.wantedRefs.some(function(item) { return item.sourceId === variantId; });
   }
 
   function publishChatSurfacePayload(htmlValue) {
@@ -389,11 +821,34 @@
     return lines.length ? '\n\nPeer context:\n' + lines.join('\n') : '';
   }
 
+  function buildWantedContextText() {
+    if (!state.wantedRefs.length) return '';
+    return '\n\nWanted reference variants:\n' + state.wantedRefs.map(function(snapshot, index) {
+      return 'Reference ' + (index + 1) + ' (' + snapshot.label + '):\n' + snapshot.html;
+    }).join('\n\n');
+  }
+
   function buildUserPrompt(basePrompt, index, total) {
-    var intro = total > 1
-      ? 'Generate variant ' + index + ' of ' + total + '. Make it meaningfully different in hierarchy, composition, spacing, and emphasis while keeping the same product intent.'
-      : 'Generate a polished premium UI from this prompt.';
-    return [intro, basePrompt.trim(), peerContextText()].filter(Boolean).join('\n\n');
+    var mode = currentThemeMode();
+    var hasWanted = state.wantedRefs.length > 0;
+    var intro;
+    if (hasWanted) {
+      intro = total > 1
+        ? 'Generate variant ' + index + ' of ' + total + ' by modifying the wanted reference variants according to the requested changes.'
+        : 'Modify the wanted reference variants according to the requested changes.';
+    } else {
+      intro = total > 1
+        ? 'Generate variant ' + index + ' of ' + total + '. Make it meaningfully different in hierarchy, layout, emphasis, and spacing while preserving the same product intent.'
+        : 'Generate a polished premium UI from this prompt.';
+    }
+    return [
+      intro,
+      'Default visual theme: ' + mode + '.',
+      'Scope rule: if this prompt describes a component or partial UI, return only that component at natural bounds. Do not generate a full phone screen, browser shell, or empty page chrome unless explicitly requested.',
+      basePrompt.trim(),
+      buildWantedContextText(),
+      peerContextText()
+    ].filter(Boolean).join('\n\n');
   }
 
   async function generateVariants() {
@@ -402,6 +857,7 @@
     hideError();
     if (state.abortCtrl) state.abortCtrl.abort();
     state.abortCtrl = new AbortController();
+
     state.variants = [];
     state.activeVariantId = null;
     setGenerating(true);
@@ -486,55 +942,99 @@
     }
   }
 
-  function renderTabs() {
-    var root = $('variantTabs');
+  function renderWantedChips() {
+    var root = $('wantedChips');
     root.innerHTML = '';
-    root.style.display = state.variants.length > 0 ? 'flex' : 'none';
-    state.variants.forEach(function(variant) {
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'variant-tab' + (variant.id === state.activeVariantId ? ' active' : '');
-      button.textContent = variant.label;
-      button.onclick = function() {
-        state.activeVariantId = variant.id;
+    state.wantedRefs.forEach(function(snapshot) {
+      var chip = document.createElement('div');
+      chip.className = 'wanted-chip';
+      chip.innerHTML = '<span>' + escapeHtml(snapshot.label) + '</span>';
+      var close = document.createElement('button');
+      close.type = 'button';
+      close.textContent = '×';
+      close.onclick = function(event) {
+        event.stopPropagation();
+        state.wantedRefs = state.wantedRefs.filter(function(item) { return item.sourceId !== snapshot.sourceId; });
         render();
       };
-      root.appendChild(button);
+      chip.appendChild(close);
+      root.appendChild(chip);
     });
   }
 
-  function renderPreview() {
-    var selected = activeVariant();
+  function renderGrid() {
+    var grid = $('variantGrid');
+    var empty = $('emptyState');
+    grid.innerHTML = '';
+    empty.style.display = state.variants.length ? 'none' : 'flex';
+    if (!state.variants.length) return;
+
+    grid.style.gridTemplateColumns = 'repeat(' + state.variants.length + ', minmax(0, 1fr))';
+
+    state.variants.forEach(function(variant) {
+      var card = document.createElement('div');
+      card.className = 'variant-card' + (variant.id === state.activeVariantId ? ' active' : '');
+      card.onclick = function() { selectVariant(variant.id); };
+
+      var wanted = isVariantWanted(variant.id);
+
+      card.innerHTML = ''
+        + '<div class="variant-top">'
+        + '  <div class="variant-title">' + escapeHtml(variant.label) + '</div>'
+        + '  <div class="variant-actions">'
+        + '    <button type="button" class="control-btn" data-action="expand" title="Expand">↗</button>'
+        + '    <button type="button" class="control-btn' + (wanted ? ' active' : '') + '" data-action="want" title="Want this variant">★ <span>' + (wanted ? 'Wanted' : 'Want') + '</span></button>'
+        + '  </div>'
+        + '</div>'
+        + '<div class="variant-preview"><iframe sandbox="allow-scripts allow-same-origin" title="' + escapeHtml(variant.label) + '"></iframe></div>';
+
+      card.querySelector('[data-action="expand"]').onclick = function(event) {
+        event.stopPropagation();
+        openExpandedVariant(variant.id);
+      };
+      card.querySelector('[data-action="want"]').onclick = function(event) {
+        event.stopPropagation();
+        toggleWantedRef(variant);
+      };
+      card.querySelector('iframe').srcdoc = buildSrcdoc(variant.html || '');
+      grid.appendChild(card);
+    });
+
     $('variantCounter').textContent = state.variants.length + ' variant' + (state.variants.length === 1 ? '' : 's');
-    if (!selected || !selected.html) {
-      $('preview').style.display = 'none';
-      $('preview').srcdoc = '';
-      $('emptyState').style.display = 'flex';
-      $('previewTitle').textContent = state.generating ? 'Generating variants…' : 'No variants yet';
-      $('previewSubtitle').textContent = state.generating ? 'Streaming the current variant into the preview.' : 'Generate 1, 2, or 3 variants from a single prompt.';
-      return;
-    }
-    $('preview').style.display = 'block';
-    $('emptyState').style.display = 'none';
-    $('preview').srcdoc = buildSrcdoc(selected.html);
-    $('previewTitle').textContent = selected.label;
-    $('previewSubtitle').textContent = truncate(selected.prompt, 140) || 'Builder output';
   }
 
-  function renderPeerSummary() {
+  function renderExpandedVariant() {
+    var variant = state.variants.find(function(item) { return item.id === state.expandedVariantId; }) || null;
+    $('expandTitle').textContent = variant ? variant.label : 'Variant';
+    $('expandSubtitle').textContent = variant ? truncate(variant.prompt || 'Expanded preview', 180) : 'Expanded preview';
+    $('expandPreview').srcdoc = variant ? buildSrcdoc(variant.html || '') : '';
+  }
+
+  function renderContextSummary() {
     var count = 0;
     Object.keys(state.peerContext).forEach(function(peerId) {
       count += Object.keys(state.peerContext[peerId] || {}).length;
     });
-    $('peerContextSummary').textContent = count > 0
-      ? count + ' context item' + (count === 1 ? '' : 's') + ' from other chat surfaces will be included.'
-      : 'The selected variant becomes the HTML attachment for the next chat send.';
+
+    if (state.wantedRefs.length > 0) {
+      $('peerContextSummary').textContent = 'Wanted chips will be used as reference context for the next generation.';
+      return;
+    }
+
+    if (count > 0) {
+      $('peerContextSummary').textContent = count + ' context item' + (count === 1 ? '' : 's') + ' from other chat surfaces will be included.';
+      return;
+    }
+
+    $('peerContextSummary').textContent = '';
   }
 
   function render() {
-    renderTabs();
-    renderPreview();
-    renderPeerSummary();
+    renderWantedChips();
+    renderGrid();
+    renderContextSummary();
+    renderExpandedVariant();
+    syncPromptHeight();
     publishBuilderContext(state.generating ? 'generating' : (state.variants.length ? 'ready' : 'empty'), null);
   }
 
@@ -560,24 +1060,10 @@
     render();
   }
 
-  function initExamples() {
-    EXAMPLES.forEach(function(example) {
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'variant-tab';
-      button.textContent = example;
-      button.onclick = function() {
-        $('prompt').value = example;
-        $('prompt').focus();
-      };
-      $('variantTabs').appendChild(button);
-    });
-    $('variantTabs').innerHTML = '';
-  }
-
   function initContex() {
     if (!window.contex || state.contexReady) return;
     state.contexReady = true;
+
     if (window.contex.context) {
       window.contex.context.onPeerContextChanged(function(data) {
         if (!data.peerId || !data.key) return;
@@ -586,6 +1072,7 @@
         render();
       });
     }
+
     if (window.contex.actions) {
       window.contex.actions.register('generate', 'Generate Builder variants from a prompt', function(params) {
         var prompt = params && (params.prompt || params.description) ? String(params.prompt || params.description) : '';
@@ -598,6 +1085,7 @@
         setTimeout(generateVariants, 50);
         return { ok: true, status: 'generating' };
       });
+
       window.contex.actions.register('setHtml', 'Set the current Builder HTML directly', function(params) {
         var html = params && (params.html || params.content) ? String(params.html || params.content) : '';
         var cleanHtml = extractHtmlOnly(html);
@@ -607,17 +1095,30 @@
         render();
         return { ok: true };
       });
+
       window.contex.actions.register('getHtml', 'Get the selected Builder HTML', function() {
         var selected = activeVariant();
-        return { html: selected ? selected.html : '', variantCount: state.variants.length, status: state.generating ? 'generating' : (selected ? 'ready' : 'empty') };
+        return {
+          html: selected ? selected.html : '',
+          variantCount: state.variants.length,
+          status: state.generating ? 'generating' : (selected ? 'ready' : 'empty')
+        };
       });
+
       window.contex.actions.register('getStatus', 'Get Builder generation status', function() {
-        return { status: state.generating ? 'generating' : (state.variants.length ? 'ready' : 'empty'), variantCount: state.variants.length, activeVariantId: state.activeVariantId };
+        return {
+          status: state.generating ? 'generating' : (state.variants.length ? 'ready' : 'empty'),
+          variantCount: state.variants.length,
+          activeVariantId: state.activeVariantId
+        };
       });
+
       window.contex.actions.register('setPrompt', 'Set the current Builder prompt', function(params) {
         $('prompt').value = params && params.prompt ? String(params.prompt) : '';
+        syncPromptHeight();
         return { ok: true };
       });
+
       window.contex.actions.register('setSettings', 'Update Builder settings', function(params) {
         if (params.model) state.config.model = String(params.model);
         if (params.baseUrl) state.config.baseUrl = String(params.baseUrl);
@@ -627,45 +1128,56 @@
         return { ok: true, model: state.config.model };
       });
     }
+
     if (window.contex.surface) {
       window.contex.surface.onRequestFlush(function() {
         publishBuilderContext(state.generating ? 'generating' : (state.variants.length ? 'ready' : 'empty'), null);
       });
+
       window.contex.surface.onClear(function() {
         if (state.abortCtrl) state.abortCtrl.abort();
         state.abortCtrl = null;
         state.variants = [];
         state.activeVariantId = null;
+        state.wantedRefs = [];
+        state.expandedVariantId = null;
         state.generating = false;
         state.peerContext = {};
         $('prompt').value = '';
         hideError();
         setGenerating(false);
+        closeExpandedVariant();
         render();
       });
     }
+
     render();
   }
 
   function bootstrap() {
-    initExamples();
-    Array.prototype.forEach.call(document.querySelectorAll('#variantCountControl button'), function(button) {
+    Array.prototype.forEach.call(document.querySelectorAll('#variantCountControl .segment-btn'), function(button) {
       button.onclick = function() { setVariantCount(Number(button.getAttribute('data-count'))); };
     });
+
     setVariantCount(state.variantCount);
     $('generateBtn').onclick = generateVariants;
     $('settingsBtn').onclick = openSettings;
     $('settingsCancelBtn').onclick = closeSettings;
     $('settingsSaveBtn').onclick = saveSettingsFromUI;
     $('settingsOverlay').onclick = function(event) { if (event.target === $('settingsOverlay')) closeSettings(); };
+    $('expandOverlay').onclick = function(event) { if (event.target === $('expandOverlay')) closeExpandedVariant(); };
+    $('expandCloseBtn').onclick = closeExpandedVariant;
+    $('prompt').addEventListener('input', syncPromptHeight);
     $('prompt').addEventListener('keydown', function(event) {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         generateVariants();
       }
     });
+
     if (!state.config.apiKey) showError('Set your API key in Builder settings to enable generation.');
     setGenerating(false);
+    syncPromptHeight();
     render();
 
     var initDone = false;
@@ -674,9 +1186,11 @@
       initDone = true;
       initContex();
     }
+
     window.addEventListener('message', function(event) {
       if (event.data && event.data.type === 'contex-bridge-ready') tryInitContex();
     });
+
     tryInitContex();
     setTimeout(tryInitContex, 0);
     setTimeout(tryInitContex, 50);

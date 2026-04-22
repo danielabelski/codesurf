@@ -25,6 +25,8 @@ export type PanelNode = PanelLeaf | PanelSplit
 
 export type DockZone = 'left' | 'right' | 'top' | 'bottom' | 'center'
 
+const PANEL_SPLIT_GUTTER_PX = 6
+
 // ─── Panel element registry ───────────────────────────────────────────────────
 // Mouse-event drag needs to know where each panel is on screen.
 // Components register their DOM element here on mount.
@@ -154,7 +156,7 @@ function getNodeMinWidth(node: PanelNode, getTileType: (tileId: string) => strin
   }
   const childWidths = node.children.map(child => getNodeMinWidth(child, getTileType))
   return node.direction === 'horizontal'
-    ? childWidths.reduce((sum, width) => sum + width, 0)
+    ? childWidths.reduce((sum, width) => sum + width, 0) + (Math.max(0, node.children.length - 1) * PANEL_SPLIT_GUTTER_PX)
     : Math.max(0, ...childWidths)
 }
 
@@ -303,9 +305,9 @@ function ResizeHandle({ direction, onResize, onInteractionChange }: { direction:
       onMouseDown={onMouseDown}
       style={{
         flexShrink: 0,
-        // 6px gutter between split leaves — lets each leaf's borderRadius
+        // Fixed gutter between split leaves — lets each leaf's borderRadius
         // show as rounded corners, matching the sidebar↔main-panel gap.
-        [isHorizontal ? 'width' : 'height']: 6,
+        [isHorizontal ? 'width' : 'height']: PANEL_SPLIT_GUTTER_PX,
         cursor: isHorizontal ? 'col-resize' : 'row-resize',
         background: 'transparent',
         position: 'relative',
@@ -367,7 +369,7 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-end', height: 34,
-      background: theme.surface.panel, borderBottom: `1px solid ${theme.border.subtle}`,
+      background: theme.surface.panel,
       overflow: 'hidden', flexShrink: 0, zIndex: 1,
       padding: '0 4px 0 2px',
     }}>
@@ -375,7 +377,6 @@ function TabBar({ tabs, activeTab, panelId, onActivate, onClose, onTabMouseDown,
       <div ref={scrollRef} style={{
         display: 'flex', alignItems: 'center', gap: 2,
         flex: 1, overflowX: 'auto', overflowY: 'hidden',
-        scrollbarWidth: 'none',
         padding: '0 0 1px',
       }}>
         {tabs.map(tab => {
@@ -750,7 +751,7 @@ function LeafPanel({ leaf, getTileLabel, renderTile, isInteracting, onActivate, 
           onCloseToRight={onCloseToRight}
         />
       )}
-      <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minHeight: 0 }}>
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minHeight: 0, background: theme.surface.panel }}>
         {isEmpty ? (
           <EmptyPanel onAddTile={onAddTile} onLaunchTemplate={onLaunchTemplate} />
         ) : (
@@ -943,9 +944,9 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
         {node.children.map((child, i) => (
           <React.Fragment key={child.id}>
             <div style={{
-              flex: `0 0 ${node.sizes[i]}%`,
-              width: node.direction === 'horizontal' ? `${node.sizes[i]}%` : undefined,
-              height: node.direction === 'vertical' ? `${node.sizes[i]}%` : undefined,
+              flexGrow: node.sizes[i],
+              flexShrink: 1,
+              flexBasis: 0,
               minWidth: node.direction === 'horizontal' ? getNodeMinWidth(child, getTileType) : 0,
               minHeight: 0,
               display: 'flex',
@@ -962,7 +963,8 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
                 onInteractionChange={setPanelInteractionActive}
                 onResize={delta => {
                   const el = document.querySelector(`[data-split-id="${node.id}"]`) as HTMLElement
-                  const totalPx = el ? (node.direction === 'horizontal' ? el.clientWidth : el.clientHeight) : 800
+                  const containerPx = el ? (node.direction === 'horizontal' ? el.clientWidth : el.clientHeight) : 800
+                  const totalPx = Math.max(1, containerPx - (Math.max(0, node.children.length - 1) * PANEL_SPLIT_GUTTER_PX))
                   handleResize(node.id, i, delta, totalPx)
                 }}
               />
@@ -980,7 +982,7 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
       onWheel={e => e.stopPropagation()}
     >
       {/* Panel tree */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
         {renderNode(root)}
       </div>
 

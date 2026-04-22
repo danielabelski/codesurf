@@ -5,7 +5,7 @@ import { Type } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { useTileColor } from '../TileColorContext'
-import { ensureMonacoConfigured } from '../monaco'
+import { ensureMonacoConfigured, getMonacoThemeName } from '../monaco'
 import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 
 interface Props {
@@ -431,6 +431,7 @@ function FileNote({ tileId, filePath, initialContent }: { tileId?: string; fileP
   const loaded = useRef(false)
   const fonts = useAppFonts()
   const theme = useTheme()
+  const monacoTheme = getMonacoThemeName(theme)
   const previewRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -559,7 +560,7 @@ function FileNote({ tileId, filePath, initialContent }: { tileId?: string; fileP
             language="markdown"
             value={content}
             onChange={handleChange}
-            theme={theme.editor.monacoBase}
+            theme={monacoTheme}
             loading={<div style={{ height: '100%', background: theme.editor.background }} />}
             options={{
               minimap: { enabled: false },
@@ -574,7 +575,11 @@ function FileNote({ tileId, filePath, initialContent }: { tileId?: string; fileP
               folding: false,
               renderLineHighlight: 'none',
               overviewRulerBorder: false,
-              scrollbar: { verticalScrollbarSize: 4 }
+              scrollbar: {
+                vertical: 'auto',
+                horizontal: 'auto',
+                verticalScrollbarSize: 4,
+              }
             }}
           />
         ) : (

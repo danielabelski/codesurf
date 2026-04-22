@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
@@ -99,23 +97,12 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
         fontSize: fontSizeRef.current,
         lineHeight: 1,
         cursorBlink: true,
-        allowProposedApi: true,
         scrollback: 5000,
       })
 
       const fitAddon = new FitAddon()
-      const unicode11 = new Unicode11Addon()
       term.loadAddon(fitAddon)
-      term.loadAddon(unicode11)
-      term.unicode.activeVersion = '11'
       term.open(container)
-
-      // WebGL renderer handles Nerd Font / PUA glyphs better than the canvas renderer
-      try {
-        const webgl = new WebglAddon()
-        webgl.onContextLoss(() => { webgl.dispose() })
-        term.loadAddon(webgl)
-      } catch { /* fall back to canvas renderer */ }
 
       // Apply padding inside xterm element so viewport bg covers behind it
       const xtermEl = container.querySelector('.xterm') as HTMLElement | null

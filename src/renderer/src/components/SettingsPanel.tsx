@@ -1540,7 +1540,7 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
                           </button>
                           {/* Show in sidebar toggle (ON by default) */}
                           <button
-                            title={isHiddenFromSidebar ? 'Show in sidebar' : 'Hide from sidebar'}
+                            title={isHiddenFromSidebar ? 'Show in sidebar and footer' : 'Hide from sidebar and footer'}
                             onClick={() => {
                               const next = isHiddenFromSidebar
                                 ? (settings.hiddenFromSidebarExtIds ?? []).filter(id => id !== ext.id)
@@ -1722,13 +1722,8 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
           {/* Nav items — grouped */}
           <div style={{ flex: 1, overflowY: 'auto' }}>
             {(['app', 'customise', 'system'] as const).map(group => {
-              // When the extensions gallery is enabled, hide the legacy
-              // Settings > Extensions nav entry. Section code is kept intact
-              // so we can restore instantly by flipping the flag off.
-              const galleryEnabled = settings.extensionsGalleryEnabled !== false
               const groupSections = SECTIONS
                 .filter(s => s.group === group)
-                .filter(s => !(galleryEnabled && s.id === 'extensions'))
               const groupLabel = group === 'app' ? 'App' : group === 'customise' ? 'Customise' : 'System'
               return (
                 <div key={group}>
@@ -1817,4 +1812,3 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
 }
 
 export { FontTokenEditor } from './settings/FontTokenEditor'
-

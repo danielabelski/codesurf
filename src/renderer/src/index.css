@@ -229,17 +229,6 @@ button:focus-visible,
   background: transparent;
 }
 
-.sidebar-scroll-container {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.sidebar-scroll-container::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-  display: none;
-}
-
 /* Terminal activity pulse */
 @keyframes pulse-glow {
   0%, 100% { box-shadow: 0 0 4px #3fb950; }
@@ -272,9 +261,19 @@ button:focus-visible,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #424242;
+  background: transparent;
   border-radius: 3px;
+  transition: background-color 0.18s ease;
 }
-::-webkit-scrollbar-thumb:hover {
+.scrollbar-visible {
+  scrollbar-color: #424242 transparent;
+}
+.scrollbar-visible:hover {
+  scrollbar-color: #555 transparent;
+}
+.scrollbar-visible::-webkit-scrollbar-thumb {
+  background: #424242;
+}
+.scrollbar-visible::-webkit-scrollbar-thumb:hover {
   background: #555;
 }

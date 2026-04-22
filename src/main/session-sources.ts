@@ -77,6 +77,12 @@ const EXTERNAL_SESSION_HEAD_SAMPLE_BYTES = 128 * 1024
 const EXTERNAL_SESSION_TAIL_SAMPLE_BYTES = 4 * 1024 * 1024
 const MAX_SESSION_LISTING_JSON_BYTES = 2 * 1024 * 1024
 const MAX_SESSION_LISTING_TEXT_SAMPLE_BYTES = 16 * 1024
+const CLAUDE_SESSION_LISTING_HEAD_BYTES = 24 * 1024
+const CLAUDE_SESSION_LISTING_TAIL_BYTES = 96 * 1024
+const CLAUDE_SESSION_EXACT_SCAN_MAX_BYTES = 256 * 1024
+const CODEX_SESSION_LISTING_HEAD_BYTES = 24 * 1024
+const CODEX_SESSION_LISTING_TAIL_BYTES = 96 * 1024
+const CODEX_SESSION_EXACT_SCAN_MAX_BYTES = 256 * 1024
 const externalSessionCache = new Map<string, { at: number; entries: AggregatedSessionEntry[] }>()
 const externalSessionStateCache = new Map<string, CachedExternalSessionState>()
 const externalSessionFullStateCache = new Map<string, CachedExternalSessionState>()
@@ -268,8 +274,19 @@ function sessionTitleFromText(fallback: string, text: string | null | undefined)
   return trimmed.split(/\r?\n/, 1)[0].slice(0, 80)
 }
 
+function normalizeSessionPath(path: string | null | undefined): string {
+  return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function pathBelongsToWorkspace(workspacePath: string | null | undefined, sessionProjectPath: string | null | undefined): boolean {
+  const workspace = normalizeSessionPath(workspacePath)
+  const project = normalizeSessionPath(sessionProjectPath)
+  if (!workspace || !project) return false
+  return project === workspace || project.startsWith(`${workspace}/`)
+}
+
 function pathScope(workspacePath: string | null | undefined, sessionProjectPath: string | null | undefined, fallback: SessionScope = 'user'): SessionScope {
-  if (workspacePath && sessionProjectPath && workspacePath === sessionProjectPath) return 'project'
+  if (pathBelongsToWorkspace(workspacePath, sessionProjectPath)) return 'project'
   return fallback
 }
 
@@ -396,15 +413,187 @@ function parseJsonlLines(raw: string): string[] {
     .filter(Boolean)
 }
 
+function getClaudeProjectPathCandidate(evt: Record<string, any> | null): string | null {
+  if (!evt) return null
+  const candidate = typeof evt.cwd === 'string' ? evt.cwd
+    : typeof evt.workingDirectory === 'string' ? evt.workingDirectory
+    : typeof evt.projectPath === 'string' ? evt.projectPath
+    : typeof evt.project?.path === 'string' ? evt.project.path
+    : typeof evt.meta?.cwd === 'string' ? evt.meta.cwd
+    : typeof evt.session?.cwd === 'string' ? evt.session.cwd
+    : null
+  return candidate && candidate.startsWith('/') ? candidate : null
+}
+
+function getClaudeRole(evt: Record<string, any> | null): ChatRole | null {
+  if (!evt) return null
+  return roleFromUnknown(evt.message?.role) ?? roleFromUnknown(evt.type) ?? roleFromUnknown(evt.role)
+}
+
+function extractClaudeContentText(
+  content: unknown,
+  options?: {
+    includeThinking?: boolean
+    includeToolResults?: boolean
+  },
+): string {
+  if (!Array.isArray(content)) return extractTextParts(content)
+
+  return content.map(part => {
+    if (typeof part === 'string') return part
+    const type = typeof part?.type === 'string' ? part.type : ''
+    if (type === 'text') return typeof part.text === 'string' ? part.text : ''
+    if (type === 'thinking') {
+      if (!options?.includeThinking) return ''
+      return typeof part.thinking === 'string' ? part.thinking : typeof part.text === 'string' ? part.text : ''
+    }
+    if (type === 'tool_result') {
+      return options?.includeToolResults ? extractTextParts(part.content) : ''
+    }
+    if (type === 'input_text') return typeof part.text === 'string' ? part.text : typeof part.input_text === 'string' ? part.input_text : ''
+    if (type === 'output_text') return typeof part.text === 'string' ? part.text : typeof part.output_text === 'string' ? part.output_text : ''
+    if (type === 'tool_use') return ''
+    return extractTextParts(part)
+  }).filter(Boolean).join('\n\n').trim()
+}
+
+function getClaudeEventText(
+  evt: Record<string, any> | null,
+  options?: {
+    includeThinking?: boolean
+    includeToolResults?: boolean
+  },
+): string {
+  if (!evt) return ''
+  return extractClaudeContentText(evt.message?.content ?? evt.content, options).trim()
+}
+
+function isClaudeToolResultOnly(evt: Record<string, any> | null): boolean {
+  const content = evt?.message?.content
+  return Array.isArray(content) && content.length > 0 && content.every(part => part?.type === 'tool_result')
+}
+
+function shouldImportClaudeEvent(evt: Record<string, any> | null): boolean {
+  const role = getClaudeRole(evt)
+  if (!role || role === 'system') return false
+  if (role === 'user' && isClaudeToolResultOnly(evt)) return false
+  return true
+}
+
+function getClaudeModel(evt: Record<string, any> | null): string {
+  if (!evt) return ''
+  const candidate = typeof evt.message?.model === 'string' ? evt.message.model
+    : typeof evt.advisorModel === 'string' ? evt.advisorModel
+    : typeof evt.model === 'string' ? evt.model
+    : ''
+  return candidate.trim()
+}
+
+function encodeClaudeProjectDirName(workspacePath: string): string {
+  return workspacePath.replace(/\\/g, '/').replace(/\//g, '-')
+}
+
+type ClaudeListingMeta = {
+  sessionId: string | null
+  title: string
+  lastMessage: string | null
+  messageCount: number
+  projectPath: string | null
+  model: string
+  gitBranch: string | null
+}
+
+function scanClaudeListingLines(
+  lines: string[],
+  meta: {
+    sessionId: string | null
+    projectPath: string | null
+    model: string
+    gitBranch: string | null
+    firstUserPrompt: string | null
+    lastPrompt: string | null
+    lastAssistantText: string | null
+    messageCount: number
+  },
+  options?: { countMessages?: boolean },
+): void {
+  for (const line of lines) {
+    const evt = parseJsonObject(line)
+    if (!evt) continue
+
+    if (!meta.projectPath) meta.projectPath = getClaudeProjectPathCandidate(evt)
+    if (!meta.sessionId && typeof evt.sessionId === 'string' && evt.sessionId.trim()) meta.sessionId = evt.sessionId.trim()
+    if (!meta.model) meta.model = getClaudeModel(evt)
+    if (!meta.gitBranch && typeof evt.gitBranch === 'string' && evt.gitBranch.trim()) meta.gitBranch = evt.gitBranch.trim()
+
+    if (!meta.lastPrompt && evt.type === 'last-prompt' && typeof evt.lastPrompt === 'string' && evt.lastPrompt.trim()) {
+      meta.lastPrompt = truncate(evt.lastPrompt, 400)
+    }
+
+    if (!shouldImportClaudeEvent(evt)) continue
+
+    const role = getClaudeRole(evt)
+    const text = truncate(getClaudeEventText(evt), 400)
+    if (!text) continue
+
+    if (options?.countMessages) meta.messageCount += 1
+    if (role === 'user' && !meta.firstUserPrompt) meta.firstUserPrompt = text
+    if (role === 'assistant') meta.lastAssistantText = text
+  }
+}
+
+async function readClaudeListingMeta(
+  filePath: string,
+  stat: import('fs').Stats,
+  fallbackProjectPath?: string | null,
+): Promise<ClaudeListingMeta> {
+  const baseMeta = {
+    sessionId: basename(filePath, '.jsonl'),
+    projectPath: fallbackProjectPath ?? null,
+    model: '',
+    gitBranch: null as string | null,
+    firstUserPrompt: null as string | null,
+    lastPrompt: null as string | null,
+    lastAssistantText: null as string | null,
+    messageCount: 0,
+  }
+
+  if (stat.size <= CLAUDE_SESSION_EXACT_SCAN_MAX_BYTES) {
+    const raw = await readTextSafe(filePath)
+    scanClaudeListingLines(parseJsonlLines(raw ?? ''), baseMeta, { countMessages: true })
+  } else {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, CLAUDE_SESSION_LISTING_HEAD_BYTES),
+      readTextTailSafe(filePath, CLAUDE_SESSION_LISTING_TAIL_BYTES),
+    ])
+    scanClaudeListingLines(parseJsonlLines(headRaw ?? ''), baseMeta)
+    scanClaudeListingLines(parseJsonlLines(tailRaw ?? ''), baseMeta)
+  }
+
+  const title = sessionTitleFromText('Claude session', baseMeta.lastPrompt ?? baseMeta.firstUserPrompt ?? baseMeta.lastAssistantText)
+  return {
+    sessionId: baseMeta.sessionId,
+    title,
+    lastMessage: baseMeta.lastAssistantText ?? baseMeta.lastPrompt ?? baseMeta.firstUserPrompt,
+    messageCount: baseMeta.messageCount,
+    projectPath: baseMeta.projectPath,
+    model: baseMeta.model,
+    gitBranch: baseMeta.gitBranch,
+  }
+}
+
 function parseClaudeLine(line: string, index: number): ImportedChatMessage | null {
   try {
     const evt = JSON.parse(line)
-    const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
-    if (!role || typeof evt?.content !== 'string') return null
+    if (!shouldImportClaudeEvent(evt)) return null
+    const role = getClaudeRole(evt)
+    if (!role) return null
+    const text = getClaudeEventText(evt)
+    if (!text) return null
     return makeImportedMessage(
       `claude-${index}`,
       role,
-      evt.content,
+      text,
       Date.parse(evt?.timestamp ?? '') || Date.now() + index,
     )
   } catch {
@@ -825,79 +1014,97 @@ async function listCodeSurfSessionFiles(workspacePath: string | null): Promise<A
 }
 
 async function listClaudeSessions(workspacePath: string | null): Promise<AggregatedSessionEntry[]> {
-  const dir = join(homedir(), '.claude', 'transcripts')
-  if (!(await fileExists(dir))) return []
+  const projectRoot = join(homedir(), '.claude', 'projects')
+  const transcriptRoot = join(homedir(), '.claude', 'transcripts')
+  const candidateFiles = new Map<string, string | null>()
 
-  const files = (await fs.readdir(dir))
-    .filter(name => name.endsWith('.jsonl'))
-    .map(name => join(dir, name))
+  if (workspacePath) {
+    const exactProjectDir = join(projectRoot, encodeClaudeProjectDirName(workspacePath))
+    if (await fileExists(exactProjectDir)) {
+      try {
+        const names = await fs.readdir(exactProjectDir)
+        for (const name of names) {
+          if (!name.endsWith('.jsonl')) continue
+          candidateFiles.set(join(exactProjectDir, name), workspacePath)
+        }
+      } catch {
+        // ignore unreadable Claude project dir
+      }
+    }
+  }
 
-  const withStat = await Promise.all(files.map(async filePath => ({ filePath, stat: await statSafe(filePath) })))
+  if (candidateFiles.size === 0 && await fileExists(projectRoot)) {
+    const files = await listFilesRecursive(projectRoot, path => extname(path).toLowerCase() === '.jsonl', 2)
+    for (const filePath of files) candidateFiles.set(filePath, null)
+  }
+
+  if (await fileExists(transcriptRoot)) {
+    try {
+      const names = await fs.readdir(transcriptRoot)
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue
+        const filePath = join(transcriptRoot, name)
+        if (!candidateFiles.has(filePath)) candidateFiles.set(filePath, null)
+      }
+    } catch {
+      // ignore unreadable transcript dir
+    }
+  }
+
+  const withStat = await Promise.all(
+    [...candidateFiles.entries()].map(async ([filePath, projectPathHint]) => ({
+      filePath,
+      projectPathHint,
+      stat: await statSafe(filePath),
+    })),
+  )
   const recent = withStat
     .filter(item => item.stat?.isFile())
     .sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0))
     .slice(0, 500)
 
-  const entries = await Promise.all(recent.map(async ({ filePath, stat }) => {
-    let lastMessage: string | null = null
-    let messageCount = 0
-    let projectPath: string | null = null
-
-    try {
-      await scanJsonlFile(filePath, (line) => {
-        messageCount += 1
-        try {
-          const evt = JSON.parse(line)
-          // Claude emits the session root in several shapes depending on
-          // version — pick the first one that looks like an absolute path.
-          if (!projectPath) {
-            const candidate = typeof evt?.cwd === 'string' ? evt.cwd
-              : typeof evt?.workingDirectory === 'string' ? evt.workingDirectory
-              : typeof evt?.projectPath === 'string' ? evt.projectPath
-              : typeof evt?.project?.path === 'string' ? evt.project.path
-              : typeof evt?.meta?.cwd === 'string' ? evt.meta.cwd
-              : typeof evt?.session?.cwd === 'string' ? evt.session.cwd
-              : null
-            if (candidate && candidate.startsWith('/')) projectPath = candidate
-          }
-          if (typeof evt?.content === 'string' && evt.content.trim()) {
-            lastMessage = truncate(evt.content)
-          }
-        } catch {
-          // ignore malformed line
-        }
-      })
-    } catch {
-      // ignore unreadable transcript
-    }
+  const entries = await Promise.all(recent.map(async ({ filePath, projectPathHint, stat }) => {
+    const listing = await readClaudeListingMeta(filePath, stat!, projectPathHint)
 
     return {
       id: `claude:${filePath}`,
       source: 'claude' as const,
-      scope: pathScope(workspacePath, projectPath, 'user'),
+      scope: pathScope(workspacePath, listing.projectPath, 'user'),
       tileId: null,
-      sessionId: basename(filePath, '.jsonl'),
+      sessionId: listing.sessionId,
       provider: 'claude',
-      model: '',
-      messageCount,
-      lastMessage,
+      model: listing.model,
+      messageCount: listing.messageCount,
+      lastMessage: listing.lastMessage,
       updatedAt: stat?.mtimeMs ?? 0,
+      sizeBytes: stat?.size ?? 0,
       filePath,
-      title: sessionTitleFromText('Claude session', lastMessage),
-      projectPath,
+      title: listing.title,
+      projectPath: listing.projectPath,
       sourceLabel: 'Claude',
-      sourceDetail: 'Transcript',
+      sourceDetail: listing.gitBranch ?? undefined,
       canOpenInChat: true,
       canOpenInApp: true,
       resumeBin: 'claude',
-      resumeArgs: ['--resume', basename(filePath, '.jsonl')],
+      resumeArgs: listing.sessionId ? ['--resume', listing.sessionId] : ['--resume'],
     }
   }))
 
   return entries
 }
 
-function parseCodexTimestamp(filePath: string): number {
+type CodexListingMeta = {
+  sessionId: string | null
+  title: string
+  lastMessage: string | null
+  messageCount: number
+  projectPath: string | null
+  model: string
+  gitBranch: string | null
+  createdAt: number
+}
+
+function parseCodexCreatedTimestamp(filePath: string): number {
   const base = basename(filePath)
   const match = base.match(/rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/)
   if (!match) return 0
@@ -905,69 +1112,195 @@ function parseCodexTimestamp(filePath: string): number {
   return Date.parse(`${y}-${m}-${d}T${hh}:${mm}:${ss}Z`) || 0
 }
 
+function scanCodexListingLines(
+  lines: string[],
+  meta: {
+    sessionId: string | null
+    projectPath: string | null
+    model: string
+    gitBranch: string | null
+    threadName: string | null
+    firstUserPrompt: string | null
+    lastAssistantText: string | null
+    lastConversationText: string | null
+    messageCount: number
+    createdAt: number
+  },
+  options?: { countMessages?: boolean },
+): void {
+  for (const line of lines) {
+    const evt = parseJsonObject(line)
+    if (!evt) continue
+    const payload = evt.payload
+
+    if (evt.type === 'session_meta') {
+      if (!meta.sessionId && typeof payload?.id === 'string' && payload.id.trim()) meta.sessionId = payload.id.trim()
+      if (!meta.projectPath && typeof payload?.cwd === 'string' && payload.cwd.trim()) meta.projectPath = payload.cwd.trim()
+      if (!meta.model && typeof payload?.model === 'string' && payload.model.trim()) meta.model = payload.model.trim()
+      if (!meta.gitBranch && typeof payload?.git?.branch === 'string' && payload.git.branch.trim()) meta.gitBranch = payload.git.branch.trim()
+      if (!meta.createdAt) {
+        const createdAt = Date.parse(typeof payload?.timestamp === 'string' ? payload.timestamp : '')
+        if (Number.isFinite(createdAt) && createdAt > 0) meta.createdAt = createdAt
+      }
+      continue
+    }
+
+    if (evt.type === 'turn_context') {
+      if (!meta.projectPath && typeof payload?.cwd === 'string' && payload.cwd.trim()) meta.projectPath = payload.cwd.trim()
+      if (!meta.model && typeof payload?.model === 'string' && payload.model.trim()) meta.model = payload.model.trim()
+      continue
+    }
+
+    if (evt.type === 'event_msg') {
+      if (!meta.threadName && payload?.type === 'thread_name_updated' && typeof payload?.thread_name === 'string' && payload.thread_name.trim()) {
+        meta.threadName = truncate(payload.thread_name, 200)
+      }
+      if (!meta.firstUserPrompt && payload?.type === 'user_message' && typeof payload?.message === 'string') {
+        meta.firstUserPrompt = truncate(stripCodexSystemMarkers(payload.message), 400)
+      }
+      continue
+    }
+
+    if (evt.type !== 'response_item' || payload?.type !== 'message') continue
+    const role = roleFromUnknown(payload?.role)
+    if (!role || role === 'system') continue
+
+    const text = truncate(stripCodexSystemMarkers(extractTextParts(payload.content)), 400)
+    if (!text) continue
+
+    if (options?.countMessages) meta.messageCount += 1
+    if (role === 'user' && !meta.firstUserPrompt) meta.firstUserPrompt = text
+    if (role === 'assistant') meta.lastAssistantText = text
+    meta.lastConversationText = text
+  }
+}
+
+async function readCodexListingMeta(
+  filePath: string,
+  stat: import('fs').Stats,
+): Promise<CodexListingMeta> {
+  const baseMeta = {
+    sessionId: basename(filePath, '.jsonl'),
+    projectPath: null as string | null,
+    model: '',
+    gitBranch: null as string | null,
+    threadName: null as string | null,
+    firstUserPrompt: null as string | null,
+    lastAssistantText: null as string | null,
+    lastConversationText: null as string | null,
+    messageCount: 0,
+    createdAt: parseCodexCreatedTimestamp(filePath),
+  }
+
+  if (stat.size <= CODEX_SESSION_EXACT_SCAN_MAX_BYTES) {
+    const raw = await readTextSafe(filePath)
+    scanCodexListingLines(parseJsonlLines(raw ?? ''), baseMeta, { countMessages: true })
+  } else {
+    const [headRaw, tailRaw] = await Promise.all([
+      readTextPreviewSafe(filePath, CODEX_SESSION_LISTING_HEAD_BYTES),
+      readTextTailSafe(filePath, CODEX_SESSION_LISTING_TAIL_BYTES),
+    ])
+    scanCodexListingLines(parseJsonlLines(headRaw ?? ''), baseMeta)
+    scanCodexListingLines(parseJsonlLines(tailRaw ?? ''), baseMeta)
+  }
+
+  const title = sessionTitleFromText('Codex session', baseMeta.threadName ?? baseMeta.firstUserPrompt ?? baseMeta.lastAssistantText ?? baseMeta.lastConversationText)
+  return {
+    sessionId: baseMeta.sessionId,
+    title,
+    lastMessage: baseMeta.lastAssistantText ?? baseMeta.lastConversationText ?? baseMeta.firstUserPrompt,
+    messageCount: baseMeta.messageCount,
+    projectPath: baseMeta.projectPath,
+    model: baseMeta.model,
+    gitBranch: baseMeta.gitBranch,
+    createdAt: baseMeta.createdAt,
+  }
+}
+
 async function listCodexSessions(workspacePath: string | null): Promise<AggregatedSessionEntry[]> {
   const root = join(homedir(), '.codex', 'sessions')
   if (!(await fileExists(root))) return []
 
-  const files = await listFilesRecursive(root, path => {
+  const withStat = await Promise.all((await listFilesRecursive(root, path => {
     const ext = extname(path).toLowerCase()
     return ext === '.jsonl' || ext === '.json'
-  }, 4)
+  }, 4)).map(async filePath => ({
+    filePath,
+    stat: await statSafe(filePath),
+  })))
 
-  const recent = files
-    .map(filePath => ({ filePath, ts: parseCodexTimestamp(filePath) }))
-    .sort((a, b) => b.ts - a.ts)
+  const recent = withStat
+    .filter(item => item.stat?.isFile())
+    .sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0))
     .slice(0, 500)
 
-  const entries = await Promise.all(recent.map(async ({ filePath, ts }) => {
-    let lastMessage: string | null = null
-    let messageCount = 0
-    let projectPath: string | null = null
-    let model = ''
-    let sessionId: string | null = basename(filePath, extname(filePath))
+  const entries = await Promise.all(recent.map(async ({ filePath, stat }) => {
+    const ext = extname(filePath).toLowerCase()
+    let listing: CodexListingMeta = {
+      sessionId: basename(filePath, ext),
+      title: 'Codex session',
+      lastMessage: null,
+      messageCount: 0,
+      projectPath: null,
+      model: '',
+      gitBranch: null,
+      createdAt: parseCodexCreatedTimestamp(filePath),
+    }
 
-    try {
-      await scanJsonlFile(filePath, (line) => {
-        try {
-          const evt = JSON.parse(line)
-          if (!projectPath && typeof evt?.payload?.cwd === 'string') projectPath = evt.payload.cwd
-          if (!model && typeof evt?.payload?.model === 'string') model = evt.payload.model
-          if (!sessionId && typeof evt?.payload?.id === 'string') sessionId = evt.payload.id
-          if (evt?.type === 'response_item' && evt?.payload?.type === 'message') {
-            const text = truncate(stripCodexSystemMarkers(extractTextParts(evt.payload.content)))
-            if (text) {
-              messageCount += 1
-              lastMessage = text
-            }
-          }
-        } catch {
-          // ignore malformed line
+    if (ext === '.jsonl') {
+      listing = await readCodexListingMeta(filePath, stat!)
+    } else {
+      const parsed = await readJsonSafe(filePath, { maxBytes: MAX_SESSION_LISTING_JSON_BYTES })
+      if (parsed && typeof parsed === 'object') {
+        const messages = Array.isArray(parsed.items) ? parsed.items.filter(item => item?.type === 'message') : []
+        const meaningfulMessages = messages
+          .map(item => ({
+            role: roleFromUnknown(item?.role),
+            text: truncate(stripCodexSystemMarkers(extractTextParts(item?.content)), 400),
+          }))
+          .filter(item => item.role && item.role !== 'system' && item.text) as Array<{ role: ChatRole; text: string }>
+        const firstUserPrompt = meaningfulMessages.find(item => item.role === 'user')?.text ?? null
+        const lastAssistantText = [...meaningfulMessages].reverse().find(item => item.role === 'assistant')?.text ?? null
+        const lastConversationText = meaningfulMessages[meaningfulMessages.length - 1]?.text ?? null
+        const sessionId = typeof parsed.session?.id === 'string' && parsed.session.id.trim()
+          ? parsed.session.id.trim()
+          : basename(filePath, ext)
+        const createdAt = Date.parse(typeof parsed.session?.timestamp === 'string' ? parsed.session.timestamp : '') || parseCodexCreatedTimestamp(filePath)
+        const title = sessionTitleFromText('Codex session', firstUserPrompt ?? lastAssistantText ?? lastConversationText)
+        listing = {
+          sessionId,
+          title,
+          lastMessage: lastAssistantText ?? lastConversationText ?? firstUserPrompt,
+          messageCount: meaningfulMessages.length,
+          projectPath: null,
+          model: typeof parsed.session?.model === 'string' ? parsed.session.model.trim() : '',
+          gitBranch: typeof parsed.session?.git?.branch === 'string' ? parsed.session.git.branch.trim() : null,
+          createdAt,
         }
-      })
-    } catch {
-      // ignore unreadable file
+      }
     }
 
     return {
       id: `codex:${filePath}`,
       source: 'codex' as const,
-      scope: pathScope(workspacePath, projectPath, 'user'),
+      scope: pathScope(workspacePath, listing.projectPath, 'user'),
       tileId: null,
-      sessionId,
+      sessionId: listing.sessionId,
       provider: 'codex',
-      model,
-      messageCount,
-      lastMessage,
-      updatedAt: ts,
+      model: listing.model,
+      messageCount: listing.messageCount,
+      lastMessage: listing.lastMessage,
+      updatedAt: stat?.mtimeMs ?? listing.createdAt,
+      sizeBytes: stat?.size ?? 0,
       filePath,
-      title: sessionTitleFromText('Codex session', lastMessage),
-      projectPath,
+      title: listing.title,
+      projectPath: listing.projectPath,
       sourceLabel: 'Codex',
-      sourceDetail: model || 'CLI session',
+      sourceDetail: listing.gitBranch ?? undefined,
       canOpenInChat: true,
       canOpenInApp: true,
       resumeBin: 'codex',
-      resumeArgs: sessionId ? ['resume', sessionId] : ['resume'],
+      resumeArgs: listing.sessionId ? ['resume', listing.sessionId] : ['resume'],
     }
   }))
 

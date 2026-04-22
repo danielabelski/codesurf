@@ -2,6 +2,7 @@ import React from 'react'
 import type { Workspace } from '../../../../shared/types'
 import { basename } from '../../utils/dnd'
 import { compareSessionsWithSelectionPriority } from './session-ordering'
+import { normalizeSidebarPath } from './path-utils'
 import type { DisplaySessionEntry, ProjectListEntry, SessionEntry, ThreadSortMode } from './types'
 
 export function deriveProjectsFromWorkspaces(workspaces: Workspace[]): ProjectListEntry[] {
@@ -65,9 +66,7 @@ export function formatSessionTitleForSidebar(title: string, hardCap = 160): stri
   return clean.length > hardCap ? `${clean.slice(0, hardCap).trimEnd()}…` : clean
 }
 
-export function normalizeSidebarPath(path: string | null | undefined): string {
-  return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
-}
+export { normalizeSidebarPath, sidebarPathBelongsToProject } from './path-utils'
 
 export function getProjectDisplayLabel(project: { name: string; path: string }): string {
   const normalizedPath = normalizeSidebarPath(project.path)
@@ -229,6 +228,7 @@ export const RESOURCE_ITEMS = [
   { id: 'skills', label: 'Skills', icon: <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M7 1l1.8 3.6L13 5.2l-3 2.9.7 4.1L7 10.3 3.3 12.2l.7-4.1-3-2.9 4.2-.6L7 1z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></svg> },
   { id: 'tools', label: 'Tools', icon: <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M8.5 2.5a3 3 0 00-4.2 4.2L2 9l1 2 2 1 2.3-2.3a3 3 0 004.2-4.2L9.5 7.5 8 7l-.5-1.5L9.5 3.5z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /></svg> },
   { id: 'agents', label: 'Agents', icon: <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="4.5" r="2.5" stroke="currentColor" strokeWidth="1.2" /><path d="M2.5 12.5c0-2.5 2-4.5 4.5-4.5s4.5 2 4.5 4.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></svg> },
+  { id: 'extensions', label: 'Extensions', icon: <svg width="16" height="16" viewBox="0 0 14 14" fill="none"><path d="M6 1.5h2a.5.5 0 0 1 .5.5v1.5H8a1 1 0 0 0-1 1 1 1 0 0 0 1 1h.5V7a.5.5 0 0 1-.5.5H6V7a1 1 0 0 0-1-1 1 1 0 0 0-1 1v.5H2.5A.5.5 0 0 1 2 7V5.5h.5a1 1 0 0 0 1-1 1 1 0 0 0-1-1H2V2a.5.5 0 0 1 .5-.5H6z" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" /></svg> },
 ] as const
 
 // Use the shared brand icons (same set the ChatTile provider menu renders)

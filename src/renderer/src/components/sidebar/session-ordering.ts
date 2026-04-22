@@ -1,13 +1,10 @@
 import type { ProjectListEntry, SessionEntry } from './types'
+import { normalizeSidebarPath, sidebarPathBelongsToProject } from './path-utils'
 
 export interface ActiveSessionMatchState {
   activeChatTileId?: string | null
   activeChatSessionId?: string | null
   activeChatSessionEntryId?: string | null
-}
-
-function normalizeSidebarPath(path: string | null | undefined): string {
-  return String(path ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
 export function isSessionActive(session: SessionEntry, activeState: ActiveSessionMatchState): boolean {
@@ -65,7 +62,7 @@ export function sortProjectEntriesByRecentSession(
     for (const session of sessions) {
       const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
       const belongs = sessionProjectPath
-        ? sessionProjectPath === projectPath
+        ? sidebarPathBelongsToProject(projectPath, sessionProjectPath)
         : workspaceIdSet.has(session.workspaceId)
       if (!belongs) continue
       latest = Math.max(latest, session.updatedAt)

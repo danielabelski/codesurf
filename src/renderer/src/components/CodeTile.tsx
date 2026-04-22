@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
-import { ensureMonacoConfigured } from '../monaco'
+import { ensureMonacoConfigured, getMonacoThemeName } from '../monaco'
 
 interface Props {
   filePath?: string
@@ -32,6 +32,7 @@ export function CodeTile({ filePath, initialContent = '' }: Props): JSX.Element 
   const isLoaded = useRef(false)
   const fonts = useAppFonts()
   const theme = useTheme()
+  const monacoTheme = getMonacoThemeName(theme)
 
   useEffect(() => {
     isLoaded.current = false
@@ -64,13 +65,13 @@ export function CodeTile({ filePath, initialContent = '' }: Props): JSX.Element 
   }, [])
 
   return (
-    <div style={{ width: '100%', height: '100%' }}>
+    <div style={{ width: '100%', height: '100%', background: theme.surface.panel }}>
       <Editor
         height="100%"
         language={getLang(filePath)}
         value={content}
         onChange={handleChange}
-        theme={theme.editor.monacoBase}
+        theme={monacoTheme}
         loading={
           <div style={{
             height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -91,6 +92,8 @@ export function CodeTile({ filePath, initialContent = '' }: Props): JSX.Element 
           overviewRulerBorder: false,
           hideCursorInOverviewRuler: true,
           scrollbar: {
+            vertical: 'auto',
+            horizontal: 'auto',
             verticalScrollbarSize: 6,
             horizontalScrollbarSize: 6
           },

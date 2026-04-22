@@ -267,7 +267,7 @@ interface ElectronAPI {
   extensions: {
     list(): Promise<Array<{ id: string; name: string; version: string; description?: string; author?: string; tier: 'safe' | 'power'; ui?: import('../../shared/types').ExtensionManifest['ui']; enabled: boolean; contributes?: import('../../shared/types').ExtensionManifest['contributes'] }>>
     listSidebar(workspacePath?: string | null): Promise<{
-      entries: Array<{ id: string; name: string }>
+      entries: Array<{ id: string; name: string; icon?: string | null; enabled: boolean }>
       tiles: import('../../shared/types').ExtensionTileContrib[]
     }>
     listTiles(): Promise<import('../../shared/types').ExtensionTileContrib[]>
