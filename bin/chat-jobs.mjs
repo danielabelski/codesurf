@@ -87,6 +87,26 @@ function sanitizeCodexStderrText(text) {
     .trim()
 }
 
+function sanitizeClaudeStderrText(text) {
+  if (!text) return ''
+  return String(text)
+    .replace(/\r\n/g, '\n')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim().length > 0)
+    .join('\n')
+    .trim()
+}
+
+function formatClaudeSdkError(error, stderrText) {
+  const message = error instanceof Error ? error.message : String(error)
+  const stderr = sanitizeClaudeStderrText(stderrText)
+  if (!stderr) return message
+  if (message && stderr.includes(message)) return stderr.slice(-6000)
+  return `${message}\n\nClaude Code stderr:\n${stderr}`.slice(-6000)
+}
+
 function normalizeCodexShellCommand(command) {
   const trimmed = String(command ?? '').trim()
   const quotedMatch = trimmed.match(/^\/bin\/zsh -lc '([\s\S]*)'$/)
@@ -509,6 +529,7 @@ export function createChatJobManager({ homeDir }) {
 
     const abortController = new AbortController()
     job.cancel = () => abortController.abort()
+    let claudeStderr = ''
 
     const modeMap = {
       default: 'default',
@@ -549,6 +570,7 @@ export function createChatJobManager({ homeDir }) {
       } : {}),
       thinking: thinkingMap[request.thinking ?? ''] ?? { type: 'adaptive' },
       cwd: workspaceDir || undefined,
+      stderr: data => { claudeStderr += data },
       ...(request.sessionId ? { resume: request.sessionId } : {}),
     }
 
@@ -640,7 +662,7 @@ export function createChatJobManager({ homeDir }) {
     } catch (error) {
       await appendEvent(job.id, {
         type: 'error',
-        error: error instanceof Error ? error.message : String(error),
+        error: formatClaudeSdkError(error, claudeStderr),
       })
       await appendEvent(job.id, { type: 'done' })
     }

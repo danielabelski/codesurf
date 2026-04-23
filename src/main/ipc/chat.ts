@@ -385,6 +385,7 @@ async function upsertRuntimeSessionState(req: ChatRequest, state: RuntimeChatSes
 
 // Active Claude SDK queries
 const activeQueries = new Map<string, Query>()
+const intentionallyClosedQueries = new WeakSet<Query>()
 // Live permission mode per card, so mid-thread mode switches (e.g. Default -> Bypass)
 // propagate into the running canUseTool closure. Keyed by cardId.
 const cardPermissionModes = new Map<string, string>()
@@ -400,6 +401,16 @@ const activeDaemonStreams = new Map<string, {
 // Stored session IDs for multi-turn conversations
 const sessionIds = new Map<string, string>()
 const execFileAsync = promisify(execFile)
+
+function isActiveQuery(cardId: string, query: Query): boolean {
+  return activeQueries.get(cardId) === query
+}
+
+function clearActiveQuery(cardId: string, query: Query): void {
+  if (isActiveQuery(cardId, query)) {
+    activeQueries.delete(cardId)
+  }
+}
 
 // ---- AskUserQuestion interactive-form handling ----------------------------
 interface AskUserQuestionOption {
@@ -583,6 +594,27 @@ function sanitizeToolOutputText(text: string | null | undefined): string {
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function sanitizeClaudeStderrText(text: string | null | undefined): string {
+  if (!text) return ''
+
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .split('\n')
+    .map(line => line.trimEnd())
+    .filter(line => line.trim().length > 0)
+    .join('\n')
+    .trim()
+}
+
+function formatClaudeSdkError(error: unknown, stderrText: string): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const stderr = sanitizeClaudeStderrText(stderrText)
+  if (!stderr) return message
+  if (message && stderr.includes(message)) return stderr.slice(-6000)
+  return `${message}\n\nClaude Code stderr:\n${stderr}`.slice(-6000)
 }
 
 function bufferHttpResponse(res: http.IncomingMessage): Promise<string> {
@@ -1654,6 +1686,7 @@ function chatClaude(req: ChatRequest): void {
   })
 
   const abortController = new AbortController()
+  let claudeStderr = ''
 
   // Map mode from UI to SDK permission mode
   const modeMap: Record<string, string> = {
@@ -1835,6 +1868,7 @@ function chatClaude(req: ChatRequest): void {
     ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
     // Use detected system binary, not the SDK's bundled cli.js
     ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
+    stderr: (data: string) => { claudeStderr += data },
   }
 
   // Resume existing session for multi-turn
@@ -1873,6 +1907,10 @@ function chatClaude(req: ChatRequest): void {
       let currentThinkingId: string | null = null
       try {
         for await (const msg of q) {
+          if (!isActiveQuery(req.cardId, q)) {
+            return
+          }
+
           // Capture session_id from the first message we receive
           if (!capturedSessionId) {
             const sid = (msg as any).session_id
@@ -1979,6 +2017,9 @@ function chatClaude(req: ChatRequest): void {
               elapsed: (msg as any).elapsed_time_seconds,
             })
           } else if (msg.type === 'result') {
+            if (!isActiveQuery(req.cardId, q)) {
+              return
+            }
             const result = msg as any
             if (!assistantText && typeof result.result === 'string' && result.result.trim()) {
               assistantText = result.result
@@ -1999,7 +2040,7 @@ function chatClaude(req: ChatRequest): void {
               resultText: result.result,
               sessionId: result.session_id,
             })
-            activeQueries.delete(req.cardId)
+            clearActiveQuery(req.cardId, q)
             // Also capture from result if we missed earlier
             if (result.session_id && !sessionIds.has(req.cardId)) {
               sessionIds.set(req.cardId, result.session_id)
@@ -2008,7 +2049,7 @@ function chatClaude(req: ChatRequest): void {
         }
 
         // Generator finished -- ensure done is sent
-        if (activeQueries.has(req.cardId)) {
+        if (isActiveQuery(req.cardId, q)) {
           if (assistantText.trim()) {
             runtimeSession.messages = [
               ...runtimeMessages,
@@ -2018,10 +2059,16 @@ function chatClaude(req: ChatRequest): void {
           runtimeSession.isStreaming = false
           void upsertRuntimeSessionState(req, runtimeSession)
           sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
-          activeQueries.delete(req.cardId)
+          clearActiveQuery(req.cardId, q)
         }
       } catch (err: any) {
-        log('generator error:', err.message ?? String(err))
+        if (intentionallyClosedQueries.has(q) || !isActiveQuery(req.cardId, q)) {
+          log('generator closed for inactive Claude query:', err?.message ?? String(err))
+          clearActiveQuery(req.cardId, q)
+          return
+        }
+        const errorMessage = formatClaudeSdkError(err, claudeStderr)
+        log('generator error:', errorMessage)
         if (assistantText.trim()) {
           runtimeSession.messages = [
             ...runtimeMessages,
@@ -2030,13 +2077,14 @@ function chatClaude(req: ChatRequest): void {
         }
         runtimeSession.isStreaming = false
         void upsertRuntimeSessionState(req, runtimeSession)
-        sendStream(req.cardId, { type: 'error', error: err.message ?? String(err) })
-        activeQueries.delete(req.cardId)
+        sendStream(req.cardId, { type: 'error', error: errorMessage })
+        clearActiveQuery(req.cardId, q)
       }
     })()
   } catch (err: any) {
-    log('query() threw:', err.message ?? String(err))
-    sendStream(req.cardId, { type: 'error', error: err.message ?? String(err) })
+    const errorMessage = formatClaudeSdkError(err, claudeStderr)
+    log('query() threw:', errorMessage)
+    sendStream(req.cardId, { type: 'error', error: errorMessage })
   }
 }
 
@@ -3282,6 +3330,7 @@ export function registerChatIPC(): void {
       // Foreground turns replace the current foreground execution for this card.
       const existingQuery = activeQueries.get(req.cardId)
       if (existingQuery) {
+        intentionallyClosedQueries.add(existingQuery)
         existingQuery.close()
         activeQueries.delete(req.cardId)
       }
@@ -3439,6 +3488,7 @@ export function registerChatIPC(): void {
   ipcMain.handle('chat:stop', async (_, cardId: string) => {
     const q = activeQueries.get(cardId)
     if (q) {
+      intentionallyClosedQueries.add(q)
       q.close()
       activeQueries.delete(cardId)
     }

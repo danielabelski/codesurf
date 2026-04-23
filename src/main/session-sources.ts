@@ -88,6 +88,14 @@ const externalSessionStateCache = new Map<string, CachedExternalSessionState>()
 const externalSessionFullStateCache = new Map<string, CachedExternalSessionState>()
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
 
+export function isExternalSessionImportableInChat(
+  messageCount: number | null | undefined,
+  lastMessage: string | null | undefined,
+): boolean {
+  if (Number.isFinite(messageCount) && Number(messageCount) > 0) return true
+  return typeof lastMessage === 'string' && lastMessage.trim().length > 0
+}
+
 function getProjectCodeSurfDir(workspacePath: string): string {
   return join(workspacePath, '.codesurf')
 }
@@ -1091,7 +1099,7 @@ async function listClaudeSessions(workspacePath: string | null): Promise<Aggrega
       projectPath: listing.projectPath,
       sourceLabel: 'Claude',
       sourceDetail: listing.gitBranch ?? undefined,
-      canOpenInChat: true,
+      canOpenInChat: isExternalSessionImportableInChat(listing.messageCount, listing.lastMessage),
       canOpenInApp: true,
       resumeBin: 'claude',
       resumeArgs: listing.sessionId ? ['--resume', listing.sessionId] : ['--resume'],
@@ -1305,7 +1313,7 @@ async function listCodexSessions(workspacePath: string | null): Promise<Aggregat
       projectPath: listing.projectPath,
       sourceLabel: 'Codex',
       sourceDetail: listing.gitBranch ?? undefined,
-      canOpenInChat: true,
+      canOpenInChat: isExternalSessionImportableInChat(listing.messageCount, listing.lastMessage),
       canOpenInApp: true,
       resumeBin: 'codex',
       resumeArgs: listing.sessionId ? ['resume', listing.sessionId] : ['resume'],
@@ -1451,9 +1459,10 @@ async function listOpenCodeSessions(workspacePath: string | null): Promise<Aggre
   const entries = await Promise.all(recent.map(async ({ filePath, ts }) => {
     const parsed = await readJsonSafe(filePath, { maxBytes: MAX_SESSION_LISTING_JSON_BYTES })
     const projectPath = typeof parsed?.projectPath === 'string' ? parsed.projectPath : null
-    const lastMessage = Array.isArray(parsed?.messages)
-      ? truncate(parsed.messages.filter((m: any) => typeof m?.content === 'string' && m.role !== 'system').slice(-1)[0]?.content)
-      : null
+    const meaningfulMessages = Array.isArray(parsed?.messages)
+      ? parsed.messages.filter((m: any) => typeof m?.content === 'string' && m.role !== 'system' && m.content.trim())
+      : []
+    const lastMessage = truncate(meaningfulMessages.slice(-1)[0]?.content)
     const sessionId = typeof parsed?.id === 'string' ? parsed.id : basename(filePath, '.json')
 
     return {
@@ -1464,7 +1473,7 @@ async function listOpenCodeSessions(workspacePath: string | null): Promise<Aggre
       sessionId,
       provider: 'opencode',
       model: typeof parsed?.model === 'string' ? parsed.model : '',
-      messageCount: Array.isArray(parsed?.messages) ? parsed.messages.length : 0,
+      messageCount: meaningfulMessages.length,
       lastMessage,
       updatedAt: ts || Date.parse(parsed?.startTime ?? '') || 0,
       filePath,
@@ -1472,7 +1481,7 @@ async function listOpenCodeSessions(workspacePath: string | null): Promise<Aggre
       projectPath,
       sourceLabel: 'OpenCode',
       sourceDetail: typeof parsed?.model === 'string' ? parsed.model : 'Conversation',
-      canOpenInChat: true,
+      canOpenInChat: isExternalSessionImportableInChat(meaningfulMessages.length, lastMessage),
       canOpenInApp: true,
       resumeBin: 'opencode',
       resumeArgs: sessionId ? ['--session', sessionId] : [],

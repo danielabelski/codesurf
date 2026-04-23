@@ -1,8 +1,6 @@
 import { ipcMain } from 'electron'
 import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
-import { tmpdir } from 'os'
-import { spawn } from 'child_process'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
 import type { TileState } from '../../shared/types'
@@ -32,7 +30,22 @@ import { daemonClient } from '../daemon/client'
 import { getIndexerStatus, indexAllSources, listThreadsFromDb, renameIndexedThread } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
 import { readArchivedSessionIds, writeArchivedSessionIds } from '../storage/sessionArchives'
-import { getAgentPath, getShellEnvPath } from '../agent-paths'
+import { getAgentPath } from '../agent-paths'
+import {
+  GENERATED_TITLE_MAX_CHARS,
+  GENERATED_TITLE_MODEL,
+  buildSessionTitlePrompt,
+  buildTitleTranscript,
+  cleanSessionTitleCandidate,
+  createSessionTitleGenerationGate,
+  deriveFallbackSessionTitle,
+  describeSessionTitleModelCandidate,
+  hasSessionTitleChangedDuringGeneration,
+  redactTitleGenerationError,
+  resolveSessionTitleModelCandidates,
+  sanitizeGeneratedSessionTitle,
+  type SessionTitleModelCandidate,
+} from './session-title-generation'
 
 interface TileSessionSummary {
   version: 1
@@ -47,38 +60,16 @@ interface TileSessionSummary {
 }
 
 const tileSessionSummaryCache = new Map<string, TileSessionSummary | null>()
-const GENERATED_TITLE_MODEL = 'claude-haiku-4-5-20251001'
-const GENERATED_TITLE_MAX_CHARS = 120
-const GENERATED_TITLE_MAX_WORDS = 4
-const GENERATED_TITLE_TRANSCRIPT_BUDGET = 90_000
-const GENERATED_TITLE_HEAD_MESSAGES = 32
-const GENERATED_TITLE_TAIL_MESSAGES = 96
+const sessionTitleGenerationGate = createSessionTitleGenerationGate<{
+  ok: boolean
+  title?: string
+  error?: string
+}>()
 
 function truncateSessionText(text: string | null | undefined, length = 120): string | null {
   if (!text) return null
   const normalized = text.replace(/\s+/g, ' ').trim()
   return normalized.length > length ? normalized.slice(0, length) : normalized
-}
-
-function cleanSessionTitleCandidate(text: string | null | undefined, hardCap = 80): string | null {
-  const trimmed = String(text ?? '').trim()
-  if (!trimmed) return null
-
-  let next = trimmed
-    .replace(/\r\n/g, '\n')
-    .split(/\r?\n/, 1)[0]
-    .trim()
-
-  next = next.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-  next = next.replace(/`([^`]+)`/g, '$1')
-  next = next.replace(/^[-*+]\s+/, '')
-  next = next.replace(/^\[[ xX]\]\s+/, '')
-  next = next.replace(/^\d+\.\s+/, '')
-  next = next.replace(/^#+\s+/, '')
-  next = next.replace(/\s+/g, ' ').trim()
-
-  if (!next) return null
-  return next.length > hardCap ? `${next.slice(0, hardCap).trimEnd()}…` : next
 }
 
 function sessionTitleFromText(text: string | null | undefined, provider: string): string {
@@ -139,93 +130,14 @@ function isLocalSessionEntry(sessionEntryId: string): boolean {
     || sessionEntryId.startsWith('codesurf-job:')
 }
 
-function trimTranscriptText(text: string, maxChars = 2_000): string {
-  const normalized = text.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= maxChars) return normalized
-  return `${normalized.slice(0, maxChars).trimEnd()}…`
-}
-
-function formatTranscriptMessage(message: Record<string, unknown>, index: number): string | null {
-  const role = typeof message.role === 'string' && message.role.trim()
-    ? message.role.trim()
-    : 'unknown'
-  const content = typeof message.content === 'string' ? trimTranscriptText(message.content) : ''
-  if (!content) return null
-  return `${index + 1}. ${role}: ${content}`
-}
-
-function buildTitleTranscript(messages: Record<string, unknown>[]): string {
-  if (messages.length === 0) return ''
-
-  const selected = messages.length <= (GENERATED_TITLE_HEAD_MESSAGES + GENERATED_TITLE_TAIL_MESSAGES)
-    ? messages
-    : [
-        ...messages.slice(0, GENERATED_TITLE_HEAD_MESSAGES),
-        ...messages.slice(-GENERATED_TITLE_TAIL_MESSAGES),
-      ]
-
-  const chunks: string[] = []
-  let used = 0
-
-  for (let index = 0; index < selected.length; index += 1) {
-    if (messages.length > selected.length && index === GENERATED_TITLE_HEAD_MESSAGES) {
-      const omittedCount = messages.length - selected.length
-      const omitted = `... ${omittedCount} earlier middle messages omitted for brevity ...`
-      if (used + omitted.length > GENERATED_TITLE_TRANSCRIPT_BUDGET) break
-      chunks.push(omitted)
-      used += omitted.length + 1
-    }
-
-    const rawIndex = messages.length <= selected.length
-      ? index
-      : (index < GENERATED_TITLE_HEAD_MESSAGES ? index : messages.length - (selected.length - index))
-    const formatted = formatTranscriptMessage(selected[index] as Record<string, unknown>, rawIndex)
-    if (!formatted) continue
-    if (used + formatted.length > GENERATED_TITLE_TRANSCRIPT_BUDGET) break
-    chunks.push(formatted)
-    used += formatted.length + 1
-  }
-
-  return chunks.join('\n')
-}
-
-function sanitizeGeneratedTitle(raw: string, fallback: string): string {
-  const rawText = String(raw ?? '').trim()
-  if (!rawText) return fallback
-
-  const jsonMatch = rawText.match(/\{[\s\S]*"title"\s*:\s*"([^"]+)"[\s\S]*\}/)
-  const candidates = [
-    jsonMatch?.[1],
-    ...rawText.split(/\r?\n/),
-  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-
-  for (const candidate of candidates) {
-    const normalized = candidate
-      .replace(/^["'`]+|["'`]+$/g, '')
-      .replace(/^title\s*:\s*/i, '')
-      .replace(/^new title\s*:\s*/i, '')
-      .trim()
-
-    if (!normalized) continue
-    if (/^(i('|’)ll|i will|let me|here('|’)s|here is|the title is|i can|sure|okay|based on)\b/i.test(normalized)) continue
-    if (/\b(read|reading|transcript|understand|generate|appropriate title|topic)\b/i.test(normalized)) continue
-
-    const cleaned = cleanSessionTitleCandidate(normalized, GENERATED_TITLE_MAX_CHARS)
-    if (!cleaned) continue
-
-    const words = cleaned.split(/\s+/).filter(Boolean)
-    if (words.length === 0) continue
-    return words.slice(0, GENERATED_TITLE_MAX_WORDS).join(' ')
-  }
-
-  return fallback
-}
-
-async function generateTitleWithClaude(prompt: string): Promise<string> {
+async function generateTitleWithClaude(prompt: string, model = GENERATED_TITLE_MODEL): Promise<string> {
   const options: Options = {
-    model: GENERATED_TITLE_MODEL,
+    model,
     permissionMode: 'plan' as any,
     thinking: { type: 'disabled' } as any,
+    tools: [],
+    maxTurns: 1,
+    includePartialMessages: false,
     persistSession: false,
   }
   const claudePath = getAgentPath('claude')
@@ -251,108 +163,146 @@ async function generateTitleWithClaude(prompt: string): Promise<string> {
   return text.trim()
 }
 
-async function generateTitleWithCodex(prompt: string): Promise<string> {
-  const codexBin = getAgentPath('codex') || 'codex'
-  const shellPath = getShellEnvPath()
-  const tempBase = join(tmpdir(), `codesurf-title-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  const schemaPath = `${tempBase}.schema.json`
-  const outputPath = `${tempBase}.out.json`
-
-  await fs.writeFile(schemaPath, JSON.stringify({
-    type: 'object',
-    properties: {
-      title: { type: 'string' },
-    },
-    required: ['title'],
-    additionalProperties: false,
-  }, null, 2))
-
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      const proc = spawn(codexBin, [
-        'exec',
-        '--model',
-        'gpt-5.1-codex-mini',
-        '--sandbox',
-        'read-only',
-        '--skip-git-repo-check',
-        '--ignore-user-config',
-        '--ephemeral',
-        '--color',
-        'never',
-        '--output-schema',
-        schemaPath,
-        '--output-last-message',
-        outputPath,
-        prompt,
-      ], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-      })
-
-      let stderr = ''
-
-      proc.stderr?.on('data', chunk => { stderr += chunk.toString() })
-      proc.on('error', reject)
-      proc.on('close', async code => {
-        if (code !== 0) {
-          reject(new Error(stderr.trim() || `Codex exited with ${code}`))
-          return
-        }
-
-        try {
-          const raw = (await fs.readFile(outputPath, 'utf8')).trim()
-          const parsed = JSON.parse(raw) as { title?: unknown }
-          if (typeof parsed.title === 'string' && parsed.title.trim()) {
-            resolve(parsed.title.trim())
-            return
-          }
-          reject(new Error('Codex returned an invalid title payload.'))
-        } catch (error) {
-          reject(error)
-        }
-      })
-    })
-  } finally {
-    await Promise.allSettled([
-      fs.unlink(schemaPath),
-      fs.unlink(outputPath),
-    ])
+function extractOpenAiCompatibleTitleText(payload: any): string {
+  const choices = Array.isArray(payload?.choices) ? payload.choices : []
+  for (const choice of choices) {
+    const messageContent = choice?.message?.content
+    if (typeof messageContent === 'string' && messageContent.trim()) return messageContent.trim()
+    if (Array.isArray(messageContent)) {
+      const text = messageContent
+        .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+        .filter(Boolean)
+        .join('')
+        .trim()
+      if (text) return text
+    }
+    if (typeof choice?.text === 'string' && choice.text.trim()) return choice.text.trim()
   }
+
+  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim()
+  if (Array.isArray(payload?.output)) {
+    const text = payload.output
+      .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
+      .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+      .filter(Boolean)
+      .join('')
+      .trim()
+    if (text) return text
+  }
+
+  return ''
+}
+
+function providerErrorMessage(payload: any, raw: string, fallback: string): string {
+  const value = payload?.error?.message
+    ?? payload?.error?.details
+    ?? payload?.error
+    ?? payload?.message
+    ?? raw
+    ?? fallback
+  return redactTitleGenerationError(String(value || fallback)).slice(0, 500)
+}
+
+function buildOpenAiCompatibleTitleBody(candidate: Extract<SessionTitleModelCandidate, { kind: 'openai-compatible' }>, prompt: string): Record<string, unknown> {
+  const messages = [
+    {
+      role: 'system',
+      content: 'Generate compact thread titles only. Return JSON only: {"title":"Three Four Word Title"}. No markdown, no explanation, no tools.',
+    },
+    { role: 'user', content: prompt },
+  ]
+
+  if (candidate.provider === 'openai') {
+    return {
+      model: candidate.model,
+      stream: false,
+      max_completion_tokens: 80,
+      messages,
+    }
+  }
+
+  return {
+    model: candidate.model,
+    stream: false,
+    max_tokens: 80,
+    temperature: 0,
+    messages,
+  }
+}
+
+async function generateTitleWithOpenAiCompatible(prompt: string, candidate: Extract<SessionTitleModelCandidate, { kind: 'openai-compatible' }>): Promise<string> {
+  const response = await fetch(`${candidate.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${candidate.apiKey}`,
+      ...(candidate.provider === 'openrouter' ? {
+        'HTTP-Referer': 'https://codesurf.local',
+        'X-Title': 'CodeSurf',
+      } : {}),
+    },
+    body: JSON.stringify(buildOpenAiCompatibleTitleBody(candidate, prompt)),
+    signal: AbortSignal.timeout(20_000),
+  })
+
+  const raw = await response.text()
+  let payload: any = null
+  try {
+    payload = raw.trim() ? JSON.parse(raw) : null
+  } catch {
+    payload = null
+  }
+
+  if (!response.ok) {
+    throw new Error(`${candidate.provider} title request failed (${response.status}): ${providerErrorMessage(payload, raw, response.statusText)}`)
+  }
+
+  const text = extractOpenAiCompatibleTitleText(payload)
+  if (!text) throw new Error(`${candidate.provider} title request returned no text`)
+  return text
+}
+
+async function generateTitleWithCandidate(prompt: string, candidate: SessionTitleModelCandidate): Promise<string> {
+  if (candidate.kind === 'claude-sdk') return generateTitleWithClaude(prompt, candidate.model)
+  return generateTitleWithOpenAiCompatible(prompt, candidate)
 }
 
 async function generateSessionTitleFromMessages(session: SessionEntryHint | AggregatedSessionEntry, messages: Record<string, unknown>[]): Promise<string> {
   const transcript = buildTitleTranscript(messages)
-  const fallbackTitle = cleanSessionTitleCandidate(session.title, GENERATED_TITLE_MAX_CHARS) ?? 'Untitled thread'
+  const fallbackTitle = cleanSessionTitleCandidate(session.title, GENERATED_TITLE_MAX_CHARS) ?? 'Untitled Chat Thread'
   if (!transcript) return fallbackTitle
 
-  const prompt = [
-    'You rename chat threads.',
-    'Return exactly one title, 2 to 4 words.',
-    'Return only those words.',
-    'No sentences. No explanation. No preamble. No markdown. No quotes.',
-    'Prefer the concrete task, bug, feature, or decision being discussed.',
-    'Do not use quotes, markdown, prefixes, or trailing punctuation unless required.',
-    'Avoid generic titles like "Conversation", "Help", or "Question".',
-    `Keep it under ${GENERATED_TITLE_MAX_CHARS} characters.`,
-    '',
-    `Current title: ${fallbackTitle}`,
-    `Provider: ${session.provider || 'unknown'}`,
-    `Model: ${session.model || 'unknown'}`,
-    `Message count: ${messages.length}`,
-    '',
-    'Transcript:',
+  const prompt = buildSessionTitlePrompt({
+    currentTitle: fallbackTitle,
+    provider: session.provider || 'unknown',
+    model: session.model || 'unknown',
+    messageCount: messages.length,
     transcript,
-  ].join('\n')
+  })
 
-  try {
-    const generated = await generateTitleWithClaude(prompt)
-    return sanitizeGeneratedTitle(generated, fallbackTitle)
-  } catch (error) {
-    console.warn('[sessions] Claude title generation failed, falling back to Codex:', error)
-    const generated = await generateTitleWithCodex(prompt)
-    return sanitizeGeneratedTitle(generated, fallbackTitle)
+  const candidates = resolveSessionTitleModelCandidates({
+    provider: session.provider,
+    model: session.model,
+  })
+
+  for (const candidate of candidates) {
+    try {
+      const generated = await generateTitleWithCandidate(prompt, candidate)
+      return sanitizeGeneratedSessionTitle(generated, fallbackTitle)
+    } catch (error) {
+      console.warn(
+        `[sessions] ${describeSessionTitleModelCandidate(candidate)} title generation failed, trying next title fallback:`,
+        redactTitleGenerationError(error),
+      )
+    }
   }
+
+  if (candidates.length === 0) {
+    console.warn('[sessions] No provider title model configured, using local title fallback.')
+  } else {
+    console.warn('[sessions] Provider title generation failed, using local title fallback.')
+  }
+  return deriveFallbackSessionTitle(transcript, fallbackTitle)
 }
 
 async function loadSessionStateForTitleGeneration(
@@ -410,6 +360,21 @@ async function loadSessionStateForTitleGeneration(
   }
 
   throw new Error('Could not load session transcript.')
+}
+
+async function getCurrentSessionTitleForTitleGeneration(
+  workspaceId: string,
+  sessionEntryId: string,
+  workspacePath: string | null,
+): Promise<string | null> {
+  if (isLocalSessionEntry(sessionEntryId)) {
+    const localSessions = await daemonClient.listLocalSessions(workspaceId).catch(() => [])
+    const match = localSessions.find(session => session.id === sessionEntryId)
+    return typeof match?.title === 'string' ? match.title : null
+  }
+
+  const match = listThreadsFromDb(workspacePath).find(session => session.id === sessionEntryId)
+  return typeof match?.title === 'string' ? match.title : null
 }
 
 function sameTileSessionSummary(a: TileSessionSummary | null, b: TileSessionSummary | null): boolean {
@@ -899,47 +864,59 @@ export function registerCanvasIPC(): void {
     entryHint?: SessionEntryHint | null,
   ) => {
     assertSafeWorkspaceArtifactId(workspaceId)
+    const generationKey = `${workspaceId}::${sessionEntryId}`
+    const initialTitle = entryHint?.title ?? ''
 
-    const state = await loadSessionStateForTitleGeneration(workspaceId, sessionEntryId, entryHint ?? null)
-    if (!Array.isArray(state.messages) || state.messages.length === 0) {
-      return { ok: false, error: 'Session has no transcript to summarize.' }
-    }
+    return await sessionTitleGenerationGate.run(generationKey, async () => {
+      const state = await loadSessionStateForTitleGeneration(workspaceId, sessionEntryId, entryHint ?? null)
+      if (!Array.isArray(state.messages) || state.messages.length === 0) {
+        return { ok: false, error: 'Session has no transcript to title.' }
+      }
 
-    const title = await generateSessionTitleFromMessages({
-      id: sessionEntryId,
-      source: (entryHint?.source ?? 'codesurf') as SessionEntryHint['source'],
-      provider: state.provider,
-      model: state.model,
-      messageCount: state.messages.length,
-      title: entryHint?.title ?? '',
-      sessionId: entryHint?.sessionId ?? null,
-      filePath: entryHint?.filePath,
-      projectPath: entryHint?.projectPath ?? null,
-    }, state.messages)
+      const title = await generateSessionTitleFromMessages({
+        id: sessionEntryId,
+        source: (entryHint?.source ?? 'codesurf') as SessionEntryHint['source'],
+        provider: state.provider,
+        model: state.model,
+        messageCount: state.messages.length,
+        title: initialTitle,
+        sessionId: entryHint?.sessionId ?? null,
+        filePath: entryHint?.filePath,
+        projectPath: entryHint?.projectPath ?? null,
+      }, state.messages)
 
-    if (!title.trim()) {
-      return { ok: false, error: 'Title generation returned an empty title.' }
-    }
+      if (!title.trim()) {
+        return { ok: false, error: 'Title generation returned an empty title.' }
+      }
 
-    const workspacePath = await getWorkspacePathById(workspaceId)
-    const result = isLocalSessionEntry(sessionEntryId)
-      ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
+      const workspacePath = await getWorkspacePathById(workspaceId)
+      const currentTitle = await getCurrentSessionTitleForTitleGeneration(workspaceId, sessionEntryId, workspacePath)
+      if (hasSessionTitleChangedDuringGeneration(initialTitle, currentTitle)) {
+        return {
           ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }))
-      : await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }))
+          error: 'Thread title changed while title generation was running; generated title was not applied.',
+        }
+      }
 
-    if (result.ok) {
-      if (!isLocalSessionEntry(sessionEntryId)) renameIndexedThread(sessionEntryId, title)
-      broadcastSessionsChangedNow(workspaceId)
-    }
+      const result = isLocalSessionEntry(sessionEntryId)
+        ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        : await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          }))
 
-    return result.ok
-      ? { ok: true, title }
-      : { ok: false, error: result.error || 'Failed to apply generated title.' }
+      if (result.ok) {
+        if (!isLocalSessionEntry(sessionEntryId)) renameIndexedThread(sessionEntryId, title)
+        broadcastSessionsChangedNow(workspaceId, 'generateSessionTitle')
+      }
+
+      return result.ok
+        ? { ok: true, title }
+        : { ok: false, error: result.error || 'Failed to apply generated title.' }
+    })
   })
 
   ipcMain.handle('canvas:setSessionArchived', async (_, workspaceId: string, sessionEntryId: string, archived: boolean) => {

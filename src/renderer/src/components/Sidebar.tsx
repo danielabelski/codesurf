@@ -15,6 +15,13 @@ import {
   getSessionRowExtraWidth,
   getSessionArchiveActionLabel,
 } from './sidebar/session-actions'
+import {
+  getSessionTitleGenerationIndicator,
+  getSessionTitleGenerationKey,
+  type SessionTitleGenerationState,
+  updateSessionTitleGenerationState,
+} from './sidebar/session-title-generation'
+import { getSessionOpenIntent } from './sidebar/session-open'
 import { SIDEBAR_MENU_WIDTH, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SpinnerIcon } from './sidebar/utils'
 import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
@@ -504,7 +511,7 @@ export function Sidebar({
   const [loadedSessionWorkspaceIds, setLoadedSessionWorkspaceIds] = useState<string[]>([])
   const [hoveredProjectRow, setHoveredProjectRow] = useState<string | null>(null)
   const [archivingSessionId, setArchivingSessionId] = useState<string | null>(null)
-  const [generatingSessionTitleId, setGeneratingSessionTitleId] = useState<string | null>(null)
+  const [generatingSessionTitleIds, setGeneratingSessionTitleIds] = useState<SessionTitleGenerationState>({})
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
   const [textDialog, setTextDialog] = useState<SidebarTextDialogState | null>(null)
@@ -1055,9 +1062,25 @@ export function Sidebar({
     void setSessionArchived(session, !(session.isArchived === true))
   }, [setSessionArchived])
 
+  const openSessionFromSidebar = useCallback((session: SessionEntry, options?: { persist?: boolean }) => {
+    const intent = getSessionOpenIntent(session, options)
+    if (intent.kind === 'chat') {
+      onOpenSessionInChat(session, { persist: intent.persist })
+      return
+    }
+    if (intent.kind === 'app') {
+      onOpenSessionInApp(session)
+      return
+    }
+    if (intent.kind === 'file' && session.filePath) {
+      onOpenFile(session.filePath, { persist: intent.persist })
+    }
+  }, [onOpenFile, onOpenSessionInApp, onOpenSessionInChat])
+
   const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
     const items: MenuItem[] = []
-    const sessionKey = `${session.workspaceId}::${session.id}`
+    const sessionKey = getSessionTitleGenerationKey(session.workspaceId, session.id)
+    const titleGeneration = getSessionTitleGenerationIndicator(generatingSessionTitleIds[sessionKey] === true)
     if (session.canOpenInChat !== false) {
       items.push({ label: 'Open in Chat', action: () => onOpenSessionInChat(session) })
       items.push({ label: 'Open in Pinned Tab', action: () => onOpenSessionInChat(session, { persist: true }) })
@@ -1121,10 +1144,10 @@ export function Sidebar({
     })
 
     items.push({
-      label: generatingSessionTitleId === sessionKey ? 'Generating Title...' : 'Generate Title',
+      label: titleGeneration.menuLabel,
       action: () => {
-        if (generatingSessionTitleId === sessionKey) return
-        setGeneratingSessionTitleId(sessionKey)
+        if (generatingSessionTitleIds[sessionKey] === true) return
+        setGeneratingSessionTitleIds(prev => updateSessionTitleGenerationState(prev, sessionKey, true))
         void window.electron.canvas.generateSessionTitle(session.workspaceId, session.id, {
           id: session.id,
           source: session.source,
@@ -1149,7 +1172,7 @@ export function Sidebar({
             window.alert(error instanceof Error ? error.message : String(error))
           })
           .finally(() => {
-            setGeneratingSessionTitleId(prev => prev === sessionKey ? null : prev)
+            setGeneratingSessionTitleIds(prev => updateSessionTitleGenerationState(prev, sessionKey, false))
           })
       },
     })
@@ -1160,7 +1183,7 @@ export function Sidebar({
     })
 
     return items.length > 0 ? items : [{ label: 'No actions available', action: () => {} }]
-  }, [generatingSessionTitleId, loadWorkspaceSessions, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, setSessionArchived, workspaceById])
+  }, [generatingSessionTitleIds, loadWorkspaceSessions, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, setSessionArchived, workspaceById])
 
   const handleOpenProjectFromSidebar = useCallback(() => {
     onOpenFolder()
@@ -1683,20 +1706,24 @@ export function Sidebar({
                       (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
                       || streamingSnapshot.entryIds.has(session.id)
                     const sessionMeta = formatSessionSidebarMeta(session)
+                    const sessionTitleKey = getSessionTitleGenerationKey(session.workspaceId, session.id)
+                    const titleGeneration = getSessionTitleGenerationIndicator(generatingSessionTitleIds[sessionTitleKey] === true, sessionMeta)
+                    const rowMeta = titleGeneration.rowMeta
+                    const isGeneratingTitle = generatingSessionTitleIds[sessionTitleKey] === true
                     return (
                       <SessionSidebarRow
                         key={session.id}
                         label={formatSessionTitleForSidebar(session.title)}
-                        meta={sessionMeta}
-                        icon={<SessionSidebarIndicator session={session} streaming={isStreaming} muted={session.isArchived === true && !isSelected} theme={theme} />}
+                        meta={rowMeta}
+                        icon={<SessionSidebarIndicator session={session} streaming={isStreaming || isGeneratingTitle} muted={session.isArchived === true && !isSelected} theme={theme} />}
                         indent={Math.max(1, session.displayIndent + 1)}
                         indentUnit={6}
                         extraWidth={getSessionRowExtraWidth(session.checkpointCount)}
-                        title={`${session.title}${sessionMeta ? `\n${sessionMeta}` : ''}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}`}
+                        title={`${session.title}${sessionMeta ? `\n${sessionMeta}` : ''}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}${titleGeneration.rowTitleSuffix}`}
                         active={isSelected}
                         muted={session.isArchived === true && !isSelected}
-                        onClick={() => { onOpenSessionInChat(session) }}
-                        onDoubleClick={() => { onOpenSessionInChat(session, { persist: true }) }}
+                        onClick={() => { openSessionFromSidebar(session) }}
+                        onDoubleClick={() => { openSessionFromSidebar(session, { persist: true }) }}
                         onContextMenu={e => {
                           e.preventDefault()
                           setSessionCtx({ x: e.clientX, y: e.clientY, session })

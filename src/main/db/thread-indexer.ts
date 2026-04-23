@@ -178,15 +178,36 @@ async function runScan(): Promise<void> {
       source_mtime_ms: number
       source_size_bytes: number
       project_path: string | null
+      title: string | null
+      preview: string | null
+      message_count: number
+      can_open_in_chat: number
+      can_open_in_app: number
       deleted_at: string | null
     }>()
     for (const row of db.prepare(
-      `SELECT entry_id, source_mtime_ms, source_size_bytes, project_path, deleted_at FROM thread_index`,
-    ).all() as Array<{ entry_id: string; source_mtime_ms: number; source_size_bytes: number; project_path: string | null; deleted_at: string | null }>) {
+      `SELECT entry_id, source_mtime_ms, source_size_bytes, project_path, title, preview, message_count, can_open_in_chat, can_open_in_app, deleted_at FROM thread_index`,
+    ).all() as Array<{
+      entry_id: string
+      source_mtime_ms: number
+      source_size_bytes: number
+      project_path: string | null
+      title: string | null
+      preview: string | null
+      message_count: number
+      can_open_in_chat: number
+      can_open_in_app: number
+      deleted_at: string | null
+    }>) {
       existing.set(row.entry_id, {
         source_mtime_ms: row.source_mtime_ms,
         source_size_bytes: row.source_size_bytes,
         project_path: row.project_path,
+        title: row.title,
+        preview: row.preview,
+        message_count: row.message_count,
+        can_open_in_chat: row.can_open_in_chat,
+        can_open_in_app: row.can_open_in_app,
         deleted_at: row.deleted_at,
       })
     }
@@ -299,6 +320,11 @@ async function runScan(): Promise<void> {
           || prev.source_mtime_ms !== mtime
           || prev.source_size_bytes !== sizeBytes
           || (prev.project_path ?? null) !== (entry.projectPath ?? null)
+          || (prev.title ?? '') !== entry.title
+          || (prev.preview ?? null) !== (entry.lastMessage ?? null)
+          || prev.message_count !== (entry.messageCount ?? 0)
+          || prev.can_open_in_chat !== (entry.canOpenInChat ? 1 : 0)
+          || prev.can_open_in_app !== (entry.canOpenInApp ? 1 : 0)
         ) {
           update.run(params)
           updates += 1

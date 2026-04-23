@@ -63,7 +63,7 @@
     "vite": "^7.3.1"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.79",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.118",
     "@monaco-editor/react": "^4.7.0",
     "@opencode-ai/sdk": "^1.2.27",
     "@streamdown/code": "^1.1.1",
@@ -107,8 +107,14 @@
       "node_modules/sharp/**"
     ],
     "extraResources": [
-      { "from": "examples/extensions/agent-kanban", "to": "bundled-extensions/agent-kanban" },
-      { "from": "bundled-extensions", "to": "bundled-extensions" }
+      {
+        "from": "examples/extensions/agent-kanban",
+        "to": "bundled-extensions/agent-kanban"
+      },
+      {
+        "from": "bundled-extensions",
+        "to": "bundled-extensions"
+      }
     ],
     "beforeBuild": "scripts/before-build.js",
     "icon": "resources/icon.png",
