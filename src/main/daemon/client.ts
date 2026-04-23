@@ -1,4 +1,4 @@
-import type { AppSettings, ExecutionHostRecord, ProjectRecord, Workspace } from '../../shared/types'
+import type { AppSettings, DashboardDreamingSummary, ExecutionHostRecord, ProjectRecord, Workspace } from '../../shared/types'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import { ensureDaemonRunning, getDaemonStatus, invalidateDaemonCache } from './manager'
 
@@ -99,6 +99,8 @@ export const daemonClient = {
       taskLabel: string | null
       status: string
       runMode?: string | null
+      workspaceId?: string | null
+      cardId?: string | null
       provider: string | null
       model: string | null
       workspaceDir: string | null
@@ -107,6 +109,7 @@ export const daemonClient = {
       completedAt?: string | null
       lastSequence: number
       sessionId?: string | null
+      initialPrompt?: string | null
       error: string | null
     }>
     summary: {
@@ -123,6 +126,7 @@ export const daemonClient = {
       startedAt: string
       appVersion: string | null
     }
+    dreaming?: DashboardDreamingSummary | null
   }> {
     return daemonRequest('/dashboard/api/jobs')
   },

@@ -2041,6 +2041,10 @@ const dreamingManager = createDreamingManager({
     : {}),
 })
 
+function refreshDreamingSettings() {
+  void dreamingManager.refreshAutoDreamSweep().catch(() => {})
+}
+
 function scheduleAutoDreamForWorkspace(workspaceId) {
   try {
     const materialized = getMaterializedWorkspace(workspaceId)
@@ -2052,6 +2056,25 @@ function scheduleAutoDreamForWorkspace(workspaceId) {
     }).catch(() => {})
   } catch {
     // ignore missing workspace state
+  }
+}
+
+async function getActiveWorkspaceDreamingSummary() {
+  const state = readWorkspaceState()
+  const active = getActiveWorkspace(state)
+  if (!active) return null
+  const materialized = materializeWorkspace(active, state.projects)
+  if (!materialized?.id) return null
+  const status = await dreamingManager.getDreamStatus(materialized.id)
+  return {
+    workspaceId: materialized.id,
+    workspaceName: materialized.name,
+    workspaceDir: materialized.path,
+    running: status.running,
+    activeRun: status.activeRun,
+    lastRun: status.lastRun,
+    state: status.state,
+    auto: status.auto,
   }
 }
 
@@ -2414,6 +2437,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         jobs,
         summary: summarizeDaemonJobs(jobs),
+        dreaming: await getActiveWorkspaceDreamingSummary().catch(() => null),
         daemon: {
           pid: process.pid,
           startedAt: STARTED_AT,
@@ -3261,6 +3285,7 @@ const server = createServer(async (req, res) => {
     if (method === 'POST' && url.pathname === '/settings') {
       const body = await parseRequestBody(req)
       writeSettings(typeof body?.settings === 'object' && body.settings ? body.settings : {})
+      refreshDreamingSettings()
       const state = readWorkspaceState()
       sendJson(res, 200, state.settings)
       return
@@ -3281,6 +3306,7 @@ const server = createServer(async (req, res) => {
           return
         }
         writeSettings(parsed)
+        refreshDreamingSettings()
         const state = readWorkspaceState()
         sendJson(res, 200, { ok: true, settings: state.settings })
       } catch (error) {

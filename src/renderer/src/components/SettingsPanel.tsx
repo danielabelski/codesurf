@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, lazy } from 'react'
-import type { AppSettings, ExecutionHostRecord, ExecutionMode, ToolPermissionGrant, Workspace } from '../../../shared/types'
+import type { AppSettings, AutoDreamSettings, ExecutionHostRecord, ExecutionMode, ToolPermissionGrant, Workspace } from '../../../shared/types'
 import { withDefaultSettings } from '../../../shared/types'
 import { Settings, Type, Monitor, FolderOpen, Plus, Trash2, ChevronDown, ChevronRight, RotateCcw, Puzzle, RefreshCw, Star, Wrench, Users, FileText, Globe, Eye, EyeOff, PanelRight, Pin, Shield } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
@@ -500,6 +500,15 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     }
   }, [persistSettings])
 
+  const updateAutoDreamPatch = useCallback((patch: Partial<AutoDreamSettings>) => {
+    updateSettingsPatch({
+      autoDream: {
+        ...settingsRef.current.autoDream,
+        ...patch,
+      },
+    })
+  }, [updateSettingsPatch])
+
   const saveExecutionHost = useCallback(async (host: ExecutionHostRecord) => {
     setExecutionHostsError(null)
     try {
@@ -729,6 +738,76 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
                 {daemonError}
               </div>
             )}
+            <SectionLabel label="Dreaming" />
+            <SettingRow
+              label="Auto-dream"
+              description="Let the daemon consolidate recent workspace sessions into generated .codesurf/DREAMING.md memory."
+            >
+              <Toggle
+                value={settings.autoDream.enabled}
+                onChange={enabled => updateAutoDreamPatch({ enabled })}
+              />
+            </SettingRow>
+            <SettingRow
+              label="Fresh sessions"
+              description="Minimum new or changed sessions required before the daemon starts an automatic dream."
+            >
+              <NumInput
+                value={settings.autoDream.minSessions}
+                min={1}
+                max={20}
+                onChange={value => updateAutoDreamPatch({ minSessions: Math.max(1, Math.min(20, Math.round(value || 1))) })}
+              />
+            </SettingRow>
+            <SettingRow
+              label="Cooldown"
+              description="Minimum minutes between successful automatic dreams. Manual runs are still available from the dream API."
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <NumInput
+                  value={Math.round((settings.autoDream.minIntervalMs ?? 0) / 60000)}
+                  min={0}
+                  max={240}
+                  onChange={value => updateAutoDreamPatch({ minIntervalMs: Math.max(0, Math.min(240, Math.round(value || 0))) * 60000 })}
+                />
+                <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled }}>min</span>
+              </div>
+            </SettingRow>
+            <details style={{ marginBottom: 8 }}>
+              <summary style={{ cursor: 'pointer', color: theme.text.disabled, fontSize: fonts.secondarySize, padding: '6px 2px' }}>
+                Advanced auto-dream cadence
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <SettingRow
+                  label="Sweep interval"
+                  description="Minutes between daemon background sweeps for externally written sessions. Set 0 to disable periodic sweeps."
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <NumInput
+                      value={Math.round((settings.autoDream.sweepMs ?? 0) / 60000)}
+                      min={0}
+                      max={120}
+                      onChange={value => updateAutoDreamPatch({ sweepMs: Math.max(0, Math.min(120, Math.round(value || 0))) * 60000 })}
+                    />
+                    <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled }}>min</span>
+                  </div>
+                </SettingRow>
+                <SettingRow
+                  label="Trigger debounce"
+                  description="Seconds to wait after session updates before evaluating auto-dream thresholds."
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <NumInput
+                      value={Math.round((settings.autoDream.debounceMs ?? 0) / 1000)}
+                      min={0}
+                      max={120}
+                      onChange={value => updateAutoDreamPatch({ debounceMs: Math.max(0, Math.min(120, Math.round(value || 0))) * 1000 })}
+                    />
+                    <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled }}>sec</span>
+                  </div>
+                </SettingRow>
+              </div>
+            </details>
             <SectionLabel label="Execution" />
             <SettingRow
               label="Default routing"

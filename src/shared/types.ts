@@ -37,6 +37,58 @@ export interface ExecutionPreference {
   hostId: string | null
 }
 
+export interface AutoDreamSettings {
+  enabled: boolean
+  minSessions: number
+  minIntervalMs: number
+  debounceMs: number
+  sweepMs: number
+}
+
+export interface DreamRunSummary {
+  id: string
+  workspaceId: string
+  workspaceName: string | null
+  workspaceDir: string
+  provider: string
+  model: string
+  status: string
+  requestedAt: string
+  startedAt: string
+  completedAt: string | null
+  sessionsReviewed: number
+  reviewedSessionIds: string[]
+  latestSessionUpdatedAt: string | null
+  outputPath: string | null
+  artifactPath: string | null
+  summary: string | null
+  promptPreview: string | null
+  error: string | null
+}
+
+export interface AutoDreamPolicySummary extends AutoDreamSettings {
+  pending: boolean
+}
+
+export interface DashboardDreamingSummary {
+  workspaceId: string
+  workspaceName: string | null
+  workspaceDir: string | null
+  running: boolean
+  activeRun: DreamRunSummary | null
+  lastRun: DreamRunSummary | null
+  state: {
+    workspaceId: string
+    lastRunId: string | null
+    lastCompletedAt: string | null
+    lastSuccessfulRunId: string | null
+    lastSuccessfulCompletedAt: string | null
+    lastReviewedAt: string | null
+    latestMemoryPath: string | null
+  } | null
+  auto: AutoDreamPolicySummary | null
+}
+
 export type BuiltinTileType = 'terminal' | 'note' | 'code' | 'image' | 'media' | 'kanban' | 'browser' | 'chat' | 'file' | 'files' | 'customisation'
 
 // ─── Customisation Data Types ──────────────────────────────────────────────
@@ -374,6 +426,8 @@ export interface AppSettings {
   linkOpenMode: 'browser-block' | 'external-browser'
   // Host-selection policy for chat and background execution.
   execution: ExecutionPreference
+  // Daemon-owned background memory consolidation.
+  autoDream: AutoDreamSettings
   // Local OpenAI-compat proxy endpoint remapping
   localProxyEnabled: boolean
   localProxyPort: number
@@ -471,6 +525,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: 'auto',
     hostId: null,
   },
+  autoDream: {
+    enabled: true,
+    minSessions: 3,
+    minIntervalMs: 30 * 60 * 1000,
+    debounceMs: 5_000,
+    sweepMs: 5 * 60 * 1000,
+  },
   localProxyEnabled: false,
   localProxyPort: 1337,
   pinnedExtensionIds: [],
@@ -529,6 +590,10 @@ export function withDefaultSettings(input: Partial<AppSettings> | null | undefin
     execution: {
       ...DEFAULT_SETTINGS.execution,
       ...(settings.execution ?? {}),
+    },
+    autoDream: {
+      ...DEFAULT_SETTINGS.autoDream,
+      ...(settings.autoDream ?? {}),
     },
     defaultTileSizes: {
       ...DEFAULT_SETTINGS.defaultTileSizes,

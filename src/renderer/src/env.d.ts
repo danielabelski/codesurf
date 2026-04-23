@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
  import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
- import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord } from '../../shared/types'
+ import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
 
 interface ElectronAPI {
   appearance: {
@@ -515,6 +515,7 @@ interface ElectronAPI {
           error: string | null
         }>
       }
+      dreaming: DashboardDreamingSummary | null
     }>
     restartDaemon(): Promise<{
       running: boolean

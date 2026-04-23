@@ -4,6 +4,7 @@ import { Cpu, Activity, ArrowUpRight, RefreshCw, RotateCcw, TriangleAlert } from
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { Tooltip } from './Tooltip'
+import { buildDreamingStatusSummary, type DashboardDreamingSummary, type DreamingStatusTone } from './mainStatusBarDreaming'
 
 type MemoryStats = {
   rss: number
@@ -53,6 +54,7 @@ type DaemonSummary = DaemonStatus & {
       error: string | null
     }>
   }
+  dreaming: DashboardDreamingSummary | null
 }
 
 type DaemonTaskRow = DaemonSummary['jobs']['recent'][number] & {
@@ -123,6 +125,47 @@ function statusBadgeTheme(theme: ReturnType<typeof useTheme>, status: string): {
     color: theme.text.disabled,
     background: theme.surface.panelMuted,
     border: theme.border.subtle,
+  }
+}
+
+function dreamingBadgeTheme(theme: ReturnType<typeof useTheme>, tone: DreamingStatusTone): { color: string; background: string; border: string; dot: string } {
+  if (tone === 'active') {
+    return {
+      color: theme.status.success,
+      background: `${theme.status.success}18`,
+      border: `${theme.status.success}36`,
+      dot: theme.status.success,
+    }
+  }
+  if (tone === 'pending') {
+    return {
+      color: theme.status.warning,
+      background: `${theme.status.warning}16`,
+      border: `${theme.status.warning}34`,
+      dot: theme.status.warning,
+    }
+  }
+  if (tone === 'failed') {
+    return {
+      color: theme.status.danger,
+      background: `${theme.status.danger}16`,
+      border: `${theme.status.danger}34`,
+      dot: theme.status.danger,
+    }
+  }
+  if (tone === 'disabled') {
+    return {
+      color: theme.text.disabled,
+      background: theme.surface.panelMuted,
+      border: theme.border.subtle,
+      dot: theme.text.disabled,
+    }
+  }
+  return {
+    color: tone === 'ready' ? theme.accent.base : theme.text.muted,
+    background: tone === 'ready' ? `${theme.accent.base}14` : theme.surface.panelMuted,
+    border: tone === 'ready' ? `${theme.accent.base}30` : theme.border.subtle,
+    dot: tone === 'ready' ? theme.accent.base : theme.text.muted,
   }
 }
 
@@ -318,6 +361,8 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
     ? `${daemonBackgroundJobCount} BG`
     : null
   const summarizedTasks = useMemo(() => summarizeDaemonTaskRows(daemonSummary?.jobs.recent ?? []), [daemonSummary?.jobs.recent])
+  const dreamingStatus = useMemo(() => buildDreamingStatusSummary(daemonSummary?.dreaming ?? null), [daemonSummary?.dreaming])
+  const dreamingTheme = dreamingStatus ? dreamingBadgeTheme(theme, dreamingStatus.tone) : null
   const daemonStatusTextColor = daemon?.running && daemonActiveJobCount > 0
     ? theme.text.primary
     : daemonColor
@@ -423,6 +468,44 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
             {daemonStatusDetail && (
               <span style={{ color: theme.text.secondary, fontWeight: 600, letterSpacing: 0.3, fontSize: fonts.secondarySize }}>
                 {daemonStatusDetail}
+              </span>
+            )}
+            {dreamingStatus && dreamingTheme && (
+              <span
+                title={dreamingStatus.title}
+                aria-label={dreamingStatus.summaryLine}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  maxWidth: 150,
+                  color: dreamingTheme.color,
+                  background: dreamingTheme.background,
+                  border: `1px solid ${dreamingTheme.border}`,
+                  borderRadius: 999,
+                  padding: '1px 6px',
+                  fontSize: fonts.secondarySize,
+                  fontWeight: 700,
+                  letterSpacing: 0.45,
+                  textTransform: 'uppercase',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <span
+                  style={{
+                    width: 5,
+                    height: 5,
+                    borderRadius: '50%',
+                    background: dreamingTheme.dot,
+                    boxShadow: dreamingStatus.tone === 'active' ? `0 0 8px ${dreamingTheme.dot}88` : 'none',
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {dreamingStatus.chipLabel}
+                </span>
               </span>
             )}
           </button>
@@ -537,6 +620,61 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                   </div>
                 </div>
               </div>
+
+              {dreamingStatus && dreamingTheme && (
+                <div
+                  style={{
+                    margin: '0 4px 8px',
+                    padding: '8px 9px',
+                    borderRadius: 11,
+                    background: theme.surface.panelMuted,
+                    border: `1px solid ${theme.border.subtle}`,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+                      <span
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: dreamingTheme.dot,
+                          boxShadow: dreamingStatus.tone === 'active' ? `0 0 8px ${dreamingTheme.dot}88` : 'none',
+                          flexShrink: 0,
+                        }}
+                      />
+                      <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, textTransform: 'uppercase', letterSpacing: 1.1, fontWeight: 800 }}>
+                        Auto-dream
+                      </span>
+                    </div>
+                    <span
+                      style={{
+                        color: dreamingTheme.color,
+                        background: dreamingTheme.background,
+                        border: `1px solid ${dreamingTheme.border}`,
+                        borderRadius: 999,
+                        padding: '2px 7px',
+                        fontSize: fonts.secondarySize,
+                        fontWeight: 800,
+                        letterSpacing: 0.45,
+                        textTransform: 'uppercase',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {dreamingStatus.chipLabel}
+                    </span>
+                  </div>
+                  <div style={{ color: theme.text.primary, fontSize: fonts.size, fontWeight: 650, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={dreamingStatus.summaryLine}>
+                    {dreamingStatus.summaryLine}
+                  </div>
+                  <div style={{ color: theme.text.muted, fontSize: fonts.secondarySize, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={dreamingStatus.detailLine}>
+                    {dreamingStatus.detailLine}
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '0 4px' }}>

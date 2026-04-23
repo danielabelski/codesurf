@@ -278,11 +278,13 @@ export function registerSystemIPC(): void {
             error: job.error,
           })).slice(0, 20),
         },
+        dreaming: dashboard.dreaming ?? null,
       }
     }
     return {
       ...status,
       jobs: readDaemonJobSummary(),
+      dreaming: null,
     }
   })
 
