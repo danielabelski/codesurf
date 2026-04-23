@@ -1147,12 +1147,31 @@ function App(): JSX.Element {
 
   const viewportRef = useRef(viewport)
   const nextZIndexRef = useRef(nextZIndex)
+  const viewportAnimationFrameRef = useRef<number | null>(null)
+  const pendingViewportRef = useRef(viewport)
 
   // Keep tilesRef / groupsRef / viewportRef / nextZIndexRef in sync with state
   tilesRef.current = tiles
   groupsRef.current = groups
   viewportRef.current = viewport
+  pendingViewportRef.current = viewport
   nextZIndexRef.current = nextZIndex
+
+  const scheduleViewportUpdate = useCallback((nextViewport: typeof viewport) => {
+    pendingViewportRef.current = nextViewport
+    if (viewportAnimationFrameRef.current !== null) return
+    viewportAnimationFrameRef.current = requestAnimationFrame(() => {
+      viewportAnimationFrameRef.current = null
+      setViewport(pendingViewportRef.current)
+    })
+  }, [])
+
+  useEffect(() => () => {
+    if (viewportAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(viewportAnimationFrameRef.current)
+      viewportAnimationFrameRef.current = null
+    }
+  }, [])
 
   // Context menus
   type CtxMenu = { x: number; y: number; items: MenuItem[] }

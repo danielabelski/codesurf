@@ -2383,7 +2383,18 @@ function chatCodex(req: ChatRequest): void {
     messages: runtimeMessages,
   }
   void upsertRuntimeSessionState(req, runtimeSession)
-  const args = ['exec', '--json', '--model', req.model, '--dangerously-bypass-approvals-and-sandbox']
+  const args = [
+    'exec',
+    '--json',
+    '--model',
+    req.model,
+    '--dangerously-bypass-approvals-and-sandbox',
+    // App-launched Codex runs should not inherit user-global MCP servers.
+    // A stale localhost entry there can abort the whole run before the model
+    // does useful work. Workspace-level `.mcp.json` remains available.
+    '-c',
+    'mcp_servers={}',
+  ]
   if (req.workspaceDir) {
     args.push('--skip-git-repo-check', '-C', req.workspaceDir)
   } else {

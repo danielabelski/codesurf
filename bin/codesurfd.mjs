@@ -11,6 +11,7 @@ import { createCheckpointStore } from './checkpoints.mjs'
 import { loadMemoryContext } from './memory-loader.mjs'
 import { createSkillsIndex } from './skills-index.mjs'
 import { expandFileReferences } from './file-references.mjs'
+import { createDreamingManager, DREAMING_DEFAULTS } from '../packages/codesurf-dreaming/src/index.mjs'
 
 const HOME = process.env.CODESURF_HOME || join(homedir(), '.codesurf')
 const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'pid.json')
@@ -1878,19 +1879,180 @@ async function installWorkspaceSkill({ workspaceId, workspaceDir = null, cardId 
   })
 }
 
-async function loadWorkspaceMemoryContext(workspaceId, executionTarget = 'local') {
+function getMaterializedWorkspace(workspaceId) {
   const state = readWorkspaceState()
   const workspace = state.workspaces.find(entry => entry.id === workspaceId)
   if (!workspace) {
     throw new Error(`Workspace not found: ${workspaceId}`)
   }
-  const materialized = materializeWorkspace(workspace, state.projects)
+  return materializeWorkspace(workspace, state.projects)
+}
+
+async function loadWorkspaceMemoryContext(workspaceId, executionTarget = 'local') {
+  const materialized = getMaterializedWorkspace(workspaceId)
   return await loadMemoryContext({
     homeDir: HOME,
     workspaceDir: materialized.path,
     projectPaths: materialized.projectPaths,
     executionTarget,
   })
+}
+
+function dreamingSessionIdentityAgent(entry) {
+  if (entry?.source === 'codesurf') {
+    const provider = String(entry?.provider ?? '').trim().toLowerCase()
+    if (provider) return provider
+  }
+  return String(entry?.source ?? 'codesurf').trim().toLowerCase() || 'codesurf'
+}
+
+function mergeDreamingSessionEntries(localSessions, nativeSessions) {
+  const byKey = new Map()
+
+  const priority = entry => {
+    if (String(entry?.id ?? '').startsWith('codesurf-runtime:')) return 5
+    if (String(entry?.id ?? '').startsWith('codesurf-job:')) return 4
+    if (String(entry?.id ?? '').startsWith('codesurf-tile:')) return 3
+    return 1
+  }
+
+  const mergeCanonicalMetadata = (preferred, alternate) => {
+    const canonical = [preferred, alternate].find(candidate =>
+      candidate?.source !== 'codesurf'
+      && typeof candidate?.title === 'string'
+      && candidate.title.trim().length > 0,
+    ) ?? null
+
+    if (!canonical) return preferred
+
+    return {
+      ...preferred,
+      title: canonical.title,
+      filePath: preferred.filePath || canonical.filePath,
+      sizeBytes: (typeof preferred.sizeBytes === 'number' && preferred.sizeBytes > 0) ? preferred.sizeBytes : canonical.sizeBytes,
+      sourceDetail: preferred.sourceDetail || canonical.sourceDetail,
+      model: preferred.model || canonical.model,
+    }
+  }
+
+  for (const entry of [...(Array.isArray(nativeSessions) ? nativeSessions : []), ...(Array.isArray(localSessions) ? localSessions : [])]) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string') continue
+    const key = entry.sessionId
+      ? `session:${dreamingSessionIdentityAgent(entry)}:${entry.sessionId}`
+      : `entry:${entry.id}`
+    const existing = byKey.get(key)
+    if (!existing) {
+      byKey.set(key, entry)
+      continue
+    }
+    const existingPriority = priority(existing)
+    const nextPriority = priority(entry)
+    if (nextPriority > existingPriority || (nextPriority === existingPriority && Number(entry.updatedAt ?? 0) > Number(existing.updatedAt ?? 0))) {
+      byKey.set(key, mergeCanonicalMetadata(entry, existing))
+      continue
+    }
+    byKey.set(key, mergeCanonicalMetadata(existing, entry))
+  }
+
+  return [...byKey.values()].sort((a, b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
+}
+
+async function listDreamingWorkspaceSessions({ workspaceId, workspaceDir = null, projectPaths = [], force = false } = {}) {
+  const normalizedWorkspaceDir = normalizePath(workspaceDir)
+  const normalizedProjectPaths = Array.from(new Set(
+    [normalizedWorkspaceDir, ...(Array.isArray(projectPaths) ? projectPaths : [])]
+      .map(path => normalizePath(path))
+      .filter(Boolean),
+  ))
+
+  const localSessions = listLocalWorkspaceSessions(workspaceId).map(entry => ({
+    ...entry,
+    projectPath: normalizePath(entry?.projectPath) ?? normalizedWorkspaceDir,
+  }))
+
+  const nativeSessions = []
+  for (const projectPath of normalizedProjectPaths) {
+    const entries = await listExternalSessionEntries(HOME, projectPath, force ? { force: true } : undefined)
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue
+      nativeSessions.push({
+        ...entry,
+        projectPath: normalizePath(entry.projectPath) ?? projectPath,
+      })
+    }
+  }
+
+  return mergeDreamingSessionEntries(localSessions, nativeSessions)
+}
+
+async function getDreamingWorkspaceSessionState({ workspaceId, workspaceDir = null, projectPaths = [], sessionEntryId } = {}) {
+  const normalizedSessionId = String(sessionEntryId ?? '').trim()
+  if (!normalizedSessionId) return null
+  if (normalizedSessionId.startsWith('codesurf-runtime:') || normalizedSessionId.startsWith('codesurf-tile:') || normalizedSessionId.startsWith('codesurf-job:')) {
+    return getLocalSessionState(workspaceId, normalizedSessionId)
+  }
+
+  const candidatePaths = Array.from(new Set(
+    [workspaceDir, ...(Array.isArray(projectPaths) ? projectPaths : [])]
+      .map(path => normalizePath(path))
+      .filter(Boolean),
+  ))
+
+  for (const projectPath of candidatePaths) {
+    const state = await getExternalSessionChatState(HOME, projectPath, normalizedSessionId)
+    if (state) return state
+  }
+
+  return await getExternalSessionChatState(HOME, null, normalizedSessionId)
+}
+
+function getPersistedAutoDreamSettings() {
+  const settings = readWorkspaceState().settings
+  const autoDream = settings && typeof settings.autoDream === 'object' ? settings.autoDream : null
+  return autoDream && !Array.isArray(autoDream) ? autoDream : null
+}
+
+async function listMaterializedDreamingWorkspaces() {
+  const state = readWorkspaceState()
+  return state.workspaces
+    .map(workspace => {
+      const materialized = materializeWorkspace(workspace, state.projects)
+      return {
+        id: workspace.id,
+        name: workspace.name,
+        path: materialized.path,
+        projectPaths: materialized.projectPaths,
+      }
+    })
+    .filter(workspace => normalizePath(workspace.path))
+}
+
+const dreamingManager = createDreamingManager({
+  homeDir: HOME,
+  listSessions: listDreamingWorkspaceSessions,
+  getSessionState: getDreamingWorkspaceSessionState,
+  listWorkspaces: listMaterializedDreamingWorkspaces,
+  getAutoDreamConfig: getPersistedAutoDreamSettings,
+  loadMemoryContext,
+  ...(process.env.CODESURF_DREAMING_TEST_MODE === 'stub'
+    ? {
+        testExecute: async () => String(process.env.CODESURF_DREAMING_TEST_RESULT ?? '# DREAMING\n\n- Test dream output.\n'),
+      }
+    : {}),
+})
+
+function scheduleAutoDreamForWorkspace(workspaceId) {
+  try {
+    const materialized = getMaterializedWorkspace(workspaceId)
+    void dreamingManager.scheduleAutoDreamEvaluation({
+      workspaceId,
+      workspaceName: materialized.name,
+      workspaceDir: materialized.path,
+      projectPaths: materialized.projectPaths,
+    }).catch(() => {})
+  } catch {
+    // ignore missing workspace state
+  }
 }
 
 function listDaemonWorkspaceSessions(workspaceId, existingEntries) {
@@ -2362,7 +2524,11 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'workspaceId, cardId, and state are required' })
         return
       }
-      sendJson(res, 200, upsertRuntimeSessionState(workspaceId, cardId, body.state))
+      const result = upsertRuntimeSessionState(workspaceId, cardId, body.state)
+      if (result?.ok) {
+        scheduleAutoDreamForWorkspace(workspaceId)
+      }
+      sendJson(res, 200, result)
       return
     }
 
@@ -2417,6 +2583,66 @@ const server = createServer(async (req, res) => {
         return
       }
       sendJson(res, 200, await loadWorkspaceMemoryContext(workspaceId, executionTarget))
+      return
+    }
+
+    if (method === 'GET' && url.pathname === '/dreaming/status') {
+      const workspaceId = String(url.searchParams.get('workspaceId') ?? '').trim()
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, await dreamingManager.getDreamStatus(workspaceId))
+      return
+    }
+
+    if (method === 'GET' && url.pathname === '/dreaming/runs') {
+      const workspaceId = String(url.searchParams.get('workspaceId') ?? '').trim()
+      const limit = Number(url.searchParams.get('limit') ?? '20') || 20
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, {
+        workspaceId,
+        runs: await dreamingManager.listDreamRuns(workspaceId, limit),
+      })
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/dreaming/run') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      try {
+        const materialized = getMaterializedWorkspace(workspaceId)
+        const result = await dreamingManager.runDream({
+          workspaceId,
+          workspaceName: materialized.name,
+          workspaceDir: materialized.path,
+          projectPaths: materialized.projectPaths,
+          provider: typeof body?.provider === 'string' ? body.provider : DREAMING_DEFAULTS.provider,
+          model: typeof body?.model === 'string' ? body.model : DREAMING_DEFAULTS.model,
+          maxSessions: body?.maxSessions,
+        })
+        sendJson(res, 200, result)
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/dreaming/cancel') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      if (!workspaceId) {
+        sendJson(res, 400, { error: 'workspaceId is required' })
+        return
+      }
+      sendJson(res, 200, await dreamingManager.cancelDream(workspaceId, typeof body?.runId === 'string' ? body.runId : null))
       return
     }
 

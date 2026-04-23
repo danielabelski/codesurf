@@ -132,6 +132,7 @@ contextBridge.exposeInMainWorld('electron', {
     deleteSession: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:deleteSession', workspaceId, sessionEntryId),
     setSessionArchived: (workspaceId: string, sessionEntryId: string, archived: boolean) => ipcRenderer.invoke('canvas:setSessionArchived', workspaceId, sessionEntryId, archived),
     renameSession: (workspaceId: string, sessionEntryId: string, title: string) => ipcRenderer.invoke('canvas:renameSession', workspaceId, sessionEntryId, title),
+    generateSessionTitle: (workspaceId: string, sessionEntryId: string, entryHint?: SessionEntryHint | null) => ipcRenderer.invoke('canvas:generateSessionTitle', workspaceId, sessionEntryId, entryHint),
     listCheckpoints: (workspaceId: string, sessionEntryId: string) => ipcRenderer.invoke('canvas:listCheckpoints', workspaceId, sessionEntryId),
     restoreCheckpoint: (workspaceId: string, checkpointId: string, sessionEntryId?: string) => ipcRenderer.invoke('canvas:restoreCheckpoint', workspaceId, checkpointId, sessionEntryId),
     queuedMessages: {
@@ -315,6 +316,13 @@ contextBridge.exposeInMainWorld('electron', {
     upsertHost: (host: import('../shared/types').ExecutionHostRecord) => ipcRenderer.invoke('execution:upsertHost', host),
     deleteHost: (id: string) => ipcRenderer.invoke('execution:deleteHost', id),
     resolveTarget: (preference: import('../shared/types').ExecutionPreference) => ipcRenderer.invoke('execution:resolveTarget', preference),
+  },
+
+  dreaming: {
+    status: (workspaceId: string) => ipcRenderer.invoke('dreaming:status', workspaceId),
+    listRuns: (args: { workspaceId: string; limit?: number }) => ipcRenderer.invoke('dreaming:listRuns', args),
+    run: (args: { workspaceId: string; provider?: string; model?: string; maxSessions?: number }) => ipcRenderer.invoke('dreaming:run', args),
+    cancel: (args: { workspaceId: string; runId?: string | null }) => ipcRenderer.invoke('dreaming:cancel', args),
   },
 
   shell: {

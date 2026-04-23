@@ -504,6 +504,7 @@ export function Sidebar({
   const [loadedSessionWorkspaceIds, setLoadedSessionWorkspaceIds] = useState<string[]>([])
   const [hoveredProjectRow, setHoveredProjectRow] = useState<string | null>(null)
   const [archivingSessionId, setArchivingSessionId] = useState<string | null>(null)
+  const [generatingSessionTitleId, setGeneratingSessionTitleId] = useState<string | null>(null)
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
   const [textDialog, setTextDialog] = useState<SidebarTextDialogState | null>(null)
@@ -1056,6 +1057,7 @@ export function Sidebar({
 
   const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
     const items: MenuItem[] = []
+    const sessionKey = `${session.workspaceId}::${session.id}`
     if (session.canOpenInChat !== false) {
       items.push({ label: 'Open in Chat', action: () => onOpenSessionInChat(session) })
       items.push({ label: 'Open in Pinned Tab', action: () => onOpenSessionInChat(session, { persist: true }) })
@@ -1119,12 +1121,46 @@ export function Sidebar({
     })
 
     items.push({
+      label: generatingSessionTitleId === sessionKey ? 'Generating Title...' : 'Generate Title',
+      action: () => {
+        if (generatingSessionTitleId === sessionKey) return
+        setGeneratingSessionTitleId(sessionKey)
+        void window.electron.canvas.generateSessionTitle(session.workspaceId, session.id, {
+          id: session.id,
+          source: session.source,
+          filePath: session.filePath,
+          sessionId: session.sessionId,
+          provider: session.provider,
+          model: session.model,
+          messageCount: session.messageCount,
+          title: session.title,
+          projectPath: session.projectPath ?? null,
+        })
+          .then(async result => {
+            if (!result?.ok) throw new Error(result?.error || 'Failed to generate thread title.')
+            const nextTitle = result.title ?? session.title
+            setSessions(prev => prev.map(entry => entry.id === session.id && entry.workspaceId === session.workspaceId
+              ? { ...entry, title: nextTitle }
+              : entry))
+            const workspaceEntry = workspaceById.get(session.workspaceId)
+            if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
+          })
+          .catch(error => {
+            window.alert(error instanceof Error ? error.message : String(error))
+          })
+          .finally(() => {
+            setGeneratingSessionTitleId(prev => prev === sessionKey ? null : prev)
+          })
+      },
+    })
+
+    items.push({
       label: getSessionArchiveActionLabel(session.isArchived === true),
       action: () => { void setSessionArchived(session, !(session.isArchived === true)) },
     })
 
     return items.length > 0 ? items : [{ label: 'No actions available', action: () => {} }]
-  }, [loadWorkspaceSessions, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, setSessionArchived, workspaceById])
+  }, [generatingSessionTitleId, loadWorkspaceSessions, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, setSessionArchived, workspaceById])
 
   const handleOpenProjectFromSidebar = useCallback(() => {
     onOpenFolder()

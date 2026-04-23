@@ -1,6 +1,9 @@
 import { ipcMain } from 'electron'
 import { promises as fs } from 'fs'
-import { dirname } from 'path'
+import { dirname, join } from 'path'
+import { tmpdir } from 'os'
+import { spawn } from 'child_process'
+import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
 import type { TileState } from '../../shared/types'
 import {
@@ -29,6 +32,7 @@ import { daemonClient } from '../daemon/client'
 import { getIndexerStatus, indexAllSources, listThreadsFromDb, renameIndexedThread } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
 import { readArchivedSessionIds, writeArchivedSessionIds } from '../storage/sessionArchives'
+import { getAgentPath, getShellEnvPath } from '../agent-paths'
 
 interface TileSessionSummary {
   version: 1
@@ -43,6 +47,12 @@ interface TileSessionSummary {
 }
 
 const tileSessionSummaryCache = new Map<string, TileSessionSummary | null>()
+const GENERATED_TITLE_MODEL = 'claude-haiku-4-5-20251001'
+const GENERATED_TITLE_MAX_CHARS = 120
+const GENERATED_TITLE_MAX_WORDS = 4
+const GENERATED_TITLE_TRANSCRIPT_BUDGET = 90_000
+const GENERATED_TITLE_HEAD_MESSAGES = 32
+const GENERATED_TITLE_TAIL_MESSAGES = 96
 
 function truncateSessionText(text: string | null | undefined, length = 120): string | null {
   if (!text) return null
@@ -121,6 +131,285 @@ function extractTileSessionSummary(tileId: string, state: unknown): TileSessionS
     title: explicitTitle ?? extractInitialSessionTitle(messages as Record<string, unknown>[]) ?? `${provider} session`,
     updatedAt: Date.now(),
   }
+}
+
+function isLocalSessionEntry(sessionEntryId: string): boolean {
+  return sessionEntryId.startsWith('codesurf-runtime:')
+    || sessionEntryId.startsWith('codesurf-tile:')
+    || sessionEntryId.startsWith('codesurf-job:')
+}
+
+function trimTranscriptText(text: string, maxChars = 2_000): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars).trimEnd()}…`
+}
+
+function formatTranscriptMessage(message: Record<string, unknown>, index: number): string | null {
+  const role = typeof message.role === 'string' && message.role.trim()
+    ? message.role.trim()
+    : 'unknown'
+  const content = typeof message.content === 'string' ? trimTranscriptText(message.content) : ''
+  if (!content) return null
+  return `${index + 1}. ${role}: ${content}`
+}
+
+function buildTitleTranscript(messages: Record<string, unknown>[]): string {
+  if (messages.length === 0) return ''
+
+  const selected = messages.length <= (GENERATED_TITLE_HEAD_MESSAGES + GENERATED_TITLE_TAIL_MESSAGES)
+    ? messages
+    : [
+        ...messages.slice(0, GENERATED_TITLE_HEAD_MESSAGES),
+        ...messages.slice(-GENERATED_TITLE_TAIL_MESSAGES),
+      ]
+
+  const chunks: string[] = []
+  let used = 0
+
+  for (let index = 0; index < selected.length; index += 1) {
+    if (messages.length > selected.length && index === GENERATED_TITLE_HEAD_MESSAGES) {
+      const omittedCount = messages.length - selected.length
+      const omitted = `... ${omittedCount} earlier middle messages omitted for brevity ...`
+      if (used + omitted.length > GENERATED_TITLE_TRANSCRIPT_BUDGET) break
+      chunks.push(omitted)
+      used += omitted.length + 1
+    }
+
+    const rawIndex = messages.length <= selected.length
+      ? index
+      : (index < GENERATED_TITLE_HEAD_MESSAGES ? index : messages.length - (selected.length - index))
+    const formatted = formatTranscriptMessage(selected[index] as Record<string, unknown>, rawIndex)
+    if (!formatted) continue
+    if (used + formatted.length > GENERATED_TITLE_TRANSCRIPT_BUDGET) break
+    chunks.push(formatted)
+    used += formatted.length + 1
+  }
+
+  return chunks.join('\n')
+}
+
+function sanitizeGeneratedTitle(raw: string, fallback: string): string {
+  const rawText = String(raw ?? '').trim()
+  if (!rawText) return fallback
+
+  const jsonMatch = rawText.match(/\{[\s\S]*"title"\s*:\s*"([^"]+)"[\s\S]*\}/)
+  const candidates = [
+    jsonMatch?.[1],
+    ...rawText.split(/\r?\n/),
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+
+  for (const candidate of candidates) {
+    const normalized = candidate
+      .replace(/^["'`]+|["'`]+$/g, '')
+      .replace(/^title\s*:\s*/i, '')
+      .replace(/^new title\s*:\s*/i, '')
+      .trim()
+
+    if (!normalized) continue
+    if (/^(i('|’)ll|i will|let me|here('|’)s|here is|the title is|i can|sure|okay|based on)\b/i.test(normalized)) continue
+    if (/\b(read|reading|transcript|understand|generate|appropriate title|topic)\b/i.test(normalized)) continue
+
+    const cleaned = cleanSessionTitleCandidate(normalized, GENERATED_TITLE_MAX_CHARS)
+    if (!cleaned) continue
+
+    const words = cleaned.split(/\s+/).filter(Boolean)
+    if (words.length === 0) continue
+    return words.slice(0, GENERATED_TITLE_MAX_WORDS).join(' ')
+  }
+
+  return fallback
+}
+
+async function generateTitleWithClaude(prompt: string): Promise<string> {
+  const options: Options = {
+    model: GENERATED_TITLE_MODEL,
+    permissionMode: 'plan' as any,
+    thinking: { type: 'disabled' } as any,
+    persistSession: false,
+  }
+  const claudePath = getAgentPath('claude')
+  if (claudePath) {
+    ;(options as any).pathToClaudeCodeExecutable = claudePath
+  }
+
+  const q = query({ prompt, options })
+  let text = ''
+
+  for await (const msg of q) {
+    if (msg.type === 'assistant') {
+      const blocks = (msg as any).message?.content ?? []
+      text += blocks
+        .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
+        .map((block: any) => block.text)
+        .join('')
+    } else if (msg.type === 'result' && typeof (msg as any).result === 'string' && (msg as any).result.trim()) {
+      text = (msg as any).result
+    }
+  }
+
+  return text.trim()
+}
+
+async function generateTitleWithCodex(prompt: string): Promise<string> {
+  const codexBin = getAgentPath('codex') || 'codex'
+  const shellPath = getShellEnvPath()
+  const tempBase = join(tmpdir(), `codesurf-title-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const schemaPath = `${tempBase}.schema.json`
+  const outputPath = `${tempBase}.out.json`
+
+  await fs.writeFile(schemaPath, JSON.stringify({
+    type: 'object',
+    properties: {
+      title: { type: 'string' },
+    },
+    required: ['title'],
+    additionalProperties: false,
+  }, null, 2))
+
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const proc = spawn(codexBin, [
+        'exec',
+        '--model',
+        'gpt-5.1-codex-mini',
+        '--sandbox',
+        'read-only',
+        '--skip-git-repo-check',
+        '--ignore-user-config',
+        '--ephemeral',
+        '--color',
+        'never',
+        '--output-schema',
+        schemaPath,
+        '--output-last-message',
+        outputPath,
+        prompt,
+      ], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+      })
+
+      let stderr = ''
+
+      proc.stderr?.on('data', chunk => { stderr += chunk.toString() })
+      proc.on('error', reject)
+      proc.on('close', async code => {
+        if (code !== 0) {
+          reject(new Error(stderr.trim() || `Codex exited with ${code}`))
+          return
+        }
+
+        try {
+          const raw = (await fs.readFile(outputPath, 'utf8')).trim()
+          const parsed = JSON.parse(raw) as { title?: unknown }
+          if (typeof parsed.title === 'string' && parsed.title.trim()) {
+            resolve(parsed.title.trim())
+            return
+          }
+          reject(new Error('Codex returned an invalid title payload.'))
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+  } finally {
+    await Promise.allSettled([
+      fs.unlink(schemaPath),
+      fs.unlink(outputPath),
+    ])
+  }
+}
+
+async function generateSessionTitleFromMessages(session: SessionEntryHint | AggregatedSessionEntry, messages: Record<string, unknown>[]): Promise<string> {
+  const transcript = buildTitleTranscript(messages)
+  const fallbackTitle = cleanSessionTitleCandidate(session.title, GENERATED_TITLE_MAX_CHARS) ?? 'Untitled thread'
+  if (!transcript) return fallbackTitle
+
+  const prompt = [
+    'You rename chat threads.',
+    'Return exactly one title, 2 to 4 words.',
+    'Return only those words.',
+    'No sentences. No explanation. No preamble. No markdown. No quotes.',
+    'Prefer the concrete task, bug, feature, or decision being discussed.',
+    'Do not use quotes, markdown, prefixes, or trailing punctuation unless required.',
+    'Avoid generic titles like "Conversation", "Help", or "Question".',
+    `Keep it under ${GENERATED_TITLE_MAX_CHARS} characters.`,
+    '',
+    `Current title: ${fallbackTitle}`,
+    `Provider: ${session.provider || 'unknown'}`,
+    `Model: ${session.model || 'unknown'}`,
+    `Message count: ${messages.length}`,
+    '',
+    'Transcript:',
+    transcript,
+  ].join('\n')
+
+  try {
+    const generated = await generateTitleWithClaude(prompt)
+    return sanitizeGeneratedTitle(generated, fallbackTitle)
+  } catch (error) {
+    console.warn('[sessions] Claude title generation failed, falling back to Codex:', error)
+    const generated = await generateTitleWithCodex(prompt)
+    return sanitizeGeneratedTitle(generated, fallbackTitle)
+  }
+}
+
+async function loadSessionStateForTitleGeneration(
+  workspaceId: string,
+  sessionEntryId: string,
+  entryHint: SessionEntryHint | null,
+): Promise<{
+  provider: string
+  model: string
+  messages: Record<string, unknown>[]
+}> {
+  const workspacePath = await getWorkspacePathById(workspaceId)
+
+  if (isLocalSessionEntry(sessionEntryId)) {
+    const local = await daemonClient.getLocalSessionState(workspaceId, sessionEntryId).catch(() => null)
+    if (local && Array.isArray((local as Record<string, unknown>).messages)) {
+      return {
+        provider: typeof (local as any).provider === 'string' ? (local as any).provider : (entryHint?.provider ?? 'claude'),
+        model: typeof (local as any).model === 'string' ? (local as any).model : (entryHint?.model ?? ''),
+        messages: (local as any).messages as Record<string, unknown>[],
+      }
+    }
+
+    if (sessionEntryId.startsWith('codesurf-tile:tile-state-')) {
+      const tileId = sessionEntryId.replace('codesurf-tile:tile-state-', '').replace(/\.json$/, '')
+      const tileState = await loadWorkspaceTileState<Record<string, unknown> | null>(workspaceId, tileId, null)
+      if (tileState && Array.isArray(tileState.messages)) {
+        return {
+          provider: typeof tileState.provider === 'string' ? tileState.provider : (entryHint?.provider ?? 'claude'),
+          model: typeof tileState.model === 'string' ? tileState.model : (entryHint?.model ?? ''),
+          messages: tileState.messages as Record<string, unknown>[],
+        }
+      }
+    }
+
+    throw new Error('Could not load local session transcript.')
+  }
+
+  const external = await getExternalSessionChatState(workspacePath, sessionEntryId, { entryHint }).catch(() => null)
+  if (external && Array.isArray(external.messages)) {
+    return {
+      provider: external.provider,
+      model: external.model,
+      messages: external.messages as Record<string, unknown>[],
+    }
+  }
+
+  const fallback = await daemonClient.getExternalSessionState(workspacePath, sessionEntryId).catch(() => null)
+  if (fallback && Array.isArray((fallback as Record<string, unknown>).messages)) {
+    return {
+      provider: typeof (fallback as any).provider === 'string' ? (fallback as any).provider : (entryHint?.provider ?? 'unknown'),
+      model: typeof (fallback as any).model === 'string' ? (fallback as any).model : (entryHint?.model ?? ''),
+      messages: (fallback as any).messages as Record<string, unknown>[],
+    }
+  }
+
+  throw new Error('Could not load session transcript.')
 }
 
 function sameTileSessionSummary(a: TileSessionSummary | null, b: TileSessionSummary | null): boolean {
@@ -601,6 +890,56 @@ export function registerCanvasIPC(): void {
       broadcastSessionsChangedNow(workspaceId)
     }
     return result
+  })
+
+  ipcMain.handle('canvas:generateSessionTitle', async (
+    _,
+    workspaceId: string,
+    sessionEntryId: string,
+    entryHint?: SessionEntryHint | null,
+  ) => {
+    assertSafeWorkspaceArtifactId(workspaceId)
+
+    const state = await loadSessionStateForTitleGeneration(workspaceId, sessionEntryId, entryHint ?? null)
+    if (!Array.isArray(state.messages) || state.messages.length === 0) {
+      return { ok: false, error: 'Session has no transcript to summarize.' }
+    }
+
+    const title = await generateSessionTitleFromMessages({
+      id: sessionEntryId,
+      source: (entryHint?.source ?? 'codesurf') as SessionEntryHint['source'],
+      provider: state.provider,
+      model: state.model,
+      messageCount: state.messages.length,
+      title: entryHint?.title ?? '',
+      sessionId: entryHint?.sessionId ?? null,
+      filePath: entryHint?.filePath,
+      projectPath: entryHint?.projectPath ?? null,
+    }, state.messages)
+
+    if (!title.trim()) {
+      return { ok: false, error: 'Title generation returned an empty title.' }
+    }
+
+    const workspacePath = await getWorkspacePathById(workspaceId)
+    const result = isLocalSessionEntry(sessionEntryId)
+      ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }))
+      : await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }))
+
+    if (result.ok) {
+      if (!isLocalSessionEntry(sessionEntryId)) renameIndexedThread(sessionEntryId, title)
+      broadcastSessionsChangedNow(workspaceId)
+    }
+
+    return result.ok
+      ? { ok: true, title }
+      : { ok: false, error: result.error || 'Failed to apply generated title.' }
   })
 
   ipcMain.handle('canvas:setSessionArchived', async (_, workspaceId: string, sessionEntryId: string, archived: boolean) => {

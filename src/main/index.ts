@@ -30,6 +30,7 @@ import { registerExtensionProtocol } from './extensions/protocol'
 import { registerExtensionIPC } from './ipc/extensions'
 import { registerChromeSyncIPC } from './ipc/chromeSync'
 import { registerLocalProxyIPC } from './ipc/localProxy'
+import { registerDreamingIPC } from './ipc/dreaming'
 import { applyWindowAppearance, getWindowAppearanceOptions } from './windowAppearance'
 import { migrateLegacyStorage } from './migration'
 import { APP_ID, APP_NAME, CONTEX_HOME } from './paths'
@@ -49,6 +50,14 @@ const maxOldSpaceSizeMb = Number.isFinite(envMaxOldSpaceSizeMb) && envMaxOldSpac
 // Expose global.gc() in renderer processes and keep the Electron V8 flag budget
 // aligned with the standalone launcher override.
 app.commandLine.appendSwitch('js-flags', `--expose-gc --max-old-space-size=${maxOldSpaceSizeMb}`)
+
+// Prefer the GPU compositor/raster path for the infinite canvas. Electron keeps
+// hardware acceleration enabled by default, but these switches help on machines
+// where Chromium would otherwise stay conservative about the accelerated path.
+app.commandLine.appendSwitch('enable-gpu-rasterization')
+app.commandLine.appendSwitch('enable-zero-copy')
+app.commandLine.appendSwitch('enable-native-gpu-memory-buffers')
+app.commandLine.appendSwitch('ignore-gpu-blocklist')
 
 // .skill file association support -----------------------------------------
 // Capture launch-via-Finder / `open "X.skill"` before app.whenReady so the
@@ -394,6 +403,7 @@ app.whenReady().then(async () => {
   registerUIIPC()
   registerJobsIPC()
   registerSkillsIPC()
+  registerDreamingIPC()
   registerFileProtocol()
   registerAgentPathsIPC()
   registerChromeSyncIPC()

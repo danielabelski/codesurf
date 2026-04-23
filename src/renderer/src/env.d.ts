@@ -120,6 +120,108 @@ interface ElectronAPI {
       reason: string
     }>
   }
+  dreaming: {
+    status(workspaceId: string): Promise<{
+      workspaceId: string
+      running: boolean
+      activeRun: {
+        id: string
+        workspaceId: string
+        workspaceName: string | null
+        workspaceDir: string
+        provider: string
+        model: string
+        status: string
+        requestedAt: string
+        startedAt: string
+        completedAt: string | null
+        sessionsReviewed: number
+        reviewedSessionIds: string[]
+        latestSessionUpdatedAt: string | null
+        outputPath: string | null
+        artifactPath: string | null
+        summary: string | null
+        promptPreview: string | null
+        error: string | null
+      } | null
+      lastRun: {
+        id: string
+        workspaceId: string
+        workspaceName: string | null
+        workspaceDir: string
+        provider: string
+        model: string
+        status: string
+        requestedAt: string
+        startedAt: string
+        completedAt: string | null
+        sessionsReviewed: number
+        reviewedSessionIds: string[]
+        latestSessionUpdatedAt: string | null
+        outputPath: string | null
+        artifactPath: string | null
+        summary: string | null
+        promptPreview: string | null
+        error: string | null
+      } | null
+      state: {
+        workspaceId: string
+        lastRunId: string | null
+        lastCompletedAt: string | null
+        lastSuccessfulRunId: string | null
+        lastSuccessfulCompletedAt: string | null
+        lastReviewedAt: string | null
+        latestMemoryPath: string | null
+      }
+    }>
+    listRuns(args: { workspaceId: string; limit?: number }): Promise<{
+      workspaceId: string
+      runs: Array<{
+        id: string
+        workspaceId: string
+        workspaceName: string | null
+        workspaceDir: string
+        provider: string
+        model: string
+        status: string
+        requestedAt: string
+        startedAt: string
+        completedAt: string | null
+        sessionsReviewed: number
+        reviewedSessionIds: string[]
+        latestSessionUpdatedAt: string | null
+        outputPath: string | null
+        artifactPath: string | null
+        summary: string | null
+        promptPreview: string | null
+        error: string | null
+      }>
+    }>
+    run(args: { workspaceId: string; provider?: string; model?: string; maxSessions?: number }): Promise<{
+      started: boolean
+      run: {
+        id: string
+        workspaceId: string
+        workspaceName: string | null
+        workspaceDir: string
+        provider: string
+        model: string
+        status: string
+        requestedAt: string
+        startedAt: string
+        completedAt: string | null
+        sessionsReviewed: number
+        reviewedSessionIds: string[]
+        latestSessionUpdatedAt: string | null
+        outputPath: string | null
+        artifactPath: string | null
+        summary: string | null
+        promptPreview: string | null
+        error: string | null
+      }
+    }>
+    cancel(args: { workspaceId: string; runId?: string | null }): Promise<{ ok: boolean; error?: string }>
+  }
   window: {
     new(): Promise<void>
     newTab(): Promise<void>
@@ -152,6 +254,7 @@ interface ElectronAPI {
     deleteSession(workspaceId: string, sessionEntryId: string): Promise<{ ok: boolean; error?: string }>
     setSessionArchived(workspaceId: string, sessionEntryId: string, archived: boolean): Promise<{ ok: boolean; changed?: boolean; archived?: boolean; error?: string }>
     renameSession(workspaceId: string, sessionEntryId: string, title: string): Promise<{ ok: boolean; error?: string; title?: string }>
+    generateSessionTitle(workspaceId: string, sessionEntryId: string, entryHint?: SessionEntryHint | null): Promise<{ ok: boolean; error?: string; title?: string }>
     listCheckpoints(workspaceId: string, sessionEntryId: string): Promise<Array<{ id: string; sessionEntryId: string; createdAt: string; restoredAt?: string | null; label: string; reason?: string | null; fileCount: number; files: string[] }>>
     restoreCheckpoint(workspaceId: string, checkpointId: string, sessionEntryId?: string): Promise<{ ok: boolean; checkpoint?: { id: string }; filesRestored?: number; filesDeleted?: number; error?: string }>
   }

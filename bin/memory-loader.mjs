@@ -179,6 +179,16 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
     const scopeRemote = nested ? 'nested-workspace' : 'workspace'
     const scopeLocal = nested ? 'nested-workspace-local' : 'workspace-local'
     candidates.push({
+      scope: scopeLocal,
+      scopeRemote,
+      scopeLocal,
+      bucket: 'local-only',
+      displayPath: `${relativePrefix}.codesurf/DREAMING.md`,
+      path: join(projectPath, '.codesurf', 'DREAMING.md'),
+      rootPath: projectPath,
+      disallowSymlink: true,
+    })
+    candidates.push({
       scope: scopeRemote,
       scopeRemote,
       scopeLocal,

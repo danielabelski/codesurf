@@ -246,6 +246,114 @@ export const daemonClient = {
   }> {
     return daemonRequest(`/memory/load?workspaceId=${encodeURIComponent(workspaceId)}&executionTarget=${encodeURIComponent(executionTarget)}`)
   },
+  getDreamStatus(workspaceId: string): Promise<{
+    workspaceId: string
+    running: boolean
+    activeRun: {
+      id: string
+      workspaceId: string
+      workspaceName: string | null
+      workspaceDir: string
+      provider: string
+      model: string
+      status: string
+      requestedAt: string
+      startedAt: string
+      completedAt: string | null
+      sessionsReviewed: number
+      reviewedSessionIds: string[]
+      latestSessionUpdatedAt: string | null
+      outputPath: string | null
+      artifactPath: string | null
+      summary: string | null
+      promptPreview: string | null
+      error: string | null
+    } | null
+    lastRun: {
+      id: string
+      workspaceId: string
+      workspaceName: string | null
+      workspaceDir: string
+      provider: string
+      model: string
+      status: string
+      requestedAt: string
+      startedAt: string
+      completedAt: string | null
+      sessionsReviewed: number
+      reviewedSessionIds: string[]
+      latestSessionUpdatedAt: string | null
+      outputPath: string | null
+      artifactPath: string | null
+      summary: string | null
+      promptPreview: string | null
+      error: string | null
+    } | null
+    state: {
+      workspaceId: string
+      lastRunId: string | null
+      lastCompletedAt: string | null
+      lastSuccessfulRunId: string | null
+      lastSuccessfulCompletedAt: string | null
+      lastReviewedAt: string | null
+      latestMemoryPath: string | null
+    }
+  }> {
+    return daemonRequest(`/dreaming/status?workspaceId=${encodeURIComponent(workspaceId)}`)
+  },
+  listDreamRuns(workspaceId: string, limit = 20): Promise<{
+    workspaceId: string
+    runs: Array<{
+      id: string
+      workspaceId: string
+      workspaceName: string | null
+      workspaceDir: string
+      provider: string
+      model: string
+      status: string
+      requestedAt: string
+      startedAt: string
+      completedAt: string | null
+      sessionsReviewed: number
+      reviewedSessionIds: string[]
+      latestSessionUpdatedAt: string | null
+      outputPath: string | null
+      artifactPath: string | null
+      summary: string | null
+      promptPreview: string | null
+      error: string | null
+    }>
+  }> {
+    return daemonRequest(`/dreaming/runs?workspaceId=${encodeURIComponent(workspaceId)}&limit=${encodeURIComponent(String(limit))}`)
+  },
+  runDream(args: { workspaceId: string; provider?: string; model?: string; maxSessions?: number }): Promise<{
+    started: boolean
+    run: {
+      id: string
+      workspaceId: string
+      workspaceName: string | null
+      workspaceDir: string
+      provider: string
+      model: string
+      status: string
+      requestedAt: string
+      startedAt: string
+      completedAt: string | null
+      sessionsReviewed: number
+      reviewedSessionIds: string[]
+      latestSessionUpdatedAt: string | null
+      outputPath: string | null
+      artifactPath: string | null
+      summary: string | null
+      promptPreview: string | null
+      error: string | null
+    }
+  }> {
+    return daemonRequest('/dreaming/run', { body: args })
+  },
+  cancelDream(args: { workspaceId: string; runId?: string | null }): Promise<{ ok: boolean; error?: string }> {
+    return daemonRequest('/dreaming/cancel', { body: args })
+  },
   listSkills(args: { workspaceId?: string | null; workspaceDir?: string | null; cardId?: string | null } = {}): Promise<DaemonSkillIndex> {
     const query = new URLSearchParams()
     const workspaceId = String(args.workspaceId ?? '').trim()
