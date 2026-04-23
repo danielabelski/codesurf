@@ -595,7 +595,15 @@ function ChatStreamdown({ text, isStreaming, className }: {
   return (
     <Streamdown
       className={`chat-md ${className ?? ''}`}
-      components={{ a: ThemedMarkdownLink }}
+      components={{
+        a: ThemedMarkdownLink,
+        // Streamdown emits `MarkdownParagraph` nodes that can nest (e.g. when
+        // the upstream markdown contains HTML-block elements inline), producing
+        // <p> inside <p> — invalid HTML and a React hydration error. Rendering
+        // paragraphs as <div> removes the nesting constraint while preserving
+        // block-level layout. Margin mimics default browser <p> spacing.
+        p: ({ className, ...rest }: any) => <div className={`chat-md-p ${className ?? ''}`} {...rest} />,
+      }}
       plugins={streamdownPlugins}
       mode={isStreaming ? 'streaming' : 'static'}
       shikiTheme={tokens.shikiTheme}

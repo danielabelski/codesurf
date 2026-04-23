@@ -276,8 +276,53 @@ function truncate(text: string | null | undefined, length = 120): string | null 
   return normalized.length > length ? normalized.slice(0, length) : normalized
 }
 
+function isSessionTitleBoilerplateLine(line: string): boolean {
+  const normalized = line.trim()
+  if (!normalized) return true
+  return /^(?:#\s*)?AGENTS\.md instructions for\b/i.test(normalized)
+    || /^(?:#\s*)?CLAUDE\.md instructions for\b/i.test(normalized)
+    || /^<INSTRUCTIONS>$/i.test(normalized)
+    || /^<\/INSTRUCTIONS>$/i.test(normalized)
+    || /^---\s*project-doc\s*---$/i.test(normalized)
+    || /^#+\s*(?:Non-Negotiable Rules|GSDN Native Mode|Installed GSDN assets|Usage rules|Skills|Files mentioned by the user)\b/i.test(normalized)
+    || /^Launching skill:/i.test(normalized)
+    || /^Base directory for this skill:/i.test(normalized)
+    || /^The `?\.codesurf\/DREAMING\.md`? has been written/i.test(normalized)
+}
+
+function firstMeaningfulSessionTitleLine(text: string | null | undefined): string | null {
+  const source = String(text ?? '').replace(/\r\n/g, '\n').trim()
+  if (!source) return null
+
+  const explicitRequest = source.match(/#+\s*My request for Codex:\s*([\s\S]+)/i)
+  if (explicitRequest?.[1]?.trim()) return firstMeaningfulSessionTitleLine(explicitRequest[1])
+
+  let insideInstructions = false
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (/<INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = true
+      continue
+    }
+    if (/<\/INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = false
+      continue
+    }
+    if (insideInstructions) continue
+
+    const workspacePrompt = line.match(/^Workspace:\s+.+?\bPrimary path:\s+\S+\s+(.+)$/i)
+    if (workspacePrompt?.[1]?.trim()) return workspacePrompt[1].trim()
+
+    if (isSessionTitleBoilerplateLine(line)) continue
+    return line
+  }
+
+  return null
+}
+
 function sessionTitleFromText(fallback: string, text: string | null | undefined): string {
-  const trimmed = text?.trim()
+  const trimmed = firstMeaningfulSessionTitleLine(text) ?? text?.trim()
   if (!trimmed) return fallback
   return trimmed.split(/\r?\n/, 1)[0].slice(0, 80)
 }
@@ -545,7 +590,9 @@ function scanClaudeListingLines(
     if (!shouldImportClaudeEvent(evt)) continue
 
     const role = getClaudeRole(evt)
-    const text = truncate(getClaudeEventText(evt), 400)
+    const rawText = getClaudeEventText(evt)
+    const titleText = firstMeaningfulSessionTitleLine(rawText) ?? rawText
+    const text = truncate(titleText, 400)
     if (!text) continue
 
     if (options?.countMessages) meta.messageCount += 1
@@ -1172,7 +1219,8 @@ function scanCodexListingLines(
         meta.threadName = truncate(payload.thread_name, 200)
       }
       if (!meta.firstUserPrompt && payload?.type === 'user_message' && typeof payload?.message === 'string') {
-        meta.firstUserPrompt = truncate(stripCodexSystemMarkers(payload.message), 400)
+        const rawMessage = stripCodexSystemMarkers(payload.message)
+        meta.firstUserPrompt = truncate(firstMeaningfulSessionTitleLine(rawMessage) ?? rawMessage, 400)
       }
       continue
     }
@@ -1181,7 +1229,9 @@ function scanCodexListingLines(
     const role = roleFromUnknown(payload?.role)
     if (!role || role === 'system') continue
 
-    const text = truncate(stripCodexSystemMarkers(extractTextParts(payload.content)), 400)
+    const rawText = stripCodexSystemMarkers(extractTextParts(payload.content))
+    const titleText = firstMeaningfulSessionTitleLine(rawText) ?? rawText
+    const text = truncate(titleText, 400)
     if (!text) continue
 
     if (options?.countMessages) meta.messageCount += 1
@@ -1272,7 +1322,7 @@ async function listCodexSessions(workspacePath: string | null): Promise<Aggregat
         const meaningfulMessages = messages
           .map(item => ({
             role: roleFromUnknown(item?.role),
-            text: truncate(stripCodexSystemMarkers(extractTextParts(item?.content)), 400),
+            text: truncate(firstMeaningfulSessionTitleLine(stripCodexSystemMarkers(extractTextParts(item?.content))) ?? stripCodexSystemMarkers(extractTextParts(item?.content)), 400),
           }))
           .filter(item => item.role && item.role !== 'system' && item.text) as Array<{ role: ChatRole; text: string }>
         const firstUserPrompt = meaningfulMessages.find(item => item.role === 'user')?.text ?? null
@@ -1663,20 +1713,8 @@ async function parseClaudeChatState(
 
   try {
     await scanJsonlFile(filePath, (line, lineNumber) => {
-      try {
-        const evt = JSON.parse(line)
-        const role = roleFromUnknown(evt?.type) ?? roleFromUnknown(evt?.role)
-        if (!role || typeof evt?.content !== 'string') return
-        const message = makeImportedMessage(
-          `claude-${lineNumber - 1}`,
-          role,
-          evt.content,
-          Date.parse(evt?.timestamp ?? '') || Date.now() + lineNumber,
-        )
-        if (message) messages.push(message)
-      } catch {
-        // ignore malformed transcript lines
-      }
+      const message = parseClaudeLine(line, lineNumber - 1)
+      if (message) messages.push(message)
     })
   } catch {
     return null

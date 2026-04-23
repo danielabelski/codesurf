@@ -6,119 +6,89 @@
 
 ## Overview
 
-CodeSurf is an Electron infinite-canvas workspace where AI agents and developers collaborate through canvas tiles. The repo lives at `~/clawd/collaborator-clone`. The primary active branch is `feature/event-bus-mcp`; a substantial set of staged and unstaged changes is in the working tree.
+CodeSurf is an Electron infinite-canvas workspace where AI agents and developers collaborate through canvas tiles. Repo: `~/clawd/collaborator-clone`. Active branch: `feature/event-bus-mcp`.
 
-Static CLAUDE.md/AGENTS.md still say "contex" — that is legacy naming; the live product is CodeSurf.
+Static CLAUDE.md/AGENTS.md use the legacy name "contex" — not authoritative. The live product name is CodeSurf (`package.json` name: `codesurf`, productName: `CodeSurf`).
 
 ---
 
 ## Durable Facts
 
 **Identity**
-- `package.json` name/productName: `codesurf` / `CodeSurf`
-- Static CLAUDE.md/AGENTS.md still say "contex" — legacy naming
-- Project/workspace display labels now inferred from `package.json.productName` when present; both daemon defaults and renderer `createWithPath` use this inference — this repo displays as `CodeSurf`, not `collaborator-clone`
+- `package.json`: `name: codesurf`, `productName: CodeSurf`, `version: 0.1.0`
+- CLAUDE.md/AGENTS.md retain "contex" naming — legacy, not product truth
+- Workspace display label at creation (`App.tsx` ~line 2830): `basename(normalizedProjectPath) || 'Project'` — no `productName` inference in committed code
 
-**Actual installed SDK version**
-- `@anthropic-ai/claude-agent-sdk` is `0.2.118` in the running environment (static docs say `0.2.79` — outdated)
-- `claude` CLI at `/Users/jkneen/.local/bin/claude`, version `2.1.118`
-- `claude-sonnet-4-6` is confirmed valid from this machine
-- SDK 0.2.118 requires `allowDangerouslySkipPermissions: true` for bypass permission mode; `permissionMode: 'bypassPermissions'` alone is insufficient
+**SDK / CLI versions (as of 2026-04-23)**
+- `@anthropic-ai/claude-agent-sdk`: `0.2.118` in running env (static docs say `0.2.79` — outdated)
+- `claude` CLI: `/Users/jkneen/.local/bin/claude`, version `2.1.118`
+- `claude-sonnet-4-6` confirmed valid in this environment
+- SDK 0.2.118 requires both `permissionMode: 'bypassPermissions'` AND `allowDangerouslySkipPermissions: true`; the latter alone is insufficient
 
 **Persistence layout**
-- Workspace canvas: `~/.contex/workspaces/{id}/canvas.json` (500 ms debounce auto-save)
+- Canvas state: `~/.contex/workspaces/{id}/canvas.json` (auto-save, 500 ms debounce)
 - Kanban tile state: `~/.contex/workspaces/{id}/tiles/{tileId}.json`
 - MCP server config: `~/.contex/mcp-server.json` (random port — never hardcode)
-- Generated workspace memory: `<workspace>/.codesurf/DREAMING.md` — this file
+- Generated workspace memory: `<workspace>/.codesurf/DREAMING.md` (this file)
 
-**Memory loader inclusion**
-- `bin/memory-loader.mjs` resolves `.codesurf/DREAMING.md` at the project path and layers it into every chat run as local-only context (`displayPath: .codesurf/DREAMING.md`)
-- Dreaming memory is injected into Codex sessions via "Workspace Local Instructions" header — confirmed working
+**Memory loader**
+- `bin/memory-loader.mjs` injects `.codesurf/DREAMING.md` as local-only context into every chat run
+- Also injected into Codex sessions via "Workspace Local Instructions" header — confirmed working
 
-**Critical file warning**
-- `src/renderer/src/App.tsx` is ~1700 LOC and owns all canvas 2D physics — changes ripple widely; edit surgically
+**Critical file warnings**
+- `src/renderer/src/App.tsx` is ~1700 LOC, owns all canvas 2D physics — edit surgically
 - `node-pty` requires `npm run rebuild` after any native dependency change
+- MCP server port is random — always read from `~/.contex/mcp-server.json`, never hardcode
 
 **Known non-blocking build warnings**
-- `npm run build` / `npm run build:renderer` emits Vite dynamic/static import chunking warnings for `PanelLayout.tsx` and `MediaTile.tsx` — pre-existing, do not treat as build failures
+- `npm run build:renderer` emits Vite chunking warnings for `PanelLayout.tsx` and `MediaTile.tsx` — pre-existing, not failures
 
 ---
 
 ## Active Subsystems
 
-### Daemon (`bin/codesurfd.mjs`)
-- HTTP daemon with routes for `/dreaming/status`, `/dreaming/runs`, `/dreaming/run`, `/dreaming/cancel`
-- Owns dreaming lifecycle: `createDreamingManager` from `packages/codesurf-dreaming/src/index.mjs`
-- Auto-dream sweep runs every 5 minutes; evaluates whether to trigger a dream run after new sessions accumulate (minimum 3 sessions, minimum 30-minute interval, 5-second debounce)
-- Dream output written atomically to `.codesurf/DREAMING.md` in the workspace directory
-- Project/workspace default label now prefers `package.json.productName` over `basename(path)` when the path contains a package with a productName field
+### Canvas Engine
+- All 2D physics in `App.tsx`: pan/zoom, drag, resize, snapping, groups, undo/redo
+- Undo snapshots full state (max 50) — do not push to undo stack in hot paths
+- Tiles lazy-loaded via `React.lazy` + `Suspense`
 
-### Dreaming Package (`packages/codesurf-dreaming`)
-- Single source file: `packages/codesurf-dreaming/src/index.mjs`
-- Provider: Claude (`claude-sonnet-4-6`) via `@anthropic-ai/claude-agent-sdk` `query()`
-- Limits: max 6 sessions, 6 messages per session, 500 chars per message, 16 000 chars total memory, 8 000 chars existing dream budget, 4 000 chars per session block
-- Writes atomically (temp file + rename) to avoid partial reads
-- Auto-dreaming types in `src/shared/types.ts`: `AutoDreamSettings`, `DreamRunSummary`, `AutoDreamPolicySummary`, `DashboardDreamingSummary` (added commit `eef4ece`)
-- UI surface: `MainStatusBar` chip via `mainStatusBarDreaming.ts`; `SettingsPanel` cadence controls
+### Workspace Tab Geometry (settled — committed in `fdd1999`)
+- `workspaceTabActiveHeight = 31`, `workspaceTabInactiveHeight = 24`
+- `workspaceTabTextOffset = -1` (active), `workspaceTabInactiveTextOffset = 0` (inactive — was `-2`, corrected over seven+ sessions)
+- `workspaceTabInactiveBottomGap = 3`, `workspaceTabAttachedBottomGap = -1`
+- Main panel corner radius conditional on first workspace tab being selected
 
-### Canvas Engine (`src/renderer/src/App.tsx`)
-- All 2D physics (pan/zoom, drag, resize, snapping, groups, undo/redo) lives here — ~1700 LOC
-- World coords = screen coords adjusted for zoom + pan offset; group movement recurses through nested groups
-- Undo snapshots full state (max 50) — never push to undo stack in hot paths
+### ChatTile — Chip Row Judder Fix (uncommitted, working tree modified)
+- Root cause: chip text wrapping to 2 lines changed row height on every 500 ms collapse event
+- Fix: chip row `flexWrap: 'nowrap'` + `overflow: hidden`; all chip text spans (`ThinkingBlockView`, `WorkingChipView`, `MixedToolGroup`, `CollapsedToolGroup`, `ToolBlockView`) now have `whiteSpace: 'nowrap'` + ellipsis
+- Design constraint: chips are single-line always — never two-line chips at any width
+- Also fixed: collapsed-messages drawer `paddingBottom` always `12` (was `0` when collapsed, clipping "N queued" text)
 
-**Workspace tab UI — settled state (2026-04-23, seven or more iterative Codex sessions, all pass `npm run build:renderer`):**
+### Session Tools (committed `1ff343d`)
+- `src/main/ipc/session-title-generation.ts`, `src/renderer/src/components/sidebar/session-title-generation.ts`
+- `src/renderer/src/components/sidebar/session-open.ts` — session open intent detection
+- Tests: `test/session-openability.test.ts`, `test/session-title-generation.test.ts`
 
-Active tab geometry:
-- Taller height (`31px`) with `-1px` bottom overlap into main panel — "attached tab" appearance
-- Squared bottom corners, no bottom border on active state
-- Main panel top-left corner radius: `0` when sidebar is expanded AND the first workspace tab is selected (line ~4208); all other states retain normal rounded corners; collapsed sidebar unaffected
+### Dreaming Subsystem
+- `packages/codesurf-dreaming/src/index.mjs`, `src/main/ipc/dreaming.ts`
+- Orphan-run reconciliation: runs stuck "running" > 10 min flipped to failed on daemon restart
+- Stderr sanitization: cleaned Claude CLI stderr surfaced as formatted error on job failure
 
-Inactive tab geometry (final settled state):
-- Height: `24px`; bottom gap: `6px` (was 7px — reduced 1px to eliminate vertical jump on selection)
-- Outer pill shape intentionally distinct from active tab; do not equalize
-- Tab row left inset: `8px` (was 11px — moved 3px left, applied at the tab container level)
-- Inner label and close `x` both use the same upward vertical transform; close icon no longer has a separate `-0.5px` SVG shift
-- `workspaceTabInactiveTextOffset = 0` — the constant controlling inner content offset for inactive tabs; final value after multiple direction corrections (was `-2`); do not move away from `0` without explicit instruction
-- Outer tab shape/geometry is unchanged; only the inner content (label + close control) is offset so the text baseline aligns with the active tab
-
-Do not re-equalize tab geometry or revert these numeric constants without explicit instruction.
-
-### Chat IPC (`src/main/ipc/chat.ts`) — dirty, modified
-- **Recent fix:** Claude stream replacement lifecycle guard — `intentionallyClosedQueries: WeakSet<Query>` + `isActiveQuery(cardId, query)` / `clearActiveQuery(cardId, query)` helpers; stale/superseded generators return silently and cannot emit failure into the new active stream or delete its query
-- **Recent fix:** stderr capture added to both live chat and detached daemon Claude jobs; `claudeStderr: string` accumulator passed as `stderr` callback; `sanitizeClaudeStderrText()` strips ANSI escapes and blank lines; `formatClaudeSdkError(error, stderrText)` formats real CLI output capped at 6 000 chars — failures no longer surface as bare `Claude Code process exited with code 1`
-- Same helpers mirrored in `bin/chat-jobs.mjs` for detached daemon Claude jobs
-- Three providers stream via NDJSON/SSE parsed in `src/main/ipc/stream.ts`: Claude SDK, Codex CLI subprocess, OpenCode HTTP server
-
-### Chat Tile (`src/renderer/src/components/ChatTile.tsx`) — ~7 300+ LOC
-
-Settled decisions (do not change without strong reason):
-- `scrollbarGutter: 'stable both-edges'` (line ~5241) — multiple sessions oscillated; `both-edges` is correct for symmetric centering; do not change
-- Shimmer bars at bottom of live assistant messages and running tool chips are intentional — multiple sessions removed then restored them; they must stay
-- Live `Thinking for Ns` chip uses tabular numbers with reserved width to prevent per-tick horizontal reflow
-
-**Open bug — phantom liveness pulse on reload:** `ChatTile` restores `saved.isStreaming` directly on mount. If a tile JSON was persisted with `isStreaming: true`, the 500 ms `StreamingLivenessIndicator` interval fires on every reload indefinitely. Root cause identified; no fix in place. Fix path: clear `isStreaming` to `false` on clean shutdown, or add a mount-time check that resets it when no active stream exists for the card.
-
-### Session Title Generation (`src/main/ipc/session-title-generation.ts`) — untracked/new
-- Multi-provider: prefers current session provider, falls back to OpenRouter free models, last resort `claude-haiku-4-5-20251001`
-- OpenAI-compatible path supports `openai` and `openrouter` providers; OpenRouter free fallbacks: `deepseek/deepseek-chat-v3-0324:free`, `google/gemini-2.0-flash-exp:free`, `meta-llama/llama-3.1-8b-instruct:free`
-- Title limits: `GENERATED_TITLE_MAX_CHARS = 64`, 3–4 words, 90 000-char transcript budget (head 32 + tail 96 messages)
-- Companion renderer module: `src/renderer/src/components/sidebar/session-title-generation.ts`
-- **Known prior bug (fixed):** Codex fallback was spawning inside the repo root, exposing `.mcp.json` (stale random MCP port); startup/crash banner leaked into title candidates; fix: isolate subprocess from repo-local `.mcp.json`
-
-### Session Openability (`src/renderer/src/components/sidebar/session-open.ts`) — untracked/new
-- Pure logic: `getSessionOpenIntent(session, options)` → `{ kind: 'chat' | 'app' | 'file' | 'none' }`
-- Determines how sidebar opens a session based on `canOpenInChat`, `canOpenInApp`, `filePath`, `messageCount`, `lastMessage`
-
-### Extension System
-- Manifest/registry/bridge/chat-surface host fully present
-- Chat-surface tab strip and extension theming: **never use `prefers-color-scheme`**; default light CSS; `body.dark` class applied via bridge; use solid hex not `rgba` opacity
+### Event Bus / MCP Server
+- `src/main/event-bus.ts`: wildcard pub/sub, ring-buffer 500 events/channel, no persistence
+- `src/main/mcp-server.ts`: HTTP MCP 2.0, 17 tools, random port, config at `~/.contex/mcp-server.json`
 
 ---
 
 ## Open Threads
 
-- **Phantom liveness indicator:** `ChatTile` mount restores `isStreaming` from persisted tile JSON; no guard clears it when no stream is active. Known root cause, not yet fixed.
-- **`src/main/ipc/chat.ts` uncommitted:** Contains lifecycle guard and stderr capture fixes — these are working-tree changes not yet committed; verify before any rebase or branch switch.
-- **`src/main/ipc/session-title-generation.ts` untracked:** New file, not yet committed.
-- **`src/renderer/src/components/sidebar/session-open.ts` untracked:** New file, not yet committed.
-- **productName display fix uncommitted:** Changes to daemon defaults and renderer `createWithPath` that infer label from `package.json.productName` — verify commit status before branch switch.
+### Codex Investigation — Blank/Large Chat List Entries (2026-04-23, unresolved)
+Some session list entries show blank content; one is 1.2 MB but displays ~50 lines. Hypothesis: different agent log formats not fully parsed by `src/main/db/thread-indexer.ts` / `src/main/session-sources.ts`. Investigation ongoing.
+
+### Uncommitted Working Tree
+- `src/renderer/src/components/ChatTile.tsx` — chip judder fix, needs commit
+- `.mcp.json` — contex server port updated, needs review and commit
+- `docs/` — several untracked plans/research files, intent unclear
+
+### `cluso-widget` Optional Dependency
+`file:../agentation-real` in `package.json` — may not exist in all environments, not a build error.

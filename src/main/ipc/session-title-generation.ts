@@ -231,11 +231,56 @@ function truncateHard(text: string, hardCap: number): string {
   return trimmed.slice(0, hardCap).trimEnd()
 }
 
+function isSessionTitleBoilerplateLine(line: string): boolean {
+  const normalized = line.trim()
+  if (!normalized) return true
+  return /^(?:#\s*)?AGENTS\.md instructions for\b/i.test(normalized)
+    || /^(?:#\s*)?CLAUDE\.md instructions for\b/i.test(normalized)
+    || /^<INSTRUCTIONS>$/i.test(normalized)
+    || /^<\/INSTRUCTIONS>$/i.test(normalized)
+    || /^---\s*project-doc\s*---$/i.test(normalized)
+    || /^#+\s*(?:Non-Negotiable Rules|GSDN Native Mode|Installed GSDN assets|Usage rules|Skills|Files mentioned by the user)\b/i.test(normalized)
+    || /^Launching skill:/i.test(normalized)
+    || /^Base directory for this skill:/i.test(normalized)
+    || /^The `?\.codesurf\/DREAMING\.md`? has been written/i.test(normalized)
+}
+
+function firstMeaningfulTitleLine(text: string): string | null {
+  const source = text.replace(/\r\n/g, '\n').trim()
+  if (!source) return null
+
+  const explicitRequest = source.match(/#+\s*My request for Codex:\s*([\s\S]+)/i)
+  if (explicitRequest?.[1]?.trim()) return firstMeaningfulTitleLine(explicitRequest[1])
+
+  let insideInstructions = false
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (/<INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = true
+      continue
+    }
+    if (/<\/INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = false
+      continue
+    }
+    if (insideInstructions) continue
+
+    const workspacePrompt = line.match(/^Workspace:\s+.+?\bPrimary path:\s+\S+\s+(.+)$/i)
+    if (workspacePrompt?.[1]?.trim()) return workspacePrompt[1].trim()
+
+    if (isSessionTitleBoilerplateLine(line)) continue
+    return line
+  }
+
+  return null
+}
+
 export function cleanSessionTitleCandidate(text: string | null | undefined, hardCap = GENERATED_TITLE_MAX_CHARS): string | null {
   const trimmed = String(text ?? '').trim()
   if (!trimmed) return null
 
-  let next = trimmed
+  let next = (firstMeaningfulTitleLine(trimmed) ?? trimmed)
     .replace(/^```(?:json|JSON)?\s*/i, '')
     .replace(/```$/i, '')
     .replace(/\r\n/g, '\n')
@@ -251,6 +296,7 @@ export function cleanSessionTitleCandidate(text: string | null | undefined, hard
   next = next.replace(/\s+/g, ' ').trim()
   next = next.replace(/[.!?。]+$/g, '').trim()
 
+  if (isSessionTitleBoilerplateLine(next)) return null
   if (!next) return null
   return truncateHard(next, hardCap)
 }

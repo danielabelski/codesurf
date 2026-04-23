@@ -1286,11 +1286,56 @@ function truncateSessionText(text, length = SESSION_TEXT_LIMIT) {
   return normalized.length > length ? normalized.slice(0, length) : normalized
 }
 
+function isSessionTitleBoilerplateLine(line) {
+  const normalized = String(line ?? '').trim()
+  if (!normalized) return true
+  return /^(?:#\s*)?AGENTS\.md instructions for\b/i.test(normalized)
+    || /^(?:#\s*)?CLAUDE\.md instructions for\b/i.test(normalized)
+    || /^<INSTRUCTIONS>$/i.test(normalized)
+    || /^<\/INSTRUCTIONS>$/i.test(normalized)
+    || /^---\s*project-doc\s*---$/i.test(normalized)
+    || /^#+\s*(?:Non-Negotiable Rules|GSDN Native Mode|Installed GSDN assets|Usage rules|Skills|Files mentioned by the user)\b/i.test(normalized)
+    || /^Launching skill:/i.test(normalized)
+    || /^Base directory for this skill:/i.test(normalized)
+    || /^The `?\.codesurf\/DREAMING\.md`? has been written/i.test(normalized)
+}
+
+function firstMeaningfulTitleLine(text) {
+  const source = String(text ?? '').replace(/\r\n/g, '\n').trim()
+  if (!source) return null
+
+  const explicitRequest = source.match(/#+\s*My request for Codex:\s*([\s\S]+)/i)
+  if (explicitRequest?.[1]?.trim()) return firstMeaningfulTitleLine(explicitRequest[1])
+
+  let insideInstructions = false
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (/<INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = true
+      continue
+    }
+    if (/<\/INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = false
+      continue
+    }
+    if (insideInstructions) continue
+
+    const workspacePrompt = line.match(/^Workspace:\s+.+?\bPrimary path:\s+\S+\s+(.+)$/i)
+    if (workspacePrompt?.[1]?.trim()) return workspacePrompt[1].trim()
+
+    if (isSessionTitleBoilerplateLine(line)) continue
+    return line
+  }
+
+  return null
+}
+
 function cleanSessionTitleCandidate(text, hardCap = 80) {
   const trimmed = String(text ?? '').trim()
   if (!trimmed) return null
 
-  let next = trimmed
+  let next = (firstMeaningfulTitleLine(trimmed) ?? trimmed)
     .replace(/\r\n/g, '\n')
     .split(/\r?\n/, 1)[0]
     .trim()
@@ -1303,6 +1348,7 @@ function cleanSessionTitleCandidate(text, hardCap = 80) {
   next = next.replace(/^#+\s+/, '')
   next = next.replace(/\s+/g, ' ').trim()
 
+  if (isSessionTitleBoilerplateLine(next)) return null
   if (!next) return null
   return next.length > hardCap ? `${next.slice(0, hardCap).trimEnd()}…` : next
 }

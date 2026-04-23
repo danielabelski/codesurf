@@ -2004,11 +2004,16 @@ function relativeTime(ts: number): string {
 }
 
 function ensureChatMdStyle(): void {
-  if (document.getElementById(SHIMMER_ID)) return
   ensureShimmerStyles()
-  const style = document.createElement('style')
-  style.id = SHIMMER_ID
+  let style = document.getElementById(SHIMMER_ID) as HTMLStyleElement | null
+  if (!style) {
+    style = document.createElement('style')
+    style.id = SHIMMER_ID
+    document.head.appendChild(style)
+  }
   style.textContent = `
+    /* Hide scrollbar on the messages pane (scroll still works) */
+    .chat-messages::-webkit-scrollbar { display: none; }
     /* Chat markdown styles (Streamdown overrides) */
     .chat-md { line-height: 1.55; color: inherit; max-width: 100%; overflow: hidden; }
     .chat-md, .chat-md * { min-width: 0; }
@@ -2016,8 +2021,8 @@ function ensureChatMdStyle(): void {
     .chat-md > *:first-child { margin-top: 0 !important; }
     .chat-md > *:last-child { margin-bottom: 0 !important; }
     .chat-md pre { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
-    .chat-md p { margin: 0 0 8px; }
-    .chat-md p:last-child { margin-bottom: 0; }
+    .chat-md p, .chat-md .chat-md-p { margin: 0 0 8px; }
+    .chat-md p:last-child, .chat-md .chat-md-p:last-child { margin-bottom: 0; }
     .chat-md h1 { font-size: 1.3em; font-weight: 700; margin: 12px 0 6px; color: inherit; }
     .chat-md h2 { font-size: 1.15em; font-weight: 600; margin: 10px 0 4px; color: inherit; }
     .chat-md h3 { font-size: 1.05em; font-weight: 600; margin: 8px 0 4px; color: inherit; }
@@ -2037,7 +2042,7 @@ function ensureChatMdStyle(): void {
     .chat-md ul:first-child, .chat-md ol:first-child { margin-top: 0; }
     .chat-md ul:last-child, .chat-md ol:last-child { margin-bottom: 0; }
     .chat-md li { line-height: 1.55; margin-bottom: 2px; }
-    .chat-md li > p { margin: 0; }
+    .chat-md li > p, .chat-md li > .chat-md-p { margin: 0; }
     .chat-md a,
     .chat-md a:any-link,
     .chat-md a:visited { color: var(--chat-link-color, #4f8cff) !important; opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
@@ -2052,7 +2057,6 @@ function ensureChatMdStyle(): void {
     .chat-md th, .chat-md td { border: 1px solid rgba(128,128,128,0.3); padding: 4px 8px; text-align: left; }
     .chat-md th { font-weight: 600; background: rgba(128,128,128,0.1); }
   `
-  document.head.appendChild(style)
 }
 
 
@@ -2499,6 +2503,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
+  // Previous scrollTop, used by handleMessagesScroll to detect scroll direction.
+  // Any user scroll toward the top releases stickToBottomRef immediately, so
+  // auto-pin can't fight the user while they're reading history during streaming.
+  const lastScrollTopRef = useRef<number>(0)
   const showScrollToLatestRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const acRef = useRef<HTMLDivElement>(null)
@@ -2629,9 +2637,20 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       : []
 
   const renderedMessages = useMemo(() => {
-    const combined = historicalMessages.length > 0
-      ? [...historicalMessages, ...messages]
-      : messages
+    // Dedupe by message ID when combining historical (session-restore) with
+    // live messages. Live wins — it has the freshest streaming state. Without
+    // this, an overlapping claude-N id from both sources triggers React's
+    // "two children with the same key" warning.
+    let combined: ChatMessage[]
+    if (historicalMessages.length > 0) {
+      const liveIds = new Set(messages.map(m => m.id))
+      combined = [
+        ...historicalMessages.filter(m => !liveIds.has(m.id)),
+        ...messages,
+      ]
+    } else {
+      combined = messages
+    }
 
     if (pagedLinkedHistoryEnabled) return combined
     if (combined.length <= CHAT_RENDER_WINDOW) return combined
@@ -3772,12 +3791,48 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     latestBlock.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
   }, [scrollToLatest, syncScrollToLatestVisibility])
 
+  // Direction-aware user-intent handlers. Only UPWARD input releases
+  // stick-to-bottom; downward input is the user following along, so we let
+  // the auto-pin mechanism keep working normally. This avoids the previous
+  // bug where any wheel (including downward) froze auto-pin for 800ms and
+  // left streaming content drifting off-screen above the viewport.
+  const handleMessagesWheel = useCallback((ev: React.WheelEvent<HTMLDivElement>) => {
+    if (ev.deltaY < 0) {
+      // Wheeled UP — user wants to read history. Release stick.
+      stickToBottomRef.current = false
+      syncScrollToLatestVisibility(true)
+    }
+    // ev.deltaY >= 0 (down or zero): no-op. Let auto-pin keep working.
+  }, [syncScrollToLatestVisibility])
+
+  const handleMessagesKeyDown = useCallback((ev: React.KeyboardEvent<HTMLDivElement>) => {
+    if (ev.key === 'ArrowUp' || ev.key === 'PageUp' || ev.key === 'Home') {
+      stickToBottomRef.current = false
+      syncScrollToLatestVisibility(true)
+    }
+  }, [syncScrollToLatestVisibility])
+
   const handleMessagesScroll = useCallback(() => {
     const el = messagesRef.current
     if (!el) return
-    const atLatest = isNearLatest(el)
-    stickToBottomRef.current = atLatest
-    syncScrollToLatestVisibility(!atLatest)
+
+    const prevTop = lastScrollTopRef.current
+    const currentTop = el.scrollTop
+    lastScrollTopRef.current = currentTop
+
+    if (currentTop < prevTop) {
+      // Scrolled toward the top — release stick. This covers keyboard nav,
+      // programmatic "scroll up", and any input we didn't catch at the wheel
+      // layer. Safe because auto-pin always goes DOWN (scrollTop=scrollHeight).
+      if (stickToBottomRef.current) stickToBottomRef.current = false
+      syncScrollToLatestVisibility(true)
+    } else if (isNearLatest(el)) {
+      // At or near bottom → (re-)stick. This makes "scroll back down to
+      // follow" work without needing to click a button.
+      if (!stickToBottomRef.current) stickToBottomRef.current = true
+      syncScrollToLatestVisibility(false)
+    }
+
     if (pagedLinkedHistoryEnabled && hasEarlierMessages && !loadingEarlier && el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD) {
       void loadEarlierMessagesRef.current()
     }
@@ -5231,14 +5286,23 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       {/* Messages */}
       <div
         ref={messagesRef}
+        className="chat-messages"
         onScroll={handleMessagesScroll}
+        onWheel={handleMessagesWheel}
+        onKeyDown={handleMessagesKeyDown}
+        tabIndex={-1}
         style={{
           flex: 1, overflowY: 'auto', padding: '12px 14px',
           overflowX: 'hidden',
           minHeight: 0,
-          // Keep the centered transcript column from jumping left/right when
-          // timed streaming UI causes the vertical scrollbar to appear/disappear.
-          scrollbarGutter: 'stable both-edges',
+          // Scrollbar hidden for testing — no gutter reservation needed while hidden.
+          scrollbarWidth: 'none' as React.CSSProperties['scrollbarWidth'],
+          // Disable Chrome's built-in scroll anchoring. React pins scrollTop =
+          // scrollHeight on every message update (useLayoutEffect below);
+          // anchoring would simultaneously try to preserve visual position as
+          // streaming content changes height, producing up-and-down judder on
+          // the currently-streaming section.
+          overflowAnchor: 'none',
         }}
       >
         <div style={{
@@ -5348,7 +5412,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 const block = blocks[i]
                 if (block.type === 'thinking') {
                   const tb = msg.thinkingBlocks?.find(t => t.id === block.thinkingId)
-                  if (tb) items.push({
+                  // Active thinking for the live message renders above the input bar — skip here
+                  if (tb && (!isLiveMessage || tb.done)) items.push({
                     kind: 'thinking',
                     key: `${msg.id}-think-${block.thinkingId}`,
                     block: !isLiveMessage && !tb.done ? { ...tb, done: true } : tb,
@@ -5494,6 +5559,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     alignContent: 'flex-start',
                     width: '100%',
                     minWidth: 0,
+                    maxWidth: '100%',
+                    overflow: 'visible',
                   }}>
                     {finalItems.map(renderChipItem)}
                   </div>
@@ -5553,7 +5620,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   const legacyThinking = msg.thinking
                     ? (!isLiveMessage && !msg.thinking.done ? { ...msg.thinking, done: true } : msg.thinking)
                     : (isLiveMessage && !msg.content ? { content: '', done: false } : null)
-                  const showLegacy = !hasInlineThinking && Boolean(legacyThinking)
+                  // Skip active legacy thinking for live messages — shown above input bar instead
+                  const showLegacy = !hasInlineThinking && Boolean(legacyThinking) && (!isLiveMessage || legacyThinking?.done)
                   return showLegacy
                     ? <ThinkingBlockView thinking={legacyThinking ?? { content: '', done: false }} />
                     : null
@@ -5584,6 +5652,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                             alignContent: 'flex-start',
                             width: '100%',
                             minWidth: 0,
+                            maxWidth: '100%',
+                            overflow: 'visible',
                           }}>
                             {chipRow}
                           </div>
@@ -5595,7 +5665,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                         if (block.type === 'thinking') {
                           if (chipRow.length === 0) chipRowStartIdx = i
                           const tb = msg.thinkingBlocks?.find(t => t.id === block.thinkingId)
-                          if (tb) {
+                          // Active (not-done) thinking blocks for the live message render
+                          // in the fixed zone above the input bar — skip them here so they
+                          // don't also appear inside the message scroll area. Once done they
+                          // fall through and render as the static "copy" in the chip row.
+                          if (tb && (!isLiveMessage || tb.done)) {
                             chipRow.push(
                               <ThinkingBlockView
                                 key={`think-${block.thinkingId}`}
@@ -5669,13 +5743,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       // Flush any trailing chip row (e.g. stream ended on a
                       // thinking or tool block without a subsequent text block).
                       flushChipRow()
-                      // Trailing status chip — lives below the last rendered
-                      // block while the message is streaming. The component
-                      // itself decides whether to show (hides during thinking,
-                      // honors the 2s show-delay) so we render unconditionally.
-                      if (msg.role === 'assistant' && isLiveMessage) {
-                        elements.push(<WorkingChipView key={`working-${msg.id}`} message={msg} />)
-                      }
+                      // WorkingChipView moved to the fixed zone above the input bar.
                       return elements
                     })()}
                   </>
@@ -5683,7 +5751,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   <>
                     {/* Fallback: legacy layout for messages without contentBlocks */}
                     {hasVisibleToolBlocks && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-start', alignContent: 'flex-start' }}>
+                      <div style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: 10,
+                        alignItems: 'flex-start',
+                        alignContent: 'flex-start',
+                        width: '100%',
+                        minWidth: 0,
+                        maxWidth: '100%',
+                        overflow: 'visible',
+                      }}>
                         {(() => {
                           const out: JSX.Element[] = []
                           const collapsibleTools = visibleToolBlocks.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length))
@@ -6046,7 +6124,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             overflow: 'hidden',
             position: 'relative',
             zIndex: 0,
-            paddingBottom: showCollapsed ? 0 : 12,
+            // The -12px bottom margin tucks this drawer behind the composer for
+            // the layered-paper effect. Always pay the matching 12px bottom
+            // padding — otherwise the tuck eats into the summary button's
+            // content box and clips the "N queued messages" text vertically.
+            paddingBottom: 12,
           }}>
             {/* Header / summary row. When collapsed it's the ONLY visible
                 row and clicking anywhere on it expands. When expanded it
@@ -6351,6 +6433,31 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               )
             })}
           </div>
+          )
+        })()}
+
+        {/* Live thinking / working chip — pinned above input bar while streaming.
+            position:relative + z-index keeps it above the queued-drawer's -12px
+            bottom-tuck (which has zIndex: 0 and overlaps this zone by 12px). */}
+        {(() => {
+          if (!isStreaming) return null
+          const liveMsg = renderedMessages[renderedMessages.length - 1]
+          if (!liveMsg || liveMsg.role !== 'assistant' || !liveMsg.isStreaming) return null
+          // Active inline thinking block takes priority
+          const activeThinking = liveMsg.thinkingBlocks?.find(tb => !tb.done)
+            ?? (!(liveMsg.contentBlocks ?? []).some(b => b.type === 'thinking') && liveMsg.thinking && !liveMsg.thinking.done
+              ? liveMsg.thinking : null)
+          return (
+            <div style={{
+              width: CHAT_COMPOSER_WIDTH, minWidth: CHAT_COMPOSER_MIN_WIDTH_STYLE,
+              margin: '0 auto', paddingTop: 4, paddingBottom: 4,
+              position: 'relative', zIndex: 2,
+            }}>
+              {activeThinking
+                ? <ThinkingBlockView thinking={activeThinking} />
+                : <WorkingChipView message={liveMsg} />
+              }
+            </div>
           )
         })()}
 
@@ -7255,17 +7362,7 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
     }
   }, [thinking.done])
 
-  // Auto-expand when content starts arriving, auto-collapse when done
-  useEffect(() => {
-    if (hasContent && isActive) setExpanded(true)
-  }, [hasContent, isActive])
-
-  useEffect(() => {
-    if (thinking.done && expanded) {
-      const t = setTimeout(() => setExpanded(false), 1200)
-      return () => clearTimeout(t)
-    }
-  }, [thinking.done])
+  // No auto-expand — user opens thinking content on demand only
 
   const displayedElapsed = finalElapsedRef.current ?? elapsedSec
 
@@ -7280,8 +7377,9 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
       alignItems: 'flex-start',
       gap: expanded ? 6 : 0,
       width: 'fit-content',
-      maxWidth: '100%',
+      maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
       minWidth: 0,
+      flex: '0 0 auto',
     }}>
       {/* Chip — matches tool chip sizing, border, and padding */}
       <button
@@ -7303,15 +7401,24 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
           fontWeight: 500,
           lineHeight: 1,
           width: 'fit-content',
+          maxWidth: '100%',
         }}
       >
         <Brain size={11} style={{ opacity: isActive ? 0.9 : 0.5, flexShrink: 0 }} />
         {isActive ? (
-          <ShimmerText baseColor={theme.accent.hover} style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
+          <ShimmerText baseColor={theme.accent.hover} style={{
+            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
+            minWidth: 0, flex: '1 1 auto',
+            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+          }}>
             {`Thinking for ${elapsedSec}s`}
           </ShimmerText>
         ) : (
-          <span style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
+          <span style={{
+            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
+            minWidth: 0, flex: '1 1 auto',
+            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+          }}>
             {`Thought for ${displayedElapsed}s`}
           </span>
         )}
@@ -7412,13 +7519,19 @@ const WorkingChipView = React.memo(function WorkingChipView({ message }: { messa
       fontWeight: 500,
       lineHeight: 1,
       width: 'fit-content',
+      maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
+      flex: '0 0 auto',
     }}>
       <Cog size={11} style={{
         opacity: 0.9,
         flexShrink: 0,
         animation: 'chat-spin 2.4s linear infinite',
       }} />
-      <ShimmerText baseColor={theme.accent.hover} style={{ fontSize: 10.5, fontWeight: 500, lineHeight: 1 }}>
+      <ShimmerText baseColor={theme.accent.hover} style={{
+        fontSize: 10.5, fontWeight: 500, lineHeight: 1,
+        minWidth: 0,
+        overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+      }}>
         {label}
       </ShimmerText>
     </div>
@@ -7488,7 +7601,15 @@ const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: 
   const [expanded, setExpanded] = useState(false)
 
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: expanded ? 6 : 0,
+      width: 'fit-content',
+      maxWidth: '100%',
+      minWidth: 0,
+      flex: '0 0 auto',
+    }}>
       <div
         onClick={() => setExpanded(e => !e)}
         style={{
@@ -7511,7 +7632,11 @@ const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: 
         }}
       >
         <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
-        <span style={{ fontWeight: 500, fontSize: 10.5, lineHeight: 1 }}>
+        <span style={{
+          fontWeight: 500, fontSize: 10.5, lineHeight: 1,
+          minWidth: 0, flex: '1 1 auto',
+          overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+        }}>
           Called {blocks.length} tools
         </span>
         <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
@@ -7522,7 +7647,19 @@ const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: 
           flexShrink: 0,
         }} />
       </div>
-      {expanded && blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
+      {expanded && (
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 6,
+          alignItems: 'flex-start',
+          alignContent: 'flex-start',
+          maxWidth: '100%',
+          overflow: 'visible',
+        }}>
+          {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
+        </div>
+      )}
     </div>
   )
 })
@@ -7569,7 +7706,15 @@ const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks
   const [expanded, setExpanded] = useState(false)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: expanded ? 6 : 0 }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: expanded ? 6 : 0,
+      width: 'fit-content',
+      maxWidth: '100%',
+      minWidth: 0,
+      flex: '0 0 auto',
+    }}>
       <div
         onClick={() => setExpanded(e => !e)}
         style={{
@@ -7592,7 +7737,11 @@ const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks
         }}
       >
         <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
-        <span style={{ fontWeight: 500, fontSize: 10.5, lineHeight: 1 }}>
+        <span style={{
+          fontWeight: 500, fontSize: 10.5, lineHeight: 1,
+          minWidth: 0, flex: '1 1 auto',
+          overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+        }}>
           {getGroupedToolLabel(name, blocks.length)}
         </span>
         <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
@@ -7604,7 +7753,15 @@ const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks
         }} />
       </div>
       {expanded && (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, paddingLeft: 4 }}>
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 6,
+          alignItems: 'flex-start',
+          alignContent: 'flex-start',
+          maxWidth: '100%',
+          overflow: 'visible',
+        }}>
           {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
         </div>
       )}
@@ -7694,6 +7851,8 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
         maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
         width: expanded || isFileChangeBlock ? '100%' : 'fit-content',
         alignSelf: 'stretch',
+        flex: expanded || isFileChangeBlock ? '1 1 100%' : '0 0 auto',
+        minWidth: 0,
       }}
     >
       <button
@@ -7755,14 +7914,19 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
                 alignItems: 'baseline',
                 gap: 8,
                 minWidth: 0,
-                flexWrap: 'wrap',
+                flexWrap: 'nowrap',
+                overflow: 'hidden',
               }}>
                 <span style={{
                   display: 'block',
                   fontWeight: 600,
                   fontSize: 10.5,
                   color: theme.chat.text,
-                  flexShrink: 0,
+                  flexShrink: 1,
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
                 }}>
                   {fileChangeSummary.fileCount} file{fileChangeSummary.fileCount === 1 ? '' : 's'} changed
                 </span>

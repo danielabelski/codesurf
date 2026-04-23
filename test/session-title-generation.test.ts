@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import {
   buildSessionTitlePrompt,
+  cleanSessionTitleCandidate,
   createSessionTitleGenerationGate,
   deriveFallbackSessionTitle,
   hasSessionTitleChangedDuringGeneration,
@@ -57,6 +58,24 @@ describe('session title generation prompt and sanitizer', () => {
     ].join('\n')
 
     expect(sanitizeGeneratedSessionTitle(codexCrash, 'Bypass Codex MCP config,')).toBe('Bypass Codex MCP Config')
+  })
+
+  test('title cleaner skips injected workspace instructions and uses the actual request', () => {
+    expect(cleanSessionTitleCandidate([
+      '# AGENTS.md instructions for /Users/jkneen/clawd/collaborator-clone',
+      '<INSTRUCTIONS>',
+      '## Non-Negotiable Rules',
+      'Do not use emoji.',
+      '</INSTRUCTIONS>',
+      '# Files mentioned by the user:',
+      '## Screenshot.png',
+      '## My request for Codex:',
+      'Can you explain why these chats open blank?',
+    ].join('\n'))).toBe('Can you explain why these chats open blank')
+
+    expect(cleanSessionTitleCandidate(
+      'Workspace: collaborator-clone Primary path: /Users/jkneen/clawd/collaborator-clone Update the generated workspace memory file for CodeSurf.',
+    )).toBe('Update the generated workspace memory file for CodeSurf')
   })
 
   test('local fallback derives a concise title without launching an agent when external generation fails', () => {

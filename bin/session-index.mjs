@@ -197,8 +197,53 @@ function truncate(text, length = 120) {
   return normalized.length > length ? normalized.slice(0, length) : normalized
 }
 
+function isSessionTitleBoilerplateLine(line) {
+  const normalized = String(line ?? '').trim()
+  if (!normalized) return true
+  return /^(?:#\s*)?AGENTS\.md instructions for\b/i.test(normalized)
+    || /^(?:#\s*)?CLAUDE\.md instructions for\b/i.test(normalized)
+    || /^<INSTRUCTIONS>$/i.test(normalized)
+    || /^<\/INSTRUCTIONS>$/i.test(normalized)
+    || /^---\s*project-doc\s*---$/i.test(normalized)
+    || /^#+\s*(?:Non-Negotiable Rules|GSDN Native Mode|Installed GSDN assets|Usage rules|Skills|Files mentioned by the user)\b/i.test(normalized)
+    || /^Launching skill:/i.test(normalized)
+    || /^Base directory for this skill:/i.test(normalized)
+    || /^The `?\.codesurf\/DREAMING\.md`? has been written/i.test(normalized)
+}
+
+function firstMeaningfulSessionTitleLine(text) {
+  const source = String(text ?? '').replace(/\r\n/g, '\n').trim()
+  if (!source) return null
+
+  const explicitRequest = source.match(/#+\s*My request for Codex:\s*([\s\S]+)/i)
+  if (explicitRequest?.[1]?.trim()) return firstMeaningfulSessionTitleLine(explicitRequest[1])
+
+  let insideInstructions = false
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    if (/<INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = true
+      continue
+    }
+    if (/<\/INSTRUCTIONS>/i.test(line)) {
+      insideInstructions = false
+      continue
+    }
+    if (insideInstructions) continue
+
+    const workspacePrompt = line.match(/^Workspace:\s+.+?\bPrimary path:\s+\S+\s+(.+)$/i)
+    if (workspacePrompt?.[1]?.trim()) return workspacePrompt[1].trim()
+
+    if (isSessionTitleBoilerplateLine(line)) continue
+    return line
+  }
+
+  return null
+}
+
 function sessionTitleFromText(fallback, text) {
-  const trimmed = text?.trim()
+  const trimmed = firstMeaningfulSessionTitleLine(text) ?? text?.trim()
   if (!trimmed) return fallback
   return trimmed.split(/\r?\n/, 1)[0].slice(0, 80)
 }
