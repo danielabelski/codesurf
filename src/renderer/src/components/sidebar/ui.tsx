@@ -104,11 +104,12 @@ export function SidebarMenuPortal({ anchorRef, children }: { anchorRef: React.Re
   )
 }
 
-export function SidebarItem({ label, icon, active, muted, emphasize, onClick, onContextMenu, indent = 0, indentUnit = 10, extra, extraAlwaysVisible = false, extraWidth, idleExtra, idleExtraWidth = 44, title }: {
+export function SidebarItem({ label, icon, active, muted, emphasize, compact = false, onClick, onContextMenu, indent = 0, indentUnit = 10, extra, extraAlwaysVisible = false, extraWidth, idleExtra, idleExtraWidth = 44, title }: {
   label: string
   icon?: React.ReactNode
   active?: boolean
   muted?: boolean
+  compact?: boolean
   /**
    * Subtle "you are here" marker, independent of `active` (which is loud: bg +
    * accent color). Three states:
@@ -164,21 +165,36 @@ export function SidebarItem({ label, icon, active, muted, emphasize, onClick, on
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        paddingTop: 4, paddingBottom: 4, paddingLeft: 8 + indent * indentUnit,
+        display: 'flex', alignItems: 'center', gap: compact ? 8 : 6,
+        paddingTop: compact ? 2 : 4, paddingBottom: compact ? 2 : 4, paddingLeft: 8 + indent * indentUnit,
         paddingRight: extra && (hovered || extraAlwaysVisible)
           ? 6 + (extraWidth ?? 20)
           : idleExtra && !extraAlwaysVisible
             ? 6 + idleExtraWidth
             : 6,
-        minHeight: 28, cursor: 'pointer', userSelect: 'none', WebkitUserSelect: 'none', borderRadius: 6, margin: '0 4px',
+        minHeight: compact ? 25 : 28, cursor: 'pointer', userSelect: 'none', WebkitUserSelect: 'none', borderRadius: 6, margin: '0 4px',
         background: active ? theme.surface.selection : hovered ? theme.surface.hover : 'transparent',
         transition: 'background 0.1s ease', position: 'relative',
       }}
     >
-      {icon && <span style={{ color: active ? theme.accent.base : muted ? theme.text.disabled : theme.text.muted, flexShrink: 0, display: 'flex', alignItems: 'center' }}>{icon}</span>}
+      {icon && (
+        <span
+          style={{
+            color: active ? theme.accent.base : muted ? theme.text.disabled : theme.text.muted,
+            flex: '0 0 24px',
+            width: 24,
+            height: 22,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: 1,
+          }}
+        >
+          {icon}
+        </span>
+      )}
       <span style={{
-        fontSize: fonts.size, fontWeight: labelWeight, lineHeight: fonts.lineHeight,
+        fontSize: fonts.size, fontWeight: labelWeight, lineHeight: compact ? fonts.lineHeight * 0.9 : fonts.lineHeight,
         color: labelColor,
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
       }}>

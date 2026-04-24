@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react'
 import { ListTodo } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { renderExtensionIcon } from './extensionIcons'
 import { useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
 import {
   addTabToLeaf,
@@ -106,7 +107,7 @@ function setWebviewsInteractionBlocked(blocked: boolean): void {
   })
 }
 
-function PanelTabIcon({ type, size = 12 }: { type: string; size?: number }): JSX.Element {
+function PanelTabIcon({ type, icon, size = 12 }: { type: string; icon?: string | null; size?: number }): JSX.Element {
   const stroke = 1.2
 
   if (type === 'terminal') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M2 3l4 4-4 4" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" /><path d="M7 11h5" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" /></svg>
@@ -119,22 +120,8 @@ function PanelTabIcon({ type, size = 12 }: { type: string; size?: number }): JSX
   if (type === 'image') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><circle cx="5" cy="5" r="1.2" stroke="currentColor" strokeWidth="1" /><path d="M1.5 10l3-3 2 2 2.5-3 3.5 4" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" /></svg>
   if (type === 'media') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="1.5" y="1.5" width="11" height="11" rx="1.5" stroke="currentColor" strokeWidth={stroke} /><path d="M5.5 4.75 9 7l-3.5 2.25V4.75Z" fill="currentColor" /></svg>
   if (type === 'customisation') return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><path d="M7 2.25 8 1l1.15.55.1 1.55a4.8 4.8 0 0 1 1.1.64l1.47-.52.68 1.06-.99 1.2c.09.27.15.55.18.84l1.4.7-.2 1.25-1.56.21a4.91 4.91 0 0 1-.58 1.05l.56 1.48-1.05.68-1.21-.98c-.26.1-.54.17-.82.21L8 13H6.75l-.23-1.55a4.72 4.72 0 0 1-.82-.21l-1.21.98-1.05-.68.56-1.48a4.91 4.91 0 0 1-.58-1.05l-1.56-.2-.2-1.26 1.4-.7c.03-.29.09-.57.18-.84l-.99-1.2.68-1.06 1.47.52c.34-.27.71-.49 1.1-.64L4.85 1.55 6 1l1 1.25Z" stroke="currentColor" strokeWidth="0.95" strokeLinejoin="round" /><circle cx="7" cy="7" r="1.7" stroke="currentColor" strokeWidth="0.95" /></svg>
-  if (type === 'ext:artifact-builder') {
-    return (
-      <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
-        <rect x="2" y="2" width="10" height="10" rx="1.9" stroke="currentColor" strokeWidth="1.25" />
-        <path d="M4.4 7.2 6.15 8.95 9.6 5.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    )
-  }
   if (type.startsWith('ext:')) {
-    return (
-      <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
-        <g transform="translate(7 7) scale(1.14) translate(-7 -7)">
-          <path d="M6 1.5h2a.5.5 0 0 1 .5.5v1.5H8a1 1 0 0 0-1 1 1 1 0 0 0 1 1h.5V7a.5.5 0 0 1-.5.5H6V7a1 1 0 0 0-1-1 1 1 0 0 0-1 1v.5H2.5A.5.5 0 0 1 2 7V5.5h.5a1 1 0 0 0 1-1 1 1 0 0 0-1-1H2V2a.5.5 0 0 1 .5-.5H6z" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
-        </g>
-      </svg>
-    )
+    return <>{renderExtensionIcon(icon, size)}</>
   }
   return <svg width={size} height={size} viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="10" height="10" rx="2" stroke="currentColor" strokeWidth={stroke} /></svg>
 }
@@ -246,6 +233,7 @@ interface TabBarProps {
   onTabMouseDown: (tileId: string, panelId: string, label: string, e: React.MouseEvent) => void
   onExit?: () => void
   getTileType: (tileId: string) => string
+  getTileIcon?: (tileId: string) => string | undefined
   onSplitNew: (panelId: string, tileType: string, zone: DockZone) => void
   onCloseOthers: (panelId: string, tileId: string) => void
   onCloseToRight: (panelId: string, tileId: string) => void
@@ -253,7 +241,7 @@ interface TabBarProps {
 
 interface CtxMenu { tileId: string; tileType: string; x: number; y: number }
 
-function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onPinTab, onClose, onTabMouseDown, getTileType, onSplitNew, onCloseOthers, onCloseToRight }: TabBarProps): JSX.Element {
+function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onPinTab, onClose, onTabMouseDown, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight }: TabBarProps): JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
@@ -354,7 +342,7 @@ function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onP
               }}
             >
               <span style={{ display: 'inline-flex', alignItems: 'center', color: 'currentColor', flexShrink: 0 }}>
-                <PanelTabIcon type={tileType} />
+                <PanelTabIcon type={tileType} icon={getTileIcon?.(tab.id)} />
               </span>
               <span
                 style={{
@@ -624,6 +612,7 @@ interface LeafPanelProps {
   dragTarget: { panelId: string; zone: DockZone } | null
   onExit: () => void
   getTileType: (tileId: string) => string
+  getTileIcon?: (tileId: string) => string | undefined
   onSplitNew: (panelId: string, tileType: string, zone: DockZone) => void
   onCloseOthers: (panelId: string, tileId: string) => void
   onCloseToRight: (panelId: string, tileId: string) => void
@@ -631,7 +620,7 @@ interface LeafPanelProps {
   outerRadii: PanelCornerRadii
 }
 
-function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, onActivate, onPinTab, onCloseTab, onTabMouseDown, onPanelFocus, onAddTile, dragTarget, onExit, getTileType, onSplitNew, onCloseOthers, onCloseToRight, onLaunchTemplate, outerRadii }: LeafPanelProps): JSX.Element {
+function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, onActivate, onPinTab, onCloseTab, onTabMouseDown, onPanelFocus, onAddTile, dragTarget, onExit, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, onLaunchTemplate, outerRadii }: LeafPanelProps): JSX.Element {
   const theme = useTheme()
   const keepMountedWhenInactive = useCallback((tileId: string) => {
     const type = getTileType(tileId)
@@ -682,6 +671,7 @@ function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, 
           onTabMouseDown={onTabMouseDown}
           onExit={onExit}
           getTileType={getTileType}
+          getTileIcon={getTileIcon}
           onSplitNew={onSplitNew}
           onCloseOthers={onCloseOthers}
           onCloseToRight={onCloseToRight}
@@ -728,6 +718,7 @@ export interface PanelLayoutProps {
   activePanelId: string | null
   onActivePanelChange: (panelId: string) => void
   getTileType: (tileId: string) => string
+  getTileIcon?: (tileId: string) => string | undefined
   onSplitNew: (panelId: string, tileType: string, zone: DockZone) => void
   onCloseOthers: (panelId: string, tileId: string) => void
   onCloseToRight: (panelId: string, tileId: string) => void
@@ -736,7 +727,7 @@ export interface PanelLayoutProps {
   outerRadii?: PanelCornerRadii
 }
 
-export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, onCloseTab, onAddTile, onExit, activePanelId: _activePanelId, onActivePanelChange, getTileType, onSplitNew, onCloseOthers, onCloseToRight, insetBottom = 4, onLaunchTemplate, outerRadii = DEFAULT_PANEL_CORNER_RADII }: PanelLayoutProps): JSX.Element {
+export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, onCloseTab, onAddTile, onExit, activePanelId: _activePanelId, onActivePanelChange, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, insetBottom = 4, onLaunchTemplate, outerRadii = DEFAULT_PANEL_CORNER_RADII }: PanelLayoutProps): JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [dragTarget, setDragTarget] = useState<{ panelId: string; zone: DockZone } | null>(null)
@@ -871,6 +862,7 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
           dragTarget={dragTarget}
           onExit={onExit}
           getTileType={getTileType}
+          getTileIcon={getTileIcon}
           onSplitNew={onSplitNew}
           onCloseOthers={onCloseOthers}
           onCloseToRight={onCloseToRight}

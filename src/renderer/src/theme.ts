@@ -274,8 +274,8 @@ const THEMES: Record<string, AppTheme> = {
       titlebar: '#262625',
       input: '#3d3d3b',         // sampled: input bar
       hover: 'rgba(255,250,240,0.05)',
-      selection: 'rgba(212,165,116,0.14)',
-      selectionBorder: 'rgba(212,165,116,0.28)',
+      selection: 'rgba(255,250,240,0.085)',
+      selectionBorder: 'rgba(255,250,240,0.14)',
       accentSoft: 'rgba(212,165,116,0.16)',
     },
     border: {
@@ -289,10 +289,10 @@ const THEMES: Record<string, AppTheme> = {
       //   primary: '#e8e6e1',  // warm off-white — matches the palette warmth
       //   primary: '#e7eaf0',  // neutral-cool — sharper, more "IDE"
       //   primary: '#ede6d8',  // strongly warm — almost parchment
-      primary: '#e8e6e1',
-      secondary: '#c5c1b8',
-      muted: '#8a857b',
-      disabled: '#5d584f',
+      primary: '#f4f2ec',
+      secondary: '#ddd9cf',
+      muted: '#a6a095',
+      disabled: '#736d63',
       inverse: '#1a1a19',
     },
     accent: {
@@ -316,10 +316,10 @@ const THEMES: Record<string, AppTheme> = {
       placeholder: '#6f6a60',
       input: '#3d3d3b',
       inputBorder: 'rgba(255,250,240,0.08)',
-      text: '#e8e6e1',
-      textSecondary: '#c5c1b8',
-      muted: '#8a857b',
-      subtle: '#5d584f',
+      text: '#f4f2ec',
+      textSecondary: '#ddd9cf',
+      muted: '#a6a095',
+      subtle: '#736d63',
       divider: 'rgba(255,250,240,0.07)',
       // TODO(YOU) #4 — Bubble differentiation. The screenshot shows bubbles
       // at the SAME shade (flat, role shown by alignment only). If you prefer
@@ -337,7 +337,7 @@ const THEMES: Record<string, AppTheme> = {
     },
     terminal: {
       background: '#2d2d2b',
-      foreground: '#e8e6e1',
+      foreground: '#f4f2ec',
       cursor: '#d4a574',
       cursorAccent: '#2d2d2b',
       selection: 'rgba(212,165,116,0.25)',
@@ -348,15 +348,15 @@ const THEMES: Record<string, AppTheme> = {
       blue: '#7aa2ff',
       magenta: '#c78e8e',
       cyan: '#7fb8b0',
-      white: '#c5c1b8',
-      brightBlack: '#5d584f',
+      white: '#ddd9cf',
+      brightBlack: '#736d63',
       brightRed: '#ff9b8a',
       brightGreen: '#a3c98e',
       brightYellow: '#ffcc73',
       brightBlue: '#94b6ff',
       brightMagenta: '#dba4a4',
       brightCyan: '#9bd0c6',
-      brightWhite: '#e8e6e1',
+      brightWhite: '#f4f2ec',
     },
     editor: {
       monacoBase: 'vs-dark',
@@ -366,8 +366,8 @@ const THEMES: Record<string, AppTheme> = {
       background: '#2d2d2b',
       panel: '#373735',
       border: 'rgba(255,250,240,0.10)',
-      text: '#e8e6e1',
-      muted: '#8a857b',
+      text: '#f4f2ec',
+      muted: '#a6a095',
       accent: '#d4a574',
     },
     shadow: {

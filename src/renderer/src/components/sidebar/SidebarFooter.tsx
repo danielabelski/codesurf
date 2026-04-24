@@ -1,44 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Bot, Folder, GitBranch, Globe, History, Layers3, MessageSquare, Package, Pencil, Puzzle, Settings, Sparkles, TerminalSquare, Wrench } from 'lucide-react'
+import { Package, Settings } from 'lucide-react'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
+import { renderExtensionIcon } from '../extensionIcons'
 import { TILE_ICONS } from './utils'
 import { buildFooterExtensions, type FooterExtensionEntrySummary, type FooterTileEntry } from './footerExtensions'
 
 interface ExtTileEntry extends FooterTileEntry {}
 interface ExtensionEntrySummary extends FooterExtensionEntrySummary {}
-
-function renderExtensionToolbarIcon(icon?: string): React.ReactNode {
-  const raw = String(icon ?? '').trim()
-  if (!raw) return <Puzzle size={12} />
-
-  const normalized = raw.toLowerCase()
-  const namedIcons: Record<string, React.ComponentType<{ size?: number }>> = {
-    sparkles: Sparkles,
-    pencil: Pencil,
-    folder: Folder,
-    'git-branch': GitBranch,
-    wrench: Wrench,
-    globe: Globe,
-    bot: Bot,
-    package: Package,
-    puzzle: Puzzle,
-    settings: Settings,
-    'message-square': MessageSquare,
-    terminal: TerminalSquare,
-    history: History,
-    'layers-3': Layers3,
-  }
-  const Icon = namedIcons[normalized]
-  if (Icon) return <Icon size={12} />
-
-  const looksLikeTextToken = /^[a-z0-9-]+$/i.test(raw)
-  if (!looksLikeTextToken) {
-    return <span style={{ fontSize: 12, lineHeight: 1 }}>{raw}</span>
-  }
-
-  return <Puzzle size={12} />
-}
 
 export interface SidebarFooterProps {
   onNewTerminal: () => void
@@ -191,7 +160,7 @@ export function SidebarFooter({
               onMouseEnter={e => { if (!disabled) e.currentTarget.style.color = theme.text.primary }}
               onMouseLeave={e => { e.currentTarget.style.color = disabled ? theme.text.disabled : footerIconColor }}
             >
-              {renderExtensionToolbarIcon(ext.icon)}
+              {renderExtensionIcon(ext.icon, 12)}
             </button>
           )
         })}
@@ -245,7 +214,7 @@ export function SidebarFooter({
                       title={disabled ? `${ext.label} disabled` : ext.tileType ? ext.label : `${ext.label} settings`}
                     >
                       <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 14, height: 14, color: 'currentColor', flexShrink: 0 }}>
-                        {renderExtensionToolbarIcon(ext.icon)}
+                        {renderExtensionIcon(ext.icon, 12)}
                       </span>
                       <span>{ext.label}</span>
                     </button>

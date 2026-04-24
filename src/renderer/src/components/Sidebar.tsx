@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { Pencil, Search } from 'lucide-react'
+import { Archive, ArchiveRestore, Clock3, Maximize2, Minimize2, PanelLeft, Pencil, Pin, Search } from 'lucide-react'
 import { getChatStreamingSnapshot, subscribeChatStreaming } from './chatStreamingStore'
 import { getChatMessageSentSnapshot, subscribeChatMessageSent } from './chatMessageSentStore'
 import type { ProjectRecord, Workspace, TileState } from '../../../shared/types'
@@ -41,9 +41,13 @@ interface SidebarTextDialogState {
 }
 const GENERIC_SESSION_SOURCE_DETAILS = new Set(['transcript', 'conversation', 'project session', 'user session'])
 const SESSION_READ_WATERMARKS_STORAGE_KEY = 'codesurf.sidebar.sessionReadWatermarks.v1'
+const PINNED_SESSION_KEYS_STORAGE_KEY = 'codesurf.sidebar.pinnedSessionKeys.v1'
 const PROJECT_SESSION_PREVIEW_COUNT = 5
 const PROJECT_SESSION_SHOW_MORE_COUNT = 10
+const SIDEBAR_RIGHT_RAIL_WIDTH = 44
+const SIDEBAR_RIGHT_RAIL_ACTION_RIGHT = (SIDEBAR_RIGHT_RAIL_WIDTH - SESSION_ACTION_BUTTON_SIZE) / 2
 type SessionReadWatermarks = Record<string, number>
+type PinnedSessionKeys = Record<string, true>
 
 function getSessionSidebarIndicatorColor(session: SessionEntry, theme: ReturnType<typeof useTheme>): string {
   const key = getSessionAgentKey(session)
@@ -88,6 +92,30 @@ function saveSessionReadWatermarks(watermarks: SessionReadWatermarks): void {
     window.localStorage.setItem(SESSION_READ_WATERMARKS_STORAGE_KEY, JSON.stringify(watermarks))
   } catch {
     // Ignore storage failures; unread dots are a non-critical UI affordance.
+  }
+}
+
+function loadPinnedSessionKeys(): PinnedSessionKeys {
+  try {
+    const raw = window.localStorage.getItem(PINNED_SESSION_KEYS_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const next: PinnedSessionKeys = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof key === 'string' && value === true) next[key] = true
+    }
+    return next
+  } catch {
+    return {}
+  }
+}
+
+function savePinnedSessionKeys(keys: PinnedSessionKeys): void {
+  try {
+    window.localStorage.setItem(PINNED_SESSION_KEYS_STORAGE_KEY, JSON.stringify(keys))
+  } catch {
+    // Pinning is a local affordance; ignore storage failures.
   }
 }
 
@@ -148,12 +176,11 @@ function formatSessionSidebarSize(bytes: number | null | undefined): string {
 
 function formatSessionSidebarMeta(session: SessionEntry): string {
   const parts: string[] = []
-  const relativeTime = formatSessionSidebarRelativeTime(session.updatedAt)
   const detail = String(session.sourceDetail ?? '').trim()
   const normalizedDetail = detail.toLowerCase()
   const sizeLabel = formatSessionSidebarSize(session.sizeBytes)
 
-  if (relativeTime) parts.push(relativeTime)
+  parts.push(getSessionAgentLabel(session))
   if (detail && !GENERIC_SESSION_SOURCE_DETAILS.has(normalizedDetail)) {
     parts.push(detail)
   }
@@ -175,6 +202,9 @@ function SessionSidebarRow({
   indentUnit = 10,
   extra,
   extraWidth,
+  leading,
+  leadingVisible,
+  trailing,
   title,
   onDoubleClick,
 }: {
@@ -190,6 +220,9 @@ function SessionSidebarRow({
   indentUnit?: number
   extra?: React.ReactNode
   extraWidth?: number
+  leading?: React.ReactNode
+  leadingVisible?: boolean
+  trailing?: React.ReactNode
   title?: string
   onDoubleClick?: () => void
 }): React.JSX.Element {
@@ -202,14 +235,14 @@ function SessionSidebarRow({
       ? Math.min(900, fonts.weight + 100)
       : fonts.weight
   const labelColor = active
-    ? theme.accent.base
+    ? theme.text.primary
     : muted
       ? theme.text.disabled
       : emphasize === true
         ? theme.text.primary
         : emphasize === false
           ? theme.text.muted
-          : theme.text.secondary
+          : theme.text.primary
   const metaColor = muted
     ? theme.text.disabled
     : active
@@ -226,24 +259,37 @@ function SessionSidebarRow({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
-        display: 'flex',
+        display: 'grid',
+        gridTemplateColumns: `${leading ? 22 : 0}px minmax(0, 1fr) ${SIDEBAR_RIGHT_RAIL_WIDTH}px`,
         alignItems: 'center',
-        gap: 6,
+        columnGap: leading ? 6 : 0,
         paddingTop: meta ? 6 : 4,
         paddingBottom: meta ? 6 : 4,
         paddingLeft: 8 + indent * indentUnit,
-        paddingRight: extra ? 6 + (extraWidth ?? 20) : 6,
+        paddingRight: 0,
         minHeight: meta ? 40 : 28,
         cursor: 'pointer',
         userSelect: 'none',
         WebkitUserSelect: 'none',
-        borderRadius: 6,
-        margin: '0 4px',
+        borderRadius: 8,
+        margin: '0',
         background: active ? theme.surface.selection : hovered ? theme.surface.hover : 'transparent',
         transition: 'background 0.1s ease',
         position: 'relative',
       }}
     >
+      <span
+        style={{
+          width: 22,
+          display: leading ? 'flex' : 'none',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: leadingVisible || hovered || active ? 1 : 0,
+          transition: 'opacity 0.1s ease',
+        }}
+      >
+        {leading}
+      </span>
       {icon && (
         <span
           style={{
@@ -287,6 +333,22 @@ function SessionSidebarRow({
           </span>
         )}
       </div>
+      {trailing && (
+        <span style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          width: SIDEBAR_RIGHT_RAIL_WIDTH,
+          minWidth: SIDEBAR_RIGHT_RAIL_WIDTH,
+          paddingRight: 8,
+          boxSizing: 'border-box',
+          color: active ? theme.text.secondary : muted ? theme.text.disabled : theme.text.disabled,
+          opacity: extra && hovered ? 0 : 1,
+          transition: 'opacity 0.1s ease',
+        }}>
+          {trailing}
+        </span>
+      )}
       {extra && (
         <span style={{
           display: 'flex',
@@ -296,7 +358,7 @@ function SessionSidebarRow({
           minWidth: 20,
           minHeight: 20,
           position: 'absolute',
-          right: 5,
+          right: SIDEBAR_RIGHT_RAIL_ACTION_RIGHT,
           top: '50%',
           transform: 'translateY(-50%)',
           opacity: hovered ? 1 : 0,
@@ -576,18 +638,18 @@ function SidebarSearchPalette({
         display: 'flex',
         alignItems: 'flex-start',
         justifyContent: 'center',
-        paddingTop: '8vh',
+        paddingTop: '7vh',
       }}
     >
       <div
         style={{
-          width: 'min(760px, calc(100vw - 72px))',
-          maxHeight: 'min(680px, calc(100vh - 96px))',
-          borderRadius: 28,
+          width: 'min(680px, calc(100vw - 72px))',
+          maxHeight: 'min(560px, calc(100vh - 96px))',
+          borderRadius: 22,
           background: theme.surface.panelElevated,
           border: `1px solid ${theme.border.default}`,
           boxShadow: theme.shadow.panel,
-          padding: 10,
+          padding: 8,
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
@@ -604,14 +666,14 @@ function SidebarSearchPalette({
             outline: 'none',
             background: 'transparent',
             color: theme.text.primary,
-            fontSize: 20,
+            fontSize: Math.max(15, fonts.size + 2),
             fontFamily: fonts.primary,
             fontWeight: 600,
-            padding: '16px 20px 14px',
+            padding: '12px 16px 10px',
             boxSizing: 'border-box',
           }}
         />
-        <div style={{ padding: '12px 16px 8px', color: theme.text.disabled, fontSize: fonts.size, fontWeight: 700 }}>
+        <div style={{ padding: '8px 14px 6px', color: theme.text.disabled, fontSize: Math.max(11, fonts.secondarySize), fontWeight: 700 }}>
           Recent chats
         </div>
         <div style={{ overflowY: 'auto', paddingBottom: 6 }}>
@@ -626,15 +688,15 @@ function SidebarSearchPalette({
               style={{
                 width: '100%',
                 border: 'none',
-                borderRadius: 18,
+                borderRadius: 14,
                 background: index === 0 ? theme.surface.hover : 'transparent',
                 color: index === 0 ? theme.text.primary : theme.text.secondary,
                 cursor: 'pointer',
                 display: 'grid',
-                gridTemplateColumns: '24px minmax(0, 1fr) auto auto',
+                gridTemplateColumns: '20px minmax(0, 1fr) auto auto',
                 alignItems: 'center',
-                gap: 10,
-                padding: '10px 16px',
+                gap: 8,
+                padding: '7px 12px',
                 fontFamily: fonts.primary,
                 textAlign: 'left',
               }}
@@ -648,19 +710,19 @@ function SidebarSearchPalette({
               }}
             >
               <span style={{ display: 'flex', color: 'currentColor', opacity: 0.75 }}>{getSessionAgentIcon(session)}</span>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 16, fontWeight: 650 }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: Math.max(12, fonts.size), fontWeight: 650 }}>
                 {formatSessionTitleForSidebar(session.title, 90)}
               </span>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.text.disabled, fontSize: 14, maxWidth: 170 }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: theme.text.disabled, fontSize: Math.max(11, fonts.secondarySize), maxWidth: 150 }}>
                 {session.workspaceName ?? session.sourceLabel}
               </span>
-              <span style={{ borderRadius: 12, background: theme.surface.panelMuted, color: theme.text.secondary, padding: '2px 8px', fontSize: 13 }}>
+              <span style={{ borderRadius: 10, background: theme.surface.panelMuted, color: theme.text.secondary, padding: '1px 7px', fontSize: Math.max(11, fonts.secondarySize), lineHeight: 1.35 }}>
                 {index < 9 ? `⌘${index + 1}` : ''}
               </span>
             </button>
           ))}
           {sessions.length === 0 && (
-            <div style={{ padding: '20px 18px 28px', color: theme.text.disabled, fontSize: fonts.size }}>
+            <div style={{ padding: '16px 14px 22px', color: theme.text.disabled, fontSize: Math.max(12, fonts.size) }}>
               No matching chats
             </div>
           )}
@@ -668,6 +730,64 @@ function SidebarSearchPalette({
       </div>
     </div>,
     document.body,
+  )
+}
+
+function SidebarTopItem({
+  label,
+  icon,
+  onClick,
+}: {
+  label: string
+  icon: React.ReactNode
+  onClick: () => void
+}): React.JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: '100%',
+        minHeight: 25,
+        display: 'grid',
+        gridTemplateColumns: '24px minmax(0, 1fr)',
+        alignItems: 'center',
+        columnGap: 8,
+        padding: '2px 10px 2px 8px',
+        border: 'none',
+        borderRadius: 6,
+        background: hovered ? theme.surface.hover : 'transparent',
+        color: theme.text.secondary,
+        cursor: 'pointer',
+        fontFamily: fonts.primary,
+        fontSize: fonts.size,
+        fontWeight: fonts.weight,
+        lineHeight: fonts.lineHeight * 0.9,
+        textAlign: 'left',
+      }}
+    >
+      <span
+        style={{
+          width: 24,
+          height: 22,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: theme.text.muted,
+        }}
+      >
+        {icon}
+      </span>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {label}
+      </span>
+    </button>
   )
 }
 
@@ -689,7 +809,6 @@ export function Sidebar({
   const scrollRef = useRef<HTMLDivElement>(null)
   void pinnedExtensionIds
   useEffect(() => { widthRef.current = width }, [width])
-  const [projectSearch, setProjectSearch] = useState('')
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false)
   const [searchPaletteQuery, setSearchPaletteQuery] = useState('')
   const [sessionCtx, setSessionCtx] = useState<{ x: number; y: number; session: SessionEntry } | null>(null)
@@ -712,12 +831,29 @@ export function Sidebar({
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
   const [sessionReadWatermarks, setSessionReadWatermarks] = useState<SessionReadWatermarks>(() => loadSessionReadWatermarks())
+  const [pinnedSessionKeys, setPinnedSessionKeys] = useState<PinnedSessionKeys>(() => loadPinnedSessionKeys())
   const [textDialog, setTextDialog] = useState<SidebarTextDialogState | null>(null)
   const threadMenuRef = useRef<HTMLDivElement>(null)
   const sessionLoadRequestSeqRef = useRef(0)
   const latestSessionLoadTokenByWorkspaceRef = useRef(new Map<string, number>())
   const lastSessionLoadAtByWorkspaceRef = useRef(new Map<string, number>())
   const readSeededWorkspaceIdsRef = useRef(new Set<string>())
+
+  const openSearchPalette = useCallback(() => {
+    setSearchPaletteQuery('')
+    setSearchPaletteOpen(true)
+  }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'g')) return
+      event.preventDefault()
+      event.stopPropagation()
+      openSearchPalette()
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [openSearchPalette])
 
   useEffect(() => {
     let cancelled = false
@@ -837,6 +973,10 @@ export function Sidebar({
   }, [sessionReadWatermarks])
 
   useEffect(() => {
+    savePinnedSessionKeys(pinnedSessionKeys)
+  }, [pinnedSessionKeys])
+
+  useEffect(() => {
     const validIds = new Set(sessions.map(session => session.id))
     setSessionPromotions(prev => {
       let changed = false
@@ -921,6 +1061,10 @@ export function Sidebar({
     if (typeof explicit === 'boolean') return explicit
     return projectId !== activeProjectId
   }, [collapsedThreadGroups, activeProjectId])
+
+  const allProjectThreadGroupsCollapsed = useMemo(() => {
+    return projectEntries.length > 0 && projectEntries.every(projectEntry => isThreadGroupCollapsed(projectEntry))
+  }, [isThreadGroupCollapsed, projectEntries])
 
   useEffect(() => {
     if (!threadMenuOpen) return
@@ -1092,6 +1236,17 @@ export function Sidebar({
     setCollapsedThreadGroups(prev => ({ ...prev, [key]: shouldCollapse }))
   }, [activeProjectId, collapsedThreadGroups, loadWorkspaceSessions, projectEntries, workspaceById, workspace?.id, _onSwitchWorkspace])
 
+  const toggleAllThreadGroups = useCallback(() => {
+    setProjectSessionVisibleCounts({})
+    setCollapsedThreadGroups(() => {
+      const next: Record<string, boolean> = {}
+      for (const projectEntry of projectEntries) {
+        next[projectEntry.id] = !allProjectThreadGroupsCollapsed
+      }
+      return next
+    })
+  }, [allProjectThreadGroupsCollapsed, projectEntries])
+
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!resizing.current) return
@@ -1163,6 +1318,26 @@ export function Sidebar({
     return buildNestedSessionList(filtered, threadSortMode, sessionPromotions)
   }, [promotedSessions, showArchivedSessions, showCronSessions, showSubagentSessions, hiddenSessionAgents, threadOrganizeMode, threadSortMode, sessionPromotions])
 
+  const toggleSessionPinned = useCallback((session: SessionEntry) => {
+    const key = getSessionActivityKey(session)
+    setPinnedSessionKeys(prev => {
+      if (prev[key]) {
+        const next = { ...prev }
+        delete next[key]
+        return next
+      }
+      return { ...prev, [key]: true }
+    })
+  }, [])
+
+  const pinnedVisibleSessions = useMemo(() => (
+    visibleSessions.filter(session => pinnedSessionKeys[getSessionActivityKey(session)] === true)
+  ), [pinnedSessionKeys, visibleSessions])
+
+  const normalVisibleSessions = useMemo(() => (
+    visibleSessions.filter(session => pinnedSessionKeys[getSessionActivityKey(session)] !== true)
+  ), [pinnedSessionKeys, visibleSessions])
+
   const availableSessionAgents = useMemo(() => {
     const byKey = new Map<string, { key: string; label: string; icon: React.JSX.Element }>()
     for (const session of sessions) {
@@ -1202,9 +1377,9 @@ export function Sidebar({
   }, [activeProjectId, threadOrganizeMode])
 
   const displayedSessions = useMemo(() => {
-    if (threadOrganizeMode !== 'chronological') return visibleSessions
-    return visibleSessions.slice(0, visibleSessionCount)
-  }, [visibleSessions, visibleSessionCount, threadOrganizeMode])
+    if (threadOrganizeMode !== 'chronological') return normalVisibleSessions
+    return normalVisibleSessions.slice(0, visibleSessionCount)
+  }, [normalVisibleSessions, visibleSessionCount, threadOrganizeMode])
 
   const displayedSessionGroups = useMemo<SessionProjectGroup[]>(() => {
     if (threadOrganizeMode === 'chronological') {
@@ -1221,7 +1396,7 @@ export function Sidebar({
       .map(projectEntry => {
         const projectPath = normalizeSidebarPath(projectEntry.path)
         const workspaceIdSet = new Set(projectEntry.workspaceIds)
-        const allWorkspaceSessions = visibleSessions.filter(session => {
+        const allWorkspaceSessions = normalVisibleSessions.filter(session => {
           const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
           if (sessionProjectPath) return sidebarPathBelongsToProject(projectPath, sessionProjectPath)
           return workspaceIdSet.has(session.workspaceId)
@@ -1235,64 +1410,12 @@ export function Sidebar({
           sessions: allWorkspaceSessions,
         }
       })
-  }, [visibleSessions, displayedSessions, orderedProjectEntries, threadOrganizeMode])
+  }, [normalVisibleSessions, displayedSessions, orderedProjectEntries, threadOrganizeMode])
 
-  // Search should hit ALL loaded sessions, not just the paged subset —
-  // otherwise hidden-for-performance items would be unsearchable. When a
-  // query is present we rebuild groups from the full `visibleSessions`
-  // list and skip pagination; when empty we fall back to the paged view.
-  const filteredSessionGroups = useMemo(() => {
-    const q = projectSearch.trim().toLowerCase()
-    if (!q) return displayedSessionGroups
+  const filteredSessionGroups = displayedSessionGroups
 
-    const matchesSession = (session: SessionEntry): boolean => {
-      if (session.title?.toLowerCase().includes(q)) return true
-      if (session.lastMessage?.toLowerCase().includes(q)) return true
-      return false
-    }
-
-    if (threadOrganizeMode === 'chronological') {
-      const allMatched = visibleSessions.filter(matchesSession)
-      if (allMatched.length === 0) return []
-      return [{
-        projectId: 'chronological',
-        projectPath: '',
-        representativeWorkspaceId: null,
-        key: 'chronological',
-        label: 'Threads',
-        sessions: allMatched,
-      }]
-    }
-
-    return orderedProjectEntries
-      .map(projectEntry => {
-        const projectPath = normalizeSidebarPath(projectEntry.path)
-        const workspaceIdSet = new Set(projectEntry.workspaceIds)
-        const allWorkspaceSessions = visibleSessions.filter(session => {
-          const sessionProjectPath = normalizeSidebarPath(session.projectPath ?? session.workspacePath)
-          if (sessionProjectPath) return sidebarPathBelongsToProject(projectPath, sessionProjectPath)
-          return workspaceIdSet.has(session.workspaceId)
-        })
-        const label = getProjectDisplayLabel(projectEntry)
-        const labelMatch = label.toLowerCase().includes(q)
-        const matchedSessions = labelMatch
-          ? allWorkspaceSessions
-          : allWorkspaceSessions.filter(matchesSession)
-        if (matchedSessions.length === 0) return null
-        return {
-          projectId: projectEntry.id,
-          projectPath: projectEntry.path,
-          representativeWorkspaceId: projectEntry.representativeWorkspaceId,
-          key: projectEntry.id,
-          label,
-          sessions: matchedSessions,
-        } as SessionProjectGroup
-      })
-      .filter(Boolean) as SessionProjectGroup[]
-  }, [displayedSessionGroups, projectSearch, threadOrganizeMode, visibleSessions, orderedProjectEntries])
-
-  const hasMoreSessions = threadOrganizeMode === 'chronological' && !projectSearch.trim()
-    ? displayedSessions.length < visibleSessions.length
+  const hasMoreSessions = threadOrganizeMode === 'chronological'
+    ? displayedSessions.length < normalVisibleSessions.length
     : false
 
   const searchPaletteSessions = useMemo(() => {
@@ -1587,6 +1710,219 @@ export function Sidebar({
     ]
   }, [projectEntries, sessions, setSessionArchived])
 
+  const renderSessionRow = useCallback((session: SessionEntry) => {
+    const isSelected = isSessionActive(session, {
+      activeChatTileId,
+      activeChatSessionId,
+      activeChatSessionEntryId,
+    })
+    const isStreaming =
+      (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
+      || streamingSnapshot.entryIds.has(session.id)
+    const sessionMeta = formatSessionSidebarMeta(session)
+    const sessionTitleKey = getSessionTitleGenerationKey(session.workspaceId, session.id)
+    const titleGeneration = getSessionTitleGenerationIndicator(generatingSessionTitleIds[sessionTitleKey] === true, sessionMeta)
+    const rowMeta = titleGeneration.rowMeta
+    const isGeneratingTitle = generatingSessionTitleIds[sessionTitleKey] === true
+    const hasUnreadUpdate = !isSelected && hasUnreadSessionUpdate(session, sessionReadWatermarks)
+    const showActivityIndicator = isStreaming || isGeneratingTitle || hasUnreadUpdate
+    const isPinned = pinnedSessionKeys[getSessionActivityKey(session)] === true
+    const muted = session.isArchived === true && !isSelected
+    const relativeTime = formatSessionSidebarRelativeTime(session.updatedAt)
+    const scheduled = isCronSession(session)
+
+    return (
+      <SessionSidebarRow
+        key={session.id}
+        label={formatSessionTitleForSidebar(session.title)}
+        meta={rowMeta}
+        leading={
+          <button
+            type="button"
+            title={isPinned ? 'Unpin thread' : 'Pin thread'}
+            aria-label={isPinned ? 'Unpin thread' : 'Pin thread'}
+            onClick={e => {
+              e.stopPropagation()
+              toggleSessionPinned(session)
+            }}
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 6,
+              border: 'none',
+              background: 'transparent',
+              color: isPinned ? theme.text.secondary : theme.text.disabled,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 0,
+            }}
+          >
+            <Pin size={15} strokeWidth={1.7} />
+          </button>
+        }
+        leadingVisible={isPinned}
+        trailing={
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: showActivityIndicator || scheduled ? 'flex-end' : 'flex-end',
+            width: '100%',
+            minWidth: 0,
+          }}>
+            {scheduled && (
+              <Clock3 size={15} strokeWidth={1.7} />
+            )}
+            {showActivityIndicator ? (
+              <SessionSidebarIndicator session={session} streaming={isStreaming || isGeneratingTitle} muted={muted} theme={theme} />
+            ) : (
+              <span style={{
+                width: '100%',
+                textAlign: 'right',
+                fontSize: Math.max(11, fonts.secondarySize),
+                fontWeight: 650,
+                lineHeight: 1,
+                color: muted ? theme.text.disabled : theme.text.disabled,
+              }}>
+                {relativeTime}
+              </span>
+            )}
+          </span>
+        }
+        indent={Math.max(0, session.displayIndent)}
+        indentUnit={6}
+        extraWidth={getSessionRowExtraWidth(session.checkpointCount)}
+        title={`${session.title}${sessionMeta ? `\n${sessionMeta}` : ''}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}${titleGeneration.rowTitleSuffix}`}
+        active={isSelected}
+        muted={muted}
+        onClick={() => { openSessionFromSidebar(session) }}
+        onDoubleClick={() => { openSessionFromSidebar(session, { persist: true }) }}
+        onContextMenu={e => {
+          e.preventDefault()
+          setSessionCtx({ x: e.clientX, y: e.clientY, session })
+        }}
+        extra={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {(session.checkpointCount ?? 0) > 0 && (
+              <>
+                <div
+                  title={`${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'} available`}
+                  style={{
+                    minWidth: 18,
+                    height: 18,
+                    padding: '0 6px',
+                    borderRadius: 999,
+                    border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+                    background: theme.chat.assistantBubble,
+                    color: theme.text.secondary,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    lineHeight: 1,
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {session.checkpointCount}
+                </div>
+                <button
+                  title="Restore latest checkpoint"
+                  onClick={e => {
+                    e.stopPropagation()
+                    const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
+                    if (!confirmed) return
+                    void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
+                      .then(checkpoints => {
+                        const latest = checkpoints[0]
+                        if (!latest) return null
+                        return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
+                      })
+                      .then(async result => {
+                        if (!result?.ok) {
+                          if (result?.error) window.alert(result.error)
+                          return
+                        }
+                        const workspaceEntry = workspaceById.get(session.workspaceId)
+                        if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
+                        if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
+                      })
+                      .catch(error => {
+                        window.alert(error instanceof Error ? error.message : String(error))
+                      })
+                  }}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 4,
+                    border: 'none',
+                    background: 'transparent',
+                    color: theme.text.disabled,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
+                    <path d="M3.1 4.1V1.9m0 0h2.3m-2.3 0 2 2m1.9-1.1a4.8 4.8 0 1 1-2.7 8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </>
+            )}
+            <button
+              title={getSessionArchiveActionLabel(session.isArchived === true)}
+              onClick={e => {
+                e.stopPropagation()
+                handleArchiveSessionClick(session)
+              }}
+              disabled={archivingSessionId === session.id}
+              style={{
+                width: SESSION_ACTION_BUTTON_SIZE,
+                height: SESSION_ACTION_BUTTON_SIZE,
+                borderRadius: 7,
+                border: 'none',
+                background: session.isArchived === true ? theme.surface.hover : 'transparent',
+                color: session.isArchived === true ? theme.text.secondary : theme.text.disabled,
+                cursor: archivingSessionId === session.id ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                opacity: archivingSessionId === session.id ? 0.5 : 1,
+                flexShrink: 0,
+              }}
+            >
+              {session.isArchived === true ? (
+                <ArchiveRestore size={SESSION_ACTION_ICON_SIZE} strokeWidth={1.7} />
+              ) : (
+                <Archive size={SESSION_ACTION_ICON_SIZE} strokeWidth={1.7} />
+              )}
+            </button>
+          </div>
+        }
+      />
+    )
+  }, [
+    activeChatSessionEntryId,
+    activeChatSessionId,
+    activeChatTileId,
+    archivingSessionId,
+    fonts.secondarySize,
+    generatingSessionTitleIds,
+    handleArchiveSessionClick,
+    loadWorkspaceSessions,
+    onOpenSessionInChat,
+    openSessionFromSidebar,
+    pinnedSessionKeys,
+    sessionReadWatermarks,
+    streamingSnapshot.entryIds,
+    streamingSnapshot.tileIds,
+    theme,
+    toggleSessionPinned,
+    workspaceById,
+  ])
+
   return (
     <div style={{
       width: collapsed ? 0 : Math.max(width, minWidth),
@@ -1602,6 +1938,93 @@ export function Sidebar({
       fontWeight: fonts.weight,
       lineHeight: fonts.lineHeight,
     }}>
+      <button
+        type="button"
+        title="Collapse sidebar"
+        aria-label="Collapse sidebar"
+        data-no-drag=""
+        onMouseDown={event => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onPointerDown={event => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        onPointerUp={event => {
+          event.preventDefault()
+          event.stopPropagation()
+          _onToggleCollapse()
+        }}
+        onClick={event => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 76,
+          zIndex: 2147483647,
+          width: 32,
+          height: 32,
+          borderRadius: 9,
+          border: 'none',
+          background: 'transparent',
+          color: theme.text.disabled,
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: 0.85,
+          pointerEvents: 'auto',
+          WebkitAppRegion: 'no-drag',
+        }}
+        onMouseEnter={e => {
+          e.currentTarget.style.background = theme.surface.hover
+          e.currentTarget.style.color = theme.text.secondary
+        }}
+        onMouseLeave={e => {
+          e.currentTarget.style.background = 'transparent'
+          e.currentTarget.style.color = theme.text.disabled
+        }}
+      >
+        <PanelLeft size={17} strokeWidth={1.8} aria-hidden="true" />
+      </button>
+
+      <div
+        style={{
+          flexShrink: 0,
+          zIndex: 2,
+          padding: '16px 8px 8px',
+          background: theme.surface.sidebar,
+          borderBottom: `1px solid ${theme.border.subtle}`,
+          fontSize: fonts.secondarySize,
+          fontWeight: fonts.secondaryWeight,
+          lineHeight: fonts.secondaryLineHeight * 0.9,
+        }}
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <SidebarTopItem
+            label="New Chat"
+            icon={<Pencil size={18} strokeWidth={1.9} />}
+            onClick={onNewChat}
+          />
+          <SidebarTopItem
+            label="Search"
+            icon={<Search size={18} strokeWidth={1.9} />}
+            onClick={openSearchPalette}
+          />
+          {RESOURCE_ITEMS.map(item => (
+            <SidebarTopItem
+              key={item.id}
+              label={item.label}
+              icon={item.icon}
+              onClick={() => onOpenSettings(item.id)}
+            />
+          ))}
+        </div>
+      </div>
+
       {/* Scrollable sections */}
       <div
         ref={scrollRef}
@@ -1609,30 +2032,22 @@ export function Sidebar({
       >
         <div style={{ userSelect: 'none', WebkitUserSelect: 'none' }}>
 
-        <div style={{ padding: '8px 8px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingBottom: 10, marginBottom: 8, borderBottom: `1px solid ${theme.border.subtle}` }}>
-            <SidebarItem
-              label="New Chat"
-              icon={<Pencil size={16} />}
-              onClick={onNewChat}
-            />
-            <SidebarItem
-              label="Search"
-              icon={<Search size={16} />}
-              onClick={() => {
-                setSearchPaletteQuery('')
-                setSearchPaletteOpen(true)
-              }}
-            />
-            {RESOURCE_ITEMS.map(item => (
-              <SidebarItem
-                key={item.id}
-                label={item.label}
-                icon={item.icon}
-                onClick={() => onOpenSettings(item.id)}
-              />
-            ))}
-          </div>
+        <div style={{ padding: '0 8px 10px', fontSize: fonts.secondarySize, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight }}>
+          {pinnedVisibleSessions.length > 0 && (
+            <div style={{ padding: '0 0 14px' }}>
+              <div style={{
+                padding: '4px 4px 6px',
+                fontSize: fonts.size + 1,
+                fontWeight: 700,
+                color: theme.text.disabled,
+              }}>
+                Pinned
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                {pinnedVisibleSessions.map(renderSessionRow)}
+              </div>
+            </div>
+          )}
 
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
             <span style={{
@@ -1647,11 +2062,12 @@ export function Sidebar({
               Projects
             </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={threadMenuRef}>
               <button
                 type="button"
-                title="Collapse sidebar"
-                aria-label="Collapse sidebar"
-                onClick={_onToggleCollapse}
+                title={allProjectThreadGroupsCollapsed ? 'Reopen all projects' : 'Collapse all projects'}
+                aria-label={allProjectThreadGroupsCollapsed ? 'Reopen all projects' : 'Collapse all projects'}
+                onClick={toggleAllThreadGroups}
                 style={{
                   width: 28,
                   height: 28,
@@ -1664,22 +2080,14 @@ export function Sidebar({
                   alignItems: 'center',
                   justifyContent: 'center',
                   opacity: 0.85,
-                  flexShrink: 0,
                 }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = theme.surface.hover
-                  e.currentTarget.style.color = theme.text.secondary
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                  e.currentTarget.style.color = theme.text.disabled
-                }}
+                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary; e.currentTarget.style.background = theme.surface.hover }}
+                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled; e.currentTarget.style.background = 'transparent' }}
               >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+                {allProjectThreadGroupsCollapsed
+                  ? <Maximize2 size={16} strokeWidth={1.7} />
+                  : <Minimize2 size={16} strokeWidth={1.7} />}
               </button>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, position: 'relative' }} ref={threadMenuRef}>
               <button
                 title="Filter and sort projects and threads"
                 aria-label="Filter and sort projects and threads"
@@ -1811,64 +2219,7 @@ export function Sidebar({
             </div>
           </div>
 
-          {/* Project/thread search filter */}
-          {displayedSessionGroups.length > 0 && (
-            <div style={{ padding: '0 0 6px' }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '4px 8px',
-                borderRadius: 6,
-                background: theme.surface.hover,
-                border: `1px solid ${theme.border.subtle}`,
-              }}>
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" style={{ flexShrink: 0, opacity: 0.5 }}>
-                  <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.3" />
-                  <path d="M9.5 9.5L13 13" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                </svg>
-                <input
-                  type="text"
-                  placeholder="Filter projects and threads..."
-                  value={projectSearch}
-                  onChange={e => setProjectSearch(e.target.value)}
-                  style={{
-                    flex: 1,
-                    background: 'transparent',
-                    border: 'none',
-                    outline: 'none',
-                    color: theme.text.primary,
-                    fontSize: fonts.secondarySize,
-                    fontFamily: 'inherit',
-                    padding: 0,
-                    minWidth: 0,
-                  }}
-                />
-                {projectSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setProjectSearch('')}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: theme.text.disabled,
-                      cursor: 'pointer',
-                      padding: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      flexShrink: 0,
-                    }}
-                  >
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                      <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {threadOrganizeMode === 'chronological' && visibleSessions.length === 0 ? (
+          {threadOrganizeMode === 'chronological' && normalVisibleSessions.length === 0 ? (
             <div style={{ padding: '4px 0', fontSize: fonts.secondarySize, color: theme.text.disabled }}>No threads yet</div>
           ) : (
             <>
@@ -1881,6 +2232,7 @@ export function Sidebar({
                   ? Math.max(0, group.sessions.length - displayedGroupSessions.length)
                   : 0
                 const canShowLessProjectSessions = threadOrganizeMode === 'project' && displayedGroupSessions.length > PROJECT_SESSION_PREVIEW_COUNT
+                const groupCollapsed = threadOrganizeMode === 'project' && isThreadGroupCollapsed(group)
 
                 return (
                 <div key={group.key} style={{ paddingBottom: 8 }}>
@@ -1933,7 +2285,7 @@ export function Sidebar({
                             viewBox="0 0 8 8"
                             style={{
                               transition: 'transform 0.15s ease',
-                              transform: isThreadGroupCollapsed(group) ? 'rotate(0deg)' : 'rotate(90deg)',
+                              transform: groupCollapsed ? 'rotate(0deg)' : 'rotate(90deg)',
                             }}
                           >
                             <path d="M2 1l4 3-4 3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
@@ -2029,231 +2381,101 @@ export function Sidebar({
                     </div>
                   )}
 
-                  {(threadOrganizeMode !== 'project' || !isThreadGroupCollapsed(group)) && displayedGroupSessions.map(session => {
-                    const isSelected = isSessionActive(session, {
-                      activeChatTileId,
-                      activeChatSessionId,
-                      activeChatSessionEntryId,
-                    })
-                    const isStreaming =
-                      (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
-                      || streamingSnapshot.entryIds.has(session.id)
-                    const sessionMeta = formatSessionSidebarMeta(session)
-                    const sessionTitleKey = getSessionTitleGenerationKey(session.workspaceId, session.id)
-                    const titleGeneration = getSessionTitleGenerationIndicator(generatingSessionTitleIds[sessionTitleKey] === true, sessionMeta)
-                    const rowMeta = titleGeneration.rowMeta
-                    const isGeneratingTitle = generatingSessionTitleIds[sessionTitleKey] === true
-                    const hasUnreadUpdate = !isSelected && hasUnreadSessionUpdate(session, sessionReadWatermarks)
-                    const showActivityIndicator = isStreaming || isGeneratingTitle || hasUnreadUpdate
-                    return (
-                      <SessionSidebarRow
-                        key={session.id}
-                        label={formatSessionTitleForSidebar(session.title)}
-                        meta={rowMeta}
-                        icon={showActivityIndicator ? <SessionSidebarIndicator session={session} streaming={isStreaming || isGeneratingTitle} muted={session.isArchived === true && !isSelected} theme={theme} /> : undefined}
-                        indent={Math.max(1, session.displayIndent + 1)}
-                        indentUnit={6}
-                        extraWidth={getSessionRowExtraWidth(session.checkpointCount)}
-                        title={`${session.title}${sessionMeta ? `\n${sessionMeta}` : ''}\n${session.sourceLabel}${session.messageCount > 0 ? ` · ${session.messageCount} msg` : ''}${(session.checkpointCount ?? 0) > 0 ? ` · ${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'}` : ''}${session.isArchived ? ' · archived' : ''}${titleGeneration.rowTitleSuffix}`}
-                        active={isSelected}
-                        muted={session.isArchived === true && !isSelected}
-                        onClick={() => { openSessionFromSidebar(session) }}
-                        onDoubleClick={() => { openSessionFromSidebar(session, { persist: true }) }}
-                        onContextMenu={e => {
-                          e.preventDefault()
-                          setSessionCtx({ x: e.clientX, y: e.clientY, session })
-                        }}
-                        extra={
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                            {(session.checkpointCount ?? 0) > 0 && (
-                              <>
-                                <div
-                                  title={`${session.checkpointCount} checkpoint${session.checkpointCount === 1 ? '' : 's'} available`}
-                                  style={{
-                                    minWidth: 18,
-                                    height: 18,
-                                    padding: '0 6px',
-                                    borderRadius: 999,
-                                    border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-                                    background: theme.chat.assistantBubble,
-                                    color: theme.text.secondary,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    fontSize: 10,
-                                    fontWeight: 600,
-                                    lineHeight: 1,
-                                    boxSizing: 'border-box',
-                                  }}
-                                >
-                                  {session.checkpointCount}
-                                </div>
-                                <button
-                                  title="Restore latest checkpoint"
-                                  onClick={e => {
-                                    e.stopPropagation()
-                                    const confirmed = window.confirm(`Restore the latest checkpoint for "${session.title}"?`)
-                                    if (!confirmed) return
-                                    void window.electron.canvas.listCheckpoints(session.workspaceId, session.id)
-                                      .then(checkpoints => {
-                                        const latest = checkpoints[0]
-                                        if (!latest) return null
-                                        return window.electron.canvas.restoreCheckpoint(session.workspaceId, latest.id, session.id)
-                                      })
-                                      .then(async result => {
-                                        if (!result?.ok) {
-                                          if (result?.error) window.alert(result.error)
-                                          return
-                                        }
-                                        const workspaceEntry = workspaceById.get(session.workspaceId)
-                                        if (workspaceEntry) await loadWorkspaceSessions(workspaceEntry, true)
-                                        if (session.canOpenInChat !== false) await onOpenSessionInChat(session)
-                                      })
-                                      .catch(error => {
-                                        window.alert(error instanceof Error ? error.message : String(error))
-                                      })
-                                  }}
-                                  style={{
-                                    width: 18,
-                                    height: 18,
-                                    borderRadius: 4,
-                                    border: 'none',
-                                    background: 'transparent',
-                                    color: theme.text.disabled,
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                  }}
-                                >
-                                  <svg width="10" height="10" viewBox="0 0 14 14" fill="none">
-                                    <path d="M3.1 4.1V1.9m0 0h2.3m-2.3 0 2 2m1.9-1.1a4.8 4.8 0 1 1-2.7 8.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                                  </svg>
-                                </button>
-                              </>
+                  {threadOrganizeMode === 'project' ? (
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateRows: groupCollapsed ? '0fr' : '1fr',
+                        opacity: groupCollapsed ? 0 : 1,
+                        transition: 'grid-template-rows 180ms ease, opacity 140ms ease',
+                      }}
+                    >
+                      <div style={{ overflow: 'hidden', minHeight: 0 }}>
+                        {displayedGroupSessions.map(renderSessionRow)}
+
+                        {(hiddenProjectSessionCount > 0 || canShowLessProjectSessions) && (
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 12,
+                              padding: '4px 0 4px 24px',
+                            }}
+                          >
+                            {hiddenProjectSessionCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setProjectSessionVisibleCounts(prev => ({
+                                  ...prev,
+                                  [group.key]: Math.min(
+                                    group.sessions.length,
+                                    (prev[group.key] ?? PROJECT_SESSION_PREVIEW_COUNT) + PROJECT_SESSION_SHOW_MORE_COUNT,
+                                  ),
+                                }))}
+                                style={{
+                                  padding: 0,
+                                  border: 'none',
+                                  background: 'transparent',
+                                  color: theme.text.disabled,
+                                  cursor: 'pointer',
+                                  fontSize: fonts.secondarySize,
+                                  fontFamily: 'inherit',
+                                  textAlign: 'left',
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
+                                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
+                              >
+                                Show more
+                              </button>
                             )}
-                            <button
-                              title={getSessionArchiveActionLabel(session.isArchived === true)}
-                              onClick={e => {
-                                e.stopPropagation()
-                                handleArchiveSessionClick(session)
-                              }}
-                              disabled={archivingSessionId === session.id}
-                              style={{
-                                width: SESSION_ACTION_BUTTON_SIZE,
-                                height: SESSION_ACTION_BUTTON_SIZE,
-                                borderRadius: 7,
-                                border: 'none',
-                                background: session.isArchived === true ? theme.surface.hover : 'transparent',
-                                color: session.isArchived === true ? theme.text.secondary : theme.text.disabled,
-                                cursor: archivingSessionId === session.id ? 'default' : 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                opacity: archivingSessionId === session.id ? 0.5 : 1,
-                                flexShrink: 0,
-                              }}
-                            >
-                              {session.isArchived === true ? (
-                                <svg width={SESSION_ACTION_ICON_SIZE} height={SESSION_ACTION_ICON_SIZE} viewBox="0 0 16 16" fill="none">
-                                  <path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
-                                  <path d="M8 9.75V3.5m0 0L5.9 5.6M8 3.5l2.1 2.1" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                              ) : (
-                                <svg width={SESSION_ACTION_ICON_SIZE} height={SESSION_ACTION_ICON_SIZE} viewBox="0 0 16 16" fill="none">
-                                  <path d="M3.25 4.5h9.5v7.25a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V4.5Z" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
-                                  <path d="M5.5 2.75h5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-                                  <path d="M6.25 7.25h3.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-                                </svg>
-                              )}
-                            </button>
+                            {canShowLessProjectSessions && (
+                              <button
+                                type="button"
+                                onClick={() => setProjectSessionVisibleCounts(prev => {
+                                  const next = { ...prev }
+                                  delete next[group.key]
+                                  return next
+                                })}
+                                style={{
+                                  padding: 0,
+                                  border: 'none',
+                                  background: 'transparent',
+                                  color: theme.text.disabled,
+                                  cursor: 'pointer',
+                                  fontSize: fonts.secondarySize,
+                                  fontFamily: 'inherit',
+                                  textAlign: 'left',
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
+                                onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
+                              >
+                                Show less
+                              </button>
+                            )}
                           </div>
-                        }
-                      />
-                    )
-                  })}
+                        )}
 
-                  {threadOrganizeMode === 'project' && !isThreadGroupCollapsed(group) && (hiddenProjectSessionCount > 0 || canShowLessProjectSessions) && (
-                    <div
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 12,
-                        padding: '4px 0 4px 24px',
-                      }}
-                    >
-                      {hiddenProjectSessionCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setProjectSessionVisibleCounts(prev => ({
-                            ...prev,
-                            [group.key]: Math.min(
-                              group.sessions.length,
-                              (prev[group.key] ?? PROJECT_SESSION_PREVIEW_COUNT) + PROJECT_SESSION_SHOW_MORE_COUNT,
-                            ),
-                          }))}
-                          style={{
-                            padding: 0,
-                            border: 'none',
-                            background: 'transparent',
-                            color: theme.text.disabled,
-                            cursor: 'pointer',
-                            fontSize: fonts.secondarySize,
-                            fontFamily: 'inherit',
-                            textAlign: 'left',
-                          }}
-                          onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                          onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
-                        >
-                          Show more
-                        </button>
-                      )}
-                      {canShowLessProjectSessions && (
-                        <button
-                          type="button"
-                          onClick={() => setProjectSessionVisibleCounts(prev => {
-                            const next = { ...prev }
-                            delete next[group.key]
-                            return next
-                          })}
-                          style={{
-                            padding: 0,
-                            border: 'none',
-                            background: 'transparent',
-                            color: theme.text.disabled,
-                            cursor: 'pointer',
-                            fontSize: fonts.secondarySize,
-                            fontFamily: 'inherit',
-                            textAlign: 'left',
-                          }}
-                          onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
-                          onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
-                        >
-                          Show less
-                        </button>
-                      )}
+                        {group.sessions.length === 0 && (
+                          <div
+                            style={{
+                              padding: '0 0 2px 24px',
+                              fontSize: fonts.secondarySize,
+                              color: theme.text.disabled,
+                            }}
+                          >
+                            No threads yet
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-
-                  {threadOrganizeMode === 'project' && !isThreadGroupCollapsed(group) && group.sessions.length === 0 && (
-                    <div
-                      style={{
-                        padding: '0 0 2px 24px',
-                        fontSize: fonts.secondarySize,
-                        color: theme.text.disabled,
-                      }}
-                    >
-                      No threads yet
-                    </div>
+                  ) : (
+                    displayedGroupSessions.map(renderSessionRow)
                   )}
 
                 </div>
                 )
               })}
 
-              {filteredSessionGroups.length === 0 && projectSearch && (
-                <div style={{ padding: '4px 0', fontSize: fonts.secondarySize, color: theme.text.disabled }}>No matching projects or threads</div>
-              )}
               {hasMoreSessions && (
                 <div style={{ padding: '2px 0 0', textAlign: 'center' }}>
                   <button
@@ -2271,7 +2493,7 @@ export function Sidebar({
                     onMouseEnter={e => { e.currentTarget.style.color = theme.text.secondary }}
                     onMouseLeave={e => { e.currentTarget.style.color = theme.text.disabled }}
                   >
-                    More ({visibleSessions.length - displayedSessions.length})
+                    More ({normalVisibleSessions.length - displayedSessions.length})
                   </button>
                 </div>
               )}

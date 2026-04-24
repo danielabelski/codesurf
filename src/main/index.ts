@@ -674,7 +674,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('window:isFresh', (event) => {
     const id = event.sender.id
     const isFresh = freshWindowIds.has(id)
-    console.log(`[window:isFresh] id=${id} fresh=${isFresh} freshSet=[${[...freshWindowIds]}]`)
     if (isFresh) {
       freshWindowIds.delete(id)
       return true

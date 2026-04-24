@@ -11,6 +11,7 @@
       {
         "type": "source-control-panel",
         "label": "Source Control",
+        "icon": "git-branch",
         "entry": "tiles/source-control/index.html",
         "defaultSize": { "w": 420, "h": 700 },
         "minSize": { "w": 320, "h": 500 }

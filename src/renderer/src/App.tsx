@@ -1022,6 +1022,10 @@ function App(): JSX.Element {
     () => new Map((extensionEntries ?? []).map(entry => [entry.id, entry.name] as const)),
     [extensionEntries],
   )
+  const extensionTileByType = useMemo(
+    () => new Map((extensionTiles ?? []).map(entry => [entry.type, entry] as const)),
+    [extensionTiles],
+  )
   const visibleSidebarExtensionTiles = useMemo(() => {
     if (settings.extensionsDisabled) return []
     const hidden = new Set(settings.hiddenFromSidebarExtIds ?? [])
@@ -1092,11 +1096,19 @@ function App(): JSX.Element {
     if (tile.label?.trim()) return tile.label.trim()
     if (tile.filePath) return tile.filePath.replace(/\\/g, '/').split('/').pop() ?? tile.filePath
     if (tile.type.startsWith('ext:')) {
+      const tileLabel = extensionTileByType.get(tile.type)?.label
+      if (tileLabel?.trim()) return tileLabel.trim()
       const friendlyName = extensionNameById.get(tile.type.slice(4))
       if (friendlyName?.trim()) return friendlyName.trim()
     }
     return tile.type.charAt(0).toUpperCase() + tile.type.slice(1)
-  }, [extensionNameById, tiles])
+  }, [extensionNameById, extensionTileByType, tiles])
+
+  const getPanelTileIcon = useCallback((tileId: string): string | undefined => {
+    const tile = tiles.find(ti => ti.id === tileId)
+    if (!tile?.type.startsWith('ext:')) return undefined
+    return extensionTileByType.get(tile.type)?.icon
+  }, [extensionTileByType, tiles])
 
   // Workspace pill tabs — open workspace ids within this window
   const [openWorkspaceIds, setOpenWorkspaceIds] = useState<string[]>([])
@@ -5564,6 +5576,7 @@ function App(): JSX.Element {
                             activePanelId={null}
                             onActivePanelChange={() => { /* no-op for embedded */ }}
                             getTileType={(tileId) => tiles.find(t => t.id === tileId)?.type ?? 'note'}
+                            getTileIcon={getPanelTileIcon}
                             onSplitNew={(panelId, tileType, zone) => {
                               const { w, h } = getInitialTileSize(tileType as TileState['type'])
                               const newTile: TileState = {
@@ -6423,6 +6436,7 @@ function App(): JSX.Element {
                 activePanelId={activePanelId}
                 onActivePanelChange={setActivePanelId}
                 getTileType={(tileId) => tiles.find(t => t.id === tileId)?.type ?? 'note'}
+                getTileIcon={getPanelTileIcon}
                 onSplitNew={(panelId, tileType, zone) => {
                   const center = viewportCenter()
                   const { w, h } = getInitialTileSize(tileType as TileState['type'])
