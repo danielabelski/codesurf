@@ -3,28 +3,17 @@ import { ListTodo } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import { useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
-
-// ─── Panel tree types ────────────────────────────────────────────────────────
-
-export interface PanelLeaf {
-  type: 'leaf'
-  id: string
-  tabs: string[]
-  activeTab: string
-  previewTabId?: string | null
-}
-
-export interface PanelSplit {
-  type: 'split'
-  id: string
-  direction: 'horizontal' | 'vertical'
-  children: PanelNode[]
-  sizes: number[]
-}
-
-export type PanelNode = PanelLeaf | PanelSplit
-
-export type DockZone = 'left' | 'right' | 'top' | 'bottom' | 'center'
+import {
+  addTabToLeaf,
+  createLeaf,
+  pinTabInLeaf,
+  removeTileFromTree,
+  setActiveTab,
+  splitLeaf,
+  type DockZone,
+  type PanelLeaf,
+  type PanelNode,
+} from './panelLayoutTree'
 
 const PANEL_SPLIT_GUTTER_PX = 6
 const PANEL_SHELL_RADIUS_PX = 16
@@ -103,48 +92,6 @@ function setWebviewsInteractionBlocked(blocked: boolean): void {
   })
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-let panelCounter = 0
-export const newPanelId = (): string => `panel-${Date.now()}-${panelCounter++}`
-
-function normalizePreviewTabId(tabs: string[], previewTabId?: string | null): string | null {
-  return previewTabId && tabs.includes(previewTabId) ? previewTabId : null
-}
-
-export function createLeaf(tileIds: string[], activeTab?: string, previewTabId?: string | null): PanelLeaf {
-  return {
-    type: 'leaf',
-    id: newPanelId(),
-    tabs: tileIds,
-    activeTab: activeTab ?? tileIds[0] ?? '',
-    previewTabId: normalizePreviewTabId(tileIds, previewTabId),
-  }
-}
-
-export function findLeafByTileId(node: PanelNode, tileId: string): PanelLeaf | null {
-  if (node.type === 'leaf') return node.tabs.includes(tileId) ? node : null
-  for (const child of node.children) {
-    const found = findLeafByTileId(child, tileId)
-    if (found) return found
-  }
-  return null
-}
-
-export function findLeafById(node: PanelNode, panelId: string): PanelLeaf | null {
-  if (node.type === 'leaf') return node.id === panelId ? node : null
-  for (const child of node.children) {
-    const found = findLeafById(child, panelId)
-    if (found) return found
-  }
-  return null
-}
-
-export function getAllTileIds(node: PanelNode): string[] {
-  if (node.type === 'leaf') return [...node.tabs]
-  return node.children.flatMap(getAllTileIds)
-}
-
 function PanelTabIcon({ type, size = 12 }: { type: string; size?: number }): JSX.Element {
   const stroke = 1.2
 
@@ -186,146 +133,6 @@ function getNodeMinWidth(node: PanelNode, getTileType: (tileId: string) => strin
   return node.direction === 'horizontal'
     ? childWidths.reduce((sum, width) => sum + width, 0) + (Math.max(0, node.children.length - 1) * PANEL_SPLIT_GUTTER_PX)
     : Math.max(0, ...childWidths)
-}
-
-export function removeTileFromTree(node: PanelNode, tileId: string): PanelNode | null {
-  if (node.type === 'leaf') {
-    const newTabs = node.tabs.filter(id => id !== tileId)
-    if (newTabs.length === 0) return null
-    return {
-      ...node,
-      tabs: newTabs,
-      activeTab: node.activeTab === tileId ? newTabs[0] : node.activeTab,
-      previewTabId: normalizePreviewTabId(newTabs, node.previewTabId),
-    }
-  }
-  const newChildren: PanelNode[] = []
-  const newSizes: number[] = []
-  for (let i = 0; i < node.children.length; i++) {
-    const result = removeTileFromTree(node.children[i], tileId)
-    if (result) { newChildren.push(result); newSizes.push(node.sizes[i]) }
-  }
-  if (newChildren.length === 0) return null
-  if (newChildren.length === 1) return newChildren[0]
-  const total = newSizes.reduce((a, b) => a + b, 0)
-  return { ...node, children: newChildren, sizes: newSizes.map(s => (s / total) * 100) }
-}
-
-export function addTabToLeaf(
-  node: PanelNode,
-  panelId: string,
-  tileId: string,
-  options?: { preview?: boolean },
-): PanelNode {
-  if (node.type === 'leaf') {
-    if (node.id !== panelId) return node
-    if (node.tabs.includes(tileId)) {
-      return {
-        ...node,
-        activeTab: tileId,
-        previewTabId: options?.preview === true
-          ? tileId
-          : options?.preview === false && node.previewTabId === tileId
-            ? null
-            : normalizePreviewTabId(node.tabs, node.previewTabId),
-      }
-    }
-    const nextTabs = [...node.tabs, tileId]
-    return {
-      ...node,
-      tabs: nextTabs,
-      activeTab: tileId,
-      previewTabId: options?.preview === true ? tileId : normalizePreviewTabId(nextTabs, node.previewTabId),
-    }
-  }
-  return { ...node, children: node.children.map(c => addTabToLeaf(c, panelId, tileId, options)) }
-}
-
-export function setActiveTab(node: PanelNode, panelId: string, tileId: string): PanelNode {
-  if (node.type === 'leaf') return node.id === panelId ? { ...node, activeTab: tileId } : node
-  return { ...node, children: node.children.map(c => setActiveTab(c, panelId, tileId)) }
-}
-
-export function pinTabInLeaf(node: PanelNode, panelId: string, tileId: string): PanelNode {
-  if (node.type === 'leaf') {
-    if (node.id !== panelId || node.previewTabId !== tileId) return node
-    return { ...node, previewTabId: null, activeTab: tileId }
-  }
-  return { ...node, children: node.children.map(c => pinTabInLeaf(c, panelId, tileId)) }
-}
-
-export function replaceTabInLeaf(
-  node: PanelNode,
-  panelId: string,
-  currentTileId: string,
-  nextTileId: string,
-  options?: { preview?: boolean },
-): PanelNode {
-  if (node.type === 'leaf') {
-    if (node.id !== panelId) return node
-    const currentIndex = node.tabs.indexOf(currentTileId)
-    if (currentIndex < 0) return node
-    const replacedTabs = node.tabs.map(tabId => tabId === currentTileId ? nextTileId : tabId)
-    const nextTabs = replacedTabs.filter((tabId, index) => replacedTabs.indexOf(tabId) === index)
-    const nextPreviewTabId = node.previewTabId === currentTileId
-      ? (options?.preview === false ? null : nextTileId)
-      : normalizePreviewTabId(nextTabs, node.previewTabId)
-    return {
-      ...node,
-      tabs: nextTabs,
-      activeTab: node.activeTab === currentTileId ? nextTileId : node.activeTab,
-      previewTabId: normalizePreviewTabId(nextTabs, nextPreviewTabId),
-    }
-  }
-  return { ...node, children: node.children.map(c => replaceTabInLeaf(c, panelId, currentTileId, nextTileId, options)) }
-}
-
-export function closeOthersInLeaf(root: PanelNode, panelId: string, keepId: string): PanelNode {
-  const update = (n: PanelNode): PanelNode => {
-    if (n.type === 'leaf') {
-      if (n.id !== panelId) return n
-      return { ...n, tabs: [keepId], activeTab: keepId, previewTabId: n.previewTabId === keepId ? keepId : null }
-    }
-    return { ...n, children: n.children.map(update) }
-  }
-  return update(root)
-}
-
-export function closeToRightInLeaf(root: PanelNode, panelId: string, tileId: string): PanelNode {
-  const update = (n: PanelNode): PanelNode => {
-    if (n.type === 'leaf') {
-      if (n.id !== panelId) return n
-      const idx = n.tabs.indexOf(tileId)
-      if (idx < 0) return n
-      const newTabs = n.tabs.slice(0, idx + 1)
-      return {
-        ...n,
-        tabs: newTabs,
-        activeTab: newTabs.includes(n.activeTab) ? n.activeTab : tileId,
-        previewTabId: normalizePreviewTabId(newTabs, n.previewTabId),
-      }
-    }
-    return { ...n, children: n.children.map(update) }
-  }
-  return update(root)
-}
-
-export function splitLeaf(node: PanelNode, targetPanelId: string, tileId: string, zone: DockZone): PanelNode {
-  if (node.type === 'leaf') {
-    if (node.id !== targetPanelId) return node
-    if (zone === 'center') return addTabToLeaf(node, targetPanelId, tileId)
-    const existingTabs = node.tabs.filter(id => id !== tileId)
-    const existingLeaf: PanelLeaf = {
-      ...node,
-      tabs: existingTabs.length > 0 ? existingTabs : node.tabs,
-      activeTab: existingTabs.length > 0 && node.activeTab === tileId ? existingTabs[0] : node.activeTab,
-    }
-    const newLeaf = createLeaf([tileId])
-    const direction: 'horizontal' | 'vertical' = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical'
-    const children: PanelNode[] = zone === 'left' || zone === 'top' ? [newLeaf, existingLeaf] : [existingLeaf, newLeaf]
-    return { type: 'split', id: newPanelId(), direction, children, sizes: [50, 50] }
-  }
-  return { ...node, children: node.children.map(c => splitLeaf(c, targetPanelId, tileId, zone)) }
 }
 
 // ─── Dock Overlay ─────────────────────────────────────────────────────────────

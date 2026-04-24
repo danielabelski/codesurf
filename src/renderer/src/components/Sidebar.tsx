@@ -795,8 +795,8 @@ export function Sidebar({
   const promotedSessions = useMemo(() => applySessionPromotions(sessions, sessionPromotions), [sessions, sessionPromotions])
 
   const orderedProjectEntries = useMemo(
-    () => sortProjectEntriesByRecentSession(projectEntries, promotedSessions, getProjectDisplayLabel),
-    [projectEntries, promotedSessions],
+    () => sortProjectEntriesByRecentSession(projectEntries, promotedSessions, getProjectDisplayLabel, sessionPromotions),
+    [projectEntries, promotedSessions, sessionPromotions],
   )
 
   const resizing = useRef(false)

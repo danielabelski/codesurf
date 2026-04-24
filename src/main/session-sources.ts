@@ -4,8 +4,8 @@ import { basename, extname, join } from 'path'
 import { createInterface } from 'readline'
 import Database from 'better-sqlite3'
 import type { AggregatedSessionEntry, SessionEntryHint, SessionScope } from '../shared/session-types'
-import { buildChatMessageHistoryFingerprint } from '../shared/chat-history'
-import { CONTEX_HOME } from './paths'
+import { buildChatMessageHistoryFingerprint } from '../shared/chat-history.ts'
+import { CONTEX_HOME } from './paths.ts'
 
 export type ChatRole = 'user' | 'assistant' | 'system'
 

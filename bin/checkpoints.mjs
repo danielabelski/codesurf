@@ -153,14 +153,20 @@ export function createCheckpointStore({
   runtimeSessionStatePath,
   workspaceContexDir,
 }) {
-  function workspaceRoots(workspaceId) {
+  function workspaceRoots(workspaceId, extraRoots = []) {
     const state = readWorkspaceState()
     const workspace = state.workspaces.find(entry => entry.id === workspaceId)
-    if (!workspace) return []
-    const materialized = materializeWorkspace(workspace, state.projects)
+    const persistedRoots = []
+    if (workspace) {
+      const materialized = materializeWorkspace(workspace, state.projects)
+      persistedRoots.push(
+        materialized.path,
+        ...(Array.isArray(materialized.projectPaths) ? materialized.projectPaths : []),
+      )
+    }
     return makeUniqueStrings([
-      materialized.path,
-      ...(Array.isArray(materialized.projectPaths) ? materialized.projectPaths : []),
+      ...persistedRoots,
+      ...(Array.isArray(extraRoots) ? extraRoots : []),
     ])
   }
 
@@ -208,8 +214,8 @@ export function createCheckpointStore({
     return nextState
   }
 
-  function resolveCheckpointTargets(workspaceId, files) {
-    const roots = workspaceRoots(workspaceId)
+  function resolveCheckpointTargets(workspaceId, files, extraRoots = []) {
+    const roots = workspaceRoots(workspaceId, extraRoots)
     const primaryRoot = roots[0] ?? null
     if (!primaryRoot) return { targets: [], invalidPaths: [] }
 
@@ -231,7 +237,7 @@ export function createCheckpointStore({
         displayPath: buildDisplayPath(resolvedPath, root),
       })
     }
-    return { targets: [...targets.values()], invalidPaths }
+    return { targets: [...targets.values()], invalidPaths, roots }
   }
 
   function captureFileSnapshot(targetPath, logicalPath, displayPath) {
@@ -294,7 +300,12 @@ export function createCheckpointStore({
     const normalizedSessionEntryId = String(sessionEntryId ?? '').trim()
     if (!normalizedSessionEntryId) return { ok: false, error: 'sessionEntryId is required' }
 
-    const { targets, invalidPaths } = resolveCheckpointTargets(workspaceId, options.files)
+    const extraRoots = makeUniqueStrings(Array.isArray(options.workspaceRoots)
+      ? options.workspaceRoots
+      : Array.isArray(options.additionalWorkspaceRoots)
+        ? options.additionalWorkspaceRoots
+        : [])
+    const { targets, invalidPaths, roots } = resolveCheckpointTargets(workspaceId, options.files, extraRoots)
     if (invalidPaths.length > 0) {
       return { ok: false, error: `Checkpoint paths must stay inside workspace roots: ${invalidPaths[0]}` }
     }
@@ -315,6 +326,7 @@ export function createCheckpointStore({
         reason: String(options.reason ?? '').trim() || null,
         createdAt: new Date().toISOString(),
         source: typeof options.source === 'string' ? options.source : 'daemon',
+        workspaceRoots: roots,
         metadata: options.metadata && typeof options.metadata === 'object' ? options.metadata : {},
         files: targets.map(readCheckpointFileSnapshot),
         sessionStateSnapshot: readRuntimeSessionSnapshot(runtimeSessionStatePath, readJsonFile, workspaceId, normalizedSessionEntryId),
@@ -348,7 +360,12 @@ export function createCheckpointStore({
       return { ok: false, error: 'Checkpoint does not belong to that session' }
     }
 
-    const roots = workspaceRoots(workspaceId)
+    const extraRoots = makeUniqueStrings([
+      ...(Array.isArray(record.workspaceRoots) ? record.workspaceRoots : []),
+      ...(Array.isArray(options.workspaceRoots) ? options.workspaceRoots : []),
+      ...(Array.isArray(options.additionalWorkspaceRoots) ? options.additionalWorkspaceRoots : []),
+    ])
+    const roots = workspaceRoots(workspaceId, extraRoots)
     const files = Array.isArray(record.files) ? record.files : []
     for (const file of files) {
       const targetPath = String(file?.fsPath ?? file?.path ?? '')

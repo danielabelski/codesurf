@@ -773,6 +773,7 @@ test('daemon runs a persisted chat job timeline and replays events for completed
 
   const state = await waitFor(async () => {
     const next = await daemon.request(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+    if (next.status === 404) return null
     return next.payload?.status === 'running' ? null : next
   })
 
@@ -860,6 +861,7 @@ exit 0
 
   const state = await waitFor(async () => {
     const next = await daemon.request(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+    if (next.status === 404) return null
     return next.payload?.status === 'running' ? null : next
   })
 
@@ -874,6 +876,184 @@ exit 0
   assert.match(rawTimeline, /"type":"text","text":"TEST OK"/)
   assert.match(rawTimeline, /"type":"done"/)
   assert.doesNotMatch(rawTimeline, /Reading additional input from stdin/)
+})
+
+test('daemon codex file changes create restorable checkpoint with daemon-local workspace roots', async t => {
+  const fakeBinDir = await makeTestTempDir('codesurfd-fake-bin-checkpoint-')
+  const fakeCodexPath = join(fakeBinDir, 'codex')
+  await writeFile(fakeCodexPath, `#!/bin/sh
+set -eu
+workspace=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-C" ]; then
+    workspace="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [ -n "$workspace" ]; then
+  cd "$workspace"
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-checkpoint"}'
+printf '%s\n' '{"type":"item.started","item":{"type":"file_change","changes":[{"path":"notes.txt","kind":"update"}]}}'
+sleep 0.2
+printf '%s\n' 'after daemon codex' > notes.txt
+printf '%s\n' '{"type":"item.completed","item":{"type":"file_change","changes":[{"path":"notes.txt","kind":"update"}]}}'
+exit 0
+`, 'utf8')
+  await chmod(fakeCodexPath, 0o755)
+
+  const daemon = await startDaemon({
+    env: {
+      PATH: `${fakeBinDir}:${process.env.PATH ?? ''}`,
+    },
+  })
+
+  t.after(async () => {
+    await daemon.stop()
+    await rm(fakeBinDir, { recursive: true, force: true })
+  })
+
+  const projectDir = join(daemon.homeDir, 'repos', 'checkpoint-project')
+  const targetFile = join(projectDir, 'notes.txt')
+  await mkdir(projectDir, { recursive: true })
+  await writeFile(targetFile, 'before daemon codex\n', 'utf8')
+
+  let response = null
+  const workspaceId = 'remote-checkpoint-workspace'
+  const cardId = 'chat-codex-checkpoint'
+  const sessionEntryId = `codesurf-runtime:${cardId}`
+
+  const start = await daemon.request('/chat/job/start', {
+    body: {
+      request: {
+        cardId,
+        workspaceId,
+        provider: 'codex',
+        model: 'gpt-5.4',
+        workspaceDir: projectDir,
+        messages: [
+          { role: 'user', content: 'edit notes.txt' },
+        ],
+      },
+    },
+  })
+
+  assert.equal(start.status, 200)
+  const jobId = start.payload.id
+
+  const state = await waitFor(async () => {
+    const next = await daemon.request(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+    if (next.status === 404) return null
+    return next.payload?.status === 'running' ? null : next
+  })
+
+  assert.equal(state.status, 200)
+  assert.equal(state.payload.status, 'completed')
+  assert.equal(await readFile(targetFile, 'utf8'), 'after daemon codex\n')
+
+  response = await daemon.request('/checkpoint/list', {
+    body: {
+      workspaceId,
+      sessionEntryId,
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.length, 1)
+  assert.equal(response.payload[0].fileCount, 1)
+  assert.deepEqual(response.payload[0].files, ['notes.txt'])
+  const checkpointId = response.payload[0].id
+
+  const timelineFile = join(daemon.homeDir, 'timelines', `${jobId}.jsonl`)
+  const rawTimeline = await readFile(timelineFile, 'utf8')
+  assert.match(rawTimeline, /"toolName":"Checkpoint saved"/)
+  assert.match(rawTimeline, /"toolName":"Edited 1 file"/)
+
+  response = await daemon.request('/checkpoint/restore', {
+    body: {
+      workspaceId,
+      checkpointId,
+      sessionEntryId,
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.ok, true)
+  assert.equal(await readFile(targetFile, 'utf8'), 'before daemon codex\n')
+})
+
+test('daemon codex file changes abort when checkpoint paths are missing', async t => {
+  const fakeBinDir = await makeTestTempDir('codesurfd-fake-bin-checkpoint-missing-path-')
+  const fakeCodexPath = join(fakeBinDir, 'codex')
+  await writeFile(fakeCodexPath, `#!/bin/sh
+set -eu
+workspace=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-C" ]; then
+    workspace="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [ -n "$workspace" ]; then
+  cd "$workspace"
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-missing-path"}'
+printf '%s\n' '{"type":"item.started","item":{"type":"file_change","changes":[{"kind":"update"}]}}'
+sleep 0.2
+printf '%s\n' 'unsafe write should not happen' > notes.txt
+exit 0
+`, 'utf8')
+  await chmod(fakeCodexPath, 0o755)
+
+  const daemon = await startDaemon({
+    env: {
+      PATH: `${fakeBinDir}:${process.env.PATH ?? ''}`,
+    },
+  })
+
+  t.after(async () => {
+    await daemon.stop()
+    await rm(fakeBinDir, { recursive: true, force: true })
+  })
+
+  const projectDir = join(daemon.homeDir, 'repos', 'checkpoint-missing-path-project')
+  const targetFile = join(projectDir, 'notes.txt')
+  await mkdir(projectDir, { recursive: true })
+  await writeFile(targetFile, 'before missing path\n', 'utf8')
+
+  const start = await daemon.request('/chat/job/start', {
+    body: {
+      request: {
+        cardId: 'chat-codex-missing-path',
+        workspaceId: 'remote-missing-path-workspace',
+        provider: 'codex',
+        model: 'gpt-5.4',
+        workspaceDir: projectDir,
+        messages: [
+          { role: 'user', content: 'edit notes.txt without a path' },
+        ],
+      },
+    },
+  })
+
+  assert.equal(start.status, 200)
+  const jobId = start.payload.id
+  const state = await waitFor(async () => {
+    const next = await daemon.request(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+    if (next.status === 404) return null
+    return next.payload?.status === 'running' ? null : next
+  })
+
+  assert.equal(state.status, 200)
+  assert.equal(state.payload.status, 'failed')
+  assert.match(state.payload.error, /no checkpointable file paths/i)
+  assert.equal(await readFile(targetFile, 'utf8'), 'before missing path\n')
+
+  const rawTimeline = await readFile(join(daemon.homeDir, 'timelines', `${jobId}.jsonl`), 'utf8')
+  assert.match(rawTimeline, /Checkpoint creation failed before Codex file change/)
+  assert.doesNotMatch(rawTimeline, /"toolName":"Edited 1 file"/)
 })
 
 test('daemon dashboard job endpoints return recorded jobs and timelines', async t => {

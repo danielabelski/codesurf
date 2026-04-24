@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'bun:test'
-import { buildDreamingStatusSummary } from '../src/renderer/src/components/mainStatusBarDreaming'
+import { describe, test } from 'node:test'
+import { expect } from './node-expect.ts'
+import { buildDreamingStatusSummary } from '../src/renderer/src/components/mainStatusBarDreaming.ts'
 
 const now = Date.parse('2026-04-23T09:30:00.000Z')
 
@@ -35,7 +36,7 @@ describe('buildDreamingStatusSummary', () => {
       auto: { enabled: true, pending: false, minSessions: 3, minIntervalMs: 1_800_000, debounceMs: 5_000, sweepMs: 300_000 },
     }, now)
 
-    expect(summary?.chipLabel).toBe('DREAMING')
+    expect(summary?.chipLabel).toBe('Dreaming')
     expect(summary?.tone).toBe('active')
     expect(summary?.summaryLine).toBe('Dreaming now · 4 sessions')
     expect(summary?.detailLine).toBe('Demo Workspace · claude · claude-sonnet-4-6')
@@ -51,7 +52,7 @@ describe('buildDreamingStatusSummary', () => {
       lastRun: null,
       state: null,
       auto: { enabled: false, pending: false, minSessions: 3, minIntervalMs: 1_800_000, debounceMs: 5_000, sweepMs: 300_000 },
-    }, now)?.chipLabel).toBe('DREAM OFF')
+    }, now)?.chipLabel).toBe('Dream off')
 
     expect(buildDreamingStatusSummary({
       workspaceId: 'ws-1',
@@ -94,7 +95,7 @@ describe('buildDreamingStatusSummary', () => {
       auto: { enabled: true, pending: false, minSessions: 3, minIntervalMs: 1_800_000, debounceMs: 5_000, sweepMs: 300_000 },
     }, now)
 
-    expect(recent?.chipLabel).toBe('DREAM 4m')
+    expect(recent?.chipLabel).toBe('Dreamt (4m)')
     expect(recent?.summaryLine).toBe('Auto-dream ready · last completed 4m ago · 3 sessions')
   })
 })

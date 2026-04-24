@@ -27,7 +27,6 @@ const AGENT_KANBAN_DIR = join(HOME, 'agent-kanban')
 const SESSION_TITLE_OVERRIDES_FILE = join(HOME, 'session-title-overrides.json')
 const AUTH_TOKEN = randomUUID()
 const SESSION_TEXT_LIMIT = 120
-const chatJobs = createChatJobManager({ homeDir: HOME })
 const checkpointStore = createCheckpointStore({
   assertSafeId,
   atomicWriteJson,
@@ -37,6 +36,7 @@ const checkpointStore = createCheckpointStore({
   runtimeSessionStatePath,
   workspaceContexDir,
 })
+const chatJobs = createChatJobManager({ homeDir: HOME, checkpointStore })
 const skillsIndex = createSkillsIndex({
   homeDir: HOME,
   userHomeDir: homedir(),

@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, test } from 'node:test'
+import { expect } from './node-expect.ts'
 import { mkdtemp, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { getExternalSessionChatState, isExternalSessionImportableInChat } from '../src/main/session-sources'
-import { getSessionOpenIntent } from '../src/renderer/src/components/sidebar/session-open'
+import { getExternalSessionChatState, isExternalSessionImportableInChat } from '../src/main/session-sources.ts'
+import { getSessionOpenIntent } from '../src/renderer/src/components/sidebar/session-open.ts'
 
 describe('external session chat openability', () => {
   test('treats hook-only/title-only external sessions as not chat-loadable', () => {

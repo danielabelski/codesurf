@@ -203,8 +203,9 @@ contextBridge.exposeInMainWorld('electron', {
       model: string
       messages: { role: string; content: string }[]
       runMode?: 'foreground' | 'background'
+      mcpEnabled?: boolean
       negotiatedTools?: string[]
-      peers?: { peerId: string; peerType: string; tools: string[] }[]
+      peers?: { peerId: string; peerType: string; tools: string[]; actions?: Array<{ name: string; description: string }>; context?: Record<string, unknown> }[]
       providerTransport?: import('../shared/types').ExtensionChatTransportConfig | null
     }) =>
       ipcRenderer.invoke('chat:send', req),

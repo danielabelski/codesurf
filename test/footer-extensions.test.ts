@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'bun:test'
-import { buildFooterExtensions } from '../src/renderer/src/components/sidebar/footerExtensions'
+import { describe, test } from 'node:test'
+import { expect } from './node-expect.ts'
+import { buildFooterExtensions } from '../src/renderer/src/components/sidebar/footerExtensions.ts'
 
 describe('buildFooterExtensions', () => {
   test('only returns actionable extensions that have a tile type', () => {

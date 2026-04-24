@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "npm run test:daemon",
+    "test": "node --test test/*.test.ts test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs",
     "test:daemon": "node --test test/daemon/*.test.mjs",
     "dev": "node scripts/dev.js",
     "build:main": "cross-env EV_BUILD_TARGET=main electron-vite build",

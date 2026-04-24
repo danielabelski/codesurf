@@ -136,6 +136,75 @@ function buildEditedToolName(fileChanges) {
   return `Edited ${fileChanges.length} file${fileChanges.length === 1 ? '' : 's'}`
 }
 
+const CLAUDE_CHECKPOINT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
+
+function isClaudeCheckpointTool(toolName) {
+  return CLAUDE_CHECKPOINT_TOOLS.has(String(toolName ?? ''))
+}
+
+function buildCheckpointLabel(toolName, filePaths, workspaceDir) {
+  if (filePaths.length === 0) return `Before ${toolName}`
+  if (filePaths.length === 1) return `Before ${toolName} ${getDisplayPath(filePaths[0], workspaceDir)}`
+  return `Before ${toolName} (${filePaths.length} files)`
+}
+
+function buildCheckpointSummary(toolName, filePaths, workspaceDir) {
+  const displayPaths = filePaths.slice(0, 2).map(filePath => getDisplayPath(filePath, workspaceDir))
+  const suffix = filePaths.length > 2 ? ` +${filePaths.length - 2} more` : ''
+  return `Saved checkpoint before ${toolName}${displayPaths.length > 0 ? ` for ${displayPaths.join(', ')}${suffix}` : ''}`
+}
+
+function buildRuntimeSessionEntryId(request, job) {
+  const cardId = String(request?.cardId ?? '').trim()
+  if (cardId) return `codesurf-runtime:${cardId}`
+  return `codesurf-job:${job.id}`
+}
+
+function extractAnthropicCheckpointPaths(toolName, input, workspaceDir) {
+  const source = input && typeof input === 'object' ? input : {}
+  const resolveFile = (value) => {
+    if (typeof value !== 'string' || !value.trim()) return null
+    return resolveCodexFilePath(value, workspaceDir)
+  }
+
+  if (toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'Write') {
+    const filePath = resolveFile(source.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  if (toolName === 'NotebookEdit') {
+    const filePath = resolveFile(source.notebook_path) ?? resolveFile(source.file_path)
+    return filePath ? [filePath] : []
+  }
+
+  return []
+}
+
+function extractCodexCheckpointPaths(changes, workspaceDir) {
+  const paths = []
+  const seen = new Set()
+  const pathFields = [
+    'path',
+    'previousPath',
+    'previous_path',
+    'oldPath',
+    'old_path',
+    'from',
+    'sourcePath',
+    'source_path',
+  ]
+  for (const change of Array.isArray(changes) ? changes : []) {
+    for (const field of pathFields) {
+      if (typeof change?.[field] !== 'string') continue
+      const resolvedPath = resolveCodexFilePath(change[field], workspaceDir)
+      if (seen.has(resolvedPath)) continue
+      seen.add(resolvedPath)
+      paths.push(resolvedPath)
+    }
+  }
+  return paths
+}
+
 function countDiffStats(diff) {
   let additions = 0
   let deletions = 0
@@ -441,7 +510,7 @@ function writeSseEvent(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`)
 }
 
-export function createChatJobManager({ homeDir }) {
+export function createChatJobManager({ homeDir, checkpointStore = null, claudeQuery = query }) {
   const jobsDir = join(homeDir, 'jobs')
   const timelinesDir = join(homeDir, 'timelines')
   ensureDir(jobsDir)
@@ -519,6 +588,54 @@ export function createChatJobManager({ homeDir }) {
     return payload
   }
 
+  async function createDaemonCheckpoint(job, request, toolName, filePaths, metadata = {}) {
+    const workspaceId = String(request?.workspaceId ?? '').trim()
+    if (!checkpointStore || typeof checkpointStore.createCheckpoint !== 'function') return { ok: true, skipped: true }
+    if (!workspaceId) return { ok: true, skipped: true }
+    if (!Array.isArray(filePaths) || filePaths.length === 0) return { ok: true, skipped: true }
+
+    try {
+      const checkpointWorkspaceDir = workspaceDirFromJob(job)
+      const response = checkpointStore.createCheckpoint(workspaceId, buildRuntimeSessionEntryId(request, job), {
+        label: buildCheckpointLabel(toolName, filePaths, checkpointWorkspaceDir),
+        reason: `tool:${toolName}`,
+        files: filePaths,
+        workspaceRoots: checkpointWorkspaceDir ? [checkpointWorkspaceDir] : [],
+        source: 'daemon-chat-job',
+        metadata: {
+          provider: request?.provider ?? null,
+          model: request?.model ?? null,
+          toolName,
+          cardId: request?.cardId ?? null,
+          jobId: job.id,
+          ...metadata,
+        },
+      })
+      if (!response?.ok) {
+        return { ok: false, error: response?.error ?? `Failed to create checkpoint for ${toolName}` }
+      }
+      const checkpointId = response.checkpoint?.id
+      if (checkpointId) {
+        const toolId = `codesurf-checkpoint-${checkpointId}`
+        await appendEvent(job.id, { type: 'tool_start', toolId, toolName: 'Checkpoint saved' })
+        await appendEvent(job.id, {
+          type: 'tool_summary',
+          toolId,
+          toolName: 'Checkpoint saved',
+          text: buildCheckpointSummary(toolName, filePaths, checkpointWorkspaceDir),
+        })
+      }
+      return { ok: true, checkpointId }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, error: message }
+    }
+  }
+
+  function workspaceDirFromJob(job) {
+    return typeof job?.metadata?.workspaceDir === 'string' ? job.metadata.workspaceDir : undefined
+  }
+
   async function runClaudeJob(job, request, workspaceDir, instructionPrompt) {
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(message => message.role === 'user')
     if (!lastUserMsg) {
@@ -553,21 +670,51 @@ export function createChatJobManager({ homeDir }) {
       includePartialMessages: true,
       permissionMode: permMode,
       ...(permMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
-      ...(permMode !== 'bypassPermissions' ? {
-        canUseTool: async (toolName, _input, toolOptions) => {
+      canUseTool: async (toolName, input, toolOptions) => {
+        if (permMode !== 'bypassPermissions') {
           const allowed = hasPersistedPermissionGrant(homeDir, {
             provider: 'claude',
             toolName,
             workspaceDir,
           })
-          if (allowed) return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+          if (!allowed) {
+            return {
+              behavior: 'deny',
+              message: `Permission required for ${toolName}. Save an all-day or all-time grant from an interactive chat before running this daemon job.`,
+              toolUseID: toolOptions?.toolUseID,
+            }
+          }
+        }
+
+        const checkpointPaths = extractAnthropicCheckpointPaths(toolName, input, workspaceDir)
+        if (isClaudeCheckpointTool(toolName) && checkpointPaths.length === 0) {
+          const message = `Checkpoint creation failed before ${toolName}: no checkpointable file path was provided`
+          await appendEvent(job.id, { type: 'error', error: message })
           return {
             behavior: 'deny',
-            message: `Permission required for ${toolName}. Save an all-day or all-time grant from an interactive chat before running this daemon job.`,
+            message,
             toolUseID: toolOptions?.toolUseID,
           }
-        },
-      } : {}),
+        }
+
+        const checkpoint = await createDaemonCheckpoint(
+          job,
+          request,
+          toolName,
+          checkpointPaths,
+          { toolUseID: typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null },
+        )
+        if (!checkpoint.ok) {
+          const message = `Checkpoint creation failed before ${toolName}: ${checkpoint.error ?? 'unknown error'}`
+          await appendEvent(job.id, { type: 'error', error: message })
+          return {
+            behavior: 'deny',
+            message,
+            toolUseID: toolOptions?.toolUseID,
+          }
+        }
+        return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+      },
       thinking: thinkingMap[request.thinking ?? ''] ?? { type: 'adaptive' },
       cwd: workspaceDir || undefined,
       stderr: data => { claudeStderr += data },
@@ -586,7 +733,7 @@ export function createChatJobManager({ homeDir }) {
     }
 
     try {
-      const q = query({ prompt: lastUserMsg.content, options })
+      const q = claudeQuery({ prompt: lastUserMsg.content, options })
       job.query = q
       let emittedDone = false
 
@@ -698,6 +845,7 @@ export function createChatJobManager({ homeDir }) {
     const exploreEntries = []
     let editsStarted = false
     let exploreStarted = false
+    let checkpointFailure = null
     let pendingStdout = ''
     let stdoutChain = Promise.resolve()
     let stderrBuf = ''
@@ -710,10 +858,34 @@ export function createChatJobManager({ homeDir }) {
         await appendEvent(job.id, { type: 'session', sessionId: evt.thread_id })
         return
       }
+      if (checkpointFailure) return
 
       if (evt.type === 'item.started') {
         const item = evt.item
         if (item?.type === 'file_change' && Array.isArray(item.changes)) {
+          const checkpointPaths = extractCodexCheckpointPaths(item.changes, workspaceDir)
+          if (item.changes.length > 0 && checkpointPaths.length === 0) {
+            checkpointFailure = 'no checkpointable file paths were provided by Codex file_change'
+            await appendEvent(job.id, {
+              type: 'error',
+              error: `Checkpoint creation failed before Codex file change: ${checkpointFailure}`,
+            })
+            if (!proc.killed) proc.kill('SIGTERM')
+            return
+          }
+          const checkpoint = await createDaemonCheckpoint(job, request, 'Codex file change', checkpointPaths, {
+            itemType: 'file_change',
+          })
+          if (!checkpoint.ok) {
+            checkpointFailure = checkpoint.error ?? 'unknown error'
+            await appendEvent(job.id, {
+              type: 'error',
+              error: `Checkpoint creation failed before Codex file change: ${checkpointFailure}`,
+            })
+            if (!proc.killed) proc.kill('SIGTERM')
+            return
+          }
+
           for (const change of item.changes) {
             if (typeof change?.path !== 'string') continue
             const resolvedPath = resolveCodexFilePath(change.path, workspaceDir)

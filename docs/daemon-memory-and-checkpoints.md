@@ -254,11 +254,11 @@ Runtime session state now carries checkpoint metadata such as:
 
 `bin/codesurfd.mjs` merges daemon-owned checkpoint metadata forward on later runtime upserts so checkpoint state is not lost when the conversation continues.
 
-## Checkpoint triggers today
+## Local runtime checkpoint triggers
 
-Checkpoint storage is daemon-owned, but trigger wiring is currently in the main-process runtime chat seam.
+Checkpoint storage is daemon-owned, and the main-process runtime chat seam asks the daemon to create checkpoints before local provider mutations.
 
-Implemented today in `src/main/ipc/chat.ts`:
+Implemented in `src/main/ipc/chat.ts`:
 
 - Claude local runtime:
   - `Edit`
@@ -274,17 +274,30 @@ Behavior:
 - deny the tool call if checkpoint creation fails
 - continue normally if checkpoint creation succeeds
 
-## Important current limitation
+## Daemon-backed checkpoint triggers
 
-The daemon owns checkpoint storage and restore, but daemon-side provider loops in `bin/chat-jobs.mjs` are not yet creating checkpoints before their own file mutations.
+The daemon now creates checkpoints for both foreground/runtime local edits and daemon-backed provider loops.
 
-So today:
+Implemented today:
 
-- local runtime chat has checkpoint-before-edit behavior
-- daemon-backed chat has daemon-owned checkpoint infrastructure available
-- but daemon-backed provider loops still need direct checkpoint trigger wiring for full parity
+- main-process local runtime (`src/main/ipc/chat.ts`):
+  - Claude `Edit`, `MultiEdit`, `Write`, `NotebookEdit`
+  - Codex `file_change` batches
+- daemon-backed jobs (`bin/chat-jobs.mjs`):
+  - Claude approved `Edit`, `MultiEdit`, `Write`, `NotebookEdit` tool calls
+  - Codex `file_change` items when `item.started` is observed (best-effort at the provider event boundary; Codex does not expose a separate blocking pre-apply hook here)
 
-That is the next checkpoint follow-up, not a new architecture direction.
+Behavior:
+
+- create checkpoint before risky mutation when workspace/session context is available
+- emit a normal `Checkpoint saved` timeline/tool chip
+- deny Claude file-edit tools if checkpoint creation fails or if a known mutating tool omits a checkpointable path
+- abort daemon Codex jobs if checkpoint creation fails before a file-change batch or if the file-change event omits checkpointable paths
+- continue normally when checkpoint creation succeeds or when there is no workspace/session context to attach checkpoint state to
+
+Daemon-backed checkpoint creation uses the daemon-provisioned workspace path for display/snapshot safety, not the initiating machine's raw local path.
+
+This gives local runtime chat and daemon-backed chat the same daemon-owned checkpoint primitive; remaining future work is richer restore/history UI, not a separate checkpoint architecture.
 
 ## Renderer/UI manifestation rules
 
@@ -340,4 +353,4 @@ See `docs/chat-ui-manifest.md` for the renderer-specific mapping.
 
 ## Practical summary
 
-Memory loading now works as a daemon-owned layered AGENTS / CLAUDE system with import resolution and privacy buckets, while checkpoints are stored/restored by the daemon and currently triggered for risky local runtime edits.
+Memory loading now works as a daemon-owned layered AGENTS / CLAUDE system with import resolution and privacy buckets, while checkpoints are stored/restored by the daemon and triggered from both risky local runtime edits and daemon-backed provider file-change loops.

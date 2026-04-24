@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   SESSION_ACTION_BUTTON_SIZE,
   SESSION_ACTION_ICON_SIZE,
-  SESSION_ROW_EXTRA_WIDTH,
+  getSessionRowExtraWidth,
   getSessionArchiveActionLabel,
 } from '../../src/renderer/src/components/sidebar/session-actions.ts'
 
@@ -20,7 +20,8 @@ test('conversation archive action uses human labels instead of delete wording', 
 test('conversation archive action is not tiny', () => {
   assert.ok(SESSION_ACTION_BUTTON_SIZE >= 24)
   assert.ok(SESSION_ACTION_ICON_SIZE >= 14)
-  assert.ok(SESSION_ROW_EXTRA_WIDTH >= 64)
+  assert.equal(getSessionRowExtraWidth(0), SESSION_ACTION_BUTTON_SIZE)
+  assert.ok(getSessionRowExtraWidth(1) >= 64)
 })
 
 test('Sidebar declares archive mutation callback before menu actions that capture it', async () => {

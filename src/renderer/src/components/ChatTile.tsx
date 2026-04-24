@@ -4219,15 +4219,36 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         case 'tool_permission_request': {
           const pid = typeof event.toolId === 'string' ? event.toolId : null
           if (!pid) break
+          const toolName = typeof event.toolName === 'string' ? event.toolName : 'tool'
           const request: ToolPermissionRequest = {
             toolId: pid,
-            toolName: typeof event.toolName === 'string' ? event.toolName : 'tool',
+            toolName,
             provider: typeof event.provider === 'string' ? event.provider : 'claude',
             title: typeof event.title === 'string' ? event.title : null,
             description: typeof event.description === 'string' ? event.description : null,
             blockedPath: typeof event.blockedPath === 'string' ? event.blockedPath : null,
             workspaceDir: typeof event.workspaceDir === 'string' ? event.workspaceDir : null,
           }
+          updateLast(m => {
+            const nextBlock: ToolBlock = {
+              id: pid,
+              name: toolName,
+              input: '',
+              status: 'running',
+            }
+            const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
+            const toolBlocks = existingIndex >= 0
+              ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? mergeToolBlockDuplicate(block, nextBlock) : block)
+              : [...(m.toolBlocks ?? []), nextBlock]
+            const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
+            return {
+              ...m,
+              toolBlocks,
+              contentBlocks: hasContentRef
+                ? m.contentBlocks
+                : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId: pid }],
+            }
+          })
           setPendingToolPermissions(prev => {
             const next = new Map(prev)
             next.set(pid, request)
@@ -4246,7 +4267,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           const pid = typeof event.toolId === 'string' ? event.toolId : null
           if (!pid) break
           const decision: ToolPermissionDecision =
-            event.decision === 'deny' || event.decision === 'once' || event.decision === 'session'
+            event.decision === 'deny' || event.decision === 'never' || event.decision === 'once' || event.decision === 'session'
               || event.decision === 'today' || event.decision === 'forever'
               ? event.decision
               : 'once'
@@ -4259,7 +4280,22 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           // Only persist a visible "resolved" banner for denials — allowed
           // tools let the normal chip render the tool result. Denials need a
           // permanent explanation since no tool_result follows.
-          if (decision === 'deny') {
+          if (decision === 'deny' || decision === 'never') {
+            updateLast(m => {
+              const toolName = typeof event.toolName === 'string' ? event.toolName : 'tool'
+              const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
+              const toolBlocks = existingIndex >= 0
+                ? (m.toolBlocks ?? []).map(block => block.id === pid ? { ...block, name: toolName, status: 'done' as const } : block)
+                : [...(m.toolBlocks ?? []), { id: pid, name: toolName, input: '', status: 'done' as const }]
+              const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
+              return {
+                ...m,
+                toolBlocks,
+                contentBlocks: hasContentRef
+                  ? m.contentBlocks
+                  : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId: pid }],
+              }
+            })
             setResolvedToolPermissions(prev => {
               const next = new Map(prev)
               next.set(pid, decision)
@@ -4751,12 +4787,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const state = latestStateRef.current
     const activeProvider = state?.provider ?? provider
     const activeModel = state?.model ?? model
-    const activeMode = state?.mode ?? mode
     const activeThinking = state?.thinking ?? thinking
     const activeSessionId = state?.sessionId ?? sessionId
     const activeMcpEnabled = state?.mcpEnabled ?? mcpEnabled
     const activeMessages = state?.messages ?? messages
     const activeProviderEntry = providerEntryById.get(activeProvider) ?? currentProviderEntry
+    const activeModeOptions = activeProviderEntry?.kind === 'builtin'
+      ? PROVIDER_MODES[activeProviderEntry.id as BuiltinProvider]
+      : [EXTENSION_PROVIDER_MODE]
+    const rawActiveMode = state?.mode ?? mode
+    const activeMode = activeModeOptions.some(option => option.id === rawActiveMode)
+      ? rawActiveMode
+      : (activeModeOptions[0]?.id ?? EXTENSION_PROVIDER_MODE.id)
     const nextCloudHostId = executionTarget === 'cloud'
       ? (cloudHostId ?? activeCloudHost?.id ?? null)
       : null
@@ -4856,6 +4898,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         mode: activeMode,
         thinking: activeThinking,
         workspaceDir: _workspaceDir,
+        mcpEnabled: activeMcpEnabled,
         executionTarget,
         cloudHostId: nextCloudHostId,
         executionPreference: settings?.execution ?? null,

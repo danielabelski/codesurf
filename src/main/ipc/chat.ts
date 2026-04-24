@@ -33,8 +33,8 @@ import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
 import { getWorkspacePathById, readSettingsSync } from './workspace'
+import { getDisconnectedPeerBridgeMcpToolNames } from '../../shared/nodeTools'
 import {
-  requestToolPermissionDetailed,
   resolveStoredPermission,
   storeSessionGrant,
   persistGrant,
@@ -88,6 +88,7 @@ interface ChatRequest {
   mode?: string
   thinking?: string
   workspaceDir?: string
+  mcpEnabled?: boolean
   negotiatedTools?: string[]
   peers?: PeerContext[]
   sessionId?: string | null
@@ -919,6 +920,10 @@ function buildPeerSystemPrompt(peers?: PeerContext[]): string | undefined {
   ].join('\n')
 }
 
+function syncPeerLinks(req: ChatRequest): void {
+  updateLinks(req.cardId, req.peers?.map(peer => peer.peerId) ?? [])
+}
+
 function normalizeContextBucketBundle(context: LoadedMemoryContext | null | undefined): ChatContextBucketBundle | undefined {
   if (context?.contextBuckets && Array.isArray(context.contextBuckets.buckets)) {
     return context.contextBuckets
@@ -1714,7 +1719,7 @@ function chatClaude(req: ChatRequest): void {
   // Wire up the contex MCP server (Bearer auth matches mcp-server HTTP checks)
   const mcpPort = getMCPPort()
   const mcpServers: Record<string, { type: 'http'; url: string; headers?: Record<string, string> }> = {}
-  if (mcpPort) {
+  if (req.mcpEnabled !== false && mcpPort) {
     mcpServers.contex = {
       type: 'http',
       url: `http://127.0.0.1:${mcpPort}/mcp`,
@@ -1724,11 +1729,9 @@ function chatClaude(req: ChatRequest): void {
   }
 
   const contexToolNames = getContexMcpToolNames()
-
-  // Register peer links in the collaboration state store
-  if (req.peers && req.peers.length > 0) {
-    updateLinks(req.cardId, req.peers.map(p => p.peerId))
-  }
+  const disallowedPeerBridgeTools = req.mcpEnabled === false
+    ? []
+    : getDisconnectedPeerBridgeMcpToolNames(req.negotiatedTools ?? req.peers?.flatMap(peer => peer.tools) ?? [])
 
   // Build system prompt context about connected peer blocks and their tools
   if (req.peers && req.peers.length > 0) {
@@ -1804,9 +1807,12 @@ function chatClaude(req: ChatRequest): void {
       if (storedDecision === 'deny') {
         // Surface the resolved state in the stream so the renderer can
         // render a "Blocked" card rather than leaving the tool pending.
+        const toolUseID = typeof toolOptions?.toolUseID === 'string'
+          ? toolOptions.toolUseID
+          : `claude-permission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
         sendStream(req.cardId, {
           type: 'tool_permission_resolved',
-          toolId: typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null,
+          toolId: toolUseID,
           toolName,
           decision: 'never',
         })
@@ -1818,7 +1824,8 @@ function chatClaude(req: ChatRequest): void {
       }
 
       // Ask the renderer inline — same pattern as AskUserQuestion.
-      const toolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
+      const sdkToolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
+      const toolUseID = sdkToolUseID ?? `claude-permission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       let decision: ToolPermissionDecision
       try {
         decision = await awaitToolPermissionAnswer(req.cardId, toolUseID, permissionRequest)
@@ -1827,7 +1834,7 @@ function chatClaude(req: ChatRequest): void {
         return {
           behavior: 'deny',
           message: 'Tool permission request was cancelled.',
-          toolUseID: toolOptions?.toolUseID,
+          toolUseID: sdkToolUseID ?? toolOptions?.toolUseID,
         }
       }
 
@@ -1851,7 +1858,7 @@ function chatClaude(req: ChatRequest): void {
           message: decision === 'never'
             ? 'Tool permission permanently denied. Future calls will be auto-rejected.'
             : 'Tool permission denied by the user.',
-          toolUseID: toolOptions?.toolUseID,
+          toolUseID: sdkToolUseID ?? toolOptions?.toolUseID,
         }
       }
 
@@ -1866,6 +1873,7 @@ function chatClaude(req: ChatRequest): void {
       return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
     },
     ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+    ...(disallowedPeerBridgeTools.length > 0 && { disallowedTools: disallowedPeerBridgeTools }),
     // Use detected system binary, not the SDK's bundled cli.js
     ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
     stderr: (data: string) => { claudeStderr += data },
@@ -1997,6 +2005,7 @@ function chatClaude(req: ChatRequest): void {
                     ? block.text.slice(alreadyStreamed.length)
                     : block.text
                   if (tail.length > 0) {
+                    assistantText += tail
                     sendStream(req.cardId, { type: 'text', text: tail })
                     streamedTextByIndex.set(key, block.text)
                   }
@@ -2436,13 +2445,24 @@ function chatCodex(req: ChatRequest): void {
     '--json',
     '--model',
     req.model,
-    '--dangerously-bypass-approvals-and-sandbox',
+  ]
+  const codexMode = req.mode === 'auto' || req.mode === 'read-only' || req.mode === 'full-access'
+    ? req.mode
+    : 'full-access'
+  if (codexMode === 'full-access') {
+    args.push('--dangerously-bypass-approvals-and-sandbox')
+  } else if (codexMode === 'auto') {
+    args.push('--full-auto')
+  } else {
+    args.push('--sandbox', 'read-only')
+  }
+  args.push(
     // App-launched Codex runs should not inherit user-global MCP servers.
     // A stale localhost entry there can abort the whole run before the model
     // does useful work. Workspace-level `.mcp.json` remains available.
     '-c',
     'mcp_servers={}',
-  ]
+  )
   if (req.workspaceDir) {
     args.push('--skip-git-repo-check', '-C', req.workspaceDir)
   } else {
@@ -2915,36 +2935,79 @@ function chatOpencode(req: ChatRequest): void {
               const permReq = props as any
               log('opencode permission asked:', permReq.permission, 'id:', permReq.id)
               try {
-                const outcome = await requestToolPermissionDetailed({
+                const toolUseID = typeof permReq.id === 'string' && permReq.id.trim()
+                  ? permReq.id
+                  : `opencode-permission-${Date.now()}`
+                const permissionRequest: ToolPermissionRequest = {
                   provider: 'opencode',
                   toolName: typeof permReq.permission === 'string' ? permReq.permission : 'tool',
                   // Prefer a structured summary if OpenCode supplies one —
-                  // falls back to empty so the modal's default "provider
-                  // wants to run tool" message still reads sensibly.
                   title: typeof permReq.title === 'string' ? permReq.title : null,
                   description: typeof permReq.description === 'string'
                     ? permReq.description
                     : (typeof permReq.command === 'string' ? permReq.command : null),
                   blockedPath: typeof permReq.path === 'string' ? permReq.path : null,
                   workspaceDir: req.workspaceDir,
-                }, true)
+                }
+
+                const storedDecision = resolveStoredPermission(permissionRequest)
+                let decision: ToolPermissionDecision
+                let fromStored = false
+                if (storedDecision === 'allow') {
+                  decision = 'once'
+                  fromStored = true
+                } else if (storedDecision === 'deny') {
+                  decision = 'never'
+                  fromStored = true
+                } else {
+                  sendStream(req.cardId, {
+                    type: 'tool_permission_request',
+                    toolId: toolUseID,
+                    provider: 'opencode',
+                    toolName: permissionRequest.toolName,
+                    title: permissionRequest.title,
+                    description: permissionRequest.description,
+                    blockedPath: permissionRequest.blockedPath,
+                    workspaceDir: permissionRequest.workspaceDir,
+                  })
+                  decision = await awaitToolPermissionAnswer(req.cardId, toolUseID, permissionRequest)
+                }
+
+                sendStream(req.cardId, {
+                  type: 'tool_permission_resolved',
+                  toolId: toolUseID,
+                  toolName: permissionRequest.toolName,
+                  decision,
+                })
+
+                if (!fromStored) {
+                  if (decision === 'never') {
+                    persistGrant(permissionRequest, 'never')
+                  } else if (decision === 'session') {
+                    storeSessionGrant(permissionRequest)
+                  } else if (decision === 'today' || decision === 'forever') {
+                    persistGrant(permissionRequest, decision)
+                  }
+                }
+
                 // Map our richer scope model to OpenCode's three-value enum.
                 //   forever        → 'always'   (persistent approval; OpenCode's own state mirrors ours)
                 //   today/session/once → 'once' (auto-approved but per-call on OpenCode side; our own
                 //                                 grant store still short-circuits subsequent calls)
                 //   deny / never   → 'reject'  (never also persists a deny-grant so future calls
                 //                                 are auto-rejected via stored lookup)
-                const reply: 'once' | 'always' | 'reject' = outcome.allowed
-                  ? (outcome.scope === 'forever' ? 'always' : 'once')
+                const allowed = decision !== 'deny' && decision !== 'never'
+                const reply: 'once' | 'always' | 'reject' = allowed
+                  ? (decision === 'forever' ? 'always' : 'once')
                   : 'reject'
                 await client.permission.reply({
-                  requestID: permReq.id,
+                  requestID: toolUseID,
                   reply,
-                  ...(outcome.allowed ? {} : { message: outcome.scope === 'never'
+                  ...(allowed ? {} : { message: decision === 'never'
                     ? 'Tool permission permanently denied. Future calls will be auto-rejected.'
                     : 'Tool permission denied by the user.' }),
                 })
-                log('opencode permission decision:', permReq.id, reply, outcome.scope ? `(scope=${outcome.scope})` : '')
+                log('opencode permission decision:', permReq.id, reply, decision ? `(scope=${decision})` : '')
               } catch (permErr: any) {
                 log('opencode permission reply error:', permErr.message)
               }
@@ -3443,6 +3506,7 @@ export function registerChatIPC(): void {
 
     emitMemoryContextLoaded(req.cardId, memoryContext)
     emitSelectedSkillsLoaded(req.cardId, skillsContext)
+    syncPeerLinks(requestWithFileReferences)
 
     if (requestedRunMode === 'background') {
       sendStream(req.cardId, {

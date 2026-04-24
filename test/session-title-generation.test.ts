@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, test } from 'node:test'
+import { expect } from './node-expect.ts'
 import { readFileSync } from 'node:fs'
 import {
   buildSessionTitlePrompt,
@@ -8,12 +9,12 @@ import {
   hasSessionTitleChangedDuringGeneration,
   resolveSessionTitleModelCandidates,
   sanitizeGeneratedSessionTitle,
-} from '../src/main/ipc/session-title-generation'
+} from '../src/main/ipc/session-title-generation.ts'
 import {
   getSessionTitleGenerationIndicator,
   getSessionTitleGenerationKey,
   updateSessionTitleGenerationState,
-} from '../src/renderer/src/components/sidebar/session-title-generation'
+} from '../src/renderer/src/components/sidebar/session-title-generation.ts'
 
 describe('session title generation prompt and sanitizer', () => {
   test('prompt is explicitly title-generation-only and asks for a 3-4 word thread title', () => {

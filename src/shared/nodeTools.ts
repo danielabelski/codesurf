@@ -17,6 +17,7 @@ export type NodeMCPTool = {
 }
 
 export const NODE_TOOL_SCOPE_PREFIX = 'tool:'
+export const CONTEX_MCP_TOOL_PREFIX = 'mcp__contex__'
 
 export const NODE_MCP_TOOLSETS: Record<string, NodeMCPTool[]> = {
   terminal: [
@@ -400,6 +401,15 @@ export function getAllNodeTools(): NodeMCPTool[] {
   return out
 }
 
+export function getPeerBridgeNodeTools(): NodeMCPTool[] {
+  const out: NodeMCPTool[] = []
+  for (const [scope, tools] of Object.entries(NODE_MCP_TOOLSETS)) {
+    if (scope === 'universal') continue
+    out.push(...tools)
+  }
+  return out
+}
+
 export function withCapabilityPrefix(toolName: string): string {
   return `${NODE_TOOL_SCOPE_PREFIX}${toolName}`
 }
@@ -407,4 +417,35 @@ export function withCapabilityPrefix(toolName: string): string {
 export function stripCapabilityPrefix(raw: string): string {
   if (raw.startsWith(NODE_TOOL_SCOPE_PREFIX)) return raw.slice(NODE_TOOL_SCOPE_PREFIX.length)
   return raw
+}
+
+export function toContexMcpToolName(toolName: string): string {
+  return `${CONTEX_MCP_TOOL_PREFIX}${toolName}`
+}
+
+export function normalizeNodeToolName(raw: string): string {
+  let name = stripCapabilityPrefix(raw)
+  if (name.startsWith(CONTEX_MCP_TOOL_PREFIX)) name = name.slice(CONTEX_MCP_TOOL_PREFIX.length)
+  return name
+}
+
+export function getDisconnectedPeerBridgeMcpToolNames(negotiatedTools: Iterable<string> = []): string[] {
+  const negotiated = new Set(Array.from(negotiatedTools, normalizeNodeToolName))
+  return getPeerBridgeNodeTools()
+    .filter(tool => !negotiated.has(tool.name))
+    .map(tool => toContexMcpToolName(tool.name))
+    .sort()
+}
+
+export function buildPeerCommandPayload(
+  tileId: string,
+  command: string,
+  payload: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ...payload,
+    tileId,
+    cardId: tileId,
+    command,
+  }
 }

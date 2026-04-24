@@ -1,5 +1,5 @@
 import type { ProjectListEntry, SessionEntry } from './types'
-import { normalizeSidebarPath, sidebarPathBelongsToProject } from './path-utils'
+import { normalizeSidebarPath, sidebarPathBelongsToProject } from './path-utils.ts'
 
 export interface ActiveSessionMatchState {
   activeChatTileId?: string | null
@@ -8,15 +8,15 @@ export interface ActiveSessionMatchState {
 }
 
 export function isSessionActive(session: SessionEntry, activeState: ActiveSessionMatchState): boolean {
-  const { activeChatTileId = null, activeChatSessionEntryId = null } = activeState
+  const {
+    activeChatTileId = null,
+    activeChatSessionId = null,
+    activeChatSessionEntryId = null,
+  } = activeState
   const hasSpecificActiveSession = Boolean(activeChatSessionEntryId)
-  return hasSpecificActiveSession
-    ? (
-        session.id === activeChatSessionEntryId
-      )
-    : (
-        Boolean(activeChatTileId) && session.tileId === activeChatTileId
-      )
+  if (hasSpecificActiveSession) return session.id === activeChatSessionEntryId
+  if (activeChatSessionId) return session.sessionId === activeChatSessionId
+  return Boolean(activeChatTileId) && session.tileId === activeChatTileId
 }
 
 export function applySessionPromotions<T extends SessionEntry>(sessions: T[], _promotedAtById: Record<string, number>): T[] {
@@ -50,6 +50,7 @@ export function sortProjectEntriesByRecentSession(
   projectEntries: ProjectListEntry[],
   sessions: SessionEntry[],
   getProjectLabel: (project: ProjectListEntry) => string,
+  promotedAtById: Record<string, number> = {},
 ): ProjectListEntry[] {
   if (projectEntries.length <= 1) return projectEntries
 
@@ -64,7 +65,8 @@ export function sortProjectEntriesByRecentSession(
         ? sidebarPathBelongsToProject(projectPath, sessionProjectPath)
         : workspaceIdSet.has(session.workspaceId)
       if (!belongs) continue
-      latest = Math.max(latest, session.updatedAt)
+      const promotedAt = Number.isFinite(promotedAtById[session.id]) ? promotedAtById[session.id]! : 0
+      latest = Math.max(latest, promotedAt, session.updatedAt)
     }
     latestByProjectId.set(projectEntry.id, latest)
   }

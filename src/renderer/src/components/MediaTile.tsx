@@ -1,10 +1,5 @@
 import React, { useLayoutEffect, useRef } from 'react'
-
-// Persistent DOM nodes keyed by tile ID. These <video>/<audio>/<img> elements
-// live outside React's reconciliation so their playback state (currentTime,
-// paused, volume, muted) survives the component unmount/remount that happens
-// when a tile moves between the canvas and the panel/tabbed layout.
-const mediaNodes = new Map<string, HTMLElement>()
+import { mediaNodes } from './mediaTileRegistry'
 
 function isVideoFile(path: string): boolean {
   return /\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(path)
@@ -77,24 +72,6 @@ function createMediaNode(filePath: string): HTMLElement {
     'display:block',
   ].join(';')
   return img
-}
-
-export function disposeMediaTile(tileId: string): void {
-  const node = mediaNodes.get(tileId)
-  if (!node) return
-  // Pause anything that plays so it stops consuming codec/resources immediately.
-  const media = node instanceof HTMLMediaElement
-    ? node
-    : node.querySelector('video, audio') as HTMLMediaElement | null
-  if (media) {
-    try {
-      media.pause()
-      media.removeAttribute('src')
-      media.load()
-    } catch { /* ignore */ }
-  }
-  node.remove()
-  mediaNodes.delete(tileId)
 }
 
 interface Props {

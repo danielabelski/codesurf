@@ -16,7 +16,7 @@ import { join } from 'path'
 import { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ExtensionRegistry } from './extensions/registry'
-import { getAllNodeTools, getNodeToolSchemaByName } from '../shared/nodeTools'
+import { buildPeerCommandPayload, getAllNodeTools, getNodeToolSchemaByName, getPeerBridgeNodeTools } from '../shared/nodeTools'
 import * as peerState from './peer-state'
 import { CONTEX_HOME } from './paths'
 import { loadWorkspaceTileState, saveWorkspaceTileState } from './storage/workspaceArtifacts'
@@ -174,7 +174,7 @@ function getExtensionTools() {
 }
 
 function getAllTools() {
-  return [
+  const tools = [
     ...TOOLS,
     ...getAllNodeTools().map(tool => ({
       name: tool.name,
@@ -187,6 +187,12 @@ function getAllTools() {
       inputSchema: tool.inputSchema,
     })),
   ]
+  const seen = new Set<string>()
+  return tools.filter(tool => {
+    if (seen.has(tool.name)) return false
+    seen.add(tool.name)
+    return true
+  })
 }
 
 interface MCPKanbanColumn {
@@ -858,7 +864,7 @@ function publishPeerCommand(tileId: string, command: string, payload: Record<str
     channel: `tile:${tileId}`,
     type: 'data',
     source: 'mcp:contex',
-    payload: { command, ...payload },
+    payload: buildPeerCommandPayload(tileId, command, payload),
   })
   sendToRenderer('bus:event', evt)
   return `Dispatched ${command} to ${tileId}`
@@ -869,7 +875,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
   // ── Node-to-node MCP bridge tools ────────────────────────────────────────
   const toolSchema = getNodeToolSchemaByName(name)
-  const nodeToolNames = new Set(getAllNodeTools().map(tool => tool.name))
+  const nodeToolNames = new Set(getPeerBridgeNodeTools().map(tool => tool.name))
   if (toolSchema && nodeToolNames.has(name)) {
     const tileId = asString(args.tile_id)
     if (!tileId) return 'Missing tile_id'

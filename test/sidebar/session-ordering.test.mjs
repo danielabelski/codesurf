@@ -69,15 +69,19 @@ const sessions = [
 
 test('session ordering promotes the clicked conversation to the top immediately', () => {
   const promoted = applySessionPromotions(sessions, { 'session-alpha-old': 500 })
-  const ordered = [...promoted].sort((a, b) => b.updatedAt - a.updatedAt)
+  const ordered = [...promoted].sort((a, b) => compareSessionsWithSelectionPriority(a, b, 'updated', {
+    'session-alpha-old': 500,
+  }))
 
   assert.equal(ordered[0].id, 'session-alpha-old')
-  assert.equal(ordered[0].updatedAt, 500)
+  assert.equal(ordered[0].updatedAt, 100)
 })
 
 test('project ordering follows the most recently promoted session so the selected conversation is visible at the top', () => {
   const promoted = applySessionPromotions(sessions, { 'session-alpha-old': 500 })
-  const orderedProjects = sortProjectEntriesByRecentSession(projects, promoted, project => project.name)
+  const orderedProjects = sortProjectEntriesByRecentSession(projects, promoted, project => project.name, {
+    'session-alpha-old': 500,
+  })
 
   assert.deepEqual(orderedProjects.map(project => project.id), ['project-alpha', 'project-beta'])
 })

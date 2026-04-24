@@ -1,9 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, test } from 'node:test'
+import { expect } from './node-expect.ts'
 import {
   buildChatSurfaceMeta,
   handleBasicChatSurfaceRpc,
   normalizeChatSurfacePayload,
-} from '../src/renderer/src/components/chatSurfaceHostRpc'
+} from '../src/renderer/src/components/chatSurfaceHostRpc.ts'
 
 const surface = {
   extId: 'rewind-lite',
