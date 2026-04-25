@@ -6775,7 +6775,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         <div style={{
         minHeight: CHAT_COMPOSER_MIN_HEIGHT,
         border: isDropTarget ? `1px solid ${theme.accent.base}` : `1px solid ${composerBorder}`, borderRadius: 14,
-        background: isDropTarget ? theme.surface.accentSoft : composerBackground,
+        // Resting fill matches the border so the composer reads as one solid
+        // rounded shape. The border stays declared so layout stays stable, but
+        // becomes visually inert because background === border-color.
+        background: isDropTarget ? theme.surface.accentSoft : composerBorder,
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
