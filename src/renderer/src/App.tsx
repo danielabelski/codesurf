@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
-import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus, Package, Link2 } from 'lucide-react'
+import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, PanelLeft, Plus, Package, Link2 } from 'lucide-react'
 import type { AggregatedSessionEntry, SessionEntryHint, WorkspaceSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
@@ -4672,7 +4672,7 @@ function App(): JSX.Element {
       {/* Sidebar inset panel — floats over the canvas */}
       <div style={{
         position: 'absolute',
-        top: 39,
+        top: 19,
         left: 6,
         bottom: mainPanelBottomInset,
         padding: '0px',
@@ -4785,6 +4785,23 @@ function App(): JSX.Element {
         </div>
       </div>
 
+      {!sidebarCollapsed && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: mainPanelLeft,
+            top: mainPanelTop,
+            bottom: mainPanelBottomInset,
+            width: 0.5,
+            background: theme.border.subtle,
+            pointerEvents: 'none',
+            zIndex: 92,
+            transition: 'left 0.15s ease',
+          }}
+        />
+      )}
+
       <div
         style={{
           position: 'absolute',
@@ -4850,6 +4867,57 @@ function App(): JSX.Element {
             paddingTop: 2,
           }}
         >
+          {!sidebarCollapsed && (
+            <button
+              type="button"
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+              data-no-drag=""
+              onMouseDown={event => {
+                event.preventDefault()
+                event.stopPropagation()
+              }}
+              onPointerDown={event => {
+                event.preventDefault()
+                event.stopPropagation()
+                setSidebarCollapsed(true)
+              }}
+              onClick={event => {
+                event.preventDefault()
+                event.stopPropagation()
+              }}
+              style={{
+                position: 'fixed',
+                top: 2,
+                left: 76,
+                zIndex: 2147483647,
+                width: 32,
+                height: 32,
+                borderRadius: 9,
+                border: 'none',
+                background: 'transparent',
+                color: theme.text.disabled,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                opacity: 0.85,
+                pointerEvents: 'auto',
+                WebkitAppRegion: 'no-drag',
+              } as React.CSSProperties}
+              onMouseEnter={event => {
+                event.currentTarget.style.background = theme.surface.hover
+                event.currentTarget.style.color = theme.text.secondary
+              }}
+              onMouseLeave={event => {
+                event.currentTarget.style.background = 'transparent'
+                event.currentTarget.style.color = theme.text.disabled
+              }}
+            >
+              <PanelLeft size={17} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          )}
+
           <div
             style={{
               display: 'flex',

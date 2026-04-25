@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Package, Settings } from 'lucide-react'
+import { Settings } from 'lucide-react'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
 import { renderExtensionIcon } from '../extensionIcons'
@@ -38,8 +38,6 @@ export function SidebarFooter({
   const [showExtMenu, setShowExtMenu] = useState(false)
   const extMenuRef = useRef<HTMLDivElement>(null)
   const footerIconColor = theme.text.secondary
-  const galleryButtonHoverBackground = `color-mix(in srgb, ${theme.surface.selection} 72%, ${theme.surface.hover})`
-  const galleryButtonBorder = `1px solid color-mix(in srgb, ${theme.accent.base} 18%, transparent)`
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -57,61 +55,38 @@ export function SidebarFooter({
   const footerExtensions = buildFooterExtensions(extensionTiles ?? [], extensionEntries ?? [])
 
   return (
-    <div style={{ padding: '14px 8px 2px', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: collapsed ? 6 : 10, flexDirection: 'row', width: 'fit-content' }}>
-      {galleryEnabled && onOpenGallery && !collapsed && (
-        <button
-          onClick={onOpenGallery}
-          title="Browse and install extensions"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 5,
-            height: 24,
-            padding: '0 10px',
-            borderRadius: 8,
-            border: galleryButtonBorder,
-            background: theme.surface.selection,
-            color: theme.accent.base,
-            fontSize: Math.max(11, fonts.size - 1),
-            fontWeight: 600,
-            fontFamily: fonts.primary,
-            lineHeight: 1,
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-            flexShrink: 0,
-            transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
-            boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 10%, transparent)`,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = galleryButtonHoverBackground }}
-          onMouseLeave={e => { e.currentTarget.style.background = theme.surface.selection }}
-        >
-          <Package size={12} />
-          <span>Get Extensions</span>
-        </button>
-      )}
-      {galleryEnabled && onOpenGallery && collapsed && (
-        <button
-          onClick={onOpenGallery}
-          title="Get Extensions"
-          style={{
-            width: 24, height: 24, borderRadius: 8,
-            border: galleryButtonBorder,
-            background: theme.surface.selection,
-            color: theme.accent.base,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: 'pointer',
-            transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
-            boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 10%, transparent)`,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = galleryButtonHoverBackground }}
-          onMouseLeave={e => { e.currentTarget.style.background = theme.surface.selection }}
-        >
-          <Package size={12} />
-        </button>
-      )}
+    <div style={{ padding: collapsed ? '14px 8px 2px' : '14px 8px 2px 13px', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: collapsed ? 6 : 14, flexDirection: 'row', width: 'fit-content' }}>
+      <button
+        onClick={() => onOpenSettings('general')}
+        title="Settings"
+        style={{
+          height: 28,
+          width: collapsed ? 28 : 'auto',
+          padding: collapsed ? 0 : '0 8px',
+          borderRadius: 7,
+          border: 'none',
+          background: 'transparent',
+          color: footerIconColor,
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: collapsed ? 0 : 10,
+          flexShrink: 0,
+          fontFamily: fonts.primary,
+          fontSize: fonts.size,
+          fontWeight: fonts.weight,
+          lineHeight: 1,
+          whiteSpace: 'nowrap',
+        }}
+        onMouseEnter={e => { e.currentTarget.style.color = theme.text.primary }}
+        onMouseLeave={e => { e.currentTarget.style.color = footerIconColor }}
+      >
+        <Settings size={16.2} strokeWidth={2} />
+        {!collapsed && <span>Settings</span>}
+      </button>
       <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 2, flexShrink: 0, flexDirection: 'row' }}>
         {([
-          { label: 'Settings', icon: <Settings size={15} />, action: () => onOpenSettings('general') },
           { label: 'New Terminal', icon: TILE_ICONS.terminal, action: onNewTerminal },
           { label: 'Agent Board', icon: TILE_ICONS.kanban, action: onNewKanban, disabled: true },
           { label: 'Browser', icon: TILE_ICONS.browser, action: onNewBrowser },

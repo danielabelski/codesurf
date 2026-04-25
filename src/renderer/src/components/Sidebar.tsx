@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
-import { Archive, ArchiveRestore, Clock3, Maximize2, Minimize2, PanelLeft, Pencil, Pin, Search } from 'lucide-react'
+import { Archive, ArchiveRestore, Clock3, Maximize2, Minimize2, Pencil, Pin, Search } from 'lucide-react'
 import { getChatStreamingSnapshot, subscribeChatStreaming } from './chatStreamingStore'
 import { getChatMessageSentSnapshot, subscribeChatMessageSent } from './chatMessageSentStore'
 import type { ProjectRecord, Workspace, TileState } from '../../../shared/types'
@@ -1938,59 +1938,6 @@ export function Sidebar({
       fontWeight: fonts.weight,
       lineHeight: fonts.lineHeight,
     }}>
-      <button
-        type="button"
-        title="Collapse sidebar"
-        aria-label="Collapse sidebar"
-        data-no-drag=""
-        onMouseDown={event => {
-          event.preventDefault()
-          event.stopPropagation()
-        }}
-        onPointerDown={event => {
-          event.preventDefault()
-          event.stopPropagation()
-        }}
-        onPointerUp={event => {
-          event.preventDefault()
-          event.stopPropagation()
-          _onToggleCollapse()
-        }}
-        onClick={event => {
-          event.preventDefault()
-          event.stopPropagation()
-        }}
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 76,
-          zIndex: 2147483647,
-          width: 32,
-          height: 32,
-          borderRadius: 9,
-          border: 'none',
-          background: 'transparent',
-          color: theme.text.disabled,
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          opacity: 0.85,
-          pointerEvents: 'auto',
-          WebkitAppRegion: 'no-drag',
-        }}
-        onMouseEnter={e => {
-          e.currentTarget.style.background = theme.surface.hover
-          e.currentTarget.style.color = theme.text.secondary
-        }}
-        onMouseLeave={e => {
-          e.currentTarget.style.background = 'transparent'
-          e.currentTarget.style.color = theme.text.disabled
-        }}
-      >
-        <PanelLeft size={17} strokeWidth={1.8} aria-hidden="true" />
-      </button>
-
       <div
         style={{
           flexShrink: 0,
@@ -2541,9 +2488,8 @@ export function Sidebar({
       )}
 
       {/* Resize handle */}
-      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 3, cursor: 'col-resize' }}
+      <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 8, cursor: 'col-resize', background: 'transparent' }}
         onMouseDown={e => { resizing.current = true; startX.current = e.clientX; startWidth.current = widthRef.current; onResizeStateChange?.(true); e.preventDefault() }}
-        onMouseEnter={e => (e.currentTarget.style.background = theme.accent.soft)}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       />
     </div>
