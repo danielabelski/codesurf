@@ -1,10 +1,17 @@
 import React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Cpu, Activity, ArrowUpRight, RefreshCw, RotateCcw, TriangleAlert } from 'lucide-react'
+import { Cpu, Activity, RefreshCw, RotateCcw, TriangleAlert } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { Tooltip } from './Tooltip'
 import { buildDreamingStatusSummary, type DashboardDreamingSummary, type DreamingStatusTone } from './mainStatusBarDreaming'
+
+// Daemon-status popover typography. Hardcoded (not derived from user font
+// settings) because this is a dense glanceable surface — when a user scales
+// their global font size up, this popover should stay tight, otherwise it
+// blows off the screen. Tune both values together to resize the whole popup.
+const POPOVER_TITLE_FONT = 11
+const POPOVER_META_FONT = 10
 
 type MemoryStats = {
   rss: number
@@ -470,43 +477,6 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                 {daemonStatusDetail}
               </span>
             )}
-            {dreamingStatus && dreamingTheme && (
-              <span
-                title={dreamingStatus.title}
-                aria-label={dreamingStatus.summaryLine}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 5,
-                  maxWidth: 150,
-                  color: dreamingTheme.color,
-                  background: dreamingTheme.background,
-                  border: `1px solid ${dreamingTheme.border}`,
-                  borderRadius: 999,
-                  padding: '1px 6px',
-                  fontSize: Math.max(10, Number(fonts.secondarySize) - 1),
-                  fontWeight: 500,
-                  letterSpacing: 0.1,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                <span
-                  style={{
-                    width: 5,
-                    height: 5,
-                    borderRadius: '50%',
-                    background: dreamingTheme.dot,
-                    boxShadow: dreamingStatus.tone === 'active' ? `0 0 8px ${dreamingTheme.dot}88` : 'none',
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {dreamingStatus.chipLabel}
-                </span>
-              </span>
-            )}
           </button>
           {showDaemonSummary && (
             <div
@@ -527,172 +497,176 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                 zIndex: 5,
               }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, padding: '4px 4px 0' }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                      <span
-                        style={{
-                          fontSize: fonts.secondarySize,
-                          color: daemonSummary?.running ? theme.status.success : theme.status.danger,
-                          background: daemonSummary?.running ? `${theme.status.success}14` : `${theme.status.danger}12`,
-                          border: `1px solid ${daemonSummary?.running ? `${theme.status.success}26` : `${theme.status.danger}24`}`,
-                          borderRadius: 999,
-                          padding: '2px 7px',
-                          letterSpacing: 0.55,
-                          textTransform: 'uppercase',
-                          fontWeight: 700,
-                        }}
-                      >
-                        {daemonSummary?.running ? 'Live' : 'Offline'}
-                      </span>
-                      <span style={{ fontSize: fonts.secondarySize, color: theme.text.muted }}>
-                        {daemonSummaryLine}
-                      </span>
-                    </div>
-                    <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, fontFamily: fonts.mono }}>
-                      {daemonSummary?.running
-                        ? `PID ${daemonSummary.info?.pid ?? '—'} · port ${daemonSummary.info?.port ?? '—'}`
-                        : 'No active daemon connection'}
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (daemonRestarting) return
-                        if (!daemonRestartConfirm) {
-                          setDaemonRestartConfirm(true)
-                          return
-                        }
-                        setDaemonRestartConfirm(false)
-                        setDaemonRestarting(true)
-                        window.electron.system.restartDaemon()
-                          .then(next => {
-                            setDaemon(next)
-                            return window.electron.system.daemonSummary()
-                          })
-                          .then(setDaemonSummary)
-                          .catch(() => {})
-                          .finally(() => setDaemonRestarting(false))
-                      }}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 24,
-                        height: 24,
-                        borderRadius: 999,
-                        background: daemonRestartConfirm ? `${theme.status.danger}16` : theme.surface.panelElevated,
-                        border: `1px solid ${daemonRestartConfirm ? `${theme.status.danger}40` : theme.border.subtle}`,
-                        color: daemonRestartConfirm ? theme.status.danger : theme.text.muted,
-                        cursor: daemonRestarting ? 'wait' : 'pointer',
-                        flexShrink: 0,
-                        opacity: daemonRestarting ? 0.6 : 1,
-                      }}
-                      title={daemonRestartConfirm ? 'Click again to confirm daemon restart' : 'Restart daemon'}
-                    >
-                      <RotateCcw size={11} strokeWidth={2} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        window.electron.system.daemonSummary().then(setDaemonSummary).catch(() => {})
-                      }}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        width: 24,
-                        height: 24,
-                        borderRadius: 999,
-                        background: theme.surface.panelElevated,
-                        border: `1px solid ${theme.border.subtle}`,
-                        color: theme.text.muted,
-                        cursor: 'pointer',
-                        flexShrink: 0,
-                      }}
-                      title="Refresh daemon summary"
-                    >
-                      <RefreshCw size={11} strokeWidth={2} />
-                    </button>
-                  </div>
+              {/* Header: status pill + stats line + inline action icons.
+                  PID/port moved into the LIVE pill's title — they're debug
+                  info, not primary status, and don't deserve their own row. */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '4px 4px 8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0, flex: 1 }}>
+                  <span
+                    title={daemonSummary?.running
+                      ? `PID ${daemonSummary.info?.pid ?? '—'} · port ${daemonSummary.info?.port ?? '—'}`
+                      : 'No active daemon connection'}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      fontSize: POPOVER_META_FONT,
+                      color: daemonSummary?.running ? theme.status.success : theme.status.danger,
+                      fontWeight: 600,
+                      letterSpacing: 0.4,
+                      textTransform: 'uppercase',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <span style={{
+                      width: 6, height: 6, borderRadius: '50%',
+                      background: daemonSummary?.running ? theme.status.success : theme.status.danger,
+                      boxShadow: daemonSummary?.running ? `0 0 6px ${theme.status.success}88` : 'none',
+                    }} />
+                    {daemonSummary?.running ? 'Live' : 'Offline'}
+                  </span>
+                  <span style={{
+                    fontSize: POPOVER_META_FONT,
+                    color: theme.text.muted,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {daemonSummaryLine}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (daemonRestarting) return
+                      if (!daemonRestartConfirm) { setDaemonRestartConfirm(true); return }
+                      setDaemonRestartConfirm(false)
+                      setDaemonRestarting(true)
+                      window.electron.system.restartDaemon()
+                        .then(next => { setDaemon(next); return window.electron.system.daemonSummary() })
+                        .then(setDaemonSummary)
+                        .catch(() => {})
+                        .finally(() => setDaemonRestarting(false))
+                    }}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 22, height: 22, borderRadius: 6,
+                      background: daemonRestartConfirm ? `${theme.status.danger}16` : 'transparent',
+                      border: 'none',
+                      color: daemonRestartConfirm ? theme.status.danger : theme.text.muted,
+                      cursor: daemonRestarting ? 'wait' : 'pointer',
+                      opacity: daemonRestarting ? 0.6 : 1,
+                    }}
+                    title={daemonRestartConfirm ? 'Click again to confirm daemon restart' : 'Restart daemon'}
+                  >
+                    <RotateCcw size={12} strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { window.electron.system.daemonSummary().then(setDaemonSummary).catch(() => {}) }}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 22, height: 22, borderRadius: 6,
+                      background: 'transparent', border: 'none',
+                      color: theme.text.muted, cursor: 'pointer',
+                    }}
+                    title="Refresh daemon summary"
+                  >
+                    <RefreshCw size={12} strokeWidth={1.8} />
+                  </button>
                 </div>
               </div>
 
+              {/* Auto-dream card: single-purpose, no duplicate timestamp pill.
+                  The relative-time is already inside summaryLine, so the
+                  right-side chip would just be a second copy. */}
               {dreamingStatus && dreamingTheme && (
                 <div
                   style={{
                     margin: '0 4px 8px',
-                    padding: '8px 9px',
-                    borderRadius: 11,
+                    padding: '8px 10px',
+                    borderRadius: 10,
                     background: theme.surface.panelMuted,
                     border: `1px solid ${theme.border.subtle}`,
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: 6,
+                    gap: 4,
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
-                      <span
-                        style={{
-                          width: 6,
-                          height: 6,
-                          borderRadius: '50%',
-                          background: dreamingTheme.dot,
-                          boxShadow: dreamingStatus.tone === 'active' ? `0 0 8px ${dreamingTheme.dot}88` : 'none',
-                          flexShrink: 0,
-                        }}
-                      />
-                      <span style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, textTransform: 'uppercase', letterSpacing: 1.1, fontWeight: 800 }}>
-                        Auto-dream
-                      </span>
-                    </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <span
                       style={{
-                        color: dreamingTheme.color,
-                        background: dreamingTheme.background,
-                        border: `1px solid ${dreamingTheme.border}`,
-                        borderRadius: 999,
-                        padding: '2px 7px',
-                        fontSize: Math.max(10, Number(fonts.secondarySize) - 1),
-                        fontWeight: 500,
-                        letterSpacing: 0.1,
-                        whiteSpace: 'nowrap',
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: dreamingTheme.dot,
+                        boxShadow: dreamingStatus.tone === 'active' ? `0 0 6px ${dreamingTheme.dot}88` : 'none',
+                        flexShrink: 0,
                       }}
-                    >
-                      {dreamingStatus.chipLabel}
+                    />
+                    <span style={{
+                      fontSize: POPOVER_META_FONT,
+                      color: theme.text.muted,
+                      fontWeight: 600,
+                      letterSpacing: 0.4,
+                      textTransform: 'uppercase',
+                    }}>
+                      Auto-dream
                     </span>
                   </div>
-                  <div style={{ color: theme.text.primary, fontSize: fonts.size, fontWeight: 650, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={dreamingStatus.summaryLine}>
+                  <div
+                    style={{
+                      color: theme.text.primary,
+                      fontSize: POPOVER_TITLE_FONT,
+                      fontWeight: 500,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={dreamingStatus.summaryLine}
+                  >
                     {dreamingStatus.summaryLine}
                   </div>
-                  <div style={{ color: theme.text.muted, fontSize: fonts.secondarySize, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={dreamingStatus.detailLine}>
+                  <div
+                    style={{
+                      color: theme.text.muted,
+                      fontSize: POPOVER_META_FONT,
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={dreamingStatus.detailLine}
+                  >
                     {dreamingStatus.detailLine}
                   </div>
                 </div>
               )}
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '0 4px' }}>
-                  <div style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, textTransform: 'uppercase', letterSpacing: 1.1, fontWeight: 700 }}>
-                    Recent tasks
-                  </div>
-                  <div
-                    style={{
-                      fontSize: fonts.secondarySize,
-                      color: theme.text.muted,
-                      fontVariantNumeric: 'tabular-nums',
-                    }}
-                  >
-                    {summarizedTasks.length}
-                  </div>
+              {/* Recent tasks: dot for status, single meta line, no "Open ↗"
+                  suffix (every row is already a button). */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div style={{
+                  fontSize: POPOVER_META_FONT,
+                  color: theme.text.muted,
+                  fontWeight: 600,
+                  letterSpacing: 0.4,
+                  textTransform: 'uppercase',
+                  padding: '0 4px 4px',
+                }}>
+                  Recent tasks
                 </div>
                 {summarizedTasks.length ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 320, overflowY: 'auto', paddingRight: 2 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, maxHeight: 320, overflowY: 'auto', paddingRight: 2 }}>
                     {summarizedTasks.map(job => {
                       const statusColor = statusBadgeTheme(theme, job.status).color
+                      const metaParts = [job.provider, job.model].filter(Boolean)
+                      const meta = [
+                        metaParts.length ? metaParts.join(' · ') : 'Unknown provider',
+                        job.runCount > 1 ? `${job.runCount} runs` : '1 run',
+                        formatRelativeTime(job.updatedAt ?? job.requestedAt),
+                      ].join(' · ')
                       return (
                         <button
                           type="button"
@@ -704,71 +678,67 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                           style={{
                             background: 'transparent',
                             border: 'none',
-                            borderRadius: 8,
-                            padding: '8px 8px',
+                            borderRadius: 6,
+                            padding: '7px 8px',
                             display: 'flex',
-                            flexDirection: 'column',
-                            gap: 4,
+                            alignItems: 'flex-start',
+                            gap: 8,
                             width: '100%',
                             textAlign: 'left',
                             cursor: onOpenDaemonTask ? 'pointer' : 'default',
                             appearance: 'none',
                             font: 'inherit',
                           }}
-                          onMouseEnter={e => {
-                            e.currentTarget.style.background = theme.surface.hover
-                          }}
-                          onMouseLeave={e => {
-                            e.currentTarget.style.background = 'transparent'
-                          }}
+                          onMouseEnter={e => { e.currentTarget.style.background = theme.surface.hover }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
                         >
-                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
-                              <span
-                                style={{
-                                  fontSize: fonts.size,
-                                  color: theme.text.primary,
-                                  fontWeight: 650,
-                                  minWidth: 0,
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  whiteSpace: 'nowrap',
-                                }}
-                                title={job.taskLabel ?? job.id}
-                              >
-                                {job.taskLabel ?? `${job.provider ?? 'Unknown'} task`}
-                              </span>
-                              <div style={{ fontSize: fonts.secondarySize, color: theme.text.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {[job.provider, job.model].filter(Boolean).join(' · ') || 'Unknown provider'}
-                              </div>
-                              <div style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                {job.runCount > 1 ? `${job.runCount} runs` : '1 run'} · {formatRelativeTime(job.updatedAt ?? job.requestedAt)}
-                              </div>
-                            </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                              <span style={{ fontSize: fonts.secondarySize, color: statusColor, textTransform: 'capitalize', fontWeight: 500 }}>
-                                {job.status}
-                              </span>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 4, color: theme.text.muted }}>
-                                <span style={{ fontSize: fonts.secondarySize, fontWeight: 500 }}>
-                                  Open
-                                </span>
-                                <ArrowUpRight size={12} strokeWidth={2} />
-                              </div>
-                            </div>
+                          <span
+                            title={job.status}
+                            style={{
+                              width: 6, height: 6, borderRadius: '50%',
+                              background: statusColor,
+                              flexShrink: 0,
+                              marginTop: 6,
+                            }}
+                          />
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+                            <span
+                              style={{
+                                fontSize: POPOVER_TITLE_FONT,
+                                color: theme.text.primary,
+                                fontWeight: 500,
+                                minWidth: 0,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                              title={job.taskLabel ?? job.id}
+                            >
+                              {job.taskLabel ?? `${job.provider ?? 'Unknown'} task`}
+                            </span>
+                            <span
+                              style={{
+                                fontSize: POPOVER_META_FONT,
+                                color: theme.text.muted,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                              title={meta}
+                            >
+                              {meta}
+                            </span>
                           </div>
                         </button>
                       )
                     })}
                   </div>
                 ) : (
-                  <div
-                    style={{
-                      padding: '8px 12px',
-                      fontSize: fonts.secondarySize,
-                      color: theme.text.disabled,
-                    }}
-                  >
+                  <div style={{
+                    padding: '8px 12px',
+                    fontSize: POPOVER_META_FONT,
+                    color: theme.text.muted,
+                  }}>
                     No daemon jobs recorded yet.
                   </div>
                 )}

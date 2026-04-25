@@ -13,7 +13,7 @@ import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, Cog, CornerDownRight, DollarSign,
-  FileText, Folder, GripVertical, Lock, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
+  FileText, Folder, GripVertical, History, Lock, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
 import { useAppFonts } from '../FontContext'
@@ -49,6 +49,7 @@ import {
 } from './ai-elements/ToolPermission'
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
+import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
 
 const CHAT_SLASH_COMMANDS = [
   { value: '/compact', description: 'Compact conversation' },
@@ -825,7 +826,7 @@ const CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT = 56
 const CHAT_AUTO_SCROLL_THRESHOLD = 48
 const TOOLBAR_ICON_SIZE = 16
 const TOOLBAR_PILL_ICON_SIZE = 14
-const TOOLBAR_TEXT_SIZE = 13
+const TOOLBAR_TEXT_SIZE = 12
 const CHAT_FOOTER_TEXT_SIZE = 12
 const TOOL_BLOCK_MAX_WIDTH = 420
 const LIVE_TOOL_COLLAPSE_GRACE_MS = 5000
@@ -2949,6 +2950,81 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     restoringCheckpointId,
     restoreCheckpoint: restoreCheckpointFromToolBlock,
   }), [workspaceId, tileId, restoringCheckpointId, restoreCheckpointFromToolBlock])
+
+  // Dream completion → synthetic chip in chat history.
+  //
+  // Polls the daemon summary every 5s. When the workspace's `lastRun.completedAt`
+  // advances to a value we haven't seen yet (and the run succeeded), append a
+  // single ChatMessage carrying a 'Dream completed' tool block. This appears
+  // inline with the rest of history, scrolls with it, and persists to canvas
+  // state alongside any other message — same lifecycle as a checkpoint chip.
+  //
+  // The first poll after mount seeds the "last seen" ref without injecting a
+  // chip, so reopening a tile doesn't dump every historical dream into the
+  // transcript. Only completions that happen *while the tile is open* show up.
+  const lastSeenDreamCompletionRef = useRef<string | null>(null)
+  const dreamPollSeededRef = useRef(false)
+  useEffect(() => {
+    if (!workspaceId) return
+    let cancelled = false
+
+    const poll = async () => {
+      try {
+        const summary = await window.electron.system.daemonSummary()
+        if (cancelled) return
+        const lastRun = summary?.dreaming?.lastRun
+        if (!lastRun) return
+        const matchesWorkspace = !lastRun.workspaceId || lastRun.workspaceId === workspaceId
+        if (!matchesWorkspace) return
+        const completedAt = lastRun.completedAt ?? null
+        if (!completedAt) return
+        if (!dreamPollSeededRef.current) {
+          dreamPollSeededRef.current = true
+          lastSeenDreamCompletionRef.current = completedAt
+          return
+        }
+        if (lastSeenDreamCompletionRef.current === completedAt) return
+        lastSeenDreamCompletionRef.current = completedAt
+        if (lastRun.status === 'failed' || lastRun.status === 'cancelled') return
+
+        const runId = String(lastRun.id ?? completedAt)
+        const sessionsReviewed = Number(lastRun.sessionsReviewed ?? 0)
+        const summaryText = sessionsReviewed > 0
+          ? `Auto-dream consolidated ${sessionsReviewed} session${sessionsReviewed === 1 ? '' : 's'}`
+          : 'Auto-dream completed'
+        const toolId = `${DREAM_TOOL_ID_PREFIX}${runId}`
+        const ts = Date.parse(completedAt) || Date.now()
+
+        setMessagesSafe(prev => {
+          // De-dupe: if a dream message with this toolId already exists in history, skip.
+          if (prev.some(m => m.toolBlocks?.some(tb => tb.id === toolId))) return prev
+          return [...prev, {
+            id: `msg-dream-${runId}`,
+            role: 'system',
+            content: '',
+            timestamp: ts,
+            contentBlocks: [{ type: 'tool', toolId }],
+            toolBlocks: [{
+              id: toolId,
+              name: DREAM_TOOL_NAME,
+              input: '',
+              summary: summaryText,
+              status: 'done',
+            }],
+          }]
+        })
+      } catch {
+        // Polling failures are non-fatal — try again next tick.
+      }
+    }
+
+    poll()
+    const interval = window.setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [workspaceId, setMessagesSafe])
 
   // Clamp index when filtered items change
   useEffect(() => {
@@ -5698,7 +5774,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     if (tb && shouldRenderToolBlock(tb)) rawTools.push(tb)
                     i++
                   }
-                  const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length) && !isCheckpointToolBlock(tb))
+                  const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length) && !isCheckpointToolBlock(tb) && !isDreamToolBlock(tb))
                   const collapsibleIds = new Set(collapsibleTools.map(t => t.id))
                   const uniqueNames = new Set(collapsibleTools.map(t => t.name))
                   const useSameNameGroup = collapsibleTools.length >= 3 && uniqueNames.size === 1
@@ -5949,7 +6025,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                           //   - 3+ collapsible tool blocks with mixed names → "Called N tools" chip.
                           //   - Otherwise each chip renders inline.
                           //   - Non-collapsible tools (running / file-change / checkpoints) always stay inline.
-                          const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length) && !isCheckpointToolBlock(tb))
+                          const collapsibleTools = rawTools.filter(tb => tb.status === 'done' && !(tb.fileChanges?.length) && !isCheckpointToolBlock(tb) && !isDreamToolBlock(tb))
                           const collapsibleIds = new Set(collapsibleTools.map(t => t.id))
                           const uniqueNames = new Set(collapsibleTools.map(t => t.name))
                           const useSameNameGroup = collapsibleTools.length >= 3 && uniqueNames.size === 1
@@ -7612,7 +7688,7 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
         onClick={() => hasContent && setExpanded(e => !e)}
         style={{
           background: theme.chat.assistantBubble,
-          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          border: `0.5px solid ${theme.border.strong}`,
           borderRadius: 8,
           display: 'inline-flex',
           alignItems: 'center',
@@ -7731,13 +7807,13 @@ const WorkingChipView = React.memo(function WorkingChipView({ message }: { messa
   return (
     <div style={{
       background: theme.chat.assistantBubble,
-      border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+      border: `0.5px solid ${theme.border.strong}`,
       borderRadius: 8,
       display: 'inline-flex',
       alignItems: 'center',
       gap: 5,
       padding: '0 8px',
-      minHeight: 22,
+      minHeight: 24,
       boxSizing: 'border-box',
       color: theme.accent.hover,
       fontSize: 10.5,
@@ -7840,7 +7916,7 @@ const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: 
         onClick={() => setExpanded(e => !e)}
         style={{
           background: theme.chat.assistantBubble,
-          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          border: `0.5px solid ${theme.border.strong}`,
           borderRadius: 8,
           display: 'flex',
           alignItems: 'center',
@@ -7945,7 +8021,7 @@ const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks
         onClick={() => setExpanded(e => !e)}
         style={{
           background: theme.chat.assistantBubble,
-          border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+          border: `0.5px solid ${theme.border.strong}`,
           borderRadius: 8,
           display: 'flex',
           alignItems: 'center',
@@ -8060,6 +8136,8 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
   })
   const isRunning = isLive && block.status === 'running'
   const hasNestedData = (block.fileChanges?.length ?? 0) > 0 || (block.commandEntries?.length ?? 0) > 0
+  const isCheckpoint = isCheckpointToolBlock(block)
+  const isDream = isDreamToolBlock(block)
   const checkpointRestoreAction = checkpointRestoreCtx
     ? getCheckpointRestoreAction(block, checkpointRestoreCtx)
     : null
@@ -8079,7 +8157,7 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
     <div
       data-tool-block-kind={isFileChangeBlock ? 'file-changes' : 'tool'}
       style={{
-        background: theme.chat.assistantBubble, border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+        background: theme.chat.assistantBubble, border: `0.5px solid ${theme.border.strong}`,
         borderRadius: 8,
         overflow: 'hidden',
         maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
@@ -8106,11 +8184,20 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
           minHeight: isFileChangeBlock ? undefined : 20,
           boxSizing: 'border-box',
           background: 'none', border: 'none',
-          cursor: 'pointer', color: isRunning ? theme.chat.textSecondary : theme.chat.muted,
+          cursor: 'pointer',
+          color: isDream
+            ? theme.accent.base
+            : isCheckpoint
+              ? theme.status.success
+              : (isRunning ? theme.chat.textSecondary : theme.chat.muted),
           fontSize: 10, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
         }}
       >
-        <Wrench size={11} style={{ opacity: isRunning ? 0.7 : 0.5, flexShrink: 0 }} />
+        {isDream
+          ? <Sparkles size={11} style={{ color: theme.accent.base, opacity: 0.95, flexShrink: 0 }} />
+          : isCheckpoint
+            ? <History size={11} style={{ color: theme.status.success, opacity: 0.95, flexShrink: 0 }} />
+            : <Wrench size={11} style={{ opacity: isRunning ? 0.7 : 0.5, flexShrink: 0 }} />}
 
         {/* Collapsed chip header shows only the tool name. Detailed summaries stay in the expanded body. */}
         {isRunning ? (
