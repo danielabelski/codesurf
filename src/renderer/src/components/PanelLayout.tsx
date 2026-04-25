@@ -246,9 +246,9 @@ function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onP
   const fonts = useAppFonts()
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const compactTabBackground = theme.surface.selection
+  const compactTabBackground = 'transparent'
   const compactTabInactiveBackground = 'transparent'
-  const compactTabHoverBackground = theme.surface.hover
+  const compactTabHoverBackground = 'transparent'
   const compactTabMaxWidth = 'min(180px, 18vw)'
 
   useEffect(() => {

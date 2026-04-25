@@ -6110,7 +6110,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 minWidth: 30,
                 padding: 0,
                 borderRadius: '50%',
-                border: `1px solid ${theme.chat.divider}`,
+                border: `0.5px solid ${theme.border.strong}`,
                 background: theme.surface.panelElevated,
                 color: theme.text.secondary,
                 cursor: 'pointer',
