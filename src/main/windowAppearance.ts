@@ -7,6 +7,13 @@ const TRANSPARENT_WINDOW_BACKGROUND = '#00000000'
  * The renderer controls perceived translucency via canvas background opacity
  * (slider at 1.0 = fully opaque, lower = more see-through).
  * No reboot needed to toggle — it's purely a CSS alpha change.
+ *
+ * Vibrancy material: 'sidebar' (NSVisualEffectMaterialSidebar). This is a
+ * modern AppKit material — on macOS 26 (Tahoe) and later it is automatically
+ * rendered with the Liquid Glass appearance; on older macOS versions it
+ * falls back to the conventional vibrant sidebar material. The previous
+ * 'under-window' material was deprecated in macOS 10.14 and does not adopt
+ * Liquid Glass on Tahoe.
  */
 
 export function getWindowAppearanceOptions(): Pick<BrowserWindowConstructorOptions, 'transparent' | 'backgroundColor' | 'vibrancy' | 'visualEffectState'> {
@@ -17,7 +24,7 @@ export function getWindowAppearanceOptions(): Pick<BrowserWindowConstructorOptio
     // invisible window when packaged). Use opaque background on Windows instead.
     transparent: !isWin,
     backgroundColor: isWin ? '#1e1e1e' : TRANSPARENT_WINDOW_BACKGROUND,
-    vibrancy: isMac ? 'under-window' : undefined,
+    vibrancy: isMac ? 'sidebar' : undefined,
     visualEffectState: isMac ? 'active' : undefined,
   }
 }
@@ -29,6 +36,6 @@ export function applyWindowAppearance(win: BrowserWindow): void {
     win.setBackgroundColor(TRANSPARENT_WINDOW_BACKGROUND)
   }
   if (process.platform === 'darwin') {
-    win.setVibrancy('under-window')
+    win.setVibrancy('sidebar')
   }
 }

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
-import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, PanelLeft, Plus, Package, Link2 } from 'lucide-react'
+import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plus, Package, Link2 } from 'lucide-react'
 import type { AggregatedSessionEntry, SessionEntryHint, WorkspaceSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
@@ -4888,33 +4888,47 @@ function App(): JSX.Element {
               }}
               style={{
                 position: 'fixed',
-                top: 2,
+                top: 6,
                 left: 76,
                 zIndex: 2147483647,
-                width: 32,
-                height: 32,
-                borderRadius: 9,
-                border: 'none',
-                background: 'transparent',
-                color: theme.text.disabled,
+                width: 28,
+                height: 28,
+                // Tahoe toolbar control: circular Liquid Glass pill. The
+                // backdrop-filter (blur + saturate) recreates the AppKit
+                // .glass material in the renderer; the translucent dark fill
+                // gives the pill a defined edge against the window vibrancy.
+                borderRadius: '50%',
+                border: '0.5px solid rgba(255,255,255,0.10)',
+                background: 'rgba(0,0,0,0.18)',
+                backdropFilter: 'blur(20px) saturate(180%)',
+                WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                color: theme.text.secondary,
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                opacity: 0.85,
                 pointerEvents: 'auto',
                 WebkitAppRegion: 'no-drag',
+                transition: 'background 0.12s ease, color 0.12s ease',
               } as React.CSSProperties}
               onMouseEnter={event => {
-                event.currentTarget.style.background = theme.surface.hover
-                event.currentTarget.style.color = theme.text.secondary
+                event.currentTarget.style.background = 'rgba(255,255,255,0.10)'
+                event.currentTarget.style.color = theme.text.primary
               }}
               onMouseLeave={event => {
-                event.currentTarget.style.background = 'transparent'
-                event.currentTarget.style.color = theme.text.disabled
+                event.currentTarget.style.background = 'rgba(0,0,0,0.18)'
+                event.currentTarget.style.color = theme.text.secondary
               }}
             >
-              <PanelLeft size={17} strokeWidth={1.8} aria-hidden="true" />
+              {/* Tahoe-style sidebar toggle: outlined rounded rectangle with a
+                  filled left column. Mirrors macOS's `sidebar.leading` SF
+                  Symbol (which lucide doesn't ship — its PanelLeft variants
+                  use only an outline divider, which read as visually identical
+                  to one another at 17px). */}
+              <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
+                <rect x="2.5" y="3.5" width="15" height="13" rx="2.6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+                <rect x="2.5" y="3.5" width="5.5" height="13" rx="2.6" fill="currentColor" />
+              </svg>
             </button>
           )}
 

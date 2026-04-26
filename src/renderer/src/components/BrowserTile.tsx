@@ -21,8 +21,28 @@ const CLUSO_TOOLBAR_BOTTOM_OFFSET = 8
 
 type WebviewRegistryEntry = {
   webview: Electron.WebviewTag
-  disposeTimer: ReturnType<typeof setTimeout> | null
+  disposeTimer: number | null
 }
+
+type ElectrobunWebviewElement = HTMLElement & {
+  src: string | null
+  webviewId?: number | null
+  partition?: string | null
+  renderer?: 'native' | 'cef'
+  loadURL?: (url: string) => void
+  loadHTML?: (html: string) => void
+  canGoBack?: () => Promise<boolean>
+  canGoForward?: () => Promise<boolean>
+  goBack?: () => void
+  goForward?: () => void
+  reload?: () => void
+  executeJavascript?: (script: string) => void
+  openDevTools?: () => void
+  syncDimensions?: (force?: boolean) => void
+  on?: (event: string, listener: (event: CustomEvent) => void) => void
+}
+
+type AdaptedElectrobunWebview = ElectrobunWebviewElement & Electron.WebviewTag & { __codesurfElectrobunWebview?: true }
 
 const webviewRegistry = new Map<string, WebviewRegistryEntry>()
 
@@ -48,8 +68,204 @@ function getWebviewParkingRoot(): HTMLDivElement {
   return root
 }
 
+function emitFallbackWebviewEvent(target: EventTarget, type: string, url?: string): void {
+  const event = new Event(type) as Event & { url?: string; message?: string }
+  if (url) event.url = url
+  target.dispatchEvent(event)
+}
+
+function eventUrl(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object') {
+    const record = detail as Record<string, unknown>
+    if (typeof record.url === 'string') return record.url
+    if (typeof record.detail === 'string') return record.detail
+  }
+  return fallback
+}
+
+function dispatchWebviewCompatEvent(target: EventTarget, type: string, detail: unknown, fallbackUrl: string): void {
+  const event = new Event(type) as Event & { url?: string; message?: string }
+  const url = eventUrl(detail, fallbackUrl)
+  if (url) event.url = url
+  if (!event.message && typeof detail === 'string') event.message = detail
+  target.dispatchEvent(event)
+}
+
+function createFallbackWebview(src: string, bgColor = '#111317'): Electron.WebviewTag {
+  const frame = document.createElement('iframe') as HTMLIFrameElement & Electron.WebviewTag & { __codesurfFallbackWebview?: true }
+  frame.__codesurfFallbackWebview = true
+  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads')
+  frame.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen; microphone; camera')
+  frame.style.cssText =
+    `position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; border: none; background: ${bgColor};`
+
+  let currentUrl = src
+  let loading = true
+
+  frame.loadURL = async (url: string) => {
+    currentUrl = url
+    loading = true
+    emitFallbackWebviewEvent(frame, 'did-start-loading', url)
+    frame.src = url
+  }
+  frame.getURL = () => currentUrl || frame.src
+  frame.getTitle = () => frame.contentDocument?.title || currentUrl || 'Browser'
+  frame.canGoBack = () => false
+  frame.canGoForward = () => false
+  frame.isLoading = () => loading
+  frame.goBack = () => {
+    try { frame.contentWindow?.history.back() } catch { /* cross-origin iframe */ }
+  }
+  frame.goForward = () => {
+    try { frame.contentWindow?.history.forward() } catch { /* cross-origin iframe */ }
+  }
+  frame.reload = () => {
+    loading = true
+    emitFallbackWebviewEvent(frame, 'did-start-loading', currentUrl)
+    try { frame.contentWindow?.location.reload() } catch { frame.src = currentUrl }
+  }
+  frame.stop = () => {
+    try { frame.contentWindow?.stop() } catch { /* ignore */ }
+    loading = false
+    emitFallbackWebviewEvent(frame, 'did-stop-loading', currentUrl)
+  }
+  frame.setUserAgent = () => { /* iframe fallback cannot change UA per tile */ }
+  frame.openDevTools = () => { /* no-op outside Electron webview */ }
+  frame.insertCSS = async () => ''
+  frame.executeJavaScript = async (script: string) => {
+    try {
+      const targetWindow = frame.contentWindow as unknown as { eval?: (source: string) => unknown } | null
+      return targetWindow?.eval?.(script) ?? null
+    } catch { return null }
+  }
+  frame.send = async () => { /* no-op outside Electron webview */ }
+
+  frame.addEventListener('load', () => {
+    currentUrl = frame.src || currentUrl
+    loading = false
+    emitFallbackWebviewEvent(frame, 'dom-ready', currentUrl)
+    emitFallbackWebviewEvent(frame, 'did-navigate', currentUrl)
+    emitFallbackWebviewEvent(frame, 'did-stop-loading', currentUrl)
+  })
+  frame.addEventListener('error', () => {
+    loading = false
+    emitFallbackWebviewEvent(frame, 'did-fail-load', currentUrl)
+  })
+
+  void frame.loadURL(src)
+  return frame
+}
+
+function createElectrobunWebview(src: string, bgColor = '#111317'): Electron.WebviewTag | null {
+  if (!customElements.get('electrobun-webview')) return null
+
+  const webview = document.createElement('electrobun-webview') as AdaptedElectrobunWebview
+  if (typeof webview.loadURL !== 'function' || typeof webview.executeJavascript !== 'function') return null
+
+  webview.__codesurfElectrobunWebview = true
+  webview.setAttribute('partition', 'persist:browser-tile')
+  webview.setAttribute('renderer', 'cef')
+  webview.setAttribute('src', src)
+  webview.style.cssText =
+    `position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; border: none; background: ${bgColor};`
+
+  const nativeLoadURL = webview.loadURL.bind(webview)
+  const nativeCanGoBack = webview.canGoBack?.bind(webview)
+  const nativeCanGoForward = webview.canGoForward?.bind(webview)
+  const nativeExecuteJavascript = webview.executeJavascript.bind(webview)
+  const nativeOpenDevTools = webview.openDevTools?.bind(webview)
+
+  let currentUrl = src
+  let loading = true
+  let canGoBack = false
+  let canGoForward = false
+
+  const refreshNav = () => {
+    void nativeCanGoBack?.().then(value => { canGoBack = Boolean(value) }).catch(() => { canGoBack = false })
+    void nativeCanGoForward?.().then(value => { canGoForward = Boolean(value) }).catch(() => { canGoForward = false })
+  }
+
+  const onElectrobunEvent = (eventName: string, handler: (detail: unknown) => void) => {
+    webview.on?.(eventName, event => handler(event.detail))
+  }
+
+  onElectrobunEvent('load-started', detail => {
+    loading = true
+    currentUrl = eventUrl(detail, currentUrl)
+    dispatchWebviewCompatEvent(webview, 'did-start-loading', detail, currentUrl)
+  })
+  onElectrobunEvent('dom-ready', detail => {
+    currentUrl = eventUrl(detail, currentUrl)
+    dispatchWebviewCompatEvent(webview, 'dom-ready', detail, currentUrl)
+    refreshNav()
+  })
+  onElectrobunEvent('load-finished', detail => {
+    loading = false
+    currentUrl = eventUrl(detail, currentUrl)
+    dispatchWebviewCompatEvent(webview, 'did-stop-loading', detail, currentUrl)
+    refreshNav()
+  })
+  onElectrobunEvent('did-navigate', detail => {
+    currentUrl = eventUrl(detail, currentUrl)
+    dispatchWebviewCompatEvent(webview, 'did-navigate', detail, currentUrl)
+    refreshNav()
+  })
+  onElectrobunEvent('did-navigate-in-page', detail => {
+    currentUrl = eventUrl(detail, currentUrl)
+    dispatchWebviewCompatEvent(webview, 'did-navigate-in-page', detail, currentUrl)
+    refreshNav()
+  })
+  onElectrobunEvent('new-window-open', detail => {
+    dispatchWebviewCompatEvent(webview, 'new-window', detail, currentUrl)
+  })
+  onElectrobunEvent('host-message', detail => {
+    const event = new Event('console-message') as Electron.ConsoleMessageEvent
+    ;(event as unknown as { message: string }).message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+    webview.dispatchEvent(event)
+  })
+
+  webview.loadURL = async (url: string) => {
+    currentUrl = url
+    loading = true
+    dispatchWebviewCompatEvent(webview, 'did-start-loading', url, currentUrl)
+    nativeLoadURL(url)
+  }
+  webview.getURL = () => currentUrl || String(webview.getAttribute('src') ?? '')
+  webview.getTitle = () => currentUrl || 'Browser'
+  webview.canGoBack = () => canGoBack
+  webview.canGoForward = () => canGoForward
+  webview.isLoading = () => loading
+  webview.stop = () => {
+    loading = false
+    dispatchWebviewCompatEvent(webview, 'did-stop-loading', currentUrl, currentUrl)
+  }
+  webview.setUserAgent = () => { /* Electrobun webview tag has no per-view UA setter yet */ }
+  webview.openDevTools = () => { nativeOpenDevTools?.() }
+  webview.insertCSS = async (css: string) => {
+    nativeExecuteJavascript(`(() => { const style = document.createElement('style'); style.textContent = ${JSON.stringify(css)}; document.documentElement.appendChild(style); })()`)
+    return ''
+  }
+  webview.executeJavaScript = async (script: string) => {
+    nativeExecuteJavascript(script)
+    return null
+  }
+  webview.send = async () => { /* host-message bridge is available through Electrobun preload */ }
+
+  requestAnimationFrame(() => {
+    webview.syncDimensions?.(true)
+    refreshNav()
+  })
+
+  return webview
+}
+
 function createManagedWebview(tileId: string, src: string, bgColor = '#111317'): Electron.WebviewTag {
-  const webview = document.createElement('webview') as Electron.WebviewTag
+  const candidate = document.createElement('webview') as Electron.WebviewTag & { loadURL?: unknown; executeJavaScript?: unknown }
+  const hasElectronWebviewApi = typeof candidate.loadURL === 'function' && typeof candidate.executeJavaScript === 'function'
+  if (!hasElectronWebviewApi) return createElectrobunWebview(src, bgColor) ?? createFallbackWebview(src, bgColor)
+
+  const webview = candidate as Electron.WebviewTag
   webview.setAttribute('allowpopups', '')
   webview.setAttribute('partition', `persist:browser-tile-${tileId}`)
   webview.setAttribute('useragent', DESKTOP_UA)
@@ -64,7 +280,7 @@ function createManagedWebview(tileId: string, src: string, bgColor = '#111317'):
 function getOrCreateManagedWebview(tileId: string, src: string, bgColor?: string): { webview: Electron.WebviewTag; reused: boolean } {
   const existing = webviewRegistry.get(tileId)
   if (existing) {
-    if (existing.disposeTimer !== null) clearTimeout(existing.disposeTimer)
+    if (existing.disposeTimer !== null) window.clearTimeout(existing.disposeTimer)
     existing.disposeTimer = null
 
     // Reusing a detached webview is unstable: Electron may have already torn
@@ -86,7 +302,7 @@ function scheduleManagedWebviewDisposal(tileId: string, webview: Electron.Webvie
   const entry = webviewRegistry.get(tileId)
   if (!entry || entry.webview !== webview) return
 
-  if (entry.disposeTimer !== null) clearTimeout(entry.disposeTimer)
+  if (entry.disposeTimer !== null) window.clearTimeout(entry.disposeTimer)
 
   entry.disposeTimer = window.setTimeout(() => {
     const latest = webviewRegistry.get(tileId)
@@ -1170,19 +1386,20 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       const webview = wvRef.current
       if (!webview || !wvReadyRef.current || !mountedRef.current) return
 
-      executeInWebview(toggleScript).then((result: string) => {
-        if ((result === '__CLUSO_NOT_READY__' || result === '__CLUSO_PENDING__') && attempt < MAX_ATTEMPTS && mountedRef.current) {
+      executeInWebview(toggleScript).then((result: unknown) => {
+        const status = typeof result === 'string' ? result : String(result ?? '')
+        if ((status === '__CLUSO_NOT_READY__' || status === '__CLUSO_PENDING__') && attempt < MAX_ATTEMPTS && mountedRef.current) {
           clusoToggleTimerRef.current = setTimeout(() => tryToggle(attempt + 1), RETRY_DELAY_MS)
           return
         }
 
-        if (result === '__CLUSO_TOGGLED__') {
+        if (status === '__CLUSO_TOGGLED__') {
           setIsClusoActiveRef.current(nextActive)
           return
         }
 
-        if (typeof result === 'string' && result.startsWith('__CLUSO_TOGGLE_ERROR__')) {
-          console.error('[BrowserTile] Failed to toggle Cluso:', result)
+        if (status.startsWith('__CLUSO_TOGGLE_ERROR__')) {
+          console.error('[BrowserTile] Failed to toggle Cluso:', status)
         }
       }).catch((err: unknown) => {
         console.error('[BrowserTile] Failed to toggle Cluso:', err)
@@ -1373,7 +1590,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
             bottom: 8,
             right: 8,
             fontSize: fonts.secondarySize - 1,
-            background: theme.surface.overlay,
+            background: theme.surface.panelElevated,
             border: `1px solid ${theme.border.default}`,
             color: theme.text.muted,
             padding: '2px 6px',
