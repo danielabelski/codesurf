@@ -4580,7 +4580,7 @@ function App(): JSX.Element {
   const workspaceTabTextOffset = -1
   const workspaceTabInactiveTextOffset = 0
   const workspaceTabInactiveBottomGap = 3
-  const workspaceTabAttachedBottomGap = -1
+  const workspaceTabAttachedBottomGap = -2
   // Discovery connection colors — adapt to theme mode
   const dsc = theme.mode === 'light'
     ? { line: '53, 104, 255', dot: '53, 104, 255', bg: '255, 255, 255', text: theme.accent.base }
