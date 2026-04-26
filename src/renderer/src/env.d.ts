@@ -460,6 +460,41 @@ interface ElectronAPI {
     getLevel(): number
     setLevel(level: number): Promise<void>
   }
+  /** Speech-to-text (dictation) — pluggable provider, audio captured renderer-side. */
+  transcribe: {
+    run(args: {
+      audio: ArrayBuffer
+      mimeType: string
+      provider?: 'openai' | 'deepgram' | 'assemblyai' | 'local'
+      lang?: string
+      localBaseUrl?: string
+      openaiModel?: string
+      deepgramModel?: string
+    }): Promise<{ ok: boolean; text?: string; error?: string }>
+  }
+  /** Text-to-speech — provider router on main side, returns audio bytes. */
+  tts: {
+    synthesize(args: {
+      text: string
+      provider?: 'cartesia' | 'deepgram' | 'elevenlabs' | 'voicelab' | 'say'
+      voice?: string
+      model?: string
+      voiceLabBaseUrl?: string
+      elevenModel?: string
+      deepgramModel?: string
+    }): Promise<{ ok: boolean; audio?: Uint8Array; mimeType?: string; error?: string }>
+  }
+  /** Spokify — rewrite assistant messages into natural spoken narration via LLM. */
+  spokify: {
+    run(args: { text: string; model?: string }): Promise<{ ok: boolean; text?: string; error?: string }>
+  }
+  /** Encrypted secrets storage (API keys). Renderer never reads decrypted values. */
+  secrets: {
+    set(name: string, value: string): Promise<{ ok: boolean; error?: string }>
+    delete(name: string): Promise<{ ok: boolean; error?: string }>
+    list(): Promise<{ ok: boolean; names: string[] }>
+    has(name: string): Promise<{ ok: boolean; has: boolean }>
+  }
   getPathForFile(file: File): string
   /** Local SQLite diagnostics. */
   db: {

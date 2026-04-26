@@ -606,4 +606,55 @@ contextBridge.exposeInMainWorld('electron', {
       await ipcRenderer.invoke('ui:setZoomLevel', level)
     },
   },
+
+  // ─── Voice: STT, TTS, spokify, secrets ────────────────────────────────
+  // STT: capture audio in renderer (MediaRecorder), send bytes to main,
+  // main routes to provider (OpenAI Whisper / Deepgram / AssemblyAI / local).
+  transcribe: {
+    run: (args: {
+      audio: ArrayBuffer
+      mimeType: string
+      provider?: 'openai' | 'deepgram' | 'assemblyai' | 'local'
+      lang?: string
+      localBaseUrl?: string
+      openaiModel?: string
+      deepgramModel?: string
+    }): Promise<{ ok: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke('transcribe:run', args),
+  },
+
+  // TTS: synthesize spoken audio for a given text. Provider router on main side.
+  // Returns audio bytes + mime type. Renderer wraps in Blob and plays.
+  tts: {
+    synthesize: (args: {
+      text: string
+      provider?: 'cartesia' | 'deepgram' | 'elevenlabs' | 'voicelab' | 'say'
+      voice?: string
+      model?: string
+      voiceLabBaseUrl?: string
+      elevenModel?: string
+      deepgramModel?: string
+    }): Promise<{ ok: boolean; audio?: Uint8Array; mimeType?: string; error?: string }> =>
+      ipcRenderer.invoke('tts:synthesize', args),
+  },
+
+  // Spokify: rewrite assistant message into natural spoken narration.
+  // Strips code blocks, drops markdown, smooths punctuation. LLM-backed.
+  spokify: {
+    run: (args: { text: string; model?: string }): Promise<{ ok: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke('spokify:run', args),
+  },
+
+  // Secrets: encrypted API key storage. Renderer can set/clear/check
+  // existence but cannot read keys back (they live in main only).
+  secrets: {
+    set: (name: string, value: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('secrets:set', { name, value }),
+    delete: (name: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('secrets:delete', name),
+    list: (): Promise<{ ok: boolean; names: string[] }> =>
+      ipcRenderer.invoke('secrets:list'),
+    has: (name: string): Promise<{ ok: boolean; has: boolean }> =>
+      ipcRenderer.invoke('secrets:has', name),
+  },
 })

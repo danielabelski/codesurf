@@ -294,7 +294,12 @@ async function convertVisionImageToPng(
 ): Promise<ChatImageAttachment | null> {
   if (!isConvertibleVisionImage(sourcePath, mediaType)) return null
   try {
-    const dir = join(tmpdir(), 'contex-chat-vision')
+    // Use ~/.codesurf/chat-vision rather than os.tmpdir() so the path is
+    // stable across reboots AND inside a permission scope the CodeSurf
+    // daemon can access without per-job grants. (os.tmpdir() lives under
+    // /private/var/folders/... on macOS, which is not in the daemon's
+    // allowlist by default — Reads from agent jobs would fail.)
+    const dir = join(CONTEX_HOME, 'chat-vision')
     await fs.mkdir(dir, { recursive: true })
     const safeBase = basename(displayPath || sourcePath)
       .replace(/\.[^.]+$/, '')
@@ -3941,7 +3946,10 @@ export function registerChatIPC(): void {
         .replace(/[\\/:*?"<>|]/g, '_')
         .replace(/\s+/g, '-')
         .slice(0, 40) || 'sketch'
-      const dir = join(tmpdir(), 'contex-chat-attach')
+      // ~/.codesurf/chat-attachments — see chat-vision comment above for
+      // the rationale: stable, user-owned path inside the daemon's
+      // permission scope so agent jobs can Read attachments back.
+      const dir = join(CONTEX_HOME, 'chat-attachments')
       await fs.mkdir(dir, { recursive: true })
       const filename = `${safeHint}-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}.${ext}`
       const dest = join(dir, filename)

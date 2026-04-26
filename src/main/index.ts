@@ -33,6 +33,10 @@ import { registerChromeSyncIPC } from './ipc/chromeSync'
 import { registerLocalProxyIPC } from './ipc/localProxy'
 import { registerDreamingIPC } from './ipc/dreaming'
 import { registerImageIPC } from './ipc/image'
+import { registerSpokifyIpc } from './ipc/spokify'
+import { registerTtsIpc } from './ipc/tts'
+import { registerTranscribeIpc } from './ipc/transcribe'
+import { registerSecretsIpc } from './ipc/secrets-ipc'
 import { applyWindowAppearance, getWindowAppearanceOptions } from './windowAppearance'
 import { migrateLegacyStorage } from './migration'
 import { APP_ID, APP_NAME, CONTEX_HOME } from './paths'
@@ -422,6 +426,10 @@ app.whenReady().then(async () => {
   registerSkillsIPC()
   registerDreamingIPC()
   registerImageIPC()
+  registerSpokifyIpc()
+  registerTtsIpc()
+  registerTranscribeIpc()
+  registerSecretsIpc()
   registerFileProtocol()
   registerAgentPathsIPC()
   registerChromeSyncIPC()

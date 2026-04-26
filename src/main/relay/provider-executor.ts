@@ -1,4 +1,6 @@
 import { execFileSync, spawn } from 'child_process'
+import { tmpdir } from 'os'
+import { sep, resolve as resolvePath } from 'path'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import type { RelayAgentExecutor, RelaySpawnRequest, RelayTurnInput } from '../../../packages/contex-relay/src'
 import { getAgentPath, getShellEnvPath } from '../agent-paths'
@@ -12,6 +14,36 @@ import {
   sanitizeAgentCliDiagnostic,
 } from '../agents/agent-cli-contracts'
 import { resolveStoredPermission } from '../permissions'
+import { CONTEX_HOME } from '../paths'
+
+// Daemon-produced paths that should be intrinsically Read-allowed without
+// requiring a workspace-level grant. These directories exist solely because
+// the user attached, dropped, or sketched an image inside the chat tile —
+// auto-allowing Reads from them matches user intent ("show this to the agent")
+// and prevents the maddening per-attachment permission prompts.
+//
+// Scope: Read only. Write/Edit on these paths still go through the normal
+// grant flow — the daemon shouldn't mutate user attachments without consent.
+//
+// Trust model: the producer (Contex itself) is trusted. The consumer (the
+// agent) is gated by the user's intent ("I attached this image"). Same
+// pattern as ~/.fieldtheory/librarian/ in the Claude Code hook chain.
+const DAEMON_AUTOREAD_PREFIXES: string[] = [
+  resolvePath(CONTEX_HOME, 'chat-attachments') + sep,
+  resolvePath(CONTEX_HOME, 'chat-vision') + sep,
+  // Legacy compat: the pre-fix build wrote sketches under
+  // os.tmpdir()/contex-chat-attach. Keep this in the allowlist until all
+  // dist-electron bundles in the wild have been rebuilt with the fix that
+  // moved sketches into CONTEX_HOME.
+  resolvePath(tmpdir(), 'contex-chat-attach') + sep,
+]
+
+function isDaemonAutoReadablePath(filePath: string): boolean {
+  if (typeof filePath !== 'string' || filePath.length === 0) return false
+  let resolved: string
+  try { resolved = resolvePath(filePath) } catch { return false }
+  return DAEMON_AUTOREAD_PREFIXES.some(prefix => resolved.startsWith(prefix))
+}
 
 const claudeSessions = new Map<string, string>()
 const hermesSessions = new Map<string, string>()
@@ -67,7 +99,17 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
       // rejected. A `never` (persistent deny) grant now produces a
       // distinct, clearer message so the user knows why calls keep
       // failing and where to clear it.
-      canUseTool: async (toolName: string, _input: Record<string, unknown>, toolOptions: any) => {
+      canUseTool: async (toolName: string, input: Record<string, unknown>, toolOptions: any) => {
+        // ── Path-based auto-allow for daemon-produced attachments ──────
+        // Read calls against ~/.codesurf/chat-attachments/ and chat-vision/
+        // (and the legacy tmpdir path) bypass the stored-grant check.
+        // These directories are produced exclusively by Contex IPC
+        // handlers in response to user actions (attaching / sketching),
+        // so a Read against them is implicitly user-consented.
+        if (toolName === 'Read' && typeof input?.file_path === 'string' && isDaemonAutoReadablePath(input.file_path)) {
+          return { behavior: 'allow', toolUseID: toolOptions?.toolUseID }
+        }
+
         const decision = resolveStoredPermission({
           provider: 'claude',
           toolName,

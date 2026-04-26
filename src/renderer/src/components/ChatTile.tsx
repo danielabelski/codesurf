@@ -13,7 +13,7 @@ import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, Cog, CornerDownRight, DollarSign,
-  FileText, Folder, GripVertical, History, Lock, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
+  FileText, Folder, GripVertical, History, Lock, Mic, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
 import { useAppFonts } from '../FontContext'
@@ -1904,14 +1904,24 @@ const InsightBlock = React.memo(({ text, closed, isStreaming, accent, textColor 
     <div
       className="chat-insight"
       style={{
-        // ── Tunable visual knobs ────────────────────────────────────────
-        borderLeft: `3px solid ${accent}`,            // (1) left rule thickness
-        background: withAlpha(accent, '14'),          // (2) tint alpha (0x14 ≈ 8%)
-        borderRadius: 8,                               // (3) corner radius
-        padding: '10px 14px',                          // (4) inner spacing
-        // ────────────────────────────────────────────────────────────────
-        margin: '8px 0',
+        // ── Glass panel in the active accent color ──────────────────────
+        // Layered for the "tinted glass" effect:
+        //   1. accent-tinted fill at ~14% so the color reads even against
+        //      opaque backgrounds (chat surface is theme.surface.panel)
+        //   2. backdrop-filter blur softens whatever sits behind
+        //   3. hairline accent border at ~30% alpha gives the edge definition
+        //      that the removed left rule used to provide
+        background: withAlpha(accent, '24'),                          // ~14% tint
+        backdropFilter: 'blur(14px) saturate(160%)',
+        WebkitBackdropFilter: 'blur(14px) saturate(160%)',
+        border: `1px solid ${withAlpha(accent, '4d')}`,               // ~30% accent edge
+        borderRadius: 12,                                              // matches code-block radius cohesion
+        padding: '12px 16px',
+        margin: '10px 0',
         color: textColor,
+        // Subtle inner highlight on the top edge — a small touch that
+        // sells the "glass" reading without being explicit about it.
+        boxShadow: `0 1px 0 0 ${withAlpha(accent, '14')} inset, 0 1px 2px rgba(0,0,0,0.04)`,
       }}
     >
       <div
@@ -5628,6 +5638,29 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [input, acType, syncComposerHeight])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // ─── Push-to-talk: hold spacebar (when input empty) to record ────────
+    // Only triggers when the draft is empty so we don't break normal typing.
+    // The keyup handler on the textarea stops recording when the key is released.
+    // e.repeat guards against the auto-repeat keydown stream after the first event.
+    if (
+      e.key === ' '
+      && !e.repeat
+      && !e.metaKey && !e.ctrlKey && !e.altKey
+      && input.length === 0
+      && !isDictating
+    ) {
+      e.preventDefault()
+      toggleDictation()
+      return
+    }
+    // While recording, swallow further space events on the textarea so the
+    // recognizer's audio gathering isn't visually polluted by " " characters
+    // landing in the input. (We append the transcript on stop.)
+    if (e.key === ' ' && isDictating) {
+      e.preventDefault()
+      return
+    }
+
     // Autocomplete keyboard navigation
     if (acType && acItems.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -5657,7 +5690,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       e.preventDefault()
       sendMessage()
     }
-  }, [sendMessage, acType, acItems, acIndex, selectAcItem])
+  }, [sendMessage, acType, acItems, acIndex, selectAcItem, input.length, isDictating, toggleDictation])
+
+  // Release push-to-talk on space-up. toggleDictation is idempotent — safe
+  // even if the user held space without ever entering recording mode (e.g.
+  // ignored because the input wasn't empty).
+  const handleKeyUp = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === ' ' && isDictating) {
+      e.preventDefault()
+      toggleDictation()
+    }
+  }, [isDictating, toggleDictation])
 
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
@@ -7170,6 +7213,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           value={input}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
+          onKeyUp={handleKeyUp}
           placeholder={isDictating ? 'Listening...' : 'Message the agent, or use /commands and /skills'}
           rows={1}
           style={{
@@ -7329,6 +7373,40 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               >2.5s we also surface a tiny "Xs" counter so the user knows the
               turn is still alive even when nothing visible has changed. */}
           {isStreaming && <StreamingLivenessIndicator lastActivityAtMs={lastActivityAtRef.current} />}
+
+          {/* Voice dictation — sits next to send/stop. Click toggles, or
+              hold spacebar in the empty composer for push-to-talk. The
+              underlying recognizer is the existing toggleDictation/isDictating
+              flow (Web Speech API in Electron's Chromium). */}
+          {!isStreaming && (
+            <button
+              onClick={toggleDictation}
+              onMouseDown={e => e.preventDefault()}
+              style={{
+                width: 28, height: 28, minWidth: 28, borderRadius: '50%',
+                background: isDictating ? theme.status.danger : theme.surface.panelMuted,
+                border: 'none',
+                cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: 0, transition: 'background 0.15s, transform 0.15s', flexShrink: 0,
+                transform: isDictating ? 'scale(1.05)' : 'scale(1)',
+                animation: isDictating ? 'chat-pulse 1.4s ease-in-out infinite' : 'none',
+              }}
+              onMouseEnter={e => {
+                if (!isDictating) e.currentTarget.style.background = theme.chat.inputBorder ?? theme.surface.panelMuted
+              }}
+              onMouseLeave={e => {
+                if (!isDictating) e.currentTarget.style.background = theme.surface.panelMuted
+              }}
+              title={isDictating ? 'Stop recording (or release Space)' : 'Hold Space (empty composer) or click to dictate'}
+            >
+              <Mic
+                size={14}
+                color={isDictating ? '#fff' : theme.chat.muted}
+                strokeWidth={2.2}
+              />
+            </button>
+          )}
 
           {/* Stop / Send */}
           {isStreaming ? (
