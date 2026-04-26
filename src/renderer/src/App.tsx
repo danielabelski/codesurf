@@ -4562,12 +4562,14 @@ function App(): JSX.Element {
     bottomLeft: mainPanelRadius,
   }
   const mainPanelBorderRadius = `${mainPanelCornerRadii.topLeft}px ${mainPanelCornerRadii.topRight}px ${mainPanelCornerRadii.bottomRight}px ${mainPanelCornerRadii.bottomLeft}px`
-  const mainPanelBackground = panelLayout ? theme.surface.panel : canvasLayerBackground
-  const mainPanelShadow = theme.mode === 'light'
-    ? '0 8px 26px rgba(15,23,42,0.14)'
-    : '0 8px 28px rgba(0,0,0,0.32)'
+  const mainPanelBackground = panelLayout ? theme.surface.app : canvasLayerBackground
+  const mainPanelShadow = panelLayout
+    ? 'none'
+    : theme.mode === 'light'
+      ? '0 8px 26px rgba(15,23,42,0.14)'
+      : '0 8px 28px rgba(0,0,0,0.32)'
   const workspaceTabLabelSize = Math.max(12, appFonts.size - 1)
-  const workspaceTabBackground = mainPanelBackground
+  const workspaceTabBackground = panelLayout ? theme.surface.panel : mainPanelBackground
   const workspaceTabInactiveBackground = 'transparent'
   const workspaceTabInactiveHoverBackground = theme.surface.hover
   const workspaceTabActiveBorder = `color-mix(in srgb, ${theme.accent.base} 16%, transparent)`

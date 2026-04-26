@@ -167,6 +167,7 @@ function ResizeHandle({ direction, onResize, onInteractionChange }: { direction:
   const dragging = useRef(false)
   const lastPos = useRef(0)
   const isHorizontal = direction === 'horizontal'
+  const gutterBackground = theme.surface.app
   // Ref so the mousemove closure always calls the latest onResize,
   // even after re-renders invalidate the original closure.
   const onResizeRef = useRef(onResize)
@@ -210,12 +211,12 @@ function ResizeHandle({ direction, onResize, onInteractionChange }: { direction:
         // show as rounded corners, matching the sidebar↔main-panel gap.
         [isHorizontal ? 'width' : 'height']: PANEL_SPLIT_GUTTER_PX,
         cursor: isHorizontal ? 'col-resize' : 'row-resize',
-        background: 'transparent',
+        background: gutterBackground,
         position: 'relative',
         zIndex: 5,
       }}
-      onMouseEnter={e => (e.currentTarget.style.background = theme.surface.hover)}
-      onMouseLeave={e => { if (!dragging.current) e.currentTarget.style.background = 'transparent' }}
+      onMouseEnter={e => (e.currentTarget.style.background = gutterBackground)}
+      onMouseLeave={e => { if (!dragging.current) e.currentTarget.style.background = gutterBackground }}
     />
   )
 }
