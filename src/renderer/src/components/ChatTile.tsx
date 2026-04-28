@@ -6384,13 +6384,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   </>
                 )}
                 {/* Cost/turns/time footer */}
-                {!isLiveMessage && msg.role === 'assistant' && msg.cost != null && (
+                {msg.role === 'assistant' && (
                   <div style={{
                     display: 'flex', alignItems: 'center', gap: 8,
                     fontSize: monoSize - 2, color: theme.chat.subtle, fontFamily: fontMono,
                     padding: '0 4px',
                     marginTop: -5,
+                    // Reserve a stable footer line so the layout doesn't jump
+                    // ~10px when streaming finishes and cost/turns/time first
+                    // appear. Without this the auto-pin shifts content up.
+                    minHeight: monoSize + 2,
+                    visibility: (!isLiveMessage && msg.cost != null) ? 'visible' : 'hidden',
                   }}>
+                    {!isLiveMessage && msg.cost != null && (<>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                       <DollarSign size={9} /> ${msg.cost.toFixed(4)}
                     </span>
@@ -6428,6 +6434,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                     >
                       <Mic size={10} strokeWidth={2.2} />
                     </button>
+                    </>)}
                   </div>
                 )}
                 {/* User message time footer */}
@@ -6500,7 +6507,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             // rather than sitting on top of it.
             width: `calc(${CHAT_COMPOSER_WIDTH} - 24px)`,
             minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
-            margin: '0 auto -12px auto',
+            margin: '0 auto 0 auto',
             border: `1px solid ${theme.chat.divider}`,
             borderBottom: 'none',
             borderRadius: '14px 14px 0 0',
@@ -6509,7 +6516,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             overflow: 'hidden',
             position: 'relative',
             zIndex: 0,
-            paddingBottom: 12,
           }}>
             <div
               style={{
@@ -6731,24 +6737,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             // the composer so it reads as a drawer pulled out from behind it.
             width: `calc(${CHAT_COMPOSER_WIDTH} - 24px)`,
             minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
-            margin: '0 auto -12px auto',
+            margin: '0 auto 0 auto',
             border: `1px solid ${theme.chat.divider}`,
             borderTop: latestChangeDrawer ? 'none' : `1px solid ${theme.chat.divider}`,
             borderBottom: 'none',
             borderRadius: latestChangeDrawer ? 0 : '14px 14px 0 0',
             // Collapsed summary row uses the darkest chat surface so it reads
-            // as a compacted tray tucked behind the composer; expanded uses
-            // the lighter muted surface so individual rows remain legible.
+            // as a compacted tray sitting flush atop the composer; expanded
+            // uses the lighter muted surface so individual rows remain legible.
             background: showCollapsed ? theme.chat.background : theme.surface.panelMuted,
             boxShadow: theme.shadow.panel,
             overflow: 'hidden',
             position: 'relative',
             zIndex: 0,
-            // The -12px bottom margin tucks this drawer behind the composer for
-            // the layered-paper effect. Always pay the matching 12px bottom
-            // padding — otherwise the tuck eats into the summary button's
-            // content box and clips the "N queued messages" text vertically.
-            paddingBottom: 12,
           }}>
             {/* Header / summary row. When collapsed it's the ONLY visible
                 row and clicking anywhere on it expands. When expanded it

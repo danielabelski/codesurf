@@ -141,7 +141,11 @@ async function sttAssemblyAI(audio: Buffer, _mimeType: string, lang: string): Pr
     body: JSON.stringify({
       audio_url: upload_url,
       language_code: lang || 'en',
-      speech_model: 'universal',
+      // AssemblyAI deprecated `speech_model` (singular). New API uses
+      // `speech_models` (plural array, priority order). Recommended pair
+      // gives universal-3-pro for supported languages with universal-2
+      // fallback for everything else.
+      speech_models: ['universal-3-pro', 'universal-2'],
     }),
   })
   if (!submitResp.ok) {

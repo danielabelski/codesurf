@@ -2485,13 +2485,10 @@ function App(): JSX.Element {
   const handleTileMouseDown = useCallback((e: React.MouseEvent, tile: TileState) => {
     e.stopPropagation()
     bringToFront(tile.id)
-    // Snapshot positions of all tiles in the same group for co-movement
-    const groupSnapshots: { id: string; x: number; y: number }[] = []
-    if (tile.groupId) {
-      tilesRef.current
-        .filter(t => t.groupId === tile.groupId && t.id !== tile.id)
-        .forEach(t => groupSnapshots.push({ id: t.id, x: t.x, y: t.y }))
-    }
+    // Tiles drag individually — even when grouped. The group itself can be
+    // dragged via its label bar or background. The group's bounds are
+    // computed from member positions, so moving a tile inside (or outside)
+    // its group's previous bounds expands/contracts the dashed frame.
     setDragState({
       type: 'tile',
       tileId: tile.id,
@@ -2499,7 +2496,7 @@ function App(): JSX.Element {
       startY: e.clientY,
       initX: tile.x,
       initY: tile.y,
-      groupSnapshots
+      groupSnapshots: [],
     })
   }, [bringToFront])
 
@@ -2742,20 +2739,11 @@ function App(): JSX.Element {
             }
           }
 
-          // Check if dragged outside its current group
-          if (tile.groupId && newGroupId === tile.groupId) {
-            const members = prev.filter(t => t.groupId === tile.groupId && t.id !== tile.id)
-            if (members.length > 0) {
-              const PAD = 20
-              const minX = Math.min(...members.map(t => t.x)) - PAD
-              const minY = Math.min(...members.map(t => t.y)) - PAD
-              const maxX = Math.max(...members.map(t => t.x + t.width)) + PAD
-              const maxY = Math.max(...members.map(t => t.y + t.height)) + PAD
-              const outside = tile.x + tile.width < minX || tile.x > maxX ||
-                              tile.y + tile.height < minY || tile.y > maxY
-              if (outside) newGroupId = undefined
-            }
-          }
+          // Tiles dragged outside their group's bounds STAY in the group —
+          // the group frame expands to include the tile's new position. Only
+          // moving a tile into a DIFFERENT group's bounds (handled above)
+          // changes its groupId. This matches the user's expectation that a
+          // group is a logical container, not a physical cage.
 
           if (newGroupId !== tile.groupId) {
             const updated = prev.map(t => t.id === tile.id ? { ...t, groupId: newGroupId } : t)
@@ -5834,7 +5822,13 @@ function App(): JSX.Element {
                       border: `2px dashed ${borderColor}`,
                       borderRadius: 12,
                       background: bgColor,
-                      zIndex: isDraggingThis ? 99989 : isNested ? 1 : 0,
+                      // Drop the resting zIndex to 'auto' so the group div
+                      // doesn't create a stacking context. That lets the label
+                      // bar inside use a high zIndex to render ABOVE tiles
+                      // (which is what the user wants). Nested vs outer order
+                      // is preserved by DOM order (sort above renders parents
+                      // first). Dragging still pops to a very high zIndex.
+                      zIndex: isDraggingThis ? 99989 : ('auto' as React.CSSProperties['zIndex']),
                       boxSizing: 'border-box',
                       cursor: isDraggingThis ? 'grabbing' : 'grab',
                     }}
@@ -5867,7 +5861,9 @@ function App(): JSX.Element {
                         setTimeout(() => ghost.remove(), 0)
                       }}
                       style={{
-                        position: 'absolute', top: -24 / viewport.zoom, left: 0,
+                        // Sits just above the dashed group border with a
+                        // small breathing-room gap.
+                        position: 'absolute', top: -36 / viewport.zoom, left: 0,
                         display: 'flex', gap: 6, alignItems: 'center',
                         userSelect: 'none', pointerEvents: 'all',
                         background: 'none',
@@ -5876,12 +5872,19 @@ function App(): JSX.Element {
                         cursor: 'grab',
                         transform: `scale(${1 / viewport.zoom})`,
                         transformOrigin: 'left top',
+                        // Lift the toolbar above tiles AND the per-tile link
+                        // sensors (zIndex 99991), which otherwise eat clicks
+                        // when they reach above their tile into the toolbar's
+                        // area. Group div uses zIndex 'auto' so this value
+                        // participates in the world container's stacking
+                        // context directly.
+                        zIndex: 99995,
                       }}>
                       {/* Color swatch / picker */}
                       <div style={{ position: 'relative' }}>
                         <div
                           style={{
-                            width: 10, height: 10, borderRadius: '50%',
+                            width: 12, height: 12, borderRadius: '50%',
                             background: color, cursor: 'pointer', flexShrink: 0,
                             border: '1px solid rgba(255,255,255,0.2)'
                           }}
@@ -5923,23 +5926,23 @@ function App(): JSX.Element {
                         }}
                         onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLElement).blur() } e.stopPropagation() }}
                         onClick={e => e.stopPropagation()}
-                        style={{ fontSize: appFonts.secondarySize, color: labelColor, fontWeight: 500, minWidth: 30, outline: 'none', cursor: 'text' }}>
+                        style={{ fontSize: appFonts.secondarySize, color: labelColor, fontWeight: 500, minWidth: 30, outline: 'none', cursor: 'text', textTransform: 'uppercase', letterSpacing: 0.5 }}>
                         {g.label ?? 'group'}
                       </span>
 
-                      <span style={{ width: 1, height: 10, background: color, opacity: 0.3 }} />
+                      <span style={{ width: 1, height: 12, background: color, opacity: 0.3 }} />
 
                       {([
-                        { icon: <LayoutGrid size={12} />, label: 'Make layout', action: () => convertGroupToLayout(g.id) },
-                        { icon: <Ungroup size={12} />, label: 'Ungroup', action: () => ungroupTilesRef.current(g.id) },
-                        { icon: <Grid2x2X size={12} />, label: 'Ungroup all', action: () => ungroupAllRef.current(g.id) },
-                        { icon: <Scissors size={12} />, label: 'Cut', action: () => {
+                        { icon: <LayoutGrid size={14} />, label: 'Make layout', action: () => convertGroupToLayout(g.id) },
+                        { icon: <Ungroup size={14} />, label: 'Ungroup', action: () => ungroupTilesRef.current(g.id) },
+                        { icon: <Grid2x2X size={14} />, label: 'Ungroup all', action: () => ungroupAllRef.current(g.id) },
+                        { icon: <Scissors size={14} />, label: 'Cut', action: () => {
                           const ids = collectGroupTileIds(g.id)
                           setSelectedTileIds(new Set(ids))
                           setSelectedTileId(null)
                           setTimeout(() => copyTilesRef.current(true), 0)
                         }},
-                        ...(clipboard.current.length > 0 ? [{ icon: <ClipboardPaste size={12} />, label: 'Paste in', action: () => pasteTilesRef.current(undefined, g.id) }] : [])
+                        ...(clipboard.current.length > 0 ? [{ icon: <ClipboardPaste size={14} />, label: 'Paste in', action: () => pasteTilesRef.current(undefined, g.id) }] : [])
                       ] as { icon: React.ReactNode; label: string; action: () => void }[]).map(btn => (
                         <div
                           key={btn.label}
@@ -5947,7 +5950,7 @@ function App(): JSX.Element {
                           onClick={e => { e.stopPropagation(); btn.action() }}
                           style={{
                             display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            width: 20, height: 20, borderRadius: 4, cursor: 'pointer',
+                            width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
                             color: labelColor, opacity: 0.6,
                           }}
                           onMouseEnter={e => { e.currentTarget.style.opacity = '1' }}
