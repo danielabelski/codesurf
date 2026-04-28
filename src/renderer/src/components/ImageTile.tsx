@@ -6,6 +6,19 @@ interface Props {
   workspaceId: string
   filePath: string
   onReplaceFilePath?: (tileId: string, filePath: string) => void
+  /** When true, the inspector controls (palette swatches, metadata, edit
+   *  input) are rendered OUTSIDE the block (left/right/below) so they don't
+   *  obscure the image. Wired from canvas selection state. */
+  isSelected?: boolean
+  /** Tile border radius in screen px (chrome's actual rounded-corner value).
+   *  We round the inner image-clipping wrapper to match, since the chrome's
+   *  outer panel must use overflow: visible when allowOverflow is on —
+   *  otherwise the inspector controls would be clipped. */
+  borderRadius?: number
+  /** Current canvas zoom. Inspector controls counter-scale by 1/zoom so
+   *  swatches, text, and the edit input stay at constant SCREEN size and
+   *  constant SCREEN distance from the block regardless of zoom. */
+  zoom?: number
 }
 
 interface ImageVariant {
@@ -72,12 +85,13 @@ function extractPalette(img: HTMLImageElement): string[] {
   }
 }
 
-export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath }: Props): JSX.Element {
+export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath, isSelected = false, borderRadius = 16, zoom = 1 }: Props): JSX.Element {
   const imageRef = React.useRef<HTMLImageElement | null>(null)
   const inputRef = React.useRef<HTMLInputElement | null>(null)
   const variantsRef = React.useRef<ImageVariant[]>([])
   const [editStatus, setEditStatus] = React.useState<{ status: 'running' | 'error' | 'done'; message: string } | null>(null)
-  const [inspectorOpen, setInspectorOpen] = React.useState(false)
+  // Inspector controls now follow canvas selection. Selected = controls visible.
+  const inspectorOpen = isSelected
   const [instruction, setInstruction] = React.useState('')
   const [palette, setPalette] = React.useState<string[]>([])
   const [dimensions, setDimensions] = React.useState<{ w: number; h: number } | null>(null)
@@ -262,7 +276,8 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath }: 
 
   React.useEffect(() => {
     if (!inspectorOpen) return
-    window.setTimeout(() => inputRef.current?.focus(), 0)
+    // Don't auto-focus the edit input on selection — keyboard ArrowLeft/Right
+    // for variant nav must remain available on the tile root.
   }, [inspectorOpen])
 
   React.useEffect(() => {
@@ -295,68 +310,122 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath }: 
   return (
     <div
       tabIndex={0}
-      onDoubleClick={event => {
-        event.preventDefault()
-        event.stopPropagation()
-        setInspectorOpen(true)
-      }}
       onKeyDown={event => {
-        if (event.key === 'Escape') setInspectorOpen(false)
         if (event.key === 'ArrowLeft') navigateVariant(-1)
         if (event.key === 'ArrowRight') navigateVariant(1)
       }}
       onWheel={event => {
+        // Cmd/Ctrl + wheel is the canvas zoom gesture — let it bubble through
+        // to the canvas listener instead of swallowing it for variant nav.
+        if (event.metaKey || event.ctrlKey) return
         if (!inspectorOpen || variants.length < 2) return
         event.stopPropagation()
         navigateVariant(event.deltaY > 0 ? 1 : -1)
       }}
       style={{
+        // Outer wrapper allows children (inspector controls) to render OUTSIDE
+        // the block. The image itself is clipped by the inner wrapper below.
+        // Chrome must pass `allowOverflow` for these controls to be visible.
         width: '100%',
         height: '100%',
+        position: 'relative',
+        outline: 'none',
+        overflow: 'visible',
+      }}
+    >
+      {/* Image clipping wrapper — this is the visual block. Mirrors the
+          chrome's border radius so the image keeps its rounded corners even
+          though the chrome's main panel runs overflow: visible while
+          selected. */}
+      <div style={{
+        position: 'absolute',
+        inset: 0,
+        background: '#111111',
+        overflow: 'hidden',
+        borderRadius,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: '#111111',
-        overflow: 'hidden',
-        position: 'relative',
-        outline: 'none',
-      }}
-    >
-      <img
-        ref={imageRef}
-        src={fileUrl(activePath)}
-        alt=""
-        draggable={false}
-        style={{
-          width: '100%',
-          height: '100%',
-          objectFit: 'cover',
-          display: 'block',
-        }}
-        onLoad={event => {
-          const img = event.currentTarget
-          setDimensions({ w: img.naturalWidth, h: img.naturalHeight })
-          setPalette(extractPalette(img))
-        }}
-        onError={e => { (e.target as HTMLImageElement).style.opacity = '0.3' }}
-      />
+      }}>
+        <img
+          ref={imageRef}
+          src={fileUrl(activePath)}
+          alt=""
+          draggable={false}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            display: 'block',
+          }}
+          onLoad={event => {
+            const img = event.currentTarget
+            setDimensions({ w: img.naturalWidth, h: img.naturalHeight })
+            setPalette(extractPalette(img))
+          }}
+          onError={e => { (e.target as HTMLImageElement).style.opacity = '0.3' }}
+        />
+      </div>
 
       {inspectorOpen ? (
         <>
-          <div style={{
-            position: 'absolute',
-            left: 10,
-            top: '50%',
-            transform: 'translateY(-50%)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 5,
-            pointerEvents: 'none',
-          }}>
+          {/* Three invisible click-absorbers covering the extended-chrome
+              zones (left/right/below the block). Without these, clicks in the
+              GAPS between controls fall through to the per-tile link sensors
+              (zIndex 99991), and even with sensors marked as tile-chrome the
+              clicks never reach the form. zIndex must beat the sensors. */}
+          <div
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'absolute', top: 0, bottom: 0,
+              right: '100%', width: 280 / zoom,
+              pointerEvents: 'auto', zIndex: 99993,
+            }}
+          />
+          <div
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'absolute', top: 0, bottom: 0,
+              left: '100%', width: 240 / zoom,
+              pointerEvents: 'auto', zIndex: 99993,
+            }}
+          />
+          <div
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'absolute', top: '100%',
+              left: -280 / zoom, right: -240 / zoom,
+              height: 84 / zoom,
+              pointerEvents: 'auto', zIndex: 99993,
+            }}
+          />
+          {/* Color palette — OUTSIDE the LEFT edge of the block. Counter-
+              scaled by 1/zoom so swatch size + gap stay constant on screen.
+              zIndex must beat the per-tile link sensors at 99991. */}
+          <div
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'absolute',
+              right: '100%',
+              marginRight: 10 / zoom,
+              top: '50%',
+              transformOrigin: 'right center',
+              transform: `translateY(-50%) scale(${1 / zoom})`,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 5,
+              cursor: 'default',
+              zIndex: 99994,
+            }}>
             {(palette.length ? palette : ['#1f2933', '#334155', '#64748b']).map(color => (
               <div key={color} title={color} style={{
-                width: 13,
-                height: 13,
+                width: 14,
+                height: 14,
+                borderRadius: 3,
                 background: color,
                 border: '1px solid rgba(255,255,255,0.26)',
                 boxShadow: '0 1px 4px rgba(0,0,0,0.45)',
@@ -364,98 +433,53 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath }: 
             ))}
           </div>
 
-          <div style={{
-            position: 'absolute',
-            right: 10,
-            top: '50%',
-            transform: 'translateY(-50%)',
-            maxWidth: 170,
-            color: 'rgba(255,255,255,0.72)',
-            textShadow: '0 1px 10px rgba(0,0,0,0.9)',
-            fontSize: 10,
-            lineHeight: 1.45,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-            pointerEvents: 'none',
-            textAlign: 'right',
-          }}>
-            <div>{fileName(activePath)}</div>
-            <div>{dimensions ? `${dimensions.w} x ${dimensions.h}` : 'dimensions unknown'}</div>
-            <div>{formatBytes(fileSize)}</div>
-            <div>{variants.length} variant{variants.length === 1 ? '' : 's'}</div>
-            <div>{variants.length ? `${activeIndex + 1} / ${variants.length}` : '1 / 1'}</div>
-            {activeVariant?.prompt ? <div>{activeVariant.prompt}</div> : null}
-          </div>
-
-          <form
-            onSubmit={event => {
-              event.preventDefault()
-              submitInstruction()
-            }}
+          {/* Metadata — OUTSIDE the RIGHT edge of the block. zIndex must
+              beat the link sensors at 99991. */}
+          <div
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
             style={{
               position: 'absolute',
-              left: '50%',
-              bottom: 14,
-              transform: 'translateX(-50%)',
-              width: 'min(430px, calc(100% - 96px))',
-              height: 34,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              background: 'rgba(11, 13, 15, 0.68)',
-              border: '1px solid rgba(255,255,255,0.14)',
-              boxShadow: '0 8px 28px rgba(0,0,0,0.38)',
-              padding: '4px 5px 4px 11px',
-              borderRadius: 7,
-              backdropFilter: 'blur(14px)',
-            }}
-          >
-            <input
-              ref={inputRef}
-              value={instruction}
-              onChange={event => setInstruction(event.target.value)}
-              placeholder="Edit this image..."
-              spellCheck={false}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                background: 'transparent',
-                border: 0,
-                outline: 'none',
-                color: 'rgba(244,244,245,0.94)',
-                fontSize: 12,
-              }}
-            />
-            <button
-              type="submit"
-              title="Apply edit"
-              style={{
-                width: 26,
-                height: 24,
-                border: '1px solid rgba(144,224,239,0.28)',
-                background: 'rgba(144,224,239,0.10)',
-                color: 'rgba(207,246,255,0.9)',
-                borderRadius: 5,
-                padding: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                flexShrink: 0,
-              }}
-            >
-              <CornerDownLeft size={14} strokeWidth={2} />
-            </button>
-          </form>
-
-          {variants.length > 1 ? (
-            <div style={{
-              position: 'absolute',
-              left: '50%',
-              bottom: 54,
-              transform: 'translateX(-50%)',
-              display: 'flex',
-              gap: 5,
+              left: '100%',
+              marginLeft: 10 / zoom,
+              top: '50%',
+              transformOrigin: 'left center',
+              transform: `translateY(-50%) scale(${1 / zoom})`,
+              width: 200,
+              color: 'rgba(255,255,255,0.78)',
+              fontSize: 10,
+              lineHeight: 1.55,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+              cursor: 'default',
+              textAlign: 'left',
+              wordBreak: 'break-word',
+              userSelect: 'text',
+              zIndex: 99994,
             }}>
+            <div style={{ opacity: 0.95, fontWeight: 500 }}>{fileName(activePath)}</div>
+            <div style={{ opacity: 0.7 }}>{dimensions ? `${dimensions.w} x ${dimensions.h}` : 'dimensions unknown'}</div>
+            <div style={{ opacity: 0.7 }}>{formatBytes(fileSize)}</div>
+            <div style={{ opacity: 0.7 }}>{variants.length} variant{variants.length === 1 ? '' : 's'}</div>
+            <div style={{ opacity: 0.7 }}>{variants.length ? `${activeIndex + 1} / ${variants.length}` : '1 / 1'}</div>
+            {activeVariant?.prompt ? <div style={{ opacity: 0.6, marginTop: 4, fontStyle: 'italic' }}>{activeVariant.prompt}</div> : null}
+          </div>
+
+          {/* Variant dots — just below the block, above the input. Counter-
+              scaled like the palette/meta. */}
+          {variants.length > 1 ? (
+            <div
+              onMouseDown={e => e.stopPropagation()}
+              style={{
+                position: 'absolute',
+                top: '100%',
+                marginTop: 8 / zoom,
+                left: '50%',
+                transformOrigin: 'center top',
+                transform: `translateX(-50%) scale(${1 / zoom})`,
+                display: 'flex',
+                gap: 5,
+                zIndex: 99994,
+              }}>
               {variants.map((variant, index) => (
                 <button
                   key={variant.filePath}
@@ -479,6 +503,74 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath }: 
               ))}
             </div>
           ) : null}
+
+          {/* Edit input — BELOW the block. Counter-scaled and pill-shaped.
+              zIndex must beat the link sensors at 99991 so the input element
+              actually receives the click and gains focus. */}
+          <form
+            onSubmit={event => {
+              event.preventDefault()
+              submitInstruction()
+            }}
+            onMouseDown={e => e.stopPropagation()}
+            style={{
+              position: 'absolute',
+              top: '100%',
+              marginTop: (variants.length > 1 ? 28 : 8) / zoom,
+              left: '50%',
+              transformOrigin: 'center top',
+              transform: `translateX(-50%) scale(${1 / zoom})`,
+              width: 430,
+              height: 36,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background: 'rgba(11, 13, 15, 0.78)',
+              border: '1px solid rgba(255,255,255,0.14)',
+              boxShadow: '0 8px 28px rgba(0,0,0,0.38)',
+              padding: '4px 5px 4px 14px',
+              borderRadius: 999,
+              backdropFilter: 'blur(14px)',
+              zIndex: 99994,
+            }}
+          >
+            <input
+              ref={inputRef}
+              value={instruction}
+              onChange={event => setInstruction(event.target.value)}
+              placeholder="Edit this image..."
+              spellCheck={false}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                background: 'transparent',
+                border: 0,
+                outline: 'none',
+                color: 'rgba(244,244,245,0.94)',
+                fontSize: 12,
+              }}
+            />
+            <button
+              type="submit"
+              title="Apply edit"
+              style={{
+                width: 28,
+                height: 28,
+                border: '1px solid rgba(144,224,239,0.28)',
+                background: 'rgba(144,224,239,0.10)',
+                color: 'rgba(207,246,255,0.9)',
+                borderRadius: '50%',
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              <CornerDownLeft size={14} strokeWidth={2} />
+            </button>
+          </form>
         </>
       ) : null}
 

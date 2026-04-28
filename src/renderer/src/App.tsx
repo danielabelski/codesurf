@@ -3,7 +3,7 @@ import { Ungroup, Grid2x2X, Scissors, ClipboardPaste, Maximize2, LayoutGrid, Plu
 import type { AggregatedSessionEntry, SessionEntryHint, WorkspaceSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType, LockedConnection } from '../../shared/types'
 import { TileColorProvider } from './TileColorContext'
-import { withDefaultSettings, DEFAULT_SETTINGS } from '../../shared/types'
+import { withDefaultSettings, DEFAULT_SETTINGS, getCurvierBlockRadius } from '../../shared/types'
 import type { MenuItem } from './components/ContextMenu'
 import { useExtensions } from './hooks/useExtensions'
 import { useAutoHideScrollbars } from './hooks/useAutoHideScrollbars'
@@ -3824,8 +3824,9 @@ function App(): JSX.Element {
   }, [viewport, nextZIndex, saveCanvas, sidebarCollapsed, sidebarWidth])
 
   // ─── Render tile body ─────────────────────────────────────────────────────
-  const renderTileBody = (tile: TileState, options?: { isInteracting?: boolean; isActive?: boolean }): React.ReactNode => {
+  const renderTileBody = (tile: TileState, options?: { isInteracting?: boolean; isActive?: boolean; isSelected?: boolean }): React.ReactNode => {
     const isTileInteracting = Boolean(options?.isInteracting)
+    const isTileSelected = Boolean(options?.isSelected)
     switch (tile.type) {
       case 'terminal':
         return (
@@ -3845,7 +3846,17 @@ function App(): JSX.Element {
       case 'note':
         return <LazyNoteTile tileId={tile.id} filePath={tile.filePath} workspacePath={workspace?.path} />
       case 'image':
-        return tile.filePath ? <LazyImageTile tileId={tile.id} workspaceId={workspace?.id ?? ''} filePath={tile.filePath} onReplaceFilePath={handleImageReplaceSource} /> : null
+        return tile.filePath ? (
+          <LazyImageTile
+            tileId={tile.id}
+            workspaceId={workspace?.id ?? ''}
+            filePath={tile.filePath}
+            onReplaceFilePath={handleImageReplaceSource}
+            isSelected={isTileSelected}
+            borderRadius={getCurvierBlockRadius(tile.borderRadius)}
+            zoom={viewport.zoom}
+          />
+        ) : null
       case 'media':
         return tile.filePath ? <LazyMediaTile tileId={tile.id} filePath={tile.filePath} /> : null
       case 'file':
@@ -6140,6 +6151,10 @@ function App(): JSX.Element {
                     onResizeMouseDown={(e, dir) => handleResizeMouseDown(e, tile, dir)}
                     onContextMenu={e => handleTileContextMenu(e, tile)}
                     isSelected={tile.id === selectedTileId || selectedTileIds.has(tile.id)}
+                    // Image tiles need to render their inspector controls
+                    // OUTSIDE the rounded block when selected. Allow overflow
+                    // so the negative-positioned palette/meta/input escape.
+                    allowOverflow={tile.type === 'image' && (tile.id === selectedTileId || selectedTileIds.has(tile.id))}
                     forceExpanded={panelTileIds.has(tile.id)}
                     onExpandChange={expanded => expanded ? enterExpandedMode(tile.id) : exitExpandedMode()}
                     discoveryConnected={negotiatedDiscoveryState.connectedTileIds.has(tile.id)}
@@ -6147,7 +6162,7 @@ function App(): JSX.Element {
                     titlebarExtra={tile.type === 'note' && !tile.filePath ? <Suspense fallback={null}><LazyStickyColorPicker /></Suspense> : undefined}
                   >
                     <Suspense fallback={<div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: 12, background: theme.surface.panelMuted }}>Loading block…</div>}>
-                      {renderTileBody(tile, { isInteracting: isActiveDrag })}
+                      {renderTileBody(tile, { isInteracting: isActiveDrag, isSelected: tile.id === selectedTileId || selectedTileIds.has(tile.id) })}
                     </Suspense>
                   </LazyTileChrome>
                   </TileColorProvider>
@@ -6168,9 +6183,18 @@ function App(): JSX.Element {
                     />
                   )}
                   {(['left', 'right', 'top', 'bottom'] as const).map(side => {
+                    // Image tiles in selection mode show inspector controls
+                    // (palette/meta/dots/edit input) outside the block. The
+                    // link sensors sit at zIndex 99991 — well above the
+                    // chrome's tile.zIndex — so they would intercept clicks
+                    // intended for those inspector controls. Disable pointer
+                    // events on sensors for the selected image tile.
+                    const isSelectedImageTile =
+                      tile.type === 'image' &&
+                      (tile.id === selectedTileId || selectedTileIds.has(tile.id))
                     const sensorStyle: React.CSSProperties = {
                       position: 'absolute',
-                      pointerEvents: dragState.type === 'connection' ? 'none' : 'all',
+                      pointerEvents: (dragState.type === 'connection' || isSelectedImageTile) ? 'none' : 'all',
                       zIndex: 99991,
                     }
                     if (side === 'left') Object.assign(sensorStyle, {
@@ -6200,7 +6224,14 @@ function App(): JSX.Element {
                     return (
                       <div
                         key={`${tile.id}-link-sensor-${side}`}
+                        // Marked as part of the tile chrome so the canvas's
+                        // mousedown handler doesn't clear selection when the
+                        // user clicks within a sensor zone (e.g. trying to
+                        // reach the image-tile inspector controls below the
+                        // block, or the group toolbar above it).
+                        data-tile-chrome="true"
                         style={sensorStyle}
+                        onMouseDown={e => e.stopPropagation()}
                         onMouseEnter={() => showConnectionHandleForSide(tile.id, side)}
                         onMouseMove={e => {
                           showConnectionHandleForSide(tile.id, side)

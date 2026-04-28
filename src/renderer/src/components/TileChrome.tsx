@@ -77,6 +77,10 @@ interface Props {
   children: React.ReactNode
   isSelected?: boolean
   forceExpanded?: boolean
+  /** When true, the tile body can render content that extends OUTSIDE the
+   *  block's rounded box (e.g. external controls flanking image tiles).
+   *  Both the main panel and the content area drop their `overflow: hidden`. */
+  allowOverflow?: boolean
   busChannel?: string
   busUnreadCount?: number
   onBusPopupToggle?: () => void
@@ -1004,7 +1008,7 @@ function processEvent(evt: { type: string; payload: Record<string, unknown>; id:
 
 export function TileChrome({
   tile, workspaceId, workspaceDir, onClose, onActivate, onTitlebarMouseDown, onResizeMouseDown, onContextMenu,
-  onExpandChange, children, isSelected, forceExpanded,
+  onExpandChange, children, isSelected, forceExpanded, allowOverflow,
   busUnreadCount, onBusPopupToggle, showBusPopup, discoveryConnected, connectedPeers, titlebarColor: titlebarColorProp, titlebarExtra, busEvents
 }: Props): JSX.Element {
   const theme = useTheme()
@@ -1370,7 +1374,7 @@ export function TileChrome({
         className="flex flex-col"
         style={{
           width: '100%', height: '100%',
-          borderRadius: getCurvierBlockRadius(tile.borderRadius), overflow: 'hidden',
+          borderRadius: getCurvierBlockRadius(tile.borderRadius), overflow: allowOverflow ? 'visible' : 'hidden',
           border: isSelected ? `1px solid ${theme.accent.base}` : `1px solid ${theme.border.default}`,
           boxShadow: isSelected
             ? `${theme.shadow.panel}, 0 0 0 1px ${theme.border.accent}`
@@ -1560,7 +1564,7 @@ export function TileChrome({
 
         {/* Content */}
         <div
-          style={{ flex: 1, overflow: 'hidden', minHeight: 0, position: 'relative' } as React.CSSProperties}
+          style={{ flex: 1, overflow: allowOverflow ? 'visible' : 'hidden', minHeight: 0, position: 'relative' } as React.CSSProperties}
           onDragOver={e => { if (tile.type !== 'kanban') e.stopPropagation() }}
           onDrop={e => { if (tile.type !== 'kanban') e.stopPropagation() }}
         >
