@@ -1,6 +1,6 @@
 # Codex-inspired CodeSurf implementation handoff
 
-Generated: 2026-05-01 11:25:01 BST
+Generated: 2026-05-01 11:43:45 BST
 
 Scope:
 - Target repo: `/Users/jkneen/clawd/collaborator-clone`
@@ -112,9 +112,23 @@ Started the behavior-preserving `ChatTile` breakup with the lowest-risk composer
 
 This is intentionally not a composer redesign yet. It is the first safe extraction layer so the prompt area, menus, drawer controls, and footer can be split in later small commits without changing behavior.
 
+### 7. Composer menu/dropdown extraction
+
+Files:
+- `src/renderer/src/components/ChatTile.tsx`
+- `src/renderer/src/components/chat/ChatComposerMenus.tsx`
+
+Continued the behavior-preserving `ChatTile` breakup by moving menu/dropdown primitives into a dedicated file:
+- Moved `MenuPortal`, `Dropdown`, `DropdownItem`, and `ModelDropdown` out of `ChatTile.tsx`.
+- Kept existing JSX call sites in `ChatTile.tsx` intact by importing the extracted components.
+- Preserved menu portal positioning, click/mousedown propagation stops, model filtering, active/hover states, and selection handlers.
+- Kept chat-local typography by using the existing `--ct-font-sans` and `--ct-font-mono` CSS variables in the extracted module rather than exporting `ChatTile`'s private font context.
+
+This remains a refactor-only step. `ComposerInsertMenu` and the prompt/drawer behavior still live in `ChatTile.tsx` for the next controlled burst.
+
 ## Verification
 
-Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer-controls extraction:
+Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer-menu extraction:
 
 ```bash
 npm run build
@@ -124,12 +138,17 @@ npm test
 Results:
 - `npm run build`: passed.
 - `npm test`: passed, 177 tests, 0 failures.
+- `git diff --cached --check`: passed before committing the code extraction.
+- Static scan of added lines for common secret/injection patterns: no findings.
+- Independent review: passed; no security concerns or logic errors. Non-blocking suggestion was to keep font fallbacks/render coverage in mind if these menu primitives are ever mounted outside the chat root that defines the `--ct-font-*` variables.
 
 ## Git state notes
 
 The implementation work has been committed locally in small controlled bursts:
 - `939cf61 feat: add Codex-inspired chat mini window polish`
 - `dd07bc5 refactor: extract chat composer controls`
+- `f7d5ea5 docs: update Codex-inspired implementation handoff`
+- `ecf9b7f refactor: extract chat composer menus`
 
 Upstream check:
 - Ran `git fetch origin` after the mini-window/sidebar commit.
@@ -142,8 +161,8 @@ Outstanding unrelated local files still present in the working tree:
 
 ## Recommended next burst
 
-1. Dogfood the new sidebar hover/context-menu mini-window actions on tile-backed sessions.
-2. Continue extracting composer internals from `ChatTile.tsx`, next with the menu/dropdown primitives (`MenuPortal`, `Dropdown`, `DropdownItem`, `ModelDropdown`) before touching prompt behavior.
-3. After the extraction seam is stable, improve the prompt/drawer UX: denser command surface, clearer collapse/expand behavior, and preserved advanced controls behind compact menus.
+1. Dogfood the extracted menu/dropdown path in the running app: open provider/model/thinking/location/branch/context menus and verify positioning, filtering, and active marks still feel identical.
+2. Continue extracting composer internals from `ChatTile.tsx`, next with `ComposerInsertMenu` and its MCP/chat-surface submenu handling, still without changing prompt behavior.
+3. After extraction seams are stable, improve the prompt/drawer UX: denser command surface, clearer collapse/expand behavior, and preserved advanced controls behind compact menus.
 4. Add a deliberate "open historical/external session into chat, then pop out" flow only if the sidebar mini action should work for sessions with no `tileId`.
 5. Start the Git Review extension/diff virtualization pass from the reference report as a separate burst.
