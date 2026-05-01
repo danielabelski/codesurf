@@ -12,9 +12,9 @@ import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
   Brain, ChevronRight, Clock, Cog, CornerDownRight, DollarSign,
-  FileText, Folder, GripVertical, History, Maximize2, Mic, Paperclip, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
+  FileText, Folder, GripVertical, History, Maximize2, Mic, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
 } from 'lucide-react'
-import { useMCPServers, type MCPServerEntry } from '../hooks/useMCPServers'
+import { useMCPServers } from '../hooks/useMCPServers'
 import { useAutoSpeak, speakMessage, bargeIn } from '../hooks/useAutoSpeak'
 import { ttsPlayer, type TtsPlayerState } from '../utils/ttsPlayer'
 import { useVoiceActivityDetector, float32ToWav } from '../hooks/useVoiceActivityDetector'
@@ -53,7 +53,7 @@ import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
 import { FooterPill, ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
-import { Dropdown, DropdownItem, MenuPortal, ModelDropdown } from './chat/ChatComposerMenus'
+import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
 const CHAT_SLASH_COMMANDS = [
   { value: '/compact', description: 'Compact conversation' },
@@ -95,20 +95,6 @@ function resolveChatSkillLocations(raw: string, homePath: string, workspacePath:
 
 // Provider brand icons are shared with the sidebar via ./icons/providerIcons.
 import { ClaudeIcon, CodexIcon, HermesIcon, OpenClawIcon } from './icons/providerIcons'
-
-// --- MCP Logo (official connected-nodes mark) ------------------------------------
-function MCPIcon({ size = 14, color = 'currentColor' }: { size?: number; color?: string }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="6" cy="6" r="2.5" />
-      <circle cx="18" cy="6" r="2.5" />
-      <circle cx="12" cy="18" r="2.5" />
-      <line x1="7.5" y1="8" x2="11" y2="16" />
-      <line x1="16.5" y1="8" x2="13" y2="16" />
-      <line x1="8.5" y1="6" x2="15.5" y2="6" />
-    </svg>
-  )
-}
 
 // --- Thinking strength icon (brain + signal bars) --------------------------------
 
@@ -257,17 +243,6 @@ interface ActiveChatSurface {
   context: Record<string, unknown>
   /** Actions registered by the surface via window.contex.actions.register(). */
   registeredActions: Array<{ name: string; description: string }>
-}
-
-interface ChatSurfaceMenuEntry {
-  extId: string
-  surfaceId: string
-  label: string
-  description?: string
-  icon?: string
-  emits: 'image' | 'text'
-  defaultHeight: number
-  minHeight: number
 }
 
 interface QueuedChatTurn {
@@ -7452,6 +7427,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                   chatSurfaces={chatSurfaceMenu}
                   activeChatSurfaceId={activeChatSurface ? `${activeChatSurface.extId}:${activeChatSurface.surfaceId}` : null}
                   onOpenChatSurface={openChatSurface}
+                  renderChatSurfaceIcon={renderChatSurfaceIcon}
                 />
               </MenuPortal>
             )}
@@ -9234,169 +9210,5 @@ function ToolInputView({ toolName, input, codePanelFontSize }: {
       {noticeBanner}
       <pre style={codeStyle}>{prettyFallback}</pre>
     </>
-  )
-}
-
-// --- Composer sub-components -----------------------------------------------------
-
-function ComposerInsertMenu({
-  onAttachFiles,
-  mcpEnabled,
-  onToggleMcpEnabled,
-  mcpServers,
-  disabledServers,
-  setDisabledServers,
-  peerToolNames,
-  chatSurfaces,
-  activeChatSurfaceId,
-  onOpenChatSurface,
-}: {
-  onAttachFiles: () => void
-  mcpEnabled: boolean
-  onToggleMcpEnabled: () => void
-  mcpServers: MCPServerEntry[]
-  disabledServers: Set<string>
-  setDisabledServers: React.Dispatch<React.SetStateAction<Set<string>>>
-  peerToolNames: string[]
-  chatSurfaces: ChatSurfaceMenuEntry[]
-  activeChatSurfaceId: string | null
-  onOpenChatSurface: (entry: ChatSurfaceMenuEntry) => void
-}): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const [mcpSubmenuOpen, setMcpSubmenuOpen] = useState(false)
-
-  const itemStyle = (active: boolean): React.CSSProperties => ({
-    width: '100%',
-    border: 'none',
-    background: active ? theme.chat.dropdownHoverBackground : 'transparent',
-    color: theme.chat.text,
-    borderRadius: 8,
-    padding: '9px 12px',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    cursor: 'pointer',
-    textAlign: 'left',
-    transition: 'background 0.12s ease',
-    ...NON_SELECTABLE_UI_STYLE,
-  })
-
-  return (
-    <div style={{ position: 'relative' }}>
-      <Dropdown>
-        <button
-          type="button"
-          onClick={onAttachFiles}
-          style={itemStyle(false)}
-          onMouseEnter={e => { e.currentTarget.style.background = theme.chat.dropdownHoverBackground }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
-        >
-          <Paperclip size={14} color={theme.chat.muted} />
-          <span style={{ fontSize: 12, fontFamily: fonts.sans }}>Add photos & files</span>
-        </button>
-
-        <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-
-        <div
-          style={{ position: 'relative' }}
-          onMouseEnter={() => setMcpSubmenuOpen(true)}
-          onMouseLeave={() => setMcpSubmenuOpen(false)}
-        >
-          <button
-            type="button"
-            onClick={() => setMcpSubmenuOpen(open => !open)}
-            style={itemStyle(mcpSubmenuOpen)}
-          >
-            <MCPIcon size={14} color={mcpEnabled ? theme.chat.text : theme.chat.muted} />
-            <span style={{ fontSize: 12, fontFamily: fonts.sans, flex: 1 }}>MCP Tools</span>
-            <ChevronRight size={13} color={theme.chat.muted} />
-          </button>
-
-          {mcpSubmenuOpen && (
-            <div style={{ position: 'absolute', top: 0, left: 'calc(100% + 8px)' }}>
-              <Dropdown>
-                <DropdownItem
-                  icon={<MCPIcon size={11} />}
-                  label="MCP Tools"
-                  active={mcpEnabled}
-                  onClick={onToggleMcpEnabled}
-                />
-                {mcpEnabled && mcpServers.length > 0 && (
-                  <>
-                    <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-                    {mcpServers.map(server => {
-                      const enabled = !disabledServers.has(server.name)
-                      return (
-                        <DropdownItem
-                          key={server.name}
-                          label={server.name}
-                          sublabel={server.url ? 'http' : 'stdio'}
-                          active={enabled}
-                          onClick={() => setDisabledServers(prev => {
-                            const next = new Set(prev)
-                            if (enabled) next.add(server.name)
-                            else next.delete(server.name)
-                            return next
-                          })}
-                        />
-                      )
-                    })}
-                  </>
-                )}
-                {mcpEnabled && mcpServers.length === 0 && (
-                  <div style={{ padding: '6px 10px', fontSize: 11, color: theme.chat.muted, fontStyle: 'italic' }}>
-                    No MCP servers configured
-                  </div>
-                )}
-                {mcpEnabled && peerToolNames.length > 0 && (
-                  <>
-                    <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-                    <div style={{ padding: '4px 10px 2px 10px', fontSize: 11, color: theme.chat.muted, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      Connected peer tools
-                    </div>
-                    {peerToolNames.map(tool => (
-                      <DropdownItem
-                        key={`peer-tool-${tool}`}
-                        label={tool}
-                        sublabel="peer"
-                        active={mcpEnabled}
-                        onClick={() => { /* read-only affordance */ }}
-                      />
-                    ))}
-                  </>
-                )}
-              </Dropdown>
-            </div>
-          )}
-        </div>
-
-        {chatSurfaces.length > 0 && (
-          <>
-            <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-            {chatSurfaces.map(entry => {
-              const id = `${entry.extId}:${entry.surfaceId}`
-              const active = activeChatSurfaceId === id
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => onOpenChatSurface(entry)}
-                  style={itemStyle(active)}
-                  onMouseEnter={e => { e.currentTarget.style.background = theme.chat.dropdownHoverBackground }}
-                  onMouseLeave={e => { e.currentTarget.style.background = active ? theme.chat.dropdownHoverBackground : 'transparent' }}
-                  title={entry.description ?? entry.label}
-                >
-                  <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: theme.chat.muted }}>
-                    {renderChatSurfaceIcon(entry.icon ?? entry.surfaceId, 14)}
-                  </span>
-                  <span style={{ fontSize: 12, fontFamily: fonts.sans }}>Add {entry.label}</span>
-                </button>
-              )
-            })}
-          </>
-        )}
-      </Dropdown>
-    </div>
   )
 }
