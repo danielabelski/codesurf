@@ -52,7 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
-import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerPrimaryToolbar, ChatComposerSecondaryToolbar, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerPrimaryToolbar, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { FooterPill, ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
@@ -2225,7 +2225,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const chatViewportBackground = theme.surface.panel
   const composerBackground = theme.mode === 'dark' ? theme.surface.panel : theme.chat.input
   const composerBorder = theme.chat.inputBorder
-  const dropdownBorder = theme.chat.dropdownBorder
   const fontSans = settings?.fonts?.primary?.family ?? settings?.primaryFont?.family ?? FONT_SANS
   const fontMono = settings?.fonts?.mono?.family ?? settings?.monoFont?.family ?? FONT_MONO
   const fontSize = settings?.fonts?.primary?.size ?? settings?.primaryFont?.size ?? FONT_SIZE_DEFAULT
@@ -7070,134 +7069,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           onStopVoicePlayback={() => bargeIn()}
         />
 
-        {openChatSurfaces.length > 0 && activeChatSurface && (
-          <div style={{
-            padding: '8px 14px 0 14px',
-          }}>
-            <div style={{
-              position: 'relative',
-              width: '100%',
-              height: activeChatSurface.height,
-              borderRadius: 12,
-              border: `1px solid ${dropdownBorder}`,
-              background: theme.surface.panelElevated,
-              overflow: 'hidden',
-              display: 'flex',
-              flexDirection: 'column',
-            }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '6px 8px',
-                borderBottom: `1px solid ${theme.border.subtle}`,
-                background: theme.surface.overlay,
-                fontSize: 11,
-                fontFamily: fontMono,
-                color: theme.chat.muted,
-                overflowX: 'auto',
-              }}>
-                {openChatSurfaces.map(surface => {
-                  const isActive = surface.instanceId === activeChatSurface.instanceId
-                  return (
-                    <div
-                      key={surface.instanceId}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 6,
-                        padding: '4px 8px',
-                        borderRadius: 8,
-                        border: `1px solid ${isActive ? theme.border.strong : theme.border.subtle}`,
-                        background: isActive ? theme.chat.dropdownHoverBackground : 'transparent',
-                        color: isActive ? theme.chat.text : theme.chat.muted,
-                        flexShrink: 0,
-                      }}
-                    >
-                      <button
-                        onClick={() => setActiveChatSurfaceId(surface.instanceId)}
-                        style={{
-                          border: 'none',
-                          background: 'transparent',
-                          color: 'inherit',
-                          cursor: 'pointer',
-                          padding: 0,
-                          fontSize: 11,
-                          fontFamily: fontMono,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 6,
-                        }}
-                      >
-                        <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-                          {renderChatSurfaceIcon(surface.icon ?? surface.surfaceId, 13)}
-                        </span>
-                        <span>{surface.label}</span>
-                      </button>
-                      <button
-                        onClick={() => closeChatSurface(surface.instanceId)}
-                        aria-label={`Close ${surface.label}`}
-                        style={{
-                          width: 16,
-                          height: 16,
-                          borderRadius: 4,
-                          border: `1px solid ${theme.border.default}`,
-                          background: 'transparent',
-                          color: 'inherit',
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: 0,
-                          fontSize: 10,
-                          lineHeight: 1,
-                        }}
-                      >×</button>
-                    </div>
-                  )
-                })}
-                {activeChatSurface.extId === 'sketch' && chatSurfaceMenu.some(entry => entry.extId === 'builder' || entry.surfaceId === 'builder') && (
-                  <button
-                    onClick={() => { void openBuilderFromSketch() }}
-                    style={{
-                      border: `1px solid ${theme.border.default}`,
-                      background: theme.chat.dropdownHoverBackground,
-                      color: theme.chat.text,
-                      borderRadius: 8,
-                      padding: '4px 8px',
-                      cursor: 'pointer',
-                      fontSize: 11,
-                      fontFamily: fontMono,
-                      flexShrink: 0,
-                    }}
-                  >
-                    Enhance → Builder
-                  </button>
-                )}
-              </div>
-              <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
-                {openChatSurfaces.map(surface => (
-                  <iframe
-                    key={surface.instanceId}
-                    ref={node => setChatSurfaceIframeRef(surface.instanceId, node)}
-                    src={surface.entryUrl}
-                    title={surface.label}
-                    style={{
-                      position: 'absolute',
-                      inset: 0,
-                      width: '100%',
-                      height: '100%',
-                      border: 'none',
-                      background: 'transparent',
-                      display: surface.instanceId === activeChatSurface.instanceId ? 'block' : 'none',
-                    }}
-                    sandbox="allow-scripts allow-same-origin"
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+        <ChatComposerSurfaceHost
+          surfaces={openChatSurfaces}
+          activeSurface={activeChatSurface}
+          fontMono={fontMono}
+          showBuilderEnhance={activeChatSurface?.extId === 'sketch' && chatSurfaceMenu.some(entry => entry.extId === 'builder' || entry.surfaceId === 'builder')}
+          renderSurfaceIcon={renderChatSurfaceIcon}
+          onActivateSurface={setActiveChatSurfaceId}
+          onCloseSurface={closeChatSurface}
+          onOpenBuilderFromSketch={() => { void openBuilderFromSketch() }}
+          onSetSurfaceIframeRef={setChatSurfaceIframeRef}
+        />
 
         <ChatComposerAttachments
           attachments={attachments}
