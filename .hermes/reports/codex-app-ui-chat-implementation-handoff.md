@@ -1,6 +1,6 @@
 # Codex-inspired CodeSurf implementation handoff
 
-Generated: 2026-05-01 17:15:09 BST
+Generated: 2026-05-01 17:30:30 BST
 
 Scope:
 - Target repo: `/Users/jkneen/clawd/collaborator-clone`
@@ -197,9 +197,23 @@ Moved the `/` and `@` autocomplete popup into the composer module:
 
 The next safe extraction point is likely the chat-surface host strip.
 
+### 13. Composer chat-surface host extraction
+
+Files:
+- `src/renderer/src/components/ChatTile.tsx`
+- `src/renderer/src/components/chat/ChatComposer.tsx`
+
+Moved the chat-surface tab/iframe host strip above the composer textarea into the composer module:
+- Added `ChatComposerSurface` and `ChatComposerSurfaceHost`.
+- Preserved surface tab rendering, active tab styling, close buttons, iframe refs, iframe sandbox attributes, active-surface visibility, and `Enhance → Builder` affordance.
+- Kept chat-surface state, active-surface selection, surface opening/closing, iframe ref ownership, RPC/message handling, peer context/actions, payload flushing, and `renderChatSurfaceIcon` ownership in `ChatTile.tsx`.
+- Removed the now-unused local `dropdownBorder` alias from `ChatTile.tsx`; the extracted host reads the same theme value directly.
+
+The next safe extraction point is likely the remaining composer footer/drawer control grouping, after a focused live dogfood pass of surfaces/menus/autocomplete.
+
 ## Verification
 
-Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer-autocomplete extraction:
+Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer chat-surface host extraction:
 
 ```bash
 npm run build
@@ -211,7 +225,7 @@ Results:
 - `npm test`: passed, 177 tests, 0 failures.
 - `git diff --cached --check`: passed before committing the code extraction.
 - Static scan of added lines for common secret/injection patterns: no findings.
-- Independent review: passed; no security concerns or logic errors for the `ChatComposerAutocompletePopup` extraction.
+- Independent review: passed; no security concerns or logic errors for the `ChatComposerSurfaceHost` extraction.
 
 ## Git state notes
 
@@ -230,6 +244,8 @@ The implementation work has been committed locally in small controlled bursts:
 - `56784a0 refactor: extract chat composer voice status`
 - `e661874 docs: note chat composer voice status extraction`
 - `2bb022a refactor: extract chat composer autocomplete`
+- `38b475b docs: note chat composer autocomplete extraction`
+- `2fa4048 refactor: extract chat surface host`
 
 Upstream check:
 - Ran `git fetch origin` after the mini-window/sidebar commit.
@@ -239,11 +255,16 @@ Upstream check:
 Outstanding unrelated local files still present in the working tree:
 - `.codesurf/DREAMING.md` — modified before this pass; review separately before committing.
 - `.mcp.json` — local environment/config change; review separately before committing.
+- `bundled-extensions/livekit-rooms/tiles/index.html` — pre-existing/external local change; left unstaged.
+- `bundled-extensions/livekit-rooms/tiles/room/index.html` — pre-existing/external local change; left unstaged.
+- `examples/extensions/livekit-rooms/tiles/index.html` — pre-existing/external local change; left unstaged.
+- `examples/extensions/livekit-rooms/tiles/room/index.html` — pre-existing/external local change; left unstaged.
+- `.tmp/` — untracked local temp directory; left unstaged.
 
 ## Recommended next burst
 
-1. Dogfood the extracted attachment/shell/menu/voice/autocomplete path in the running app: type `/`, type `@`, use arrow keys/Enter/Escape, click autocomplete rows, attach/remove files, open the `+` menu, toggle MCP, use provider/model/thinking/location/branch/context menus, trigger dictation/TTS banners, and send/stop a message.
-2. Continue extracting composer internals from `ChatTile.tsx` one slot at a time: chat-surface host strip is safer than one giant stateful `ChatComposer` props object.
+1. Dogfood the extracted attachment/shell/menu/voice/autocomplete/chat-surface host path in the running app: type `/`, type `@`, use arrow keys/Enter/Escape, click autocomplete rows, attach/remove files, open the `+` menu, toggle MCP, open a chat surface, switch/close surface tabs, verify `Enhance → Builder`, use provider/model/thinking/location/branch/context menus, trigger dictation/TTS banners, and send/stop a message.
+2. Continue extracting composer internals from `ChatTile.tsx` one slot at a time: the remaining footer/drawer control grouping is safer than one giant stateful `ChatComposer` props object.
 3. After extraction seams are stable, improve the prompt/drawer UX: denser command surface, clearer collapse/expand behavior, and preserved advanced controls behind compact menus.
 4. Add a deliberate "open historical/external session into chat, then pop out" flow only if the sidebar mini action should work for sessions with no `tileId`.
 5. Start the Git Review extension/diff virtualization pass from the reference report as a separate burst.
