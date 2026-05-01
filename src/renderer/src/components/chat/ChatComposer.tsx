@@ -2,8 +2,10 @@ import React from 'react'
 import { FileText, Folder, Trash2 } from 'lucide-react'
 import { useTheme } from '../../ThemeContext'
 import { basename } from '../../utils/dnd'
+import type { ExecutionHostRecord } from '../../../../shared/types'
 import type { TtsPlayerState } from '../../utils/ttsPlayer'
-import { MenuPortal } from './ChatComposerMenus'
+import { FooterPill } from './ChatComposerControls'
+import { Dropdown, DropdownItem, MenuPortal } from './ChatComposerMenus'
 
 export interface ChatComposerAutocompleteItem {
   key: string
@@ -79,6 +81,112 @@ export function ChatComposerSecondaryToolbar({ children }: { children: React.Rea
       padding: '0 8px',
     }}>
       {children}
+    </div>
+  )
+}
+
+function LocalProjectIcon({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <rect x="1.5" y="2" width="11" height="8.5" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4.2 11.4h5.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CloudProjectIcon({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <path d="M4.4 11.2h5.2a2.2 2.2 0 000-4.4 3.1 3.1 0 00-6-.6A2.2 2.2 0 004.4 11.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function ChatComposerLocationMenu({
+  anchorRef,
+  showMenu,
+  executionTarget,
+  locationLabel,
+  localExecutionLabel,
+  normalizedRepoRoot,
+  remoteHosts,
+  activeCloudHost,
+  fontSans,
+  onToggleMenu,
+  onSelectLocal,
+  onSelectCloud,
+  onSelectRemoteHost,
+}: {
+  anchorRef: React.RefObject<HTMLDivElement | null>
+  showMenu: boolean
+  executionTarget: 'local' | 'cloud'
+  locationLabel: string
+  localExecutionLabel: string
+  normalizedRepoRoot: string
+  remoteHosts: ExecutionHostRecord[]
+  activeCloudHost: ExecutionHostRecord | null
+  fontSans: string
+  onToggleMenu: () => void
+  onSelectLocal: () => void
+  onSelectCloud: () => void
+  onSelectRemoteHost: (hostId: string) => void
+}): JSX.Element {
+  const theme = useTheme()
+
+  return (
+    <div ref={anchorRef} style={{ position: 'relative' }}>
+      <FooterPill
+        prefix={executionTarget === 'local' ? <LocalProjectIcon /> : <CloudProjectIcon />}
+        label={locationLabel}
+        color={theme.chat.muted}
+        active={showMenu}
+        onClick={onToggleMenu}
+      />
+      {showMenu && (
+        <MenuPortal anchorRef={anchorRef}>
+          <Dropdown>
+            <div style={{ padding: '8px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+              Continue in
+            </div>
+            <DropdownItem
+              icon={<LocalProjectIcon size={11} />}
+              label={localExecutionLabel}
+              sublabel={normalizedRepoRoot || undefined}
+              active={executionTarget === 'local'}
+              onClick={onSelectLocal}
+            />
+            <DropdownItem
+              icon={<CloudProjectIcon size={11} />}
+              label="Cloud"
+              active={executionTarget === 'cloud'}
+              sublabel={activeCloudHost?.label ?? (remoteHosts.length > 0 ? undefined : 'No remote daemon configured')}
+              onClick={onSelectCloud}
+            />
+            {remoteHosts.length > 0 && (
+              <>
+                <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
+                <div style={{ padding: '8px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+                  Remote daemons
+                </div>
+                {remoteHosts.map(host => (
+                  <DropdownItem
+                    key={host.id}
+                    icon={<CloudProjectIcon size={11} />}
+                    label={host.label}
+                    sublabel={host.url ?? undefined}
+                    active={executionTarget === 'cloud' && activeCloudHost?.id === host.id}
+                    onClick={() => onSelectRemoteHost(host.id)}
+                  />
+                ))}
+              </>
+            )}
+            <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
+            <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+              Rate limits remaining
+            </div>
+          </Dropdown>
+        </MenuPortal>
+      )}
     </div>
   )
 }

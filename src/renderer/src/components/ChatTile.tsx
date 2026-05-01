@@ -52,7 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
-import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerLocationMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { FooterPill, ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
@@ -121,23 +121,6 @@ function ThinkingIcon({ level }: { level: string }): JSX.Element {
         ))}
       </svg>
     </div>
-  )
-}
-
-function LocalProjectIcon({ size = 13 }: { size?: number }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
-      <rect x="1.5" y="2" width="11" height="8.5" rx="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M4.2 11.4h5.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-function CloudProjectIcon({ size = 13 }: { size?: number }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
-      <path d="M4.4 11.2h5.2a2.2 2.2 0 000-4.4 3.1 3.1 0 00-6-.6A2.2 2.2 0 004.4 11.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-    </svg>
   )
 }
 
@@ -7364,70 +7347,34 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         {/* Secondary toolbar */}
         <ChatComposerSecondaryToolbar>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <div ref={locationMenuRef} style={{ position: 'relative' }}>
-              <FooterPill
-                prefix={executionTarget === 'local' ? <LocalProjectIcon /> : <CloudProjectIcon />}
-                label={locationLabel}
-                color={theme.chat.muted}
-                active={showLocationMenu}
-                onClick={() => toggleMenu('location')}
-              />
-              {showLocationMenu && (
-                <MenuPortal anchorRef={locationMenuRef}>
-                  <Dropdown>
-                    <div style={{ padding: '8px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                      Continue in
-                    </div>
-                    <DropdownItem
-                      icon={<LocalProjectIcon size={11} />}
-                      label={localExecutionLabel}
-                      sublabel={normalizedRepoRoot || undefined}
-                      active={executionTarget === 'local'}
-                      onClick={() => { setExecutionTarget('local'); setShowLocationMenu(false) }}
-                    />
-                    <DropdownItem
-                      icon={<CloudProjectIcon size={11} />}
-                      label="Cloud"
-                      active={executionTarget === 'cloud'}
-                      sublabel={activeCloudHost?.label ?? (remoteHosts.length > 0 ? undefined : 'No remote daemon configured')}
-                      onClick={() => {
-                        if (remoteHosts.length > 0) {
-                          setExecutionTarget('cloud')
-                          setCloudHostId(activeCloudHost?.id ?? remoteHosts[0].id)
-                        }
-                        setShowLocationMenu(false)
-                      }}
-                    />
-                    {remoteHosts.length > 0 && (
-                      <>
-                        <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-                        <div style={{ padding: '8px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                          Remote daemons
-                        </div>
-                        {remoteHosts.map(host => (
-                          <DropdownItem
-                            key={host.id}
-                            icon={<CloudProjectIcon size={11} />}
-                            label={host.label}
-                            sublabel={host.url ?? undefined}
-                            active={executionTarget === 'cloud' && activeCloudHost?.id === host.id}
-                            onClick={() => {
-                              setExecutionTarget('cloud')
-                              setCloudHostId(host.id)
-                              setShowLocationMenu(false)
-                            }}
-                          />
-                        ))}
-                      </>
-                    )}
-                    <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-                    <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                      Rate limits remaining
-                    </div>
-                  </Dropdown>
-                </MenuPortal>
-              )}
-            </div>
+            <ChatComposerLocationMenu
+              anchorRef={locationMenuRef}
+              showMenu={showLocationMenu}
+              executionTarget={executionTarget}
+              locationLabel={locationLabel}
+              localExecutionLabel={localExecutionLabel}
+              normalizedRepoRoot={normalizedRepoRoot}
+              remoteHosts={remoteHosts}
+              activeCloudHost={activeCloudHost}
+              fontSans={fontSans}
+              onToggleMenu={() => toggleMenu('location')}
+              onSelectLocal={() => {
+                setExecutionTarget('local')
+                setShowLocationMenu(false)
+              }}
+              onSelectCloud={() => {
+                if (remoteHosts.length > 0) {
+                  setExecutionTarget('cloud')
+                  setCloudHostId(activeCloudHost?.id ?? remoteHosts[0].id)
+                }
+                setShowLocationMenu(false)
+              }}
+              onSelectRemoteHost={hostId => {
+                setExecutionTarget('cloud')
+                setCloudHostId(hostId)
+                setShowLocationMenu(false)
+              }}
+            />
 
             <div ref={branchMenuRef} style={{ position: 'relative' }}>
               <FooterPill
