@@ -52,7 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
-import { ChatComposerAttachments, ChatComposerCard, ChatComposerPrimaryToolbar, ChatComposerSecondaryToolbar, ChatComposerVoiceStatus, ChatComposerWrap } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerPrimaryToolbar, ChatComposerSecondaryToolbar, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { FooterPill, ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
@@ -352,13 +352,7 @@ function getImplicitPeerImageAttachments(peers: DiscoveryPeer[]): PendingAttachm
     .filter(item => item.path.length > 0)
 }
 
-interface AutocompleteItem {
-  key: string
-  value: string
-  description: string
-  attachPath?: string
-  priority?: number
-}
+type AutocompleteItem = ChatComposerAutocompleteItem
 
 interface Props {
   tileId: string
@@ -2231,10 +2225,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const chatViewportBackground = theme.surface.panel
   const composerBackground = theme.mode === 'dark' ? theme.surface.panel : theme.chat.input
   const composerBorder = theme.chat.inputBorder
-  const dropdownBackground = theme.chat.dropdownBackground
   const dropdownBorder = theme.chat.dropdownBorder
-  const dropdownActiveBackground = theme.chat.dropdownActiveBackground
-  const dropdownHoverBackground = theme.chat.dropdownHoverBackground
   const fontSans = settings?.fonts?.primary?.family ?? settings?.primaryFont?.family ?? FONT_SANS
   const fontMono = settings?.fonts?.mono?.family ?? settings?.monoFont?.family ?? FONT_MONO
   const fontSize = settings?.fonts?.primary?.size ?? settings?.primaryFont?.size ?? FONT_SIZE_DEFAULT
@@ -7059,56 +7050,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         boxShadow: isDropTarget ? `0 0 0 1px ${theme.border.accent}, 0 0 22px ${theme.accent.soft}` : 'none',
         transition: 'border-color 120ms ease, background 120ms ease, box-shadow 120ms ease',
       }}>
-        {/* Autocomplete popup */}
-        {acType && acItems.length > 0 && (
-          <div
-            ref={acRef}
-            style={{
-              position: 'absolute', bottom: '100%', left: 0, right: 0,
-              marginBottom: 4,
-              background: dropdownBackground, border: `1px solid ${dropdownBorder}`,
-              borderRadius: 8, padding: 4,
-              boxShadow: theme.shadow.panel,
-              zIndex: 9999,
-              maxHeight: 6 * 36, overflowY: 'auto',
-            }}
-          >
-            {acType === 'mention' && !acQuery && (
-              <div style={{
-                padding: '6px 10px', fontSize: 11, color: theme.chat.muted,
-                fontFamily: fontMono,
-              }}>
-                Connected files appear first. Type to search files...
-              </div>
-            )}
-            {acItems.map((item, i) => (
-              <div
-                key={item.key}
-                onMouseDown={(e) => { e.preventDefault(); selectAcItem(item) }}
-                onMouseEnter={() => setAcIndex(i)}
-                style={{
-                  padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  background: i === acIndex ? dropdownActiveBackground : 'transparent',
-                  transition: 'background 0.1s',
-                }}
-              >
-                <span style={{
-                  fontSize: 12, color: i === acIndex ? theme.accent.base : theme.chat.text,
-                  fontFamily: fontMono, fontWeight: 500,
-                }}>
-                  {item.value}
-                </span>
-                <span style={{
-                  fontSize: 11, color: theme.chat.muted, fontFamily: fontSans,
-                  marginLeft: 'auto',
-                }}>
-                  {item.description}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
+        <ChatComposerAutocompletePopup
+          popupRef={acRef}
+          autocompleteType={acType}
+          query={acQuery}
+          items={acItems}
+          activeIndex={acIndex}
+          fontSans={fontSans}
+          fontMono={fontMono}
+          onHoverIndex={setAcIndex}
+          onSelect={selectAcItem}
+        />
 
         <ChatComposerVoiceStatus
           isDictating={isDictating}

@@ -4,6 +4,14 @@ import { useTheme } from '../../ThemeContext'
 import { basename } from '../../utils/dnd'
 import type { TtsPlayerState } from '../../utils/ttsPlayer'
 
+export interface ChatComposerAutocompleteItem {
+  key: string
+  value: string
+  description: string
+  attachPath?: string
+  priority?: number
+}
+
 export interface ChatComposerAttachment {
   path: string
   kind: 'image' | 'file'
@@ -60,6 +68,82 @@ export function ChatComposerSecondaryToolbar({ children }: { children: React.Rea
       padding: '0 8px',
     }}>
       {children}
+    </div>
+  )
+}
+
+export function ChatComposerAutocompletePopup({
+  popupRef,
+  autocompleteType,
+  query,
+  items,
+  activeIndex,
+  fontSans,
+  fontMono,
+  onHoverIndex,
+  onSelect,
+}: {
+  popupRef: React.RefObject<HTMLDivElement>
+  autocompleteType: 'slash' | 'mention' | null
+  query: string
+  items: ChatComposerAutocompleteItem[]
+  activeIndex: number
+  fontSans: string
+  fontMono: string
+  onHoverIndex: (index: number) => void
+  onSelect: (item: ChatComposerAutocompleteItem) => void
+}): JSX.Element | null {
+  const theme = useTheme()
+
+  if (!autocompleteType || items.length === 0) return null
+
+  return (
+    <div
+      ref={popupRef}
+      style={{
+        position: 'absolute', bottom: '100%', left: 0, right: 0,
+        marginBottom: 4,
+        background: theme.chat.dropdownBackground, border: `1px solid ${theme.chat.dropdownBorder}`,
+        borderRadius: 8, padding: 4,
+        boxShadow: theme.shadow.panel,
+        zIndex: 9999,
+        maxHeight: 6 * 36, overflowY: 'auto',
+      }}
+    >
+      {autocompleteType === 'mention' && !query && (
+        <div style={{
+          padding: '6px 10px', fontSize: 11, color: theme.chat.muted,
+          fontFamily: fontMono,
+        }}>
+          Connected files appear first. Type to search files...
+        </div>
+      )}
+      {items.map((item, index) => (
+        <div
+          key={item.key}
+          onMouseDown={(event) => { event.preventDefault(); onSelect(item) }}
+          onMouseEnter={() => onHoverIndex(index)}
+          style={{
+            padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 8,
+            background: index === activeIndex ? theme.chat.dropdownActiveBackground : 'transparent',
+            transition: 'background 0.1s',
+          }}
+        >
+          <span style={{
+            fontSize: 12, color: index === activeIndex ? theme.accent.base : theme.chat.text,
+            fontFamily: fontMono, fontWeight: 500,
+          }}>
+            {item.value}
+          </span>
+          <span style={{
+            fontSize: 11, color: theme.chat.muted, fontFamily: fontSans,
+            marginLeft: 'auto',
+          }}>
+            {item.description}
+          </span>
+        </div>
+      ))}
     </div>
   )
 }
