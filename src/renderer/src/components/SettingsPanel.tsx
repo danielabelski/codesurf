@@ -1551,14 +1551,6 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
           </>
         )
 
-      case 'voice':
-        return (
-          <>
-            <SectionLabel label="Voice — speech in, voice out" />
-            <VoiceSettingsEditor settings={settings} onChange={onSettingsChange} />
-          </>
-        )
-
       case 'browser':
         return (
           <>

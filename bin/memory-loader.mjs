@@ -325,7 +325,7 @@ async function readMemoryFile(candidate) {
 
     return await handle.readFile({ encoding: 'utf8' })
   } catch (error) {
-    if (error?.code === 'ENOENT' && handle == null) {
+    if ((error?.code === 'ENOENT' || error?.code === 'EPERM' || error?.code === 'EACCES') && handle == null) {
       return null
     }
     if (candidate.disallowSymlink && error?.code === 'ELOOP') {

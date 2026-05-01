@@ -288,6 +288,11 @@ export class ExtensionRegistry {
       }
     }
 
+    // Skip catalog duplicates; installed/bundled copies win over gallery entries.
+    if (this.extensions.has(manifest.id) && opts?.defaultEnabled === false) {
+      return
+    }
+
     // Skip if already loaded (workspace overrides global)
     if (this.extensions.has(manifest.id)) {
       const existing = this.extensions.get(manifest.id)!

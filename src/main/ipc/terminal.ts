@@ -598,11 +598,10 @@ export function registerTerminalIPC(): void {
     }
 
     const contexDir = workspaceTileDir(workspaceDir, tileId)
-    await fsP.mkdir(contexDir, { recursive: true })
     const peersPath = join(contexDir, 'peers.md')
 
     if (!peers || peers.length === 0) {
-      try { await fsP.unlink(peersPath) } catch { /* didn't exist */ }
+      try { await fsP.unlink(peersPath) } catch { /* didn't exist or not permitted */ }
       bus.publish({
         channel: `tile:${tileId}`,
         type: 'system',
@@ -631,12 +630,21 @@ export function registerTerminalIPC(): void {
     lines.push('---')
     lines.push('*This file is auto-updated when canvas links change. Use `reload_objective` or re-read this file for the latest state.*')
 
-    await fsP.writeFile(peersPath, lines.join('\n'), 'utf8')
+    let persisted = true
+    try {
+      await fsP.mkdir(contexDir, { recursive: true })
+      await fsP.writeFile(peersPath, lines.join('\n'), 'utf8')
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'EPERM' && code !== 'EACCES') throw error
+      persisted = false
+    }
+
     bus.publish({
       channel: `tile:${tileId}`,
       type: 'system',
       source: `terminal:${tileId}`,
-      payload: { action: 'peers_updated', count: peers.length, peerIds: peers.map(p => p.peerId) }
+      payload: { action: 'peers_updated', count: peers.length, peerIds: peers.map(p => p.peerId), persisted }
     })
   })
 }
