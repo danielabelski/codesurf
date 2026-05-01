@@ -52,7 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
-import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerLocationMenu, ChatComposerModeMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerDrawerFrame, ChatComposerLocationMenu, ChatComposerModeMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
@@ -6472,22 +6472,13 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         {liveComposerActivityChip}
 
         {latestChangeDrawer && (
-          <div style={{
-            flexShrink: 0,
+          <ChatComposerDrawerFrame style={{
             // Match the queued-messages drawer's indent + bottom-tuck so the
             // changes drawer reads as pulled out from behind the composer
             // rather than sitting on top of it.
             width: `calc(${CHAT_COMPOSER_WIDTH} - 24px)`,
             minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
             margin: '0 auto 0 auto',
-            border: `1px solid ${theme.chat.divider}`,
-            borderBottom: 'none',
-            borderRadius: '14px 14px 0 0',
-            background: theme.surface.panelMuted,
-            boxShadow: theme.shadow.panel,
-            overflow: 'hidden',
-            position: 'relative',
-            zIndex: 0,
           }}>
             <div
               style={{
@@ -6692,7 +6683,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 </div>
               </div>
             )}
-          </div>
+          </ChatComposerDrawerFrame>
         )}
 
         {queuedTurns.length > 0 && (() => {
@@ -6703,26 +6694,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           const urgentCount = queuedTurns.filter(t => isUrgentQueuedContent(t.content)).length
           const showCollapsed = queueCollapsed && queuedTurns.length >= 3
           return (
-          <div style={{
-            flexShrink: 0,
-            // Match the "changes" drawer's indent + tucks the bottom edge under
-            // the composer so it reads as a drawer pulled out from behind it.
-            width: `calc(${CHAT_COMPOSER_WIDTH} - 24px)`,
-            minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
-            margin: '0 auto 0 auto',
-            border: `1px solid ${theme.chat.divider}`,
-            borderTop: latestChangeDrawer ? 'none' : `1px solid ${theme.chat.divider}`,
-            borderBottom: 'none',
-            borderRadius: latestChangeDrawer ? 0 : '14px 14px 0 0',
-            // Collapsed summary row uses the darkest chat surface so it reads
-            // as a compacted tray sitting flush atop the composer; expanded
-            // uses the lighter muted surface so individual rows remain legible.
-            background: showCollapsed ? theme.chat.background : theme.surface.panelMuted,
-            boxShadow: theme.shadow.panel,
-            overflow: 'hidden',
-            position: 'relative',
-            zIndex: 0,
-          }}>
+          <ChatComposerDrawerFrame
+            joinedToPrevious={Boolean(latestChangeDrawer)}
+            collapsed={showCollapsed}
+            style={{
+              // Match the "changes" drawer's indent + tucks the bottom edge under
+              // the composer so it reads as a drawer pulled out from behind it.
+              width: `calc(${CHAT_COMPOSER_WIDTH} - 24px)`,
+              minWidth: `calc(${CHAT_COMPOSER_MIN_WIDTH_STYLE} - 24px)`,
+              margin: '0 auto 0 auto',
+            }}
+          >
             {/* Header / summary row. When collapsed it's the ONLY visible
                 row and clicking anywhere on it expands. When expanded it
                 becomes a compact toggle at the top so the user can tuck the
@@ -7020,7 +7002,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               </div>
               )
             })}
-          </div>
+          </ChatComposerDrawerFrame>
           )
         })()}
 

@@ -322,6 +322,41 @@ button:focus-visible,
 
 .cs-chat-composer-card {
   backdrop-filter: saturate(120%);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: outline-color 120ms ease, filter 120ms ease;
+}
+
+.cs-chat-composer-card:focus-within {
+  outline-color: rgba(255, 255, 255, 0.12);
+  filter: saturate(108%);
+}
+
+.cs-chat-composer-card textarea::placeholder {
+  color: rgba(170, 170, 170, 0.58);
+}
+
+.cs-chat-composer-drawer {
+  backdrop-filter: saturate(130%) blur(10px);
+}
+
+.cs-chat-composer-drawer::after {
+  content: '';
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+  pointer-events: none;
+}
+
+.cs-chat-composer-drawer-joined::after {
+  opacity: 0.35;
+}
+
+.cs-chat-composer-drawer-collapsed {
+  box-shadow: none !important;
 }
 
 .cs-chat-composer-primary-toolbar,

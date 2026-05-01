@@ -97,6 +97,41 @@ export function ChatComposerSecondaryToolbar({ children }: { children: React.Rea
   )
 }
 
+export function ChatComposerDrawerFrame({
+  children,
+  joinedToPrevious = false,
+  collapsed = false,
+  style,
+}: {
+  children: React.ReactNode
+  joinedToPrevious?: boolean
+  collapsed?: boolean
+  style?: React.CSSProperties
+}): JSX.Element {
+  const theme = useTheme()
+
+  return (
+    <div
+      className={`cs-chat-composer-drawer${joinedToPrevious ? ' cs-chat-composer-drawer-joined' : ''}${collapsed ? ' cs-chat-composer-drawer-collapsed' : ''}`}
+      style={{
+        flexShrink: 0,
+        border: `1px solid ${theme.chat.divider}`,
+        borderTop: joinedToPrevious ? 'none' : `1px solid ${theme.chat.divider}`,
+        borderBottom: 'none',
+        borderRadius: joinedToPrevious ? 0 : '14px 14px 0 0',
+        background: collapsed ? theme.chat.background : theme.surface.panelMuted,
+        boxShadow: collapsed ? 'none' : `${theme.shadow.panel}, inset 0 1px rgba(255, 255, 255, 0.04)`,
+        overflow: 'hidden',
+        position: 'relative',
+        zIndex: 0,
+        ...style,
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
 function LocalProjectIcon({ size = 13 }: { size?: number }): JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
