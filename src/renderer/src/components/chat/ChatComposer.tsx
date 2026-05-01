@@ -1,5 +1,5 @@
 import React from 'react'
-import { FileText, Folder, Trash2 } from 'lucide-react'
+import { FileText, Folder, Plus, Trash2 } from 'lucide-react'
 import { useTheme } from '../../ThemeContext'
 import { basename } from '../../utils/dnd'
 import type { ExecutionHostRecord } from '../../../../shared/types'
@@ -18,6 +18,11 @@ export interface ChatComposerAutocompleteItem {
 export interface ChatComposerAttachment {
   path: string
   kind: 'image' | 'file'
+}
+
+export interface ChatComposerBranch {
+  name: string
+  current: boolean
 }
 
 export interface ChatComposerSurface {
@@ -185,6 +190,180 @@ export function ChatComposerLocationMenu({
               Rate limits remaining
             </div>
           </Dropdown>
+        </MenuPortal>
+      )}
+    </div>
+  )
+}
+
+function BranchIcon({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
+      <circle cx="4" cy="2.5" r="1.2" stroke="currentColor" strokeWidth="1.1" />
+      <circle cx="10" cy="6.8" r="1.2" stroke="currentColor" strokeWidth="1.1" />
+      <circle cx="4" cy="11" r="1.2" stroke="currentColor" strokeWidth="1.1" />
+      <path d="M4 3.8v5.9c0 .6.4 1 1 1h1.9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5 4.1h1.8c.7 0 1.2.5 1.2 1.2v.3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function ChatComposerBranchMenu({
+  anchorRef,
+  showMenu,
+  isGitRepo,
+  branches,
+  branchFilter,
+  branchCreateEnabled,
+  currentBranchLabel,
+  projectFolderName,
+  normalizedRepoRoot,
+  changedCount,
+  fontSans,
+  nonSelectableStyle,
+  onToggleMenu,
+  onBranchFilterChange,
+  onSelectBranch,
+  onCreateBranch,
+}: {
+  anchorRef: React.RefObject<HTMLDivElement | null>
+  showMenu: boolean
+  isGitRepo: boolean
+  branches: ChatComposerBranch[]
+  branchFilter: string
+  branchCreateEnabled: boolean
+  currentBranchLabel: string
+  projectFolderName: string
+  normalizedRepoRoot: string
+  changedCount: number
+  fontSans: string
+  nonSelectableStyle: React.CSSProperties
+  onToggleMenu: () => void
+  onBranchFilterChange: (nextFilter: string) => void
+  onSelectBranch: (branchName: string) => void | Promise<void>
+  onCreateBranch: () => void | Promise<void>
+}): JSX.Element {
+  const theme = useTheme()
+
+  return (
+    <div ref={anchorRef} style={{ position: 'relative' }}>
+      <FooterPill
+        prefix={<BranchIcon />}
+        label={isGitRepo ? currentBranchLabel : projectFolderName}
+        color={theme.chat.muted}
+        active={showMenu}
+        onClick={onToggleMenu}
+      />
+      {showMenu && (
+        <MenuPortal anchorRef={anchorRef}>
+          <div style={{
+            minWidth: 260,
+            maxWidth: 320,
+            background: theme.chat.dropdownBackground,
+            border: `1px solid ${theme.chat.dropdownBorder}`,
+            borderRadius: 8,
+            padding: 4,
+            boxShadow: theme.shadow.panel,
+            ...nonSelectableStyle,
+          }}>
+            <div style={{ padding: '4px 4px 6px' }}>
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 8px',
+                borderRadius: 6,
+                background: theme.surface.panelMuted,
+              }}>
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+                  <circle cx="6" cy="6" r="4.2" stroke="currentColor" strokeWidth="1.2" />
+                  <path d="M9.8 9.8 12 12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+                <input
+                  type="text"
+                  value={branchFilter}
+                  onChange={event => onBranchFilterChange(event.target.value)}
+                  placeholder="Search branches"
+                  style={{
+                    width: '100%',
+                    background: 'transparent',
+                    border: 'none',
+                    outline: 'none',
+                    color: theme.chat.text,
+                    fontSize: 12,
+                    fontFamily: fontSans,
+                  }}
+                  onKeyDown={event => {
+                    event.stopPropagation()
+                    if (event.key === 'Enter' && branchCreateEnabled) {
+                      event.preventDefault()
+                      void onCreateBranch()
+                    }
+                  }}
+                />
+              </div>
+            </div>
+            <div style={{ padding: '2px 10px 6px' }}>
+              <div style={{ fontSize: 11, color: theme.chat.text, fontFamily: fontSans, fontWeight: 600 }}>
+                {projectFolderName}
+              </div>
+              <div style={{ fontSize: 10, color: theme.chat.muted, fontFamily: fontSans, lineHeight: 1.4 }}>
+                {normalizedRepoRoot}
+              </div>
+            </div>
+            <div style={{ padding: '4px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+              Branches
+            </div>
+            <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+              {isGitRepo ? branches.map(branch => (
+                <DropdownItem
+                  key={branch.name}
+                  icon={<BranchIcon size={11} />}
+                  label={branch.name}
+                  sublabel={branch.current && changedCount > 0 ? `Uncommitted: ${changedCount} file${changedCount === 1 ? '' : 's'}` : undefined}
+                  active={branch.current}
+                  onClick={() => { if (!branch.current) void onSelectBranch(branch.name) }}
+                />
+              )) : (
+                <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+                  Git metadata is not available for this workspace yet.
+                </div>
+              )}
+              {isGitRepo && branches.length === 0 && (
+                <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
+                  No matching branches
+                </div>
+              )}
+            </div>
+            <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
+            <button
+              type="button"
+              onClick={() => { void onCreateBranch() }}
+              disabled={!branchCreateEnabled}
+              style={{
+                width: '100%',
+                border: 'none',
+                background: 'transparent',
+                color: branchCreateEnabled ? theme.chat.text : theme.chat.muted,
+                borderRadius: 8,
+                padding: '9px 12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                cursor: branchCreateEnabled ? 'pointer' : 'default',
+                textAlign: 'left',
+                opacity: branchCreateEnabled ? 1 : 0.5,
+                ...nonSelectableStyle,
+              }}
+              onMouseEnter={event => { if (branchCreateEnabled) event.currentTarget.style.background = theme.chat.dropdownHoverBackground }}
+              onMouseLeave={event => { event.currentTarget.style.background = 'transparent' }}
+            >
+              <Plus size={14} />
+              <span style={{ fontSize: 12, fontFamily: fontSans }}>
+                Create and checkout new branch...
+              </span>
+            </button>
+          </div>
         </MenuPortal>
       )}
     </div>

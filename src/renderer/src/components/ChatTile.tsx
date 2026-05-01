@@ -52,7 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
-import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerLocationMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerLocationMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { FooterPill, ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
 
@@ -121,18 +121,6 @@ function ThinkingIcon({ level }: { level: string }): JSX.Element {
         ))}
       </svg>
     </div>
-  )
-}
-
-function BranchIcon({ size = 13 }: { size?: number }): JSX.Element {
-  return (
-    <svg width={size} height={size} viewBox="0 0 14 14" fill="none">
-      <circle cx="4" cy="2.5" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="10" cy="6.8" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="4" cy="11" r="1.2" stroke="currentColor" strokeWidth="1.1" />
-      <path d="M4 3.8v5.9c0 .6.4 1 1 1h1.9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5 4.1h1.8c.7 0 1.2.5 1.2 1.2v.3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   )
 }
 
@@ -7376,127 +7364,24 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               }}
             />
 
-            <div ref={branchMenuRef} style={{ position: 'relative' }}>
-              <FooterPill
-                prefix={<BranchIcon />}
-                label={isGitRepo ? currentBranchLabel : projectFolderName}
-                color={theme.chat.muted}
-                active={showBranchMenu}
-                onClick={() => toggleMenu('branch')}
-              />
-              {showBranchMenu && (
-                <MenuPortal anchorRef={branchMenuRef}>
-                  <div style={{
-                    minWidth: 260,
-                    maxWidth: 320,
-                    background: theme.chat.dropdownBackground,
-                    border: `1px solid ${theme.chat.dropdownBorder}`,
-                    borderRadius: 8,
-                    padding: 4,
-                    boxShadow: theme.shadow.panel,
-                    ...NON_SELECTABLE_UI_STYLE,
-                  }}>
-                    <div style={{ padding: '4px 4px 6px' }}>
-                      <div style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        padding: '6px 8px',
-                        borderRadius: 6,
-                        background: theme.surface.panelMuted,
-                      }}>
-                        <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
-                          <circle cx="6" cy="6" r="4.2" stroke="currentColor" strokeWidth="1.2" />
-                          <path d="M9.8 9.8 12 12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                        </svg>
-                        <input
-                          type="text"
-                          value={branchFilter}
-                          onChange={e => setBranchFilter(e.target.value)}
-                          placeholder="Search branches"
-                          style={{
-                            width: '100%',
-                            background: 'transparent',
-                            border: 'none',
-                            outline: 'none',
-                            color: theme.chat.text,
-                            fontSize: 12,
-                            fontFamily: fontSans,
-                          }}
-                          onKeyDown={e => {
-                            e.stopPropagation()
-                            if (e.key === 'Enter' && branchMenuCreateEnabled) {
-                              e.preventDefault()
-                              void handleCreateBranch()
-                            }
-                          }}
-                        />
-                      </div>
-                    </div>
-                    <div style={{ padding: '2px 10px 6px' }}>
-                      <div style={{ fontSize: 11, color: theme.chat.text, fontFamily: fontSans, fontWeight: 600 }}>
-                        {projectFolderName}
-                      </div>
-                      <div style={{ fontSize: 10, color: theme.chat.muted, fontFamily: fontSans, lineHeight: 1.4 }}>
-                        {normalizedRepoRoot}
-                      </div>
-                    </div>
-                    <div style={{ padding: '4px 10px 6px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                      Branches
-                    </div>
-                    <div style={{ maxHeight: 220, overflowY: 'auto' }}>
-                      {isGitRepo ? filteredBranches.map(branch => (
-                        <DropdownItem
-                          key={branch.name}
-                          icon={<BranchIcon size={11} />}
-                          label={branch.name}
-                          sublabel={branch.current && gitStatus.changedCount > 0 ? `Uncommitted: ${gitStatus.changedCount} file${gitStatus.changedCount === 1 ? '' : 's'}` : undefined}
-                          active={branch.current}
-                          onClick={() => { if (!branch.current) void handleBranchSelect(branch.name) }}
-                        />
-                      )) : (
-                        <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                          Git metadata is not available for this workspace yet.
-                        </div>
-                      )}
-                      {isGitRepo && filteredBranches.length === 0 && (
-                        <div style={{ padding: '8px 10px', fontSize: 11, color: theme.chat.muted, fontFamily: fontSans }}>
-                          No matching branches
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ height: 1, background: theme.chat.dropdownBorder, margin: '4px 0' }} />
-                    <button
-                      type="button"
-                      onClick={() => { void handleCreateBranch() }}
-                      disabled={!branchMenuCreateEnabled}
-                      style={{
-                        width: '100%',
-                        border: 'none',
-                        background: 'transparent',
-                        color: branchMenuCreateEnabled ? theme.chat.text : theme.chat.muted,
-                        borderRadius: 8,
-                        padding: '9px 12px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 10,
-                        cursor: branchMenuCreateEnabled ? 'pointer' : 'default',
-                        textAlign: 'left',
-                        opacity: branchMenuCreateEnabled ? 1 : 0.5,
-                        ...NON_SELECTABLE_UI_STYLE,
-                      }}
-                      onMouseEnter={e => { if (branchMenuCreateEnabled) e.currentTarget.style.background = theme.chat.dropdownHoverBackground }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
-                    >
-                      <Plus size={14} />
-                      <span style={{ fontSize: 12, fontFamily: fontSans }}>
-                        Create and checkout new branch...
-                      </span>
-                    </button>
-                  </div>
-                </MenuPortal>
-              )}
-            </div>
+            <ChatComposerBranchMenu
+              anchorRef={branchMenuRef}
+              showMenu={showBranchMenu}
+              isGitRepo={isGitRepo}
+              branches={filteredBranches}
+              branchFilter={branchFilter}
+              branchCreateEnabled={branchMenuCreateEnabled}
+              currentBranchLabel={currentBranchLabel}
+              projectFolderName={projectFolderName}
+              normalizedRepoRoot={normalizedRepoRoot}
+              changedCount={gitStatus.changedCount}
+              fontSans={fontSans}
+              nonSelectableStyle={NON_SELECTABLE_UI_STYLE}
+              onToggleMenu={() => toggleMenu('branch')}
+              onBranchFilterChange={setBranchFilter}
+              onSelectBranch={handleBranchSelect}
+              onCreateBranch={handleCreateBranch}
+            />
 
             <ChatComposerProjectPathButton
               title={executionTarget === 'cloud' ? activeProjectPathLabel : `${activeProjectPathLabel} — click to switch folder`}
