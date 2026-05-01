@@ -1,6 +1,6 @@
 # Codex-inspired CodeSurf implementation handoff
 
-Generated: 2026-05-01 18:41:16 BST
+Generated: 2026-05-01 19:38:29 BST
 
 Scope:
 - Target repo: `/Users/jkneen/clawd/collaborator-clone`
@@ -253,23 +253,40 @@ Moved the footer local/cloud execution-target menu into the composer module:
 - Kept execution-target state and cloud-host mutation in `ChatTile.tsx` via explicit callbacks, so the extracted component stays presentational.
 - Kept `locationMenuRef` owned by `ChatTile.tsx`, so shared outside-click/Escape handling still uses the same `menuRefs` array.
 
-The next safe extraction point is likely one of the remaining footer clusters: branch menu or mode chip.
+The next safe extraction point is likely the remaining footer mode chip.
+
+### 17. Composer branch menu extraction
+
+Files:
+- `src/renderer/src/components/ChatTile.tsx`
+- `src/renderer/src/components/chat/ChatComposer.tsx`
+
+Moved the footer git branch menu into the composer module:
+- Added `ChatComposerBranch` and `ChatComposerBranchMenu`.
+- Moved the branch SVG icon with the extracted visual component.
+- Preserved the footer pill, current-branch/project fallback label, branch search input, Enter-to-create behavior, repository path header, branches section, current-branch active state, uncommitted-file sublabel, no-git/no-match empty states, create-and-checkout button, portal anchoring, hover styling, and theme styling.
+- Kept git state, branch filtering, branch creation, branch checkout, refresh behavior, and `branchMenuRef` ownership in `ChatTile.tsx`, so shared outside-click/Escape handling still uses the same `menuRefs` array.
+
+The next safe extraction point is likely the remaining footer mode chip.
 
 ## Verification
 
-Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer location menu extraction:
+Commands run from `/Users/jkneen/clawd/collaborator-clone` after the latest composer branch menu extraction:
 
 ```bash
 npm run build
-npm test
+node --test test/daemon/checkpoints.test.mjs
+node --test --test-concurrency=1 test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs
 ```
 
 Results:
 - `npm run build`: passed.
-- `npm test`: passed, 177 tests, 0 failures.
+- Targeted daemon checkpoint test after cleanup: passed, 2 tests, 0 failures.
+- Full Node test suite run serially with `--test-concurrency=1`: passed, 177 tests, 0 failures.
+- Note: the default parallel `npm test` command hit daemon startup timeouts in `test/daemon/checkpoints.test.mjs` in this busy local environment before cleanup; the targeted checkpoint test and the serial run of the same full suite both passed.
 - `git diff --cached --check`: passed before committing the code extraction.
 - Static scan of added lines for common secret/injection patterns: no findings.
-- Independent review: passed; no security concerns or logic errors for the `ChatComposerLocationMenu` extraction.
+- Independent review: passed; no security concerns or logic errors for the `ChatComposerBranchMenu` extraction.
 
 ## Git state notes
 
@@ -296,6 +313,8 @@ The implementation work has been committed locally in small controlled bursts:
 - `4fe26f3 refactor: extract chat context usage dial`
 - `b9c979f docs: note chat context dial extraction`
 - `664daf1 refactor: extract chat location menu`
+- `0dd504c docs: note chat location menu extraction`
+- `967ec93 refactor: extract chat branch menu`
 
 Upstream check:
 - Ran `git fetch origin` after the mini-window/sidebar commit.
@@ -313,8 +332,8 @@ Outstanding unrelated local files still present in the working tree:
 
 ## Recommended next burst
 
-1. Dogfood the extracted attachment/shell/menu/voice/autocomplete/chat-surface host/project-path/context-dial/location-menu path in the running app: type `/`, type `@`, use arrow keys/Enter/Escape, click autocomplete rows, attach/remove files, open the `+` menu, toggle MCP, open a chat surface, switch/close surface tabs, verify `Enhance → Builder`, switch project folder from the footer path button, open the context dial popup, switch local/cloud/remote execution target from the location menu, use provider/model/thinking/branch menus, trigger dictation/TTS banners, and send/stop a message.
-2. Continue extracting composer internals from `ChatTile.tsx` one slot at a time: branch menu or mode chip are safer than one giant stateful `ChatComposer` props object.
+1. Dogfood the extracted attachment/shell/menu/voice/autocomplete/chat-surface host/project-path/context-dial/location-menu/branch-menu path in the running app: type `/`, type `@`, use arrow keys/Enter/Escape, click autocomplete rows, attach/remove files, open the `+` menu, toggle MCP, open a chat surface, switch/close surface tabs, verify `Enhance → Builder`, switch project folder from the footer path button, open the context dial popup, switch local/cloud/remote execution target from the location menu, use provider/model/thinking/branch menus, trigger dictation/TTS banners, and send/stop a message.
+2. Continue extracting composer internals from `ChatTile.tsx` one slot at a time: the mode chip is now the safest remaining footer seam.
 3. After extraction seams are stable, improve the prompt/drawer UX: denser command surface, clearer collapse/expand behavior, and preserved advanced controls behind compact menus.
 4. Add a deliberate "open historical/external session into chat, then pop out" flow only if the sidebar mini action should work for sessions with no `tileId`.
 5. Start the Git Review extension/diff virtualization pass from the reference report as a separate burst.
