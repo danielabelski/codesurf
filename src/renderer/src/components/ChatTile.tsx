@@ -26,7 +26,7 @@ import {
   type BuiltinProvider, type ModelOption, type ModeOption, type ThinkingOption,
   DEFAULT_MODELS, DEFAULT_PROVIDER_ID, PROVIDER_MODES, EXTENSION_PROVIDER_MODE,
   THINKING_OPTIONS, PROVIDER_LABELS, isBuiltinProvider, getApproxContextWindowTokens,
-  getApproxSystemOverheadTokens,
+  getApproxSystemOverheadTokens, resolveProviderModeId,
 } from '../config/providers'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
 import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote, FileChange } from '../../../shared/chat-types'
@@ -333,6 +333,7 @@ interface Props {
   height: number
   reloadToken?: number
   settings?: AppSettings
+  onChatModePreferenceChange?: (providerId: string, modeId: string) => void
   isConnected?: boolean
   isAutoConnected?: boolean
   connectedPeers?: DiscoveryPeer[]
@@ -2191,7 +2192,7 @@ function ensureChatMdStyle(): void {
 
 // --- Component -------------------------------------------------------------------
 
-export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, width: _width, height: _height, reloadToken = 0, settings, isConnected, isAutoConnected, connectedPeers = [] }: Props): JSX.Element {
+export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, width: _width, height: _height, reloadToken = 0, settings, onChatModePreferenceChange, isConnected, isAutoConnected, connectedPeers = [] }: Props): JSX.Element {
   const theme = useTheme()
   const chatViewportBackground = theme.surface.panel
   const composerBackground = theme.mode === 'dark' ? theme.surface.panel : theme.chat.input
@@ -2265,11 +2266,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       ? DEFAULT_MODELS[initialProvider][0]?.id
       : DEFAULT_MODELS[DEFAULT_PROVIDER_ID][0]?.id)
     ?? ''
-  const initialMode = initialRuntimeStateRef.current?.mode
-    ?? (isBuiltinProvider(initialProvider)
-      ? PROVIDER_MODES[initialProvider][0]?.id
-      : EXTENSION_PROVIDER_MODE.id)
-    ?? EXTENSION_PROVIDER_MODE.id
+  const initialMode = resolveProviderModeId(
+    initialProvider,
+    initialRuntimeStateRef.current?.mode ?? settings?.chatProviderModes?.[initialProvider],
+  )
   const initialExecutionTarget = initialRuntimeStateRef.current?.executionTarget ?? 'local'
   const initialCloudHostId = initialRuntimeStateRef.current?.cloudHostId ?? null
   const initialJobId = initialRuntimeStateRef.current?.jobId ?? null
@@ -2772,15 +2772,56 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     loadEarlierMessagesRef.current = loadEarlierMessages
   }, [loadEarlierMessages])
 
-  // Slash commands
+  // Slash commands (built-in) + discovered skills (workspaceSkills already
+  // covers `.claude/commands`, `.claude/skills`, OpenCode skills, Cursor rules,
+  // and plugin-namespaced commands picked up from CHAT_DEFAULT_SKILL_LOCATIONS).
   const SLASH_COMMANDS = CHAT_SLASH_COMMANDS
 
-  // File mention stubs
-  const MENTION_STUBS = [
-    { value: '@CLAUDE.md', description: 'Project instructions' },
-    { value: '@package.json', description: 'Package manifest' },
-    { value: '@src/', description: 'Source directory' },
-  ]
+  // Workspace file index for `@` mentions. Built once per workspace via a
+  // bounded recursive readDir; skips dot-folders and the usual heavy build
+  // artifact dirs so a typical repo stays under a few thousand entries.
+  const [workspaceFiles, setWorkspaceFiles] = useState<Array<{ path: string; relPath: string; name: string; depth: number }>>([])
+  useEffect(() => {
+    let cancelled = false
+    const root = _workspaceDir?.trim() || ''
+    if (!root) {
+      setWorkspaceFiles([])
+      return () => { cancelled = true }
+    }
+
+    const SKIP_DIRS = new Set([
+      'node_modules', 'dist', 'build', 'out', 'target', 'coverage',
+      '.git', '.next', '.turbo', '.cache', '.parcel-cache', '.vercel',
+      '.nuxt', '.svelte-kit', '.angular', '.expo', '.terraform',
+      'build-electrobun', 'dist-electron', '__pycache__', '.venv', 'venv',
+    ])
+    const MAX_FILES = 5000
+    const MAX_DEPTH = 4
+
+    ;(async () => {
+      const collected: Array<{ path: string; relPath: string; name: string; depth: number }> = []
+      const walk = async (dir: string, depth: number): Promise<void> => {
+        if (cancelled || collected.length >= MAX_FILES || depth > MAX_DEPTH) return
+        const entries: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(dir).catch(() => [])
+        for (const entry of entries) {
+          if (cancelled || collected.length >= MAX_FILES) return
+          if (entry.name.startsWith('.') && depth === 0) continue
+          if (entry.isDir) {
+            if (SKIP_DIRS.has(entry.name)) continue
+            if (entry.name.startsWith('.') && entry.name !== '.claude') continue
+            await walk(entry.path, depth + 1)
+            continue
+          }
+          const relPath = getRelativeMentionPath(entry.path, root)
+          collected.push({ path: entry.path, relPath, name: entry.name, depth })
+        }
+      }
+      await walk(root, 0)
+      if (!cancelled) setWorkspaceFiles(collected)
+    })().catch(() => { if (!cancelled) setWorkspaceFiles([]) })
+
+    return () => { cancelled = true }
+  }, [_workspaceDir])
 
   const mentionItems = useMemo<AutocompleteItem[]>(() => {
     const query = acQuery.trim().toLowerCase()
@@ -2817,18 +2858,76 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     })
 
     const existingValues = new Set(connectedFileItems.map(item => item.value.toLowerCase()))
-    const stubItems = MENTION_STUBS
-      .filter(item => !query || `${item.value}\n${item.description}`.toLowerCase().includes(query))
-      .filter(item => !existingValues.has(item.value.toLowerCase()))
-      .map(item => ({ key: `mention-stub:${item.value}`, ...item }))
 
-    return [...connectedFileItems, ...stubItems]
-  }, [acQuery, connectedPeers, _workspaceDir])
+    // Real workspace file results. Rank by: basename-prefix > basename-contains
+    // > path-contains, then by directory depth (shallower first), then
+    // alphabetical. Cap the dropdown so we never paint thousands of rows.
+    const FILE_RESULT_LIMIT = 40
+    const fileItems: Array<AutocompleteItem & { rank: number }> = []
+    if (workspaceFiles.length > 0) {
+      for (const file of workspaceFiles) {
+        const value = `@${file.relPath}`
+        if (existingValues.has(value.toLowerCase())) continue
+        const nameLower = file.name.toLowerCase()
+        const relLower = file.relPath.toLowerCase()
+        let rank = -1
+        if (!query) rank = 2
+        else if (nameLower.startsWith(query)) rank = 0
+        else if (nameLower.includes(query)) rank = 1
+        else if (relLower.includes(query)) rank = 2
+        if (rank < 0) continue
+        fileItems.push({
+          key: `workspace-file:${file.path}`,
+          value,
+          description: file.relPath,
+          attachPath: file.path,
+          priority: rank * 100 + file.depth,
+          rank,
+        })
+      }
+      fileItems.sort((a, b) => {
+        if (a.rank !== b.rank) return a.rank - b.rank
+        if ((a.priority ?? 0) !== (b.priority ?? 0)) return (a.priority ?? 0) - (b.priority ?? 0)
+        return a.value.localeCompare(b.value)
+      })
+    }
+
+    return [...connectedFileItems, ...fileItems.slice(0, FILE_RESULT_LIMIT).map(({ rank: _rank, ...rest }) => rest)]
+  }, [acQuery, connectedPeers, _workspaceDir, workspaceFiles])
+
+  const slashItems = useMemo<AutocompleteItem[]>(() => {
+    const q = acQuery.toLowerCase()
+    const seen = new Set<string>()
+    const items: AutocompleteItem[] = []
+
+    for (const command of SLASH_COMMANDS) {
+      if (!command.value.toLowerCase().startsWith('/' + q)) continue
+      if (seen.has(command.value)) continue
+      seen.add(command.value)
+      items.push({ key: `slash:${command.value}`, value: command.value, description: command.description })
+    }
+
+    // Discovered skills/commands. Skill `command` is the slash trigger
+    // (e.g. `cleanup` → `/cleanup`); fall back to `name` when absent.
+    for (const skill of workspaceSkills) {
+      const trigger = (skill.command || skill.name || '').trim()
+      if (!trigger) continue
+      const value = '/' + trigger.replace(/^\/+/, '')
+      if (seen.has(value)) continue
+      if (!value.toLowerCase().startsWith('/' + q)) continue
+      seen.add(value)
+      items.push({
+        key: `skill:${skill.id || value}`,
+        value,
+        description: skill.description?.trim() || `Skill · ${skill.name}`,
+      })
+    }
+
+    return items
+  }, [acQuery, SLASH_COMMANDS, workspaceSkills])
 
   const acItems: AutocompleteItem[] = acType === 'slash'
-    ? SLASH_COMMANDS
-      .filter(c => c.value.toLowerCase().startsWith('/' + acQuery.toLowerCase()))
-      .map(item => ({ key: `slash:${item.value}`, ...item }))
+    ? slashItems
     : acType === 'mention'
       ? mentionItems
       : []
@@ -3549,11 +3648,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           parentId: typeof item.parentId === 'string' ? item.parentId : null,
         })))
       }
+      const savedProvider = typeof saved.provider === 'string' ? saved.provider : provider
       if (saved.provider) setProvider(saved.provider)
       if (typeof saved.model === 'string') setModel(saved.model)
       if (saved.executionTarget === 'local' || saved.executionTarget === 'cloud') setExecutionTarget(saved.executionTarget)
       if (typeof saved.mcpEnabled === 'boolean') setMcpEnabled(saved.mcpEnabled)
-      if (typeof saved.mode === 'string') setMode(saved.mode)
+      if (typeof saved.mode === 'string') setMode(resolveProviderModeId(savedProvider, saved.mode))
       if (typeof saved.thinking === 'string') setThinking(saved.thinking)
       if (typeof saved.autoAgentMode === 'boolean') setAutoAgentMode(saved.autoAgentMode)
       if (typeof saved.preserveSessionSummary === 'boolean') setPreserveSessionSummary(saved.preserveSessionSummary)
@@ -3622,9 +3722,13 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     })
       .then((saved: any) => {
         if (cancelled || !saved) return
+        const savedProvider = typeof saved.provider === 'string'
+          ? saved.provider
+          : (latestStateRef.current?.provider ?? DEFAULT_PROVIDER_ID)
         if (Array.isArray(saved.messages)) setMessagesSafe(saved.messages)
         if (typeof saved.provider === 'string') setProvider(saved.provider)
         if (typeof saved.model === 'string') setModel(saved.model)
+        if (typeof saved.mode === 'string') setMode(resolveProviderModeId(savedProvider, saved.mode))
         if (typeof saved.hasEarlierMessages === 'boolean') setHasEarlierMessages(saved.hasEarlierMessages)
         if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId ?? null)
         if (saved.executionTarget === 'local' || saved.executionTarget === 'cloud') setExecutionTarget(saved.executionTarget)
@@ -4066,7 +4170,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (currentProviderEntry.id !== provider) {
       setProvider(currentProviderEntry.id)
       setModel(currentProviderEntry.models[0]?.id ?? '')
-      setMode(modeOptions[0]?.id ?? EXTENSION_PROVIDER_MODE.id)
+      setMode(resolveProviderModeId(currentProviderEntry.id, settings?.chatProviderModes?.[currentProviderEntry.id]))
       return
     }
 
@@ -4075,25 +4179,23 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (!options.some(option => option.id === model)) {
       setModel(options[0].id)
     }
-  }, [currentProviderEntry, provider, modeOptions, model])
+  }, [currentProviderEntry, provider, settings?.chatProviderModes, model])
 
   useEffect(() => {
     if (!modeOptions.some(option => option.id === mode)) {
-      setMode(modeOptions[0]?.id ?? EXTENSION_PROVIDER_MODE.id)
+      setMode(resolveProviderModeId(provider, settings?.chatProviderModes?.[provider]))
     }
-  }, [modeOptions, mode])
+  }, [modeOptions, mode, provider, settings?.chatProviderModes])
 
   const handleProviderChange = useCallback((providerId: string) => {
     const nextProvider = providerEntryById.get(providerId)
     if (!nextProvider) return
     setProvider(nextProvider.id)
     setModel(nextProvider.models[0]?.id ?? '')
-    setMode(nextProvider.kind === 'builtin'
-      ? (PROVIDER_MODES[nextProvider.id as BuiltinProvider]?.[0]?.id ?? 'default')
-      : EXTENSION_PROVIDER_MODE.id)
+    setMode(resolveProviderModeId(nextProvider.id, settings?.chatProviderModes?.[nextProvider.id]))
     // Preserve thinking preference across providers
     setShowProviderMenu(false)
-  }, [providerEntryById])
+  }, [providerEntryById, settings?.chatProviderModes])
 
   const toggleMenu = useCallback((which: 'model' | 'provider' | 'insert' | 'mode' | 'thinking' | 'location' | 'branch' | 'context') => {
     setShowModelMenu(prev => { const next = which === 'model' ? !prev : false; if (!next) setModelFilter(''); return next })
@@ -5168,7 +5270,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     const rawActiveMode = state?.mode ?? mode
     const activeMode = activeModeOptions.some(option => option.id === rawActiveMode)
       ? rawActiveMode
-      : (activeModeOptions[0]?.id ?? EXTENSION_PROVIDER_MODE.id)
+      : resolveProviderModeId(activeProvider, settings?.chatProviderModes?.[activeProvider])
     const nextCloudHostId = executionTarget === 'cloud'
       ? (cloudHostId ?? activeCloudHost?.id ?? null)
       : null
@@ -5305,7 +5407,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       focusComposer()
       return false
     }
-  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, persistLatestState])
+  }, [provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry, tileId, connectedPeers, _workspaceDir, executionTarget, cloudHostId, activeCloudHost, settings?.execution, settings?.chatProviderModes, peerToolNames, focusComposer, setMessagesSafe, queuedTurns, effectiveAgentMode, autoAgentMode, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, persistLatestState])
 
   const logQueueEvent = useCallback((
     type: 'enqueue' | 'dispatch' | 'delete' | 'complete' | 'clear' | 'reorder',
@@ -7380,6 +7482,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               onToggleMenu={() => toggleMenu('mode')}
               onSelectMode={modeId => {
                 setMode(modeId)
+                onChatModePreferenceChange?.(provider, modeId)
                 setShowModeMenu(false)
               }}
             />
