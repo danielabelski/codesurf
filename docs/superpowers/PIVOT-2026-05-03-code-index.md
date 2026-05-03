@@ -19,25 +19,60 @@ The intended target is the **CodeSurf CLI**, which is the project at:
 
 ## Long-term architecture (must inform design choices)
 
-The user's statement, captured verbatim so the next session does not lose it:
+### The architectural NorthStar
 
-> "eventually this will merge with the daemon in codesurf so they will be one and the same then the desktop app will use this as it's daemon and cli too"
+> **The desktop is dumb as shit. The daemon is smart.**
 
-Decoded:
+All intelligence — agent loop, tools, MCP, indexing, planning, hooks, memory,
+inference — lives in **`grok-cli`** (the daemon). The desktop is a
+**UI shell**: it renders, takes input, and forwards everything to the daemon.
+It owns no logic that the CLI doesn't already own.
 
-1. **Now:** `grok-cli` (CLI/TUI) and the CodeSurf desktop app (`collaborator-clone`, Electron) are two separate codebases.
-2. **Soon:** `grok-cli` absorbs the CodeSurf daemon role. They become one repo / one runtime.
-3. **Eventually:** the desktop app stops being a standalone agent and becomes a **UI shell** that talks to the merged `grok-cli` (the daemon) — both for CLI invocations and for the desktop tile/panel UI.
+Putting code-index in the desktop app is wrong **twice**:
+1. Wrong product (this is CLI feature territory).
+2. Wrong **layer** (any logic in the dumb shell is misplaced even if the
+   product targeting were right).
 
-Implications for code-index:
+### The user's statements, captured verbatim
+
+> "eventually this will merge with the daemon in codesurf so they will be one
+> and the same then the desktop app will use this as it's daemon and cli too"
+
+> "so there is no need for it to be in desktop, and if it's in the electron
+> app and not the daemon well that's worse because the desktop itself should
+> be dumb as shit"
+
+### Decoded
+
+1. **Now:** `grok-cli` (CLI/TUI/daemon-in-progress) and the CodeSurf desktop
+   app (`collaborator-clone`, Electron) are two separate codebases.
+2. **Soon:** `grok-cli` absorbs / becomes the CodeSurf daemon. They unify.
+3. **Eventually:** the desktop app drops all logic and becomes a **rendering
+   shell** that talks to the merged `grok-cli`. The desktop owns no agent,
+   no tools, no index, no nothing — just UI.
+
+### Implications for code-index
 
 - **Build it in `grok-cli`.** That is where it will live forever.
-- **Keep `lib/*` as platform-agnostic Node modules** so they survive any process boundary the merge introduces. They already are.
-- **Expose the index via clean interfaces** (in-process function calls + MCP server) so the future desktop UI can consume the same data without re-implementation.
-- **Do NOT design for the desktop app's tile bridge.** That layer goes away or gets reshaped when the merge happens.
-- **Hook integration goes through `grok-cli/src/hooks/`** — the in-process hook system grok-cli already has.
+- **Keep `lib/*` as platform-agnostic Node modules** so they survive any
+  process boundary the merge introduces. They already are.
+- **Expose the index via clean interfaces** (in-process function calls + MCP
+  server). Any future desktop UI consumes those same interfaces — never
+  reimplements logic.
+- **Do NOT design for the desktop app's tile bridge.** That layer goes away
+  or gets reshaped when the desktop becomes a thin shell.
+- **Hook integration goes through `grok-cli/src/hooks/`** — the in-process
+  hook system grok-cli already has.
+- **Anything that could conceivably belong in the desktop UI must NOT live
+  there.** Index queries, ranking, freshness checks, parser invocations —
+  all daemon-side. The desktop only ever asks "give me the data, I'll render
+  it."
 
-YAGNI guard: do not pre-build for the merge. Design clean interfaces, ship for the CLI, let the merge happen when it happens.
+### YAGNI guard
+
+Do not pre-build for the merge. Design clean interfaces, ship for the CLI,
+let the merge happen when it happens. The "dumb desktop" principle is a
+**constraint that simplifies design**, not a feature to engineer toward.
 
 ---
 
@@ -166,4 +201,16 @@ User decision when they get there. Default to **A** until told otherwise.
 
 ## TL;DR for the next session
 
-> Wrong target. Code Index belongs in `grok-cli` (= the CodeSurf CLI), not in `collaborator-clone` (the desktop app). Future state: grok-cli will become the daemon the desktop app uses, so building in grok-cli is forward-compatible. ~600 LOC of pure Node modules salvages cleanly; the desktop-extension scaffolding (manifest, tile, bridge wiring) is throwaway. New spec + plan must be written in `grok-cli/docs/superpowers/` before any code moves.
+> **Wrong target, wrong layer.** Code Index belongs in `grok-cli` (= the
+> CodeSurf CLI/daemon), not in `collaborator-clone` (the Electron desktop
+> shell). The desktop is dumb as shit — all logic lives in the daemon.
+> Future state: grok-cli absorbs the daemon role, the desktop becomes a
+> pure UI shell that consumes daemon interfaces.
+>
+> ~600 LOC of pure-Node modules (storage, indexer, workspace) salvages
+> cleanly. The desktop-extension scaffolding (`extension.json`, tile UI,
+> `ctx.bus`/`ctx.mcp` bridge wiring, localhost HTTP ingest) is throwaway —
+> grok-cli's hooks run in-process so no HTTP server is needed.
+>
+> New spec + plan must be written in `grok-cli/docs/superpowers/` and
+> approved before any code moves.
