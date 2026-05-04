@@ -58,6 +58,7 @@ export default defineConfig({
           resolve: {
             alias: {
               '@': resolve(__dirname, 'src/renderer/src'),
+              '@contex/chat-bridge': resolve(__dirname, 'packages/contex-chat-bridge/src/index.ts'),
               extend: resolve(__dirname, 'src/renderer/src/vendor/extend.ts'),
               ...clusoAlias
             }

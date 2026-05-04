@@ -20,6 +20,7 @@ import { CODESURF_OPEN_LINK_EVENT, normalizeLocalPathCandidate, type CodeSurfOpe
 import { disposeChatTileRuntimeState, getChatTileRuntimeState, setChatTileRuntimeState } from './components/chatTileRuntimeState'
 import { disposeMediaTile } from './components/mediaTileRegistry'
 import { MainStatusBar } from './components/MainStatusBar'
+import { resolveProviderModeId } from './config/providers'
 
 const LazyPanelLayout = React.lazy(() => import('./components/PanelLayout').then(m => ({ default: m.PanelLayout })))
 
@@ -85,6 +86,7 @@ const LazyCodeTile = React.lazy(() => import('./components/CodeTile').then(m => 
 const LazyNoteTile = React.lazy(() => import('./components/NoteTile').then(m => ({ default: m.NoteTile })))
 const LazyStickyColorPicker = React.lazy(() => import('./components/NoteTile').then(m => ({ default: m.StickyColorPicker })))
 const LazyChatTile = React.lazy(() => import('./components/ChatTile').then(m => ({ default: m.ChatTile })))
+const LazyChatTileWebview = React.lazy(() => import('./components/ChatTileWebview').then(m => ({ default: m.ChatTileWebview })))
 const LazyFileTile = React.lazy(() => import('./components/FileTile').then(m => ({ default: m.FileTile })))
 const LazyFileExplorerTile = React.lazy(() => import('./components/FileExplorerTile'))
 const LazyConnectionPill = React.lazy(() => import('./components/ConnectionPill').then(m => ({ default: m.ConnectionPill })))
@@ -1525,6 +1527,18 @@ function App(): JSX.Element {
       return next
     })
   }, [])
+
+  const rememberChatProviderMode = useCallback((providerId: string, modeId: string) => {
+    const provider = providerId.trim()
+    if (!provider) return
+    const normalizedMode = resolveProviderModeId(provider, modeId)
+    updateAppSettings(current => ({
+      chatProviderModes: {
+        ...(current.chatProviderModes ?? {}),
+        [provider]: normalizedMode,
+      },
+    }))
+  }, [updateAppSettings])
 
   useEffect(() => {
     async function init(): Promise<void> {
@@ -3276,14 +3290,6 @@ function App(): JSX.Element {
     }
 
     const provider = typeof state.provider === 'string' ? state.provider : (session.provider || 'claude')
-    const defaultModeByProvider: Record<string, string> = {
-      claude: 'default',
-      codex: 'full-auto',
-      opencode: 'plan',
-      openclaw: 'default',
-      hermes: 'full',
-    }
-
     const nextChatState = {
       messages: Array.isArray(state.messages) ? state.messages : [],
       input: '',
@@ -3291,7 +3297,10 @@ function App(): JSX.Element {
       provider,
       model: typeof state.model === 'string' ? state.model : (session.model || ''),
       mcpEnabled: typeof state.mcpEnabled === 'boolean' ? state.mcpEnabled : true,
-      mode: defaultModeByProvider[provider] ?? 'default',
+      mode: resolveProviderModeId(
+        provider,
+        typeof state.mode === 'string' ? state.mode : settings.chatProviderModes?.[provider],
+      ),
       thinking: 'adaptive',
       agentMode: false,
       autoAgentMode: false,
@@ -3351,7 +3360,7 @@ function App(): JSX.Element {
       return
     }
     bringToFront(chatTileId)
-  }, [addTile, bringToFront, buildTileState, findMatchingChatTileIdForSession, focusTileInWorkspace, getNavigationLeaf, handleOpenFile, isPreviewTabReplaceable, mountTile, pinPreviewTab, rememberChatTileSessionMatch, replacePreviewTile])
+  }, [addTile, bringToFront, buildTileState, findMatchingChatTileIdForSession, focusTileInWorkspace, getNavigationLeaf, handleOpenFile, isPreviewTabReplaceable, mountTile, pinPreviewTab, rememberChatTileSessionMatch, replacePreviewTile, settings.chatProviderModes])
 
   const openSessionInChat = useCallback(async (session: SessionTargetEntry, options?: FocusOpenOptions) => {
     const targetWorkspace = await resolveWorkspaceForSession(session)
@@ -4019,8 +4028,14 @@ function App(): JSX.Element {
             label: peerTile?.label,
           }
         })
+        // Feature flag: when settings.experimental.chatTileWebview is true,
+        // mount the standalone apps/chat-app/ via iframe + bridge instead
+        // of the in-process React ChatTile. Same Props signature.
+        const useWebviewChat = (settings as { experimental?: { chatTileWebview?: boolean } } | undefined)
+          ?.experimental?.chatTileWebview === true
+        const ChatComponent = useWebviewChat ? LazyChatTileWebview : LazyChatTile
         return (
-          <LazyChatTile
+          <ChatComponent
             tileId={tile.id}
             workspaceId={workspace?.id ?? ''}
             workspaceDir={workspace?.path ?? ''}
@@ -4028,6 +4043,7 @@ function App(): JSX.Element {
             height={tile.height}
             reloadToken={chatReloadTokens[tile.id] ?? 0}
             settings={settings}
+            onChatModePreferenceChange={rememberChatProviderMode}
             isConnected={negotiatedDiscoveryState.connectedTileIds.has(tile.id)}
             isAutoConnected={tile.autoAgentMode && negotiatedDiscoveryState.connectedTileIds.has(tile.id)}
             connectedPeers={chatPeers}
@@ -5022,6 +5038,7 @@ function App(): JSX.Element {
                 height={Math.max(360, window.innerHeight - 34)}
                 reloadToken={chatReloadTokens[miniChatTile.id] ?? 0}
                 settings={settings}
+                onChatModePreferenceChange={rememberChatProviderMode}
                 isConnected={negotiatedDiscoveryState.connectedTileIds.has(miniChatTile.id)}
                 isAutoConnected={miniChatTile.autoAgentMode && negotiatedDiscoveryState.connectedTileIds.has(miniChatTile.id)}
                 connectedPeers={miniChatPeers}

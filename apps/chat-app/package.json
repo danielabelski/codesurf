@@ -1,0 +1,30 @@
+{
+  "name": "@contex/chat-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 5174"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.12.28",
+    "@assistant-ui/react-markdown": "^0.12.11",
+    "@contex/chat-bridge": "file:../../packages/contex-chat-bridge",
+    "ai": "^6.0.174",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tw-shimmer": "^0.4.11"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.0.0"
+  }
+}
