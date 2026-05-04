@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
@@ -32,6 +32,20 @@ async function writeJson(filePath, value) {
 async function makeTestTempDir(prefix) {
   await mkdir(TEST_TMP_ROOT, { recursive: true })
   return await mkdtemp(join(TEST_TMP_ROOT, prefix))
+}
+
+function git(args, cwd) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'CodeSurf Test',
+      GIT_AUTHOR_EMAIL: 'codesurf-test@example.com',
+      GIT_COMMITTER_NAME: 'CodeSurf Test',
+      GIT_COMMITTER_EMAIL: 'codesurf-test@example.com',
+    },
+  }).trim()
 }
 
 async function startDaemon(options = {}) {
@@ -137,6 +151,140 @@ test('daemon dashboard serves html and query-token auth works', async t => {
   assert.match(html, /\/dashboard\/api\/jobs/)
 })
 
+test('daemon permission routes persist, resolve, replace, and clear grants', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const workspaceA = join(daemon.homeDir, 'repos', 'alpha')
+  const workspaceB = join(daemon.homeDir, 'repos', 'beta')
+  await mkdir(workspaceA, { recursive: true })
+  await mkdir(workspaceB, { recursive: true })
+
+  let response = await daemon.request('/permissions')
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.path, join(daemon.homeDir, 'permissions.json'))
+  assert.deepEqual(response.payload.grants, [])
+
+  response = await daemon.request('/permissions/grant', {
+    body: {
+      provider: 'claude',
+      toolName: 'Write',
+      action: 'allow',
+      scope: 'today',
+      workspaceDir: workspaceA,
+      title: 'Write file',
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.grant.provider, 'claude')
+  assert.equal(response.payload.grant.toolName, 'Write')
+  assert.equal(response.payload.grant.action, 'allow')
+  assert.equal(response.payload.grant.scope, 'today')
+  assert.equal(response.payload.grant.workspaceDir, resolve(workspaceA))
+  assert.match(response.payload.grant.expiresAt, /^\d{4}-\d{2}-\d{2}T/)
+
+  response = await daemon.request('/permissions/resolve', {
+    body: { provider: 'claude', toolName: 'Write', workspaceDir: workspaceA },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.decision, 'allow')
+  assert.equal(response.payload.grant.workspaceDir, resolve(workspaceA))
+
+  response = await daemon.request('/permissions/resolve', {
+    body: { provider: 'claude', toolName: 'Write', workspaceDir: workspaceB },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.decision, null)
+  assert.equal(response.payload.grant, null)
+
+  response = await daemon.request('/permissions/grant', {
+    body: {
+      provider: 'claude',
+      toolName: 'Write',
+      action: 'deny',
+      workspaceDir: workspaceA,
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.grants.length, 1)
+  assert.equal(response.payload.grant.action, 'deny')
+  assert.equal(response.payload.grant.scope, 'never')
+
+  response = await daemon.request('/permissions/grant', {
+    body: {
+      provider: 'claude',
+      toolName: 'Bash',
+      action: 'allow',
+      scope: 'forever',
+      workspaceDir: null,
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.grant.workspaceDir, null)
+
+  response = await daemon.request('/permissions/resolve', {
+    body: { provider: 'claude', toolName: 'Bash', workspaceDir: workspaceB },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.decision, 'allow')
+  assert.equal(response.payload.grant.workspaceDir, null)
+
+  const store = await readJson(join(daemon.homeDir, 'permissions.json'))
+  assert.equal(store.version, 1)
+  assert.equal(store.grants.length, 2)
+
+  response = await daemon.request('/permissions/clear', {
+    body: { id: response.payload.grant.id },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.grants.length, 1)
+
+  response = await daemon.request('/permissions/clear', {
+    body: { all: true },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.payload.grants, [])
+})
+
+test('daemon permission routes ignore expired persisted grants', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  await writeJson(join(daemon.homeDir, 'permissions.json'), {
+    version: 1,
+    grants: [
+      {
+        id: 'perm-expired',
+        provider: 'claude',
+        toolName: 'Write',
+        action: 'allow',
+        scope: 'today',
+        workspaceDir: null,
+        title: null,
+        description: null,
+        blockedPath: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        expiresAt: '2026-01-01T00:00:01.000Z',
+      },
+    ],
+  })
+
+  let response = await daemon.request('/permissions')
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.payload.grants, [])
+
+  response = await daemon.request('/permissions/resolve', {
+    body: { provider: 'claude', toolName: 'Write', workspaceDir: daemon.homeDir },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.decision, null)
+  assert.equal(response.payload.grant, null)
+})
+
 test('daemon manages workspace and project lifecycle through persisted json state', async t => {
   const daemon = await startDaemon()
   t.after(async () => {
@@ -188,6 +336,61 @@ test('daemon manages workspace and project lifecycle through persisted json stat
   assert.equal(workspacesDoc.workspaces.length, 1)
   assert.equal(projectsDoc.projects.length, 1)
   assert.equal(projectsDoc.projects[0].path, folderB)
+})
+
+test('daemon renames projects and creates sibling git worktrees', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const sourceRepo = join(daemon.homeDir, 'repos', 'alpha')
+  await mkdir(sourceRepo, { recursive: true })
+  git(['init'], sourceRepo)
+  await writeFile(join(sourceRepo, 'README.md'), '# Alpha\n', 'utf8')
+  git(['add', 'README.md'], sourceRepo)
+  git(['commit', '-m', 'initial'], sourceRepo)
+
+  let response = await daemon.request('/workspace/create-from-folder', {
+    body: { folderPath: sourceRepo },
+  })
+  assert.equal(response.status, 200)
+  const workspaceId = response.payload.id
+
+  response = await daemon.request('/workspace/projects')
+  const sourceProject = response.payload.find(project => project.path === sourceRepo)
+  assert.ok(sourceProject)
+
+  response = await daemon.request('/workspace/project/rename', {
+    body: {
+      projectId: sourceProject.id,
+      name: 'Alpha Renamed',
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.ok, true)
+  assert.equal(response.payload.project.name, 'Alpha Renamed')
+
+  response = await daemon.request('/workspace/project/worktree', {
+    body: {
+      projectId: sourceProject.id,
+      name: 'feature/test-branch',
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.ok, true)
+  assert.equal(response.payload.branch, 'feature/test-branch')
+  assert.equal(response.payload.path, join(daemon.homeDir, 'repos', 'alpha-feature-test-branch'))
+  assert.equal(existsSync(join(response.payload.path, '.git')), true)
+
+  const workspace = await daemon.request('/workspace/active')
+  assert.equal(workspace.payload.id, workspaceId)
+  assert.deepEqual(workspace.payload.projectPaths, [sourceRepo, response.payload.path])
+
+  response = await daemon.request('/workspace/projects')
+  const byPath = new Map(response.payload.map(project => [project.path, project]))
+  assert.equal(byPath.get(sourceRepo).name, 'Alpha Renamed')
+  assert.equal(byPath.get(join(daemon.homeDir, 'repos', 'alpha-feature-test-branch')).name, 'feature/test-branch')
 })
 
 test('daemon creates, switches, and deletes workspaces while maintaining the active workspace', async t => {
@@ -322,6 +525,21 @@ test('daemon lists, reads, and deletes local session state while maintaining sum
   const summaryStat = await stat(summaryFile)
   assert.ok(summaryStat.isFile())
 
+  await writeJson(tileStateFile, {
+    ...state,
+    messages: [],
+  })
+
+  response = await daemon.request(`/session/local/list?workspaceId=${workspaceId}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.length, 0)
+  assert.equal(existsSync(summaryFile), false)
+
+  await writeJson(tileStateFile, state)
+  response = await daemon.request(`/session/local/list?workspaceId=${workspaceId}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.length, 1)
+
   response = await daemon.request(`/session/local/state?workspaceId=${workspaceId}&sessionEntryId=${encodeURIComponent(`codesurf-tile:tile-state-${tileId}.json`)}`)
   assert.equal(response.status, 200)
   assert.deepEqual(response.payload, state)
@@ -337,6 +555,56 @@ test('daemon lists, reads, and deletes local session state while maintaining sum
   assert.equal(existsSync(tileStateFile), false)
   assert.equal(existsSync(summaryFile), false)
   assert.equal(existsSync(join(contexDir, 'deleted', `tile-state-${tileId}.json`)), true)
+})
+
+test('daemon hides local tile sessions for tiles no longer present on the canvas', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const workspaceId = 'ws-orphaned-tile'
+  const liveTileId = 'live-chat'
+  const staleTileId = 'stale-chat'
+  const contexDir = join(daemon.homeDir, 'workspaces', workspaceId, '.contex')
+  const liveStateFile = join(contexDir, `tile-state-${liveTileId}.json`)
+  const staleStateFile = join(contexDir, `tile-state-${staleTileId}.json`)
+  const staleSummaryFile = join(contexDir, `tile-session-${staleTileId}.json`)
+
+  await writeJson(join(contexDir, 'canvas-state.json'), {
+    version: 1,
+    tiles: [{ id: liveTileId, type: 'chat' }],
+  })
+  await writeJson(liveStateFile, {
+    provider: 'codex',
+    messages: [
+      { role: 'user', content: 'live session' },
+      { role: 'assistant', content: 'still on the canvas' },
+    ],
+  })
+  await writeJson(staleStateFile, {
+    provider: 'codex',
+    messages: [
+      { role: 'user', content: 'stale session' },
+      { role: 'assistant', content: 'not on the canvas' },
+    ],
+  })
+  await writeJson(staleSummaryFile, {
+    version: 1,
+    tileId: staleTileId,
+    provider: 'codex',
+    title: 'stale session',
+    messageCount: 2,
+    updatedAt: Date.now(),
+  })
+
+  const response = await daemon.request(`/session/local/list?workspaceId=${workspaceId}`)
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.length, 1)
+  assert.equal(response.payload[0].id, `codesurf-tile:tile-state-${liveTileId}.json`)
+  assert.equal(response.payload[0].title, 'live session')
+  assert.equal(existsSync(staleStateFile), true)
+  assert.equal(existsSync(staleSummaryFile), false)
 })
 
 test('daemon settings routes round-trip settings and raw json', async t => {

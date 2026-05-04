@@ -184,11 +184,22 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
 async function runCodexTurn(spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
   const codexBin = getAgentPath('codex') || 'codex'
   const shellPath = getShellEnvPath()
+  const workspaceDir = workspaceDirFromSpawnRequest(spawnRequest)
+  const mode = spawnRequest.mode ?? 'default'
+  const modeArgs = mode === 'bypassPermissions' || mode === 'full-access'
+    ? ['--dangerously-bypass-approvals-and-sandbox']
+    : mode === 'auto' || mode === 'full-auto'
+      ? ['--full-auto']
+      : mode === 'read-only' || mode === 'plan'
+        ? ['--sandbox', 'read-only']
+        : ['--sandbox', 'workspace-write']
   return await new Promise<string>((resolve, reject) => {
     const proc = spawn(codexBin, [
       'exec',
       '--model', spawnRequest.model ?? 'gpt-5.3-codex',
-      '--approval-mode', spawnRequest.mode ?? 'read-only',
+      ...modeArgs,
+      '--skip-git-repo-check',
+      ...(workspaceDir ? ['-C', workspaceDir] : []),
       input.prompt,
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],

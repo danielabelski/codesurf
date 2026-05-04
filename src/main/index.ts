@@ -138,6 +138,45 @@ function loadRenderer(win: BrowserWindow, query?: Record<string, string>): void 
   }
 }
 
+function installRenderPerfProbe(win: BrowserWindow): void {
+  if (process.env.CODESURF_PERF_RENDER !== '1') return
+
+  const startedAt = performance.now()
+  const log = (name: string): void => {
+    console.log(`[perf:render] ${name}=${(performance.now() - startedAt).toFixed(1)}ms`)
+  }
+
+  win.webContents.once('dom-ready', () => log('domReady'))
+  win.once('ready-to-show', () => log('readyToShow'))
+  win.webContents.once('did-finish-load', async () => {
+    log('didFinishLoad')
+    try {
+      const metrics = await win.webContents.executeJavaScript(`
+        new Promise((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            const nav = performance.getEntriesByType('navigation')[0]
+            resolve({
+              domContentLoaded: nav?.domContentLoadedEventEnd ?? null,
+              loadEventEnd: nav?.loadEventEnd ?? null,
+              firstPaint: performance.getEntriesByName('first-paint')[0]?.startTime ?? null,
+              firstContentfulPaint: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
+              twoAnimationFrames: performance.now(),
+              nodeCount: document.querySelectorAll('*').length
+            })
+          }))
+        })
+      `, true)
+      console.log(`[perf:render] rendererMetrics=${JSON.stringify(metrics)}`)
+    } catch (error) {
+      console.warn('[perf:render] rendererMetrics failed:', error)
+    }
+
+    if (process.env.CODESURF_PERF_EXIT_AFTER_RENDER === '1') {
+      setTimeout(() => app.quit(), 250)
+    }
+  })
+}
+
 function resolveBundledExtensionDirs(): string[] {
   const envDir = process.env.CODESURF_BUNDLED_EXTENSIONS_DIR
   const candidates = [
@@ -311,6 +350,7 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
     }
   })
   const windowId = win.webContents.id
+  installRenderPerfProbe(win)
 
   win.on('ready-to-show', () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return

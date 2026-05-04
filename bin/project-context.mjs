@@ -1,23 +1,3 @@
-export function applyProjectContextPolicy({ executionTarget = 'local', projectContext = {} } = {}) {
-  const raw = {
-    workspaceDir: normalizeNullableString(projectContext.workspaceDir),
-    gitRemoteUrl: normalizeNullableString(projectContext.gitRemoteUrl),
-    gitBranch: normalizeNullableString(projectContext.gitBranch),
-    repoName: normalizeNullableString(projectContext.repoName),
-  }
-
-  const remoteBoundary = executionTarget === 'cloud'
-  const workspaceDir = remoteBoundary && raw.gitRemoteUrl ? null : raw.workspaceDir
-
-  return {
-    workspaceDir,
-    gitRemoteUrl: raw.gitRemoteUrl,
-    gitBranch: raw.gitBranch,
-    repoName: raw.repoName,
-  }
-}
-
-function normalizeNullableString(value) {
-  const text = String(value ?? '').trim()
-  return text ? text : null
-}
+// Re-export shim. Source of truth: packages/codesurf-daemon/bin/project-context.mjs
+// This file is kept so legacy imports (`from '../../bin/project-context.mjs'`) continue to resolve.
+export * from '../packages/codesurf-daemon/bin/project-context.mjs'

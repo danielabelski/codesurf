@@ -442,6 +442,8 @@ export interface AppSettings {
   linkOpenMode: 'browser-block' | 'external-browser'
   // Host-selection policy for chat and background execution.
   execution: ExecutionPreference
+  // Last selected chat execution / permission mode by provider.
+  chatProviderModes: Partial<Record<string, string>>
   // Daemon-owned background memory consolidation.
   autoDream: AutoDreamSettings
   // Local OpenAI-compat proxy endpoint remapping
@@ -563,6 +565,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: 'auto',
     hostId: null,
   },
+  chatProviderModes: {},
   autoDream: {
     enabled: true,
     minSessions: 3,
@@ -718,6 +721,21 @@ function resolveFonts(saved?: Partial<FontSettings>, legacyPrimary?: Partial<Fon
 
 export function withDefaultSettings(input: Partial<AppSettings> | null | undefined): AppSettings {
   const settings = input ?? {}
+  const rawChatProviderModes = settings.chatProviderModes
+    && typeof settings.chatProviderModes === 'object'
+    && !Array.isArray(settings.chatProviderModes)
+    ? settings.chatProviderModes
+    : {}
+  const chatProviderModes = Object.fromEntries(
+    Object.entries(rawChatProviderModes)
+      .filter((entry): entry is [string, string] => (
+        typeof entry[0] === 'string'
+        && entry[0].trim().length > 0
+        && typeof entry[1] === 'string'
+        && entry[1].trim().length > 0
+      ))
+      .map(([providerId, modeId]) => [providerId.trim(), modeId.trim()]),
+  ) as Partial<Record<string, string>>
   const generationProviders = Object.fromEntries(
     Object.entries({
       ...DEFAULT_SETTINGS.generationProviders,
@@ -742,6 +760,7 @@ export function withDefaultSettings(input: Partial<AppSettings> | null | undefin
       ...DEFAULT_SETTINGS.execution,
       ...(settings.execution ?? {}),
     },
+    chatProviderModes,
     autoDream: {
       ...DEFAULT_SETTINGS.autoDream,
       ...(settings.autoDream ?? {}),

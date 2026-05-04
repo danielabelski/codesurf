@@ -1198,8 +1198,8 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
                         <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.text.disabled, background: theme.surface.input, padding: '2px 8px', borderRadius: 999 }}>
                           {grant.provider}
                         </span>
-                        <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: theme.status.success, background: `${theme.status.success}14`, padding: '2px 8px', borderRadius: 999 }}>
-                          {grant.scope === 'forever' ? 'all time' : grant.scope}
+                        <span style={{ fontSize: Math.max(10, fonts.secondarySize - 1), color: grant.action === 'deny' ? theme.status.danger : theme.status.success, background: `${grant.action === 'deny' ? theme.status.danger : theme.status.success}14`, padding: '2px 8px', borderRadius: 999 }}>
+                          {grant.action === 'deny' ? 'blocked' : grant.scope === 'forever' ? 'all time' : grant.scope}
                         </span>
                       </div>
                       {grant.description && (

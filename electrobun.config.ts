@@ -22,6 +22,7 @@ export default {
       'electrobun/helpers': 'helpers',
       'bin': 'bin',
       'packages/codesurf-dreaming': 'packages/codesurf-dreaming',
+      'packages/codesurf-daemon': 'packages/codesurf-daemon',
       'resources/icon.png': 'resources/icon.png',
     },
     buildFolder: 'build-electrobun',

@@ -1,0 +1,44 @@
+{
+  "name": "@codesurf/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CodeSurf local HTTP daemon (codesurfd) and process supervisor. Used by both the desktop app and the codesurf TUI.",
+  "main": "./src/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json",
+    "./manager": "./src/manager.ts",
+    "./client": "./src/client.ts",
+    "./paths": "./src/paths.ts",
+    "./bin/codesurfd": "./bin/codesurfd.mjs",
+    "./bin/chat-jobs": "./bin/chat-jobs.mjs",
+    "./bin/checkpoints": "./bin/checkpoints.mjs",
+    "./bin/memory-loader": "./bin/memory-loader.mjs",
+    "./bin/skills-index": "./bin/skills-index.mjs",
+    "./bin/file-references": "./bin/file-references.mjs",
+    "./bin/session-index": "./bin/session-index.mjs",
+    "./bin/context-buckets": "./bin/context-buckets.mjs",
+    "./bin/project-context": "./bin/project-context.mjs",
+    "./bin/instruction-context": "./bin/instruction-context.mjs"
+  },
+  "bin": {
+    "codesurfd": "./bin/codesurfd.mjs"
+  },
+  "files": [
+    "bin/",
+    "vendor/",
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.114"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

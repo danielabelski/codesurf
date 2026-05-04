@@ -72,25 +72,27 @@ export const DEFAULT_PROVIDER_ID: BuiltinProvider = 'claude'
 
 export const PROVIDER_MODES: Record<BuiltinProvider, ModeOption[]> = {
   claude: [
-    { id: 'bypassPermissions', label: 'Bypass', description: 'Full auto, no approval', color: '#e54d2e' },
-    { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve file edits', color: '#ffb432' },
     { id: 'default', label: 'Default', description: 'Ask before risky actions', color: '#3fb950' },
+    { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve file edits', color: '#ffb432' },
     { id: 'plan', label: 'Plan', description: 'Plan only, no execution', color: '#58a6ff' },
+    { id: 'bypassPermissions', label: 'Bypass', description: 'Full auto, no approval', color: '#e54d2e' },
   ],
   codex: [
-    { id: 'full-access', label: 'Full Access', description: 'Full auto, no approval', color: '#e54d2e' },
+    { id: 'default', label: 'Default', description: 'Ask before risky actions', color: '#3fb950' },
     { id: 'auto', label: 'Auto', description: 'Auto-approve safe actions', color: '#ffb432' },
     { id: 'read-only', label: 'Read Only', description: 'No file modifications', color: '#58a6ff' },
+    { id: 'full-access', label: 'Full Access', description: 'Full auto, no approval', color: '#e54d2e' },
   ],
   opencode: [
-    { id: 'plan', label: 'Plan', description: 'Plan only, no execution', color: '#58a6ff' },
-    { id: 'build', label: 'Build', description: 'Execute and build code', color: '#ffb432' },
-  ],
-  openclaw: [
-    { id: 'full-auto', label: 'Full Auto', description: 'Full auto, no approval', color: '#e54d2e' },
-    { id: 'auto', label: 'Auto', description: 'Auto-approve safe actions', color: '#ffb432' },
     { id: 'default', label: 'Default', description: 'Ask before risky actions', color: '#3fb950' },
     { id: 'plan', label: 'Plan', description: 'Plan only, no execution', color: '#58a6ff' },
+    { id: 'bypassPermissions', label: 'Bypass', description: 'Full auto, no approval', color: '#e54d2e' },
+  ],
+  openclaw: [
+    { id: 'default', label: 'Default', description: 'Ask before risky actions', color: '#3fb950' },
+    { id: 'auto', label: 'Auto', description: 'Auto-approve safe actions', color: '#ffb432' },
+    { id: 'plan', label: 'Plan', description: 'Plan only, no execution', color: '#58a6ff' },
+    { id: 'full-auto', label: 'Full Auto', description: 'Full auto, no approval', color: '#e54d2e' },
   ],
   hermes: [
     { id: 'full', label: 'Full', description: 'All toolsets enabled', color: '#e54d2e' },
@@ -105,6 +107,20 @@ export const EXTENSION_PROVIDER_MODE: ModeOption = {
   label: 'Proxy',
   description: 'Connected extension transport',
   color: '#58a6ff',
+}
+
+export function getProviderModeOptions(providerId: string): ModeOption[] {
+  return isBuiltinProvider(providerId)
+    ? PROVIDER_MODES[providerId]
+    : [EXTENSION_PROVIDER_MODE]
+}
+
+export function resolveProviderModeId(providerId: string, preferredModeId?: string | null): string {
+  const options = getProviderModeOptions(providerId)
+  const preferred = typeof preferredModeId === 'string' ? preferredModeId.trim() : ''
+  return options.find(option => option.id === preferred)?.id
+    ?? options[0]?.id
+    ?? EXTENSION_PROVIDER_MODE.id
 }
 
 export const THINKING_OPTIONS: ThinkingOption[] = [

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitAny": false,
+    "noImplicitReturns": true,
+    "noEmit": true,
+    "paths": {
+      "*": ["./*"],
+      "@/*": ["./src/renderer/src/*"],
+      "@contex/chat-bridge": ["./packages/contex-chat-bridge/src/index.ts"],
+      "@contex/chat-bridge/*": ["./packages/contex-chat-bridge/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "packages/**/*.ts"],
+  "exclude": ["node_modules", "dist", "out"]
+}

@@ -5,15 +5,58 @@
  */
 import React, { useEffect, useRef } from 'react'
 import { Streamdown } from 'streamdown'
-import { code } from '@streamdown/code'
 import 'streamdown/styles.css'
 import { useTheme } from '../../ThemeContext'
 import { useAppFonts } from '../../FontContext'
 import { useThemeTokens } from '../../theme-tokens'
 import { dispatchOpenLink, findAnchorFromEventTarget, normalizeLocalPathCandidate } from '../../utils/links'
 
-// --- Streamdown plugins (singleton) ------------------------------------------------
-export const streamdownPlugins = { code }
+// --- Streamdown plugins -----------------------------------------------------------
+// Keep the heavy @streamdown/code/Shiki path out of the initial ChatTile chunk.
+// Most chat turns are prose/tool chips; loading the syntax highlighter eagerly
+// pulled ~1.3MB into streamdown-utils plus hundreds of language chunks. We only
+// import it once a fenced code block actually appears, then cache it globally.
+export const streamdownPlugins: Record<string, never> = {}
+
+const EMPTY_STREAMDOWN_PLUGINS = Object.freeze({})
+const FENCED_CODE_RE = /(^|\n)\s*(```|~~~)/
+let cachedCodePlugin: unknown | null = null
+let codePluginPromise: Promise<unknown> | null = null
+
+function loadCodePlugin(): Promise<unknown> {
+  if (!codePluginPromise) {
+    codePluginPromise = import('@streamdown/code').then(mod => {
+      cachedCodePlugin = mod.code
+      return cachedCodePlugin
+    })
+  }
+  return codePluginPromise
+}
+
+function useStreamdownPlugins(text: string): Record<string, unknown> {
+  const needsCodePlugin = FENCED_CODE_RE.test(text)
+  const [codePlugin, setCodePlugin] = React.useState<unknown | null>(() => needsCodePlugin ? cachedCodePlugin : null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!needsCodePlugin) {
+      if (codePlugin) setCodePlugin(null)
+      return () => { cancelled = true }
+    }
+    if (cachedCodePlugin) {
+      setCodePlugin(cachedCodePlugin)
+      return () => { cancelled = true }
+    }
+    void loadCodePlugin().then(plugin => {
+      if (!cancelled) setCodePlugin(plugin)
+    })
+    return () => { cancelled = true }
+  }, [needsCodePlugin, codePlugin])
+
+  return React.useMemo(() => {
+    return needsCodePlugin && codePlugin ? { code: codePlugin } : EMPTY_STREAMDOWN_PLUGINS
+  }, [needsCodePlugin, codePlugin])
+}
 
 // --- Shimmer / animation keyframes (injected once globally) -----------------------
 const SHIMMER_STYLE_ID = 'shared-streamdown-shimmer'
@@ -592,6 +635,7 @@ function ChatStreamdown({ text, isStreaming, className }: {
   className?: string
 }): JSX.Element {
   const tokens = useThemeTokens()
+  const plugins = useStreamdownPlugins(text)
   return (
     <Streamdown
       className={`chat-md ${className ?? ''}`}
@@ -604,7 +648,7 @@ function ChatStreamdown({ text, isStreaming, className }: {
         // block-level layout. Margin mimics default browser <p> spacing.
         p: ({ className, ...rest }: any) => <div className={`chat-md-p ${className ?? ''}`} {...rest} />,
       }}
-      plugins={streamdownPlugins}
+      plugins={plugins as any}
       mode={isStreaming ? 'streaming' : 'static'}
       shikiTheme={tokens.shikiTheme}
       controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}

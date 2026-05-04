@@ -1,0 +1,16 @@
+# Project Preferences
+- Convert images from HEIC to PNG before reading/opening them. Confidence: 0.85
+- Assume all images need conversion before processing. Confidence: 0.80
+- Commit all uncommitted changes before starting new operations or tasks. Confidence: 0.75
+- Maintain exact functionality and parity when porting code from other projects. Confidence: 0.80
+- Do not approximate or simplify when porting features. Confidence: 0.75
+- Use "blocks" for tiles, "fullview" for tabbed mode, "layouts" for layout groups. Confidence: 0.80
+- Keep connection graph computation separate from visual rendering — tiles in layouts/fullview must preserve peer connections even when visual wires are hidden. Confidence: 0.80
+- When user says "continue", "keep going", or "crack on", proceed autonomously without asking for confirmation. Confidence: 0.80
+- Build real working implementations, not UI mocks or scaffolding — actual vectorization, actual API calls, real functionality. Confidence: 0.85
+- When user says "yes do it" or "do it", execute immediately without further discussion. Confidence: 0.75
+- When user says "going to bed" or "crack on going to bed", work autonomously overnight without waiting for responses. Confidence: 0.80
+- When user says "stop asking me" or "you should be checking", investigate logs and debug autonomously without requesting information. Confidence: 0.70
+- When user prefixes requests with "just" or "very simple", provide straightforward solutions without overcomplicating. Confidence: 0.65
+- When user says "ok" after a plan, proceed immediately with implementation. Confidence: 0.70
+- When user says "nice" or "that's awesome", treat as confirmation to continue with related work. Confidence: 0.60

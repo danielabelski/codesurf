@@ -44,6 +44,7 @@ import {
   buildHermesChatArgs,
   sanitizeAgentCliDiagnostic,
 } from '../agents/agent-cli-contracts'
+import { buildOpenCodeSessionPermissions } from '../agents/opencode-permissions'
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
 // externalizeDepsPlugin converts dynamic import() to require() which can't
 // resolve ESM-only exports — wrap in try/catch so the app still starts.
@@ -1876,6 +1877,7 @@ function chatClaude(req: ChatRequest): void {
     persistSession: true,
     includePartialMessages: true,
     permissionMode: permMode as any,
+    ...(permMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {}),
     thinking: thinkingConfig as any,
     // AskUserQuestion must be intercepted regardless of permission mode so the
     // agent's question actually reaches the user. Everything else honours permMode.
@@ -2586,15 +2588,19 @@ function chatCodex(req: ChatRequest): void {
     '--model',
     req.model,
   ]
-  const codexMode = req.mode === 'auto' || req.mode === 'read-only' || req.mode === 'full-access'
+  const codexMode = req.mode === 'default' || req.mode === 'auto' || req.mode === 'read-only' || req.mode === 'full-access'
     ? req.mode
-    : 'full-access'
+    : 'default'
   if (codexMode === 'full-access') {
     args.push('--dangerously-bypass-approvals-and-sandbox')
   } else if (codexMode === 'auto') {
     args.push('--full-auto')
   } else {
-    args.push('--sandbox', 'read-only')
+    if (codexMode === 'default') {
+      args.push('--sandbox', 'workspace-write')
+    } else {
+      args.push('--sandbox', 'read-only')
+    }
   }
   args.push(
     // App-launched Codex runs should not inherit user-global MCP servers.
@@ -2861,26 +2867,7 @@ function chatOpencode(req: ChatRequest): void {
       // 2. Create or reuse session
       let sessionID = existingSessionId
       if (!sessionID) {
-        // Map UI mode to permissions — 'build' allows everything, 'plan' denies writes
-        const isPlan = req.mode === 'plan'
-        const permission = isPlan
-          ? [
-              { permission: 'read', pattern: '*', action: 'allow' as const },
-              { permission: 'list', pattern: '*', action: 'allow' as const },
-              { permission: 'grep', pattern: '*', action: 'allow' as const },
-              { permission: 'glob', pattern: '*', action: 'allow' as const },
-              { permission: 'edit', pattern: '*', action: 'deny' as const },
-              { permission: 'bash', pattern: '*', action: 'deny' as const },
-            ]
-          : [
-              { permission: 'read', pattern: '*', action: 'allow' as const },
-              { permission: 'edit', pattern: '*', action: 'allow' as const },
-              { permission: 'list', pattern: '*', action: 'allow' as const },
-              { permission: 'grep', pattern: '*', action: 'allow' as const },
-              { permission: 'glob', pattern: '*', action: 'allow' as const },
-              { permission: 'bash', pattern: '*', action: 'allow' as const },
-              { permission: 'task', pattern: '*', action: 'allow' as const },
-            ]
+        const permission = buildOpenCodeSessionPermissions(req.mode)
         const sessionRes = await client.session.create({
           title: `Chat ${req.cardId.slice(0, 8)}`,
           permission,
@@ -2892,7 +2879,11 @@ function chatOpencode(req: ChatRequest): void {
           throw new Error('Failed to create OpenCode session — no session ID returned')
         }
         opencodeSessionIds.set(req.cardId, sessionID)
-        log('opencode session created:', sessionID, isPlan ? '(plan mode)' : '(build mode)')
+        log('opencode session created:', sessionID, req.mode === 'plan'
+          ? '(plan mode)'
+          : req.mode === 'bypassPermissions'
+            ? '(bypass mode)'
+            : '(default ask mode)')
       }
 
       // 3. Subscribe to SSE + send prompt concurrently
@@ -3862,6 +3853,21 @@ export function registerChatIPC(): void {
     }
     const delivered = resolvePendingToolPermission(payload.cardId, payload.toolId ?? null, payload.decision)
     if (!delivered) {
+      const activeDaemon = activeDaemonStreams.get(payload.cardId)
+      if (activeDaemon) {
+        try {
+          return await hostRequest(activeDaemon.host, '/chat/job/permission/answer', {
+            body: {
+              jobId: activeDaemon.jobId,
+              toolId: payload.toolId ?? '',
+              decision: payload.decision,
+            },
+          })
+        } catch (error) {
+          log('chat:answerToolPermission daemon reply failed:', error instanceof Error ? error.message : String(error))
+          return { ok: false, error: error instanceof Error ? error.message : String(error) }
+        }
+      }
       log('chat:answerToolPermission: no pending request for', payload.cardId, payload.toolId)
       return { ok: false, error: 'no pending request' }
     }

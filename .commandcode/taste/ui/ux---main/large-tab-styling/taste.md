@@ -1,0 +1,17 @@
+# UI/UX - Main/Large Tab Styling
+- Position activity indicators in the left gutter (dead space), not inline with titles. Confidence: 0.90
+- Remove bottom borders from large/main tabs when requested. Confidence: 0.85
+- Match main tab background color to canvas/main section background for visual consistency. Confidence: 0.90
+- Align inactive tab text vertically with active tab text to prevent jumping on selection. Confidence: 0.85
+- Set main panel top-left corner radius to 0 when first tab is selected and sidebar is expanded. Confidence: 0.80
+- Apply precise pixel-level positioning adjustments (e.g., 3px left shift) to tab containers. Confidence: 0.75
+- When user attaches screenshots with visual UI instructions, prioritize the visual reference to identify correct target element. Confidence: 0.75
+- Position visual indicators (circles/dots) in dead space to the left rather than shifting content. Confidence: 0.85
+- Match text positioning between selected and unselected tab states to prevent jumping. Confidence: 0.90
+- Remove bottom borders from large tabs when requested. Confidence: 0.85
+- Tab background should match canvas/main section background color. Confidence: 0.80
+- Show visual indicators (circles/dots) only when there are unread updates, not always. Confidence: 0.85
+- Fix pixel-perfect alignment for tab close buttons and text to prevent movement on click. Confidence: 0.90
+- Chat interface must be visible under the "What do you want to build today?" starter message. Confidence: 0.85
+- Use Codex-style layout: Pencil icon for New Chat as first option, then Search below it. Confidence: 0.80
+- New Chat should open with starter composer interface based on selected project/workspace. Confidence: 0.75

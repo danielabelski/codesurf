@@ -128,6 +128,194 @@ test('daemon Claude bypass mode still creates a checkpoint before allowing Write
   assert.equal(timeline.some(event => event.type === 'tool_summary' && event.toolName === 'Checkpoint saved' && /before Write/.test(event.text)), true)
 })
 
+test('daemon Claude foreground jobs ask for tool permission and persist scoped approvals', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-claude-permission-prompt-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const targetFile = join(workspaceDir, 'notes.txt')
+  await mkdir(workspaceDir, { recursive: true })
+  await writeFile(targetFile, 'before prompt write\n', 'utf8')
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const manager = createChatJobManager({
+    homeDir,
+    checkpointStore: {
+      createCheckpoint() {
+        return { ok: true, checkpoint: { id: 'checkpoint-after-permission' } }
+      },
+    },
+    claudeQuery: ({ options }) => (async function* () {
+      assert.equal(options.permissionMode, 'default')
+      const decision = await options.canUseTool('Write', { file_path: 'notes.txt', content: 'after prompt write\n' }, { toolUseID: 'toolu-prompt-write' })
+      assert.equal(decision.behavior, 'allow')
+      await writeFile(targetFile, 'after prompt write\n', 'utf8')
+      yield {
+        type: 'result',
+        result: 'done',
+        session_id: 'claude-thread-permission-prompt',
+        total_cost_usd: 0,
+        num_turns: 1,
+      }
+    })(),
+  })
+
+  const job = await manager.startJob({
+    cardId: 'chat-claude-permission-prompt',
+    workspaceId: 'remote-claude-permission-prompt-workspace',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'default',
+    workspaceDir,
+    messages: [
+      { role: 'user', content: 'write notes with prompt' },
+    ],
+  })
+
+  await waitFor(async () => {
+    const timeline = await readTimeline(homeDir, job.id).catch(() => [])
+    return timeline.find(event => event.type === 'tool_permission_request')
+  })
+
+  assert.deepEqual(manager.answerToolPermission(job.id, 'toolu-prompt-write', 'today'), { ok: true })
+
+  const completed = await waitForCompletedJob(manager, job.id)
+  assert.equal(completed.status, 'completed')
+  assert.equal(await readFile(targetFile, 'utf8'), 'after prompt write\n')
+
+  const timeline = await readTimeline(homeDir, job.id)
+  assert.equal(timeline.some(event => event.type === 'tool_permission_request' && event.toolName === 'Write'), true)
+  assert.equal(timeline.some(event => event.type === 'tool_permission_resolved' && event.decision === 'today'), true)
+
+  const permissionStore = JSON.parse(await readFile(join(homeDir, 'permissions.json'), 'utf8'))
+  assert.equal(permissionStore.grants.length, 1)
+  assert.equal(permissionStore.grants[0].provider, 'claude')
+  assert.equal(permissionStore.grants[0].toolName, 'Write')
+  assert.equal(permissionStore.grants[0].action, 'allow')
+  assert.equal(permissionStore.grants[0].scope, 'today')
+  assert.equal(permissionStore.grants[0].workspaceDir, workspaceDir)
+})
+
+test('daemon Claude grant-only mode denies ungranted tools without prompting', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-claude-grant-only-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const manager = createChatJobManager({
+    homeDir,
+    checkpointStore: {
+      createCheckpoint() {
+        return { ok: true, checkpoint: { id: 'checkpoint-should-not-run' } }
+      },
+    },
+    claudeQuery: ({ options }) => (async function* () {
+      assert.equal(options.permissionMode, 'default')
+      const decision = await options.canUseTool('Write', { file_path: 'notes.txt', content: 'after\n' }, { toolUseID: 'toolu-grant-only-write' })
+      assert.equal(decision.behavior, 'deny')
+      assert.match(decision.message, /Permission required for Write/)
+      yield {
+        type: 'result',
+        result: 'denied',
+        session_id: 'claude-thread-grant-only',
+        total_cost_usd: 0,
+        num_turns: 1,
+      }
+    })(),
+  })
+
+  const job = await manager.startJob({
+    cardId: 'chat-claude-grant-only',
+    workspaceId: 'remote-claude-grant-only-workspace',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'dontAsk',
+    workspaceDir,
+    messages: [
+      { role: 'user', content: 'write notes without a stored grant' },
+    ],
+  })
+
+  const completed = await waitForCompletedJob(manager, job.id)
+  assert.equal(completed.status, 'completed')
+
+  const timeline = await readTimeline(homeDir, job.id)
+  assert.equal(timeline.some(event => event.type === 'tool_permission_request'), false)
+  assert.equal(timeline.some(event => event.type === 'tool_start' && event.toolName === 'Checkpoint saved'), false)
+})
+
+test('daemon Claude workspace jobs honor persisted global permission grants', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-claude-global-permission-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const targetFile = join(workspaceDir, 'notes.txt')
+  await mkdir(workspaceDir, { recursive: true })
+  await writeFile(targetFile, 'before global grant write\n', 'utf8')
+  await writeFile(join(homeDir, 'permissions.json'), `${JSON.stringify({
+    version: 1,
+    grants: [
+      {
+        id: 'perm-global-write',
+        provider: 'claude',
+        toolName: 'Write',
+        action: 'allow',
+        scope: 'forever',
+        workspaceDir: null,
+        title: null,
+        description: null,
+        blockedPath: null,
+        createdAt: new Date().toISOString(),
+        expiresAt: null,
+      },
+    ],
+  }, null, 2)}\n`, 'utf8')
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const manager = createChatJobManager({
+    homeDir,
+    checkpointStore: {
+      createCheckpoint() {
+        return { ok: true, checkpoint: { id: 'checkpoint-global-permission' } }
+      },
+    },
+    claudeQuery: ({ options }) => (async function* () {
+      const decision = await options.canUseTool('Write', { file_path: 'notes.txt', content: 'after global grant write\n' }, { toolUseID: 'toolu-global-write' })
+      assert.equal(decision.behavior, 'allow')
+      await writeFile(targetFile, 'after global grant write\n', 'utf8')
+      yield {
+        type: 'result',
+        result: 'done',
+        session_id: 'claude-thread-global-permission',
+        total_cost_usd: 0,
+        num_turns: 1,
+      }
+    })(),
+  })
+
+  const job = await manager.startJob({
+    cardId: 'chat-claude-global-permission',
+    workspaceId: 'remote-claude-global-permission-workspace',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'default',
+    workspaceDir,
+    messages: [
+      { role: 'user', content: 'write notes with global grant' },
+    ],
+  })
+
+  const completed = await waitForCompletedJob(manager, job.id)
+  assert.equal(completed.status, 'completed')
+  assert.equal(await readFile(targetFile, 'utf8'), 'after global grant write\n')
+
+  const timeline = await readTimeline(homeDir, job.id)
+  assert.equal(timeline.some(event => event.type === 'tool_permission_request'), false)
+  assert.equal(timeline.some(event => event.type === 'tool_start' && event.toolName === 'Checkpoint saved'), true)
+})
+
 test('daemon Claude denies a risky Write when no checkpointable file path is provided', async t => {
   const homeDir = await makeTestTempDir('chat-jobs-claude-checkpoint-missing-path-')
   const workspaceDir = join(homeDir, 'workspace')

@@ -744,7 +744,13 @@ const CHAT_CHIP_ROW_STYLE: React.CSSProperties = {
   maxWidth: '100%',
   overflow: 'visible',
 }
-const CHAT_RENDER_WINDOW = 80
+const CHAT_OFFSCREEN_MESSAGE_STYLE: React.CSSProperties = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: '0 160px',
+}
+const CHAT_RENDER_PAGE_SIZE = 20
+const CHAT_INITIAL_RENDER_PAGES = 2
+const CHAT_INITIAL_RENDER_WINDOW = CHAT_RENDER_PAGE_SIZE * CHAT_INITIAL_RENDER_PAGES
 const LINKED_SESSION_LIVE_TAIL_LIMIT = 40
 const LINKED_SESSION_HISTORY_PAGE_SIZE = 20
 const LINKED_SESSION_HISTORY_LOAD_THRESHOLD = 32
@@ -2014,7 +2020,7 @@ const ChatMessageContent = React.memo(({
   // through the normal markdown pipeline.
   const accent = theme.accent.base
   const textColor = theme.text.primary
-  const segments = splitInsightSegments(bodyText)
+  const segments = useMemo(() => splitInsightSegments(bodyText), [bodyText])
   const renderedBody = segments.length === 1 && segments[0].kind === 'md'
     ? <ChatMarkdown text={segments[0].text} isStreaming={isStreaming} className={className} />
     : (
@@ -2518,6 +2524,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   // list. They stay out of the live model context and persistence hot path,
   // but render with the normal chat UI once loaded.
   const [historicalMessages, setHistoricalMessages] = useState<ChatMessage[]>([])
+  const [visibleMessageLimit, setVisibleMessageLimit] = useState(CHAT_INITIAL_RENDER_WINDOW)
   const [loadingEarlier, setLoadingEarlier] = useState(false)
   const [earlierLoadError, setEarlierLoadError] = useState<string | null>(null)
   const pendingHistoryPrependRef = useRef<{ previousHeight: number; previousTop: number } | null>(null)
@@ -2948,10 +2955,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       combined = messages
     }
 
-    if (pagedLinkedHistoryEnabled) return combined
-    if (combined.length <= CHAT_RENDER_WINDOW) return combined
-    return combined.slice(-CHAT_RENDER_WINDOW)
-  }, [historicalMessages, messages, pagedLinkedHistoryEnabled])
+    if (combined.length <= visibleMessageLimit) return combined
+    return combined.slice(-visibleMessageLimit)
+  }, [historicalMessages, messages, visibleMessageLimit])
 
   const mergeDrawerFileChanges = useCallback((fileChanges: FileChange[]): FileChange[] => {
     const merged = new Map<string, FileChange>()
@@ -2969,9 +2975,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     return Array.from(merged.values())
   }, [])
 
-  const hiddenMessageCount = pagedLinkedHistoryEnabled
-    ? 0
-    : Math.max(0, messages.length - renderedMessages.length)
+  const hiddenMessageCount = Math.max(0, historicalMessages.length + messages.length - renderedMessages.length)
   const latestChangeDrawer = useMemo<LatestChangeDrawerState | null>(() => {
     const batchMessages: ChatMessage[] = []
     for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
@@ -4345,16 +4349,23 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       if (stickToBottomRef.current) stickToBottomRef.current = false
       syncScrollToLatestVisibility(true)
     } else if (isNearLatest(el)) {
-      // At or near bottom → (re-)stick. This makes "scroll back down to
-      // follow" work without needing to click a button.
+      // At or near bottom → (re-)stick and collapse the rendered transcript
+      // back to the latest two pages. Older messages remain in state/session,
+      // but React stops reconciling DOM the user cannot see.
       if (!stickToBottomRef.current) stickToBottomRef.current = true
+      if (visibleMessageLimit !== CHAT_INITIAL_RENDER_WINDOW) setVisibleMessageLimit(CHAT_INITIAL_RENDER_WINDOW)
       syncScrollToLatestVisibility(false)
     }
 
-    if (pagedLinkedHistoryEnabled && hasEarlierMessages && !loadingEarlier && el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD) {
-      void loadEarlierMessagesRef.current()
+    if (el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD && !loadingEarlier) {
+      pendingHistoryPrependRef.current = { previousHeight: el.scrollHeight, previousTop: el.scrollTop }
+      if (hiddenMessageCount > 0) {
+        setVisibleMessageLimit(prev => prev + CHAT_RENDER_PAGE_SIZE)
+      } else if (pagedLinkedHistoryEnabled && hasEarlierMessages) {
+        void loadEarlierMessagesRef.current()
+      }
     }
-  }, [isNearLatest, syncScrollToLatestVisibility, pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier])
+  }, [isNearLatest, syncScrollToLatestVisibility, pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier, hiddenMessageCount, visibleMessageLimit])
 
   useLayoutEffect(() => {
     const pending = pendingHistoryPrependRef.current
@@ -4363,16 +4374,21 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     pendingHistoryPrependRef.current = null
     const delta = el.scrollHeight - pending.previousHeight
     el.scrollTop = pending.previousTop + delta
-  }, [historicalMessages])
+  }, [historicalMessages, visibleMessageLimit])
 
   useEffect(() => {
-    if (!pagedLinkedHistoryEnabled || !hasEarlierMessages || loadingEarlier) return
+    if (loadingEarlier) return
     const el = messagesRef.current
     if (!el) return
-    if (el.scrollHeight <= el.clientHeight + LINKED_SESSION_HISTORY_LOAD_THRESHOLD) {
+    if (el.scrollHeight > el.clientHeight + LINKED_SESSION_HISTORY_LOAD_THRESHOLD) return
+
+    pendingHistoryPrependRef.current = { previousHeight: el.scrollHeight, previousTop: el.scrollTop }
+    if (hiddenMessageCount > 0) {
+      setVisibleMessageLimit(prev => prev + CHAT_RENDER_PAGE_SIZE)
+    } else if (pagedLinkedHistoryEnabled && hasEarlierMessages) {
       void loadEarlierMessagesRef.current()
     }
-  }, [pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier, historicalMessages.length, messages.length])
+  }, [pagedLinkedHistoryEnabled, hasEarlierMessages, loadingEarlier, historicalMessages.length, messages.length, hiddenMessageCount, visibleMessageLimit])
 
   // Tracks whether a block-note composer is currently active (open AND has
   // non-empty text). While true, auto-scroll is suppressed so the viewport
@@ -6017,7 +6033,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
               fontSize: 11,
               textAlign: 'center',
             }}>
-              Showing the most recent {renderedMessages.length} messages to keep this block responsive. {hiddenMessageCount} older message{hiddenMessageCount === 1 ? '' : 's'} are still preserved in compacted session state.
+              Showing the latest {renderedMessages.length} messages. Scroll up to reveal older pages; {hiddenMessageCount} older message{hiddenMessageCount === 1 ? '' : 's'} are preserved but not mounted.
             </div>
           )}
 
@@ -6287,6 +6303,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
                 marginBottom: msg.role === 'user' ? 5 : 0,
                 gap: 6,
+                ...(isLiveMessage ? {} : CHAT_OFFSCREEN_MESSAGE_STYLE),
               }}>
                 {/* Thinking block — show the pre-tools indicator only when there
                     are no inline thinking content-blocks yet, so we don't render

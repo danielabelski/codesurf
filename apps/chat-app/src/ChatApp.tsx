@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { onContext, callHost, subscribe, type BridgeContext } from '@contex/chat-bridge'
+import { onContext, type BridgeContext } from '@contex/chat-bridge'
 import { Thread } from './Thread'
 import { ContexRuntimeProvider } from './runtime/ContexRuntimeProvider'
 
@@ -8,7 +8,6 @@ export function ChatApp() {
   const [bridgeStatus, setBridgeStatus] = useState<'idle' | 'connected' | 'standalone'>('idle')
 
   useEffect(() => {
-    // If no host parent answers within 1.5s assume standalone preview.
     const timer = window.setTimeout(() => {
       setBridgeStatus(prev => (prev === 'idle' ? 'standalone' : prev))
     }, 1500)
@@ -17,8 +16,6 @@ export function ChatApp() {
       window.clearTimeout(timer)
       setCtx(next)
       setBridgeStatus('connected')
-      // Apply theme/font tokens from the host onto :root so all child
-      // components using shadcn CSS vars inherit the host's palette.
       const root = document.documentElement
       for (const [key, value] of Object.entries(next.theme ?? {})) {
         root.style.setProperty(key, String(value))
@@ -36,9 +33,9 @@ export function ChatApp() {
 
   return (
     <ContexRuntimeProvider context={ctx}>
-      <div className="flex h-full flex-col">
+      <div className="flex h-full w-full flex-col bg-background text-foreground">
         <Header status={bridgeStatus} ctx={ctx} />
-        <div className="flex-1 min-h-0">
+        <div className="flex min-h-0 flex-1 flex-col">
           <Thread />
         </div>
       </div>
@@ -51,12 +48,13 @@ function Header({ status, ctx }: { status: 'idle' | 'connected' | 'standalone'; 
   const label = status === 'connected'
     ? `${ctx?.tileId?.slice(0, 8) ?? 'tile'} · ${ctx?.workspaceDir ?? ''}`
     : status === 'standalone'
-      ? 'Standalone preview (no host)'
+      ? 'Standalone preview'
       : 'Connecting…'
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 text-xs" style={{ color: 'var(--color-muted-foreground)' }}>
-      <span style={{ width: 6, height: 6, borderRadius: 999, background: dotColor }} />
+    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-4 text-xs text-muted-foreground">
+      <span className="size-1.5 rounded-full" style={{ background: dotColor }} />
       <span className="truncate">{label}</span>
+      <span className="ml-auto opacity-60">contex chat</span>
     </div>
   )
 }

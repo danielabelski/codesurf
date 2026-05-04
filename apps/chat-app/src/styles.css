@@ -1,9 +1,11 @@
 @import "tailwindcss";
 
-/* Theme tokens come from the host via BridgeContext (set as inline
-   CSS vars on :root). Default fallbacks here keep the page legible
-   when it's loaded standalone (no host present). */
-:root {
+/* Tailwind 4 theme tokens — these become utility classes
+   (bg-background, text-foreground, border-input, etc.) and are
+   overridden at runtime by the host via BridgeContext.theme.
+   Defaults match the contex dark palette so standalone preview
+   isn't naked. */
+@theme inline {
   --color-background: #1e1e1e;
   --color-foreground: #cccccc;
   --color-muted: #2a2a2a;
@@ -13,15 +15,23 @@
   --color-ring: #555555;
   --color-primary: #3b82f6;
   --color-primary-foreground: #ffffff;
-  --color-accent: #333333;
+  --color-accent: #2a2a2a;
   --color-accent-foreground: #cccccc;
   --color-card: #252525;
   --color-card-foreground: #cccccc;
   --color-popover: #252525;
   --color-popover-foreground: #cccccc;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #ffffff;
   --radius: 0.5rem;
+}
+
+:root {
   --thread-max-width: 48rem;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  --accent-color: var(--color-primary);
+  --accent-foreground: var(--color-primary-foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", Roboto, sans-serif;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -30,4 +40,9 @@ html, body, #root {
   background: var(--color-background);
   color: var(--color-foreground);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
+
+/* Hide scrollbar in the thread viewport but keep scrolling. */
+.cs-no-scrollbar { scrollbar-width: none; }
+.cs-no-scrollbar::-webkit-scrollbar { display: none; }

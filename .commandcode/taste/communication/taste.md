@@ -1,0 +1,18 @@
+# Communication
+- When frustrated, user uses direct/profane language; don't take it personally, just fix the issue. Confidence: 0.85
+- User explicitly wants implementation not analysis when they say "implement it" or "do it". Confidence: 0.90
+- "Continue" means proceed immediately without asking clarifying questions. Confidence: 0.80
+- User gets angry at hesitation or over-analysis; prefers immediate action. Confidence: 0.85
+- When user grants permission ("Do it", "yes edit"), execute immediately without further confirmation. Confidence: 0.90
+- When user says "STOP JUMPING THE GUN" or similar, they are frustrated by assumptions — listen carefully and don't act prematurely. Confidence: 0.85
+- When user says "now fucking remember this", they want the demonstrated issue/behavior remembered for future reference. Confidence: 0.80
+- When user says "do you understand?", confirm understanding before proceeding with implementation. Confidence: 0.75
+- "You fucking NAILED it" indicates strong positive confirmation — remember what was done right. Confidence: 0.80
+- When user provides detailed visual evidence (e.g., "look at the frames of this video"), analyze carefully with specific measurements provided. Confidence: 0.75
+- "worry about that later" means explicitly defer that work — do not address it now. Confidence: 0.75
+- "find out why..." requests investigation/diagnosis mode — analyze root cause before fixing. Confidence: 0.75
+- "still wrong" with screenshots indicates iterative visual refinement is needed — keep adjusting. Confidence: 0.75
+- "whoa -- what is going on here" indicates unexpected/surprising behavior that needs investigation. Confidence: 0.70
+- NEVER guess - when user says this explicitly, they want exact matches only, no assumptions or fallbacks. Confidence: 0.90
+- When user says "now fucking remember this", treat as a critical instruction to retain for future sessions. Confidence: 0.85
+- STOP jumping to conclusions or making assumptions - user explicitly hates this behavior. Confidence: 0.85

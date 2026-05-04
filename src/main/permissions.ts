@@ -108,11 +108,19 @@ function endOfTodayIso(): string {
   return end.toISOString()
 }
 
-function matchesGrant(grant: ToolPermissionGrant, request: ToolPermissionRequest): boolean {
+function sameGrantTarget(grant: ToolPermissionGrant, request: ToolPermissionRequest): boolean {
   if (grant.provider !== request.provider) return false
   if (grant.toolName !== request.toolName) return false
   const requestedWorkspace = normalizeWorkspaceDir(request.workspaceDir)
   return (grant.workspaceDir ?? null) === requestedWorkspace
+}
+
+function grantAppliesToRequest(grant: ToolPermissionGrant, request: ToolPermissionRequest): boolean {
+  if (grant.provider !== request.provider) return false
+  if (grant.toolName !== request.toolName) return false
+  const grantWorkspace = normalizeWorkspaceDir(grant.workspaceDir)
+  if (grantWorkspace === null) return true
+  return grantWorkspace === normalizeWorkspaceDir(request.workspaceDir)
 }
 
 function buildGrant(request: ToolPermissionRequest, scope: Exclude<ToolPermissionDecisionScope, 'once'>): ToolPermissionGrant {
@@ -136,7 +144,7 @@ function buildGrant(request: ToolPermissionRequest, scope: Exclude<ToolPermissio
 export function persistGrant(request: ToolPermissionRequest, scope: Exclude<ToolPermissionDecisionScope, 'once' | 'session'>): ToolPermissionGrant {
   const store = pruneExpiredPersistedGrants(readPersistedStore())
   const nextGrant = buildGrant(request, scope)
-  const filtered = store.grants.filter(grant => !matchesGrant(grant, request))
+  const filtered = store.grants.filter(grant => !sameGrantTarget(grant, request))
   const nextStore = { ...store, grants: [nextGrant, ...filtered] }
   writePersistedStore(nextStore)
   return nextGrant
@@ -195,7 +203,7 @@ export function clearAllPermissionGrants(): ToolPermissionGrant[] {
 export function resolveStoredPermission(request: ToolPermissionRequest): 'allow' | 'deny' | null {
   purgeExpiredSessionGrants()
   const persisted = pruneExpiredPersistedGrants(readPersistedStore()).grants
-  const grant = [...sessionGrants.values(), ...persisted].find(candidate => matchesGrant(candidate, request))
+  const grant = [...sessionGrants.values(), ...persisted].find(candidate => grantAppliesToRequest(candidate, request))
   if (!grant) return null
   return grant.action
 }

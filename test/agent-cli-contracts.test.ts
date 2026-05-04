@@ -16,6 +16,7 @@ import {
   parseOpenCodeRunOutput,
   sanitizeAgentCliDiagnostic,
 } from '../src/main/agents/agent-cli-contracts.ts'
+import { buildOpenCodeSessionPermissions } from '../src/main/agents/opencode-permissions.ts'
 
 function expectNoFlags(args: string[], forbidden: string[]): void {
   for (const flag of forbidden) {
@@ -144,6 +145,32 @@ describe('agent CLI contract builders', () => {
     expectNoFlags(args, ['--approval-mode'])
   })
 
+  test('OpenCode SDK sessions ask by default and only allow all in explicit bypass mode', () => {
+    expect(buildOpenCodeSessionPermissions('default')).toEqual([
+      { permission: 'read', pattern: '*', action: 'allow' },
+      { permission: 'list', pattern: '*', action: 'allow' },
+      { permission: 'grep', pattern: '*', action: 'allow' },
+      { permission: 'glob', pattern: '*', action: 'allow' },
+      { permission: 'todoread', pattern: '*', action: 'allow' },
+      { permission: 'question', pattern: '*', action: 'allow' },
+      { permission: 'codesearch', pattern: '*', action: 'allow' },
+      { permission: 'lsp', pattern: '*', action: 'allow' },
+      { permission: 'edit', pattern: '*', action: 'ask' },
+      { permission: 'bash', pattern: '*', action: 'ask' },
+      { permission: 'task', pattern: '*', action: 'ask' },
+      { permission: 'external_directory', pattern: '*', action: 'ask' },
+      { permission: 'todowrite', pattern: '*', action: 'ask' },
+      { permission: 'webfetch', pattern: '*', action: 'ask' },
+      { permission: 'websearch', pattern: '*', action: 'ask' },
+      { permission: 'doom_loop', pattern: '*', action: 'ask' },
+      { permission: 'skill', pattern: '*', action: 'ask' },
+    ])
+
+    expect(buildOpenCodeSessionPermissions('plan').slice(-9).map(rule => rule.action)).toEqual(Array(9).fill('deny'))
+    expect(buildOpenCodeSessionPermissions('bypassPermissions').slice(-9).map(rule => rule.action)).toEqual(Array(9).fill('allow'))
+    expect(buildOpenCodeSessionPermissions('build').slice(-9).map(rule => rule.action)).toEqual(Array(9).fill('ask'))
+  })
+
   test('parses OpenCode JSONL output line-by-line instead of taking the first object blob', () => {
     const parsed = parseOpenCodeRunOutput([
       JSON.stringify({ type: 'message', role: 'assistant', content: [{ type: 'text', text: 'Hello ' }] }),
@@ -246,12 +273,22 @@ describe('agent CLI contract builders', () => {
 
   test('daemon chat routing recognizes OpenCode and Hermes as daemon-capable providers', () => {
     const ipcSource = readFileSync(`${process.cwd()}/src/main/ipc/chat.ts`, 'utf8')
-    const daemonSource = readFileSync(`${process.cwd()}/bin/chat-jobs.mjs`, 'utf8')
+    const daemonSource = readFileSync(`${process.cwd()}/packages/codesurf-daemon/bin/chat-jobs.mjs`, 'utf8')
 
     expect(ipcSource).toContain("return provider === 'claude' || provider === 'codex' || provider === 'opencode' || provider === 'hermes'")
     expect(ipcSource).toContain('Supported daemon providers: Claude, Codex, OpenCode, and Hermes.')
     expect(daemonSource).toContain("request.provider === 'hermes'")
     expect(daemonSource).toContain('Daemon execution is only implemented for Claude, Codex, OpenCode, and Hermes right now')
+  })
+
+  test('Claude bypass mode passes the SDK dangerous-skip confirmation flag', () => {
+    const ipcSource = readFileSync(`${process.cwd()}/src/main/ipc/chat.ts`, 'utf8')
+    const daemonSource = readFileSync(`${process.cwd()}/packages/codesurf-daemon/bin/chat-jobs.mjs`, 'utf8')
+    const relaySource = readFileSync(`${process.cwd()}/src/main/relay/provider-executor.ts`, 'utf8')
+
+    expect(ipcSource).toContain("...(permMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {})")
+    expect(daemonSource).toContain("...(permMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {})")
+    expect(relaySource).toContain("...(claudePermissionMode === 'bypassPermissions' ? { allowDangerouslySkipPermissions: true } : {})")
   })
 
   test('main-process Hermes chat uses shared model/provider contract helpers', () => {

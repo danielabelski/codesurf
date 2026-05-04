@@ -8,18 +8,321 @@ const https = require('https')
 
 const APP_NAME = 'codesurf'
 const APP_DIR = path.join(__dirname, '..')
-const CACHE_DIR = path.join(os.homedir(), '.codesurf')
+const CACHE_DIR = process.env.CODESURF_HOME?.trim() || path.join(os.homedir(), '.codesurf')
 const LEGACY_CACHE_DIR = path.join(os.homedir(), '.contex')
 const ELECTRON_CACHE = path.join(CACHE_DIR, 'electron')
 const UPDATE_CHECK_FILE = path.join(CACHE_DIR, 'last-update-check')
 const PID_FILE = path.join(CACHE_DIR, 'codesurf.pid')
+const PERMISSIONS_FILE = path.join(CACHE_DIR, 'permissions.json')
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
+const PERMISSIONS_VERSION = 1
 
 function getMaxOldSpaceSizeMb() {
   const raw = process.env.CODESURF_MAX_OLD_SPACE_SIZE_MB
   const parsed = raw ? parseInt(raw, 10) : NaN
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_OLD_SPACE_SIZE_MB
+}
+
+// ---------------------------------------------------------------------------
+// Permission store
+// ---------------------------------------------------------------------------
+
+function normalizeWorkspaceDir(workspaceDir) {
+  const trimmed = String(workspaceDir ?? '').trim()
+  if (!trimmed) return null
+  try {
+    return path.resolve(trimmed)
+  } catch {
+    return trimmed
+  }
+}
+
+function normalizeScope(scope, action) {
+  const normalized = String(scope ?? '').trim().toLowerCase()
+  const aliases = {
+    always: 'forever',
+    alltime: 'forever',
+    'all-time': 'forever',
+    day: 'today',
+    allday: 'today',
+    'all-day': 'today',
+    no: 'never',
+    deny: 'never',
+  }
+  const value = aliases[normalized] || normalized || (action === 'deny' ? 'never' : 'forever')
+  if (action === 'deny') {
+    if (value !== 'never') {
+      throw new Error('Deny grants can only use --scope never')
+    }
+    return 'never'
+  }
+  if (value === 'session') {
+    throw new Error('Session grants are process-local and cannot be set from the CLI. Use --scope today or --scope forever.')
+  }
+  if (value !== 'today' && value !== 'forever') {
+    throw new Error('Allow grants from the CLI must use --scope today or --scope forever')
+  }
+  return value
+}
+
+function normalizePermissionGrant(grant) {
+  if (!grant || typeof grant !== 'object') return null
+  if (typeof grant.id !== 'string' || !grant.id) return null
+  if (typeof grant.provider !== 'string' || !grant.provider) return null
+  if (typeof grant.toolName !== 'string' || !grant.toolName) return null
+  if (grant.action !== 'allow' && grant.action !== 'deny') return null
+  if (!['session', 'today', 'forever', 'never'].includes(grant.scope)) return null
+  if (typeof grant.createdAt !== 'string') return null
+  if (grant.expiresAt) {
+    const expiry = Date.parse(grant.expiresAt)
+    if (Number.isFinite(expiry) && expiry <= Date.now()) return null
+  }
+  return {
+    id: grant.id,
+    provider: grant.provider,
+    toolName: grant.toolName,
+    action: grant.action,
+    scope: grant.scope,
+    workspaceDir: normalizeWorkspaceDir(grant.workspaceDir),
+    title: typeof grant.title === 'string' ? grant.title : null,
+    description: typeof grant.description === 'string' ? grant.description : null,
+    blockedPath: typeof grant.blockedPath === 'string' ? grant.blockedPath : null,
+    createdAt: grant.createdAt,
+    expiresAt: typeof grant.expiresAt === 'string' ? grant.expiresAt : null,
+  }
+}
+
+function readPermissionStore() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PERMISSIONS_FILE, 'utf8'))
+    const grants = Array.isArray(raw?.grants)
+      ? raw.grants.map(normalizePermissionGrant).filter(Boolean)
+      : []
+    return { version: PERMISSIONS_VERSION, grants }
+  } catch {
+    return { version: PERMISSIONS_VERSION, grants: [] }
+  }
+}
+
+function writePermissionStore(store) {
+  ensureCacheDir()
+  const tempPath = `${PERMISSIONS_FILE}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(tempPath, `${JSON.stringify({ version: PERMISSIONS_VERSION, grants: store.grants }, null, 2)}\n`, 'utf8')
+  fs.renameSync(tempPath, PERMISSIONS_FILE)
+}
+
+function makePermissionId() {
+  return `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function endOfTodayIso() {
+  const end = new Date()
+  end.setHours(23, 59, 59, 999)
+  return end.toISOString()
+}
+
+function permissionMatches(grant, provider, toolName, workspaceDir) {
+  return grant.provider === provider
+    && grant.toolName === toolName
+    && (grant.workspaceDir ?? null) === (workspaceDir ?? null)
+}
+
+function parsePermissionOptions(argv) {
+  const options = {
+    json: false,
+    action: null,
+    scope: null,
+    workspaceDir: process.cwd(),
+    title: null,
+    description: null,
+    blockedPath: null,
+  }
+  const positional = []
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]
+    const nextValue = () => {
+      index += 1
+      if (index >= argv.length) throw new Error(`${arg} requires a value`)
+      return argv[index]
+    }
+
+    switch (arg) {
+      case '--all':
+        options.all = true
+        break
+      case '--json':
+        options.json = true
+        break
+      case '--action':
+        options.action = nextValue()
+        break
+      case '--scope':
+        options.scope = nextValue()
+        break
+      case '--workspace':
+      case '--cwd':
+        options.workspaceDir = nextValue()
+        break
+      case '--global':
+        options.workspaceDir = null
+        break
+      case '--title':
+        options.title = nextValue()
+        break
+      case '--description':
+        options.description = nextValue()
+        break
+      case '--blocked-path':
+      case '--path':
+        options.blockedPath = nextValue()
+        break
+      default:
+        if (arg.startsWith('-')) throw new Error(`Unknown option: ${arg}`)
+        positional.push(arg)
+        break
+    }
+  }
+
+  return { positional, options }
+}
+
+function printPermissionHelp() {
+  console.log(`
+CodeSurf permissions
+
+Usage:
+  codesurf permissions list [--json]
+  codesurf permissions path
+  codesurf permissions allow <provider> <tool> [--scope today|forever] [--workspace <path>|--global]
+  codesurf permissions deny <provider> <tool> [--workspace <path>|--global]
+  codesurf permissions set <provider> <tool> --action allow|deny [--scope today|forever|never] [--workspace <path>|--global]
+  codesurf permissions clear <grant-id>
+  codesurf permissions clear --all
+
+Defaults:
+  --workspace defaults to the current directory.
+  allow defaults to --scope forever.
+  deny always writes a persistent "never" grant.
+
+Store: ${PERMISSIONS_FILE}
+`)
+}
+
+function formatPermissionGrant(grant) {
+  const action = grant.action === 'deny' ? 'deny' : 'allow'
+  const scope = grant.scope === 'forever' ? 'all time' : grant.scope
+  const workspace = grant.workspaceDir ?? '(global)'
+  const expiry = grant.expiresAt ? ` expires ${grant.expiresAt}` : ''
+  return `${grant.id}  ${action.padEnd(5)}  ${scope.padEnd(8)}  ${grant.provider}/${grant.toolName}  ${workspace}${expiry}`
+}
+
+function outputPermissionResult(value, json) {
+  if (json) {
+    console.log(JSON.stringify(value, null, 2))
+  }
+}
+
+function setPermissionGrant({ provider, toolName, action, scope, workspaceDir, title, description, blockedPath }) {
+  const normalizedAction = action === 'deny' ? 'deny' : 'allow'
+  const normalizedScope = normalizeScope(scope, normalizedAction)
+  const normalizedWorkspace = normalizeWorkspaceDir(workspaceDir)
+  const grant = {
+    id: makePermissionId(),
+    provider,
+    toolName,
+    action: normalizedAction,
+    scope: normalizedScope,
+    workspaceDir: normalizedWorkspace,
+    title: title || null,
+    description: description || null,
+    blockedPath: blockedPath || null,
+    createdAt: new Date().toISOString(),
+    expiresAt: normalizedScope === 'today' ? endOfTodayIso() : null,
+  }
+  const store = readPermissionStore()
+  const grants = store.grants.filter(existing => !permissionMatches(existing, provider, toolName, normalizedWorkspace))
+  const next = { version: PERMISSIONS_VERSION, grants: [grant, ...grants] }
+  writePermissionStore(next)
+  return grant
+}
+
+function handlePermissionsCommand(argv) {
+  const command = argv[0]
+  if (!command || command === '--help' || command === '-h' || command === 'help') {
+    printPermissionHelp()
+    return
+  }
+
+  if (command === 'path') {
+    console.log(PERMISSIONS_FILE)
+    return
+  }
+
+  if (command === 'list') {
+    const { options } = parsePermissionOptions(argv.slice(1))
+    const result = { path: PERMISSIONS_FILE, grants: readPermissionStore().grants }
+    if (options.json) {
+      outputPermissionResult(result, true)
+      return
+    }
+    console.log(`Store: ${PERMISSIONS_FILE}`)
+    if (result.grants.length === 0) {
+      console.log('No permission grants.')
+      return
+    }
+    for (const grant of result.grants) console.log(formatPermissionGrant(grant))
+    return
+  }
+
+  if (command === 'clear') {
+    const { positional, options } = parsePermissionOptions(argv.slice(1))
+    const clearAll = argv.includes('--all')
+    if (clearAll) {
+      const next = { version: PERMISSIONS_VERSION, grants: [] }
+      writePermissionStore(next)
+      outputPermissionResult({ path: PERMISSIONS_FILE, grants: [] }, options.json)
+      if (!options.json) console.log('Cleared all permission grants.')
+      return
+    }
+    const id = positional[0]
+    if (!id) throw new Error('clear requires a grant id or --all')
+    const store = readPermissionStore()
+    const next = { version: PERMISSIONS_VERSION, grants: store.grants.filter(grant => grant.id !== id) }
+    writePermissionStore(next)
+    outputPermissionResult({ path: PERMISSIONS_FILE, grants: next.grants }, options.json)
+    if (!options.json) console.log(next.grants.length === store.grants.length ? `No grant found for ${id}` : `Cleared ${id}.`)
+    return
+  }
+
+  if (command === 'allow' || command === 'deny' || command === 'set') {
+    const { positional, options } = parsePermissionOptions(argv.slice(1))
+    const provider = positional[0]?.trim()
+    const toolName = positional[1]?.trim()
+    if (!provider || !toolName) throw new Error(`${command} requires <provider> and <tool>`)
+    const action = command === 'set'
+      ? String(options.action ?? '').trim().toLowerCase()
+      : command
+    if (action !== 'allow' && action !== 'deny') throw new Error('set requires --action allow or --action deny')
+    const grant = setPermissionGrant({
+      provider,
+      toolName,
+      action,
+      scope: options.scope,
+      workspaceDir: options.workspaceDir,
+      title: options.title,
+      description: options.description,
+      blockedPath: options.blockedPath,
+    })
+    outputPermissionResult({ path: PERMISSIONS_FILE, grant, grants: readPermissionStore().grants }, options.json)
+    if (!options.json) {
+      console.log(`Saved ${grant.action} grant: ${formatPermissionGrant(grant)}`)
+    }
+    return
+  }
+
+  throw new Error(`Unknown permissions command: ${command}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +694,17 @@ async function launch() {
 
 const args = process.argv.slice(2)
 
+if (args[0] === 'permissions' || args[0] === 'permission') {
+  try {
+    handlePermissionsCommand(args.slice(1))
+    process.exit(0)
+  } catch (error) {
+    console.error(`codesurf permissions: ${error.message}`)
+    console.error('Run `codesurf permissions --help` for usage.')
+    process.exit(1)
+  }
+}
+
 if (args.includes('--help') || args.includes('-h')) {
   const version = getCurrentVersion() || 'unknown'
   console.log(`
@@ -398,6 +712,7 @@ CodeSurf v${version} - Infinite canvas workspace for AI agents
 
 Usage:
   npx codesurf            Launch the app
+  npx codesurf permissions Manage remembered tool permissions
   npx codesurf --update   Check for and install updates
   npx codesurf --version  Show current version
   npx codesurf --clean    Clear cached Electron installation
