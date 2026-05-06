@@ -11,7 +11,7 @@ import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
-  Brain, ChevronRight, Clock, Cog, CornerDownRight, DollarSign,
+  Brain, ChevronRight, Clock, Cog, Copy, CornerDownRight, DollarSign,
   FileText, GripVertical, History, Maximize2, Mic, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
 } from 'lucide-react'
 import { useMCPServers } from '../hooks/useMCPServers'
@@ -52,6 +52,7 @@ import {
 import { handleBasicChatSurfaceRpc, normalizeChatSurfacePayload, type ChatSurfacePayload } from './chatSurfaceHostRpc'
 import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
+import { CHAT_STREAM_FLUSH_INTERVAL_MS, isLargeArtifact, isLargeMessage, measureText, previewText, splitRawDiffText, type RawDiffFile } from './chat/largeContent'
 import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerDrawerFrame, ChatComposerInput, ChatComposerLocationMenu, ChatComposerModeMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
 import { ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
@@ -1926,10 +1927,258 @@ const InsightBlock = React.memo(({ text, closed, isStreaming, accent, textColor 
         <span style={{ fontSize: 13, lineHeight: 1 }}>★</span>
         <span>Insight</span>
       </div>
-      <ChatMarkdown text={text} isStreaming={isStreaming} />
+      <GuardedChatMarkdown text={text} isStreaming={isStreaming} />
     </div>
   )
 })
+
+function LargeTextBlock({ text, isStreaming, className }: {
+  text: string
+  isStreaming?: boolean
+  className?: string
+}): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const [expanded, setExpanded] = useState(false)
+  const measure = useMemo(() => measureText(text), [text])
+  const preview = useMemo(() => previewText(text), [text])
+
+  if (expanded) {
+    return (
+      <div className={className}>
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: 8,
+            border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+            borderRadius: 8,
+            background: theme.chat.assistantBubble,
+            color: theme.chat.textSecondary,
+            padding: '5px 9px',
+            fontSize: fonts.secondarySize,
+            cursor: 'pointer',
+          }}
+        >
+          <ChevronRight size={12} style={{ transform: 'rotate(90deg)' }} />
+          Collapse large message
+        </button>
+        <ChatMarkdown text={text} isStreaming={isStreaming} />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className={className}
+      style={{
+        border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+        borderRadius: 10,
+        background: theme.chat.assistantBubble,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderBottom: `1px solid ${theme.chat.assistantBubbleBorder}` }}>
+        <FileText size={13} color={theme.chat.textSecondary} style={{ flexShrink: 0 }} />
+        <div style={{ minWidth: 0, flex: 1, color: theme.chat.textSecondary, fontSize: fonts.secondarySize, fontWeight: 600 }}>
+          Large message - {measure.lines.toLocaleString()} lines - {measure.chars.toLocaleString()} chars
+        </div>
+        <button
+          type="button"
+          onClick={() => { void navigator.clipboard.writeText(text).catch(() => {}) }}
+          title="Copy full message"
+          style={{ border: 'none', background: 'transparent', color: theme.chat.muted, cursor: 'pointer', padding: 4, display: 'inline-flex' }}
+        >
+          <Copy size={13} />
+        </button>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          style={{
+            border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+            borderRadius: 7,
+            background: theme.surface.panelMuted,
+            color: theme.chat.textSecondary,
+            padding: '4px 8px',
+            fontSize: fonts.secondarySize,
+            cursor: 'pointer',
+          }}
+        >
+          Expand
+        </button>
+      </div>
+      <pre
+        className="allow-text-selection"
+        style={{
+          margin: 0,
+          maxHeight: 320,
+          overflow: 'auto',
+          padding: 10,
+          color: theme.chat.text,
+          background: theme.surface.panelMuted,
+          fontFamily: fonts.mono,
+          fontSize: Math.max(10, fonts.size - 2),
+          lineHeight: 1.45,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}
+      >
+        {preview}
+      </pre>
+    </div>
+  )
+}
+
+function RawDiffFileBlock({ file }: { file: RawDiffFile }): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const [expanded, setExpanded] = useState(false)
+  const [renderFull, setRenderFull] = useState(false)
+  const large = useMemo(() => isLargeArtifact(file.diff), [file.diff])
+  const preview = useMemo(() => previewText(file.diff), [file.diff])
+
+  return (
+    <div style={{ borderTop: `1px solid ${theme.chat.assistantBubbleBorder}` }}>
+      <button
+        type="button"
+        onClick={() => setExpanded(value => !value)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          width: '100%',
+          border: 'none',
+          background: 'transparent',
+          color: theme.chat.textSecondary,
+          padding: '7px 10px',
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <ChevronRight size={13} style={{ transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: fonts.mono, fontSize: Math.max(10, fonts.size - 2) }}>
+          {file.path}
+        </span>
+        <span style={{ color: theme.status.success, fontFamily: fonts.mono, fontSize: 11 }}>+{file.additions}</span>
+        <span style={{ color: theme.status.danger, fontFamily: fonts.mono, fontSize: 11 }}>-{file.deletions}</span>
+      </button>
+      {expanded && (
+        <div style={{ padding: '0 10px 10px' }}>
+          {large && !renderFull ? (
+            <>
+              <pre
+                className="allow-text-selection"
+                style={{
+                  margin: 0,
+                  maxHeight: 280,
+                  overflow: 'auto',
+                  borderRadius: 8,
+                  background: theme.surface.panelMuted,
+                  color: theme.chat.text,
+                  padding: 10,
+                  fontFamily: fonts.mono,
+                  fontSize: Math.max(10, fonts.size - 2),
+                  lineHeight: 1.45,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                }}
+              >
+                {preview}
+              </pre>
+              <button
+                type="button"
+                onClick={() => setRenderFull(true)}
+                style={{
+                  marginTop: 8,
+                  border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+                  borderRadius: 7,
+                  background: theme.surface.panelMuted,
+                  color: theme.chat.textSecondary,
+                  padding: '4px 8px',
+                  fontSize: fonts.secondarySize,
+                  cursor: 'pointer',
+                }}
+              >
+                Render full diff
+              </button>
+            </>
+          ) : (
+            <DiffView diff={file.diff} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RawDiffBlock({ files }: { files: RawDiffFile[] }): JSX.Element {
+  const theme = useTheme()
+  const fonts = useAppFonts()
+  const totals = useMemo(() => files.reduce((acc, file) => ({
+    additions: acc.additions + file.additions,
+    deletions: acc.deletions + file.deletions,
+  }), { additions: 0, deletions: 0 }), [files])
+  const raw = useMemo(() => files.map(file => file.diff).join('\n\n'), [files])
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${theme.chat.assistantBubbleBorder}`,
+        borderRadius: 10,
+        background: theme.chat.assistantBubble,
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px' }}>
+        <FileText size={13} color={theme.chat.textSecondary} style={{ flexShrink: 0 }} />
+        <div style={{ minWidth: 0, flex: 1, color: theme.chat.textSecondary, fontSize: fonts.secondarySize, fontWeight: 600 }}>
+          Diff - {files.length} file{files.length === 1 ? '' : 's'}
+        </div>
+        <span style={{ color: theme.status.success, fontFamily: fonts.mono, fontSize: 11 }}>+{totals.additions}</span>
+        <span style={{ color: theme.status.danger, fontFamily: fonts.mono, fontSize: 11 }}>-{totals.deletions}</span>
+        <button
+          type="button"
+          onClick={() => { void navigator.clipboard.writeText(raw).catch(() => {}) }}
+          title="Copy raw diff"
+          style={{ border: 'none', background: 'transparent', color: theme.chat.muted, cursor: 'pointer', padding: 4, display: 'inline-flex' }}
+        >
+          <Copy size={13} />
+        </button>
+      </div>
+      {files.map((file, index) => <RawDiffFileBlock key={`${file.path}:${index}`} file={file} />)}
+    </div>
+  )
+}
+
+function GuardedChatMarkdown({ text, isStreaming, className }: {
+  text: string
+  isStreaming?: boolean
+  className?: string
+}): JSX.Element {
+  const diff = useMemo(() => isStreaming ? null : splitRawDiffText(text), [isStreaming, text])
+
+  if (diff) {
+    return (
+      <div className={className} style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
+        {diff.prefix && (
+          isLargeMessage(diff.prefix)
+            ? <LargeTextBlock text={diff.prefix} isStreaming={isStreaming} />
+            : <ChatMarkdown text={diff.prefix} isStreaming={isStreaming} />
+        )}
+        <RawDiffBlock files={diff.files} />
+      </div>
+    )
+  }
+
+  if (isLargeMessage(text)) {
+    return <LargeTextBlock text={text} isStreaming={isStreaming} className={className} />
+  }
+
+  return <ChatMarkdown text={text} isStreaming={isStreaming} className={className} />
+}
 
 const ChatMessageContent = React.memo(({
   text,
@@ -2060,12 +2309,12 @@ const ChatMessageContent = React.memo(({
   const textColor = theme.text.primary
   const segments = useMemo(() => splitInsightSegments(bodyText), [bodyText])
   const renderedBody = segments.length === 1 && segments[0].kind === 'md'
-    ? <ChatMarkdown text={segments[0].text} isStreaming={isStreaming} className={className} />
+    ? <GuardedChatMarkdown text={segments[0].text} isStreaming={isStreaming} className={className} />
     : (
       <div className={className}>
         {segments.map((seg, i) => seg.kind === 'insight'
           ? <InsightBlock key={i} text={seg.text} closed={seg.closed} isStreaming={isStreaming} accent={accent} textColor={textColor} />
-          : <ChatMarkdown key={i} text={seg.text} isStreaming={isStreaming} />
+          : <GuardedChatMarkdown key={i} text={seg.text} isStreaming={isStreaming} />
         )}
       </div>
     )
@@ -2645,9 +2894,47 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       return pagedLinkedHistoryEnabledRef.current ? next : normalizeMessagesForMemory(next)
     })
   }, [])
+  const pendingStreamTextRef = useRef('')
+  const pendingStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushPendingStreamText = useCallback(() => {
+    const text = pendingStreamTextRef.current
+    if (!text) return
+    pendingStreamTextRef.current = ''
+    setMessagesSafe(prev => {
+      const last = prev[prev.length - 1]
+      if (!last?.isStreaming) return prev
+      const blocks = [...(last.contentBlocks ?? [])]
+      const lastBlock = blocks[blocks.length - 1]
+      if (lastBlock?.type === 'text') {
+        blocks[blocks.length - 1] = { ...lastBlock, text: lastBlock.text + text }
+      } else {
+        blocks.push({ type: 'text', text })
+      }
+      return [...prev.slice(0, -1), { ...last, content: last.content + text, contentBlocks: blocks }]
+    })
+  }, [setMessagesSafe])
+  const queueStreamText = useCallback((text: string) => {
+    if (!text) return
+    pendingStreamTextRef.current += text
+    if (pendingStreamFlushTimerRef.current) return
+    pendingStreamFlushTimerRef.current = setTimeout(() => {
+      pendingStreamFlushTimerRef.current = null
+      flushPendingStreamText()
+    }, CHAT_STREAM_FLUSH_INTERVAL_MS)
+  }, [flushPendingStreamText])
   const stateLoadedRef = useRef(false)
   const lastJobSequenceRef = useRef<number>(initialJobSequence)
   const resumedJobKeyRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (pendingStreamFlushTimerRef.current) {
+        clearTimeout(pendingStreamFlushTimerRef.current)
+        pendingStreamFlushTimerRef.current = null
+      }
+      pendingStreamTextRef.current = ''
+    }
+  }, [])
 
   useEffect(() => {
     lastJobSequenceRef.current = jobSequence
@@ -4618,22 +4905,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           return prev
         })
 
+      if (event.type !== 'text') flushPendingStreamText()
+
       switch (event.type) {
         case 'session':
           if (event.sessionId) setSessionId(event.sessionId)
           break
 
         case 'text':
-          if (event.text) updateLast(m => {
-            const blocks = [...(m.contentBlocks ?? [])]
-            const last = blocks[blocks.length - 1]
-            if (last?.type === 'text') {
-              blocks[blocks.length - 1] = { ...last, text: last.text + event.text }
-            } else {
-              blocks.push({ type: 'text', text: event.text })
-            }
-            return { ...m, content: m.content + event.text, contentBlocks: blocks }
-          })
+          if (event.text) queueStreamText(event.text)
           break
 
         case 'thinking_start': {
@@ -4905,7 +5185,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       }
     })
     return cleanup
-  }, [tileId])
+  }, [tileId, flushPendingStreamText, queueStreamText, setMessagesSafe])
 
   // Subscribe to incoming MCP peer commands on this tile's bus channel.
   // Strict gating so broadcasts from editor/extension peers don't spam every

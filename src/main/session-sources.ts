@@ -2263,6 +2263,12 @@ export async function loadExternalSessionMessagesPage(
   if (!entry?.filePath || !entry.canOpenInChat) return null
 
   const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 20)))
+  const largePage = await loadLargeExternalSessionMessagesPageFromTail(entry, {
+    beforeFingerprint: String(options.beforeFingerprint ?? '').trim(),
+    limit,
+  })
+  if (largePage) return largePage
+
   const cacheKey = `${workspacePath ?? '__no_workspace__'}::${entry.source}::${entry.filePath}::${entry.id}`
   const state = await loadCachedFullExternalSessionState(entry, cacheKey)
   if (!state) return null
@@ -2292,5 +2298,63 @@ export async function loadExternalSessionMessagesPage(
     total: state.messages.length,
     hasMore: startIndex > 0,
     messages: state.messages.slice(startIndex, endIndex),
+  }
+}
+
+async function loadLargeExternalSessionMessagesPageFromTail(
+  entry: AggregatedSessionEntry,
+  options: { beforeFingerprint: string; limit: number },
+): Promise<{
+  provider: string
+  model: string
+  sessionId: string | null
+  total: number
+  hasMore: boolean
+  messages: ImportedChatMessage[]
+} | null> {
+  if (entry.source !== 'claude' && entry.source !== 'codex') return null
+  if (!entry.filePath) return null
+
+  const stat = await statSafe(entry.filePath)
+  if (!stat?.isFile() || stat.size <= LARGE_EXTERNAL_SESSION_BYTES) return null
+
+  const sampleBytes = Math.min(stat.size, EXTERNAL_SESSION_TAIL_SAMPLE_BYTES * 2)
+  const raw = await readTextTailSafe(entry.filePath, sampleBytes)
+  const lines = parseJsonlLines(raw ?? '')
+  const state = entry.source === 'claude'
+    ? {
+        provider: 'claude',
+        model: entry.model,
+        sessionId: entry.sessionId,
+        messages: parseClaudeMessagesFromLines(lines, Math.max(0, lines.length * -1)),
+      }
+    : parseCodexChatStateFromLines(lines, entry, Math.max(10_000, lines.length))
+
+  const messages = dedupeImportedMessages(state.messages)
+  const beforeFingerprint = options.beforeFingerprint
+  let endIndex = messages.length
+  if (beforeFingerprint) {
+    const matchIndex = messages.findIndex(message => buildChatMessageHistoryFingerprint(message as any) === beforeFingerprint)
+    if (matchIndex < 0) {
+      return {
+        provider: state.provider,
+        model: state.model,
+        sessionId: state.sessionId,
+        total: Number.isFinite(entry.messageCount) ? Number(entry.messageCount) : messages.length,
+        hasMore: false,
+        messages: [],
+      }
+    }
+    endIndex = matchIndex
+  }
+
+  const startIndex = Math.max(0, endIndex - options.limit)
+  return {
+    provider: state.provider,
+    model: state.model,
+    sessionId: state.sessionId,
+    total: Number.isFinite(entry.messageCount) ? Number(entry.messageCount) : messages.length,
+    hasMore: startIndex > 0,
+    messages: messages.slice(startIndex, endIndex),
   }
 }

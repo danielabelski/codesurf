@@ -8,6 +8,7 @@ import {
 import { callHost, subscribe, type BridgeContext, type ChannelName } from '@contex/chat-bridge'
 
 type ChatMessage = ThreadMessageLike & { id: string }
+const STREAM_FLUSH_INTERVAL_MS = 50
 
 interface Props {
   context: BridgeContext | null
@@ -27,7 +28,41 @@ export function ContexRuntimeProvider({ context, children }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const streamingIdRef = useRef<string | null>(null)
+  const pendingStreamTextRef = useRef('')
+  const pendingStreamFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const tileId = context?.tileId ?? null
+
+  const flushPendingStreamText = () => {
+    const targetId = streamingIdRef.current
+    const text = pendingStreamTextRef.current
+    if (!targetId || !text) return
+    pendingStreamTextRef.current = ''
+    setMessages(prev => prev.map(msg => {
+      if (msg.id !== targetId) return msg
+      const existingText = typeof msg.content === 'string' ? msg.content : ''
+      return { ...msg, content: existingText + text }
+    }))
+  }
+
+  const queueStreamText = (text: string) => {
+    if (!text) return
+    pendingStreamTextRef.current += text
+    if (pendingStreamFlushTimerRef.current) return
+    pendingStreamFlushTimerRef.current = setTimeout(() => {
+      pendingStreamFlushTimerRef.current = null
+      flushPendingStreamText()
+    }, STREAM_FLUSH_INTERVAL_MS)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (pendingStreamFlushTimerRef.current) {
+        clearTimeout(pendingStreamFlushTimerRef.current)
+        pendingStreamFlushTimerRef.current = null
+      }
+      pendingStreamTextRef.current = ''
+    }
+  }, [])
 
   // Stream subscription (only when we have a host context).
   useEffect(() => {
@@ -41,18 +76,16 @@ export function ContexRuntimeProvider({ context, children }: Props) {
       // round trip. Full mapping (thinking, tool_*, permission, etc.)
       // lands in subsequent commits.
       if (chunk.type === 'text' && typeof chunk.text === 'string') {
-        setMessages(prev => prev.map(msg => {
-          if (msg.id !== targetId) return msg
-          const existingText = typeof msg.content === 'string' ? msg.content : ''
-          return { ...msg, content: existingText + chunk.text }
-        }))
+        queueStreamText(chunk.text)
       } else if (chunk.type === 'done' || chunk.type === 'error') {
+        flushPendingStreamText()
         setMessages(prev => prev.map(msg => msg.id === targetId
           ? (chunk.type === 'error'
               ? { ...msg, content: typeof msg.content === 'string' && msg.content ? msg.content : `Error: ${chunk.error ?? 'unknown'}` }
               : msg)
           : msg))
         setIsRunning(false)
+        pendingStreamTextRef.current = ''
         streamingIdRef.current = null
       }
     })
@@ -63,6 +96,7 @@ export function ContexRuntimeProvider({ context, children }: Props) {
     messages,
     isRunning,
     setMessages: (next) => setMessages(next as ChatMessage[]),
+    convertMessage: (message) => message,
     onNew: async (newMessage) => {
       const id = `user-${Date.now()}`
       const userMsg: ChatMessage = { id, role: 'user', content: textOf(newMessage.content) }
