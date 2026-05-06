@@ -55,6 +55,9 @@ export interface ActiveQueuedMessage {
 
 const LOG_PATH = join(CONTEX_HOME, 'queued-messages.log.jsonl')
 
+/** Compact the log when it exceeds this size. */
+const LOG_MAX_BYTES = 512 * 1024
+
 async function ensureLogDir(): Promise<void> {
   await fs.mkdir(CONTEX_HOME, { recursive: true })
 }
@@ -80,12 +83,27 @@ function coerceEvent(raw: unknown): QueuedMessageEvent | null {
   return ev
 }
 
+/** Counter to avoid stat-ing the log on every single append. */
+let appendsSinceLastSizeCheck = 0
+
 /** Append one event to the log. Best-effort; swallows IO errors. */
 export async function appendQueuedMessageEvent(event: QueuedMessageEvent): Promise<void> {
   try {
     await ensureLogDir()
     const line = JSON.stringify(event) + '\n'
     await fs.appendFile(LOG_PATH, line, 'utf8')
+
+    // Periodically check if the log has grown too large and compact it.
+    appendsSinceLastSizeCheck += 1
+    if (appendsSinceLastSizeCheck >= 50) {
+      appendsSinceLastSizeCheck = 0
+      try {
+        const stat = await fs.stat(LOG_PATH)
+        if (stat.size > LOG_MAX_BYTES) {
+          await compactQueuedMessagesLog()
+        }
+      } catch { /* ignore */ }
+    }
   } catch {
     // Intentionally swallow — log is best-effort; never crash the main process.
   }
@@ -149,6 +167,37 @@ export async function listActiveQueuedMessages(): Promise<ActiveQueuedMessage[]>
   }
 
   return Array.from(active.values()).sort((a, b) => a.enqueuedAt - b.enqueuedAt)
+}
+
+/**
+ * Compact the log by rewriting it with only the currently-active entries.
+ * Call after a successful listActiveQueuedMessages() when no crash recovery
+ * is in progress. Safe to call concurrently — worst case we compact twice.
+ */
+export async function compactQueuedMessagesLog(): Promise<void> {
+  try {
+    const active = await listActiveQueuedMessages()
+    if (active.length === 0) {
+      // No active entries — truncate the log entirely.
+      await fs.writeFile(LOG_PATH, '', 'utf8')
+      return
+    }
+    // Rewrite only the enqueue events for still-active entries.
+    const lines = active.map(entry => JSON.stringify({
+      type: 'enqueue' as const,
+      at: entry.enqueuedAt,
+      workspaceId: entry.workspaceId,
+      tileId: entry.tileId,
+      queueId: entry.queueId,
+      content: entry.content,
+      preview: entry.preview,
+      attachmentCount: entry.attachmentCount,
+      createdAt: entry.createdAt,
+    } satisfies QueuedMessageEvent))
+    await fs.writeFile(LOG_PATH, lines.join('\n') + '\n', 'utf8')
+  } catch {
+    // Best-effort — never crash the main process.
+  }
 }
 
 /** For diagnostics / manual reset. */

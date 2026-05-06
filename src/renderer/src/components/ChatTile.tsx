@@ -2886,12 +2886,20 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [gitBranches, setGitBranches] = useState<GitBranchSummary>(() => getCachedGitState(_workspaceDir)?.branches ?? createEmptyGitState(_workspaceDir).branches)
   const pagedLinkedHistoryEnabledRef = useRef(pagedLinkedHistoryEnabled)
   pagedLinkedHistoryEnabledRef.current = pagedLinkedHistoryEnabled
+  const isStreamingRef = useRef(false)
   const setMessagesSafe = useCallback((updater: React.SetStateAction<ChatMessage[]>) => {
     setMessages(prev => {
       const next = typeof updater === 'function'
         ? (updater as (prev: ChatMessage[]) => ChatMessage[])(prev)
         : updater
-      return pagedLinkedHistoryEnabledRef.current ? next : normalizeMessagesForMemory(next)
+      if (pagedLinkedHistoryEnabledRef.current) return next
+      // During streaming, skip expensive normalization for text-only appends
+      // (same message count, last message still streaming). Normalize once
+      // when streaming ends or message count changes.
+      if (isStreamingRef.current && next.length === prev.length && next[next.length - 1]?.isStreaming) {
+        return next
+      }
+      return normalizeMessagesForMemory(next)
     })
   }, [])
   const pendingStreamTextRef = useRef('')
@@ -4087,9 +4095,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   // quiet-indicator starts from zero for each new turn. The message-change
   // effect below then keeps it current while tokens/tool-blocks arrive.
   useEffect(() => {
+    isStreamingRef.current = isStreaming
     if (isStreaming) {
       lastActivityAtRef.current = Date.now()
     }
+  }, [isStreaming])
+
+  // Run deferred normalization when streaming ends — catches any growth
+  // that accumulated while the fast-path skipped normalizeMessagesForMemory.
+  useEffect(() => {
+    if (!isStreaming && stateLoadedRef.current && !pagedLinkedHistoryEnabledRef.current) {
+      setMessages(prev => normalizeMessagesForMemory(prev))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isStreaming])
 
   // Any mutation to messages while streaming counts as activity.
@@ -4149,7 +4167,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null
       persistLatestState()
-    }, isStreaming ? 250 : 100)
+    }, isStreaming ? 2000 : 500)
 
     return () => {
       if (persistTimerRef.current) {
@@ -4160,7 +4178,24 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [workspaceId, tileId, messages, input, attachments, queuedTurns, openChatSurfaces, activeChatSurfaceId, executionTarget, provider, model, mcpEnabled, mode, thinking, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, jobId, jobSequence, cloudHostId, isStreaming, persistLatestState])
 
   useEffect(() => {
+    // Flush pending state on window close so the last few seconds of a
+    // conversation are not lost. The unmount cleanup fires async IPC which
+    // may not survive Electron's window teardown — beforeunload fires
+    // earlier and gives the main process time to write.
+    const handleBeforeUnload = (): void => {
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current)
+        persistTimerRef.current = null
+      }
+      const latest = latestStateRef.current
+      if (latest && !isChatTileRuntimeStateDisposed(tileId)) {
+        persistLatestState(latest)
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
       if (persistTimerRef.current) {
         clearTimeout(persistTimerRef.current)
         persistTimerRef.current = null

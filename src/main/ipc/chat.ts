@@ -450,6 +450,45 @@ const activeDaemonStreams = new Map<string, {
 }>()
 // Stored session IDs for multi-turn conversations
 const sessionIds = new Map<string, string>()
+
+// Persist session IDs to disk so they survive main-process restarts.
+const SESSION_IDS_PATH = join(CONTEX_HOME, 'session-ids.json')
+let sessionIdsPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+function persistSessionIds(): void {
+  if (sessionIdsPersistTimer) return
+  sessionIdsPersistTimer = setTimeout(async () => {
+    sessionIdsPersistTimer = null
+    try {
+      const data: Record<string, string> = {}
+      for (const [key, value] of sessionIds) data[key] = value
+      await fs.mkdir(dirname(SESSION_IDS_PATH), { recursive: true })
+      await fs.writeFile(SESSION_IDS_PATH, JSON.stringify(data), 'utf8')
+    } catch {
+      // Best-effort — swallow errors.
+    }
+  }, 1000)
+}
+
+function loadPersistedSessionIds(): void {
+  try {
+    const raw = readFileSync(SESSION_IDS_PATH, 'utf8')
+    const data = JSON.parse(raw)
+    if (data && typeof data === 'object') {
+      for (const [key, value] of Object.entries(data)) {
+        if (typeof value === 'string' && value && !sessionIds.has(key)) {
+          sessionIds.set(key, value)
+        }
+      }
+    }
+  } catch {
+    // File doesn't exist yet or is malformed — that's fine.
+  }
+}
+
+// Load persisted session IDs on module init.
+loadPersistedSessionIds()
+
 const execFileAsync = promisify(execFile)
 
 function isActiveQuery(cardId: string, query: Query): boolean {
@@ -1792,6 +1831,7 @@ function chatClaude(req: ChatRequest): void {
   // Restore sessionId from frontend (survives app restart via tile state)
   if (req.sessionId && !sessionIds.has(req.cardId)) {
     sessionIds.set(req.cardId, req.sessionId)
+    persistSessionIds()
   }
 
   const existingSessionId = sessionIds.get(req.cardId)
@@ -2051,6 +2091,7 @@ function chatClaude(req: ChatRequest): void {
             if (sid) {
               log('captured session_id:', sid.slice(0, 8))
               sessionIds.set(req.cardId, sid)
+              persistSessionIds()
               runtimeSession.sessionId = sid
               void upsertRuntimeSessionState(req, runtimeSession)
               sendStream(req.cardId, { type: 'session', sessionId: sid })
@@ -2179,6 +2220,7 @@ function chatClaude(req: ChatRequest): void {
             // Also capture from result if we missed earlier
             if (result.session_id && !sessionIds.has(req.cardId)) {
               sessionIds.set(req.cardId, result.session_id)
+              persistSessionIds()
             }
           }
         }
@@ -2643,6 +2685,7 @@ function chatCodex(req: ChatRequest): void {
 
     if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
       sessionIds.set(req.cardId, evt.thread_id)
+      persistSessionIds()
       runtimeSession.sessionId = evt.thread_id
       void upsertRuntimeSessionState(req, runtimeSession)
       sendStream(req.cardId, { type: 'session', sessionId: evt.thread_id })
