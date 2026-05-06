@@ -11,3 +11,4 @@ opensrc/morph-labs--morph-typescript-sdk/
 /.playwright-mcp
 /build-electrobun/dev-macos-arm64
 /.tmp
+/apps/chat-app/dist
