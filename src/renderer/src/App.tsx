@@ -31,6 +31,17 @@ type PendingSessionOpen =
 type SessionTargetEntry = AggregatedSessionEntry | WorkspaceSessionEntry
 type FocusOpenOptions = { persist?: boolean; sourceTileId?: string }
 type MiniChatOptions = { workspaceId: string; tileId: string; title: string }
+type InitialWindowOptions = { workspaceId: string | null; workspacePicker: boolean }
+
+function readInitialWindowOptions(): InitialWindowOptions {
+  if (typeof window === 'undefined') return { workspaceId: null, workspacePicker: false }
+  const params = new URLSearchParams(window.location.search)
+  const workspaceId = params.get('workspaceId')?.trim() || null
+  return {
+    workspaceId,
+    workspacePicker: params.get('workspacePicker') === '1',
+  }
+}
 
 function readMiniChatOptions(): MiniChatOptions | null {
   if (typeof window === 'undefined') return null
@@ -983,6 +994,8 @@ function findDiscoveryMatch(sourceTileId: string, tileList: TileState[], hiddenT
 function App(): JSX.Element {
   useAutoHideScrollbars()
   const miniChatOptions = useMemo(() => readMiniChatOptions(), [])
+  const initialWindowOptions = useMemo(() => readInitialWindowOptions(), [])
+  const nativeWorkspaceTabsEnabled = !miniChatOptions && window.electron?.platform === 'darwin'
 
   const [tiles, setTiles] = useState<TileState[]>([])
   const [groups, setGroups] = useState<GroupState[]>([])
@@ -1140,11 +1153,11 @@ function App(): JSX.Element {
   // Workspace pill tabs — open workspace ids within this window
   const [openWorkspaceIds, setOpenWorkspaceIds] = useState<string[]>([])
   useEffect(() => {
-    if (miniChatOptions) return
+    if (miniChatOptions || nativeWorkspaceTabsEnabled) return
     if (workspace?.id) setOpenWorkspaceIds(prev => prev.includes(workspace.id) ? prev : [...prev, workspace.id])
-  }, [workspace?.id, miniChatOptions])
+  }, [workspace?.id, miniChatOptions, nativeWorkspaceTabsEnabled])
   useEffect(() => {
-    if (miniChatOptions) return
+    if (miniChatOptions || nativeWorkspaceTabsEnabled) return
     const canonicalCurrentWorkspaceId = getCanonicalWorkspaceId(workspaces, workspace?.id)
     if (workspace?.id && canonicalCurrentWorkspaceId && canonicalCurrentWorkspaceId !== workspace.id) return
 
@@ -1157,10 +1170,10 @@ function App(): JSX.Element {
       if (next.length === prev.length && next.every((id, index) => id === prev[index])) return prev
       return next
     })
-  }, [workspace?.id, workspaces, miniChatOptions])
+  }, [workspace?.id, workspaces, miniChatOptions, nativeWorkspaceTabsEnabled])
 
   useEffect(() => {
-    if (miniChatOptions) return
+    if (miniChatOptions || nativeWorkspaceTabsEnabled) return
     if (!workspaceTabsHydratedRef.current) return
     const canonicalWorkspaceId = getCanonicalWorkspaceId(workspaces, workspace?.id) ?? workspace?.id ?? null
     const canonicalWorkspacePickerReturnId = getCanonicalWorkspaceId(workspaces, workspacePickerReturnWorkspaceId) ?? workspacePickerReturnWorkspaceId ?? null
@@ -1168,7 +1181,7 @@ function App(): JSX.Element {
       openWorkspaceIds,
       currentWorkspaceId: canonicalWorkspaceId ?? canonicalWorkspacePickerReturnId ?? openWorkspaceIds[0] ?? null,
     })
-  }, [openWorkspaceIds, workspace?.id, workspacePickerReturnWorkspaceId, workspaces, miniChatOptions])
+  }, [openWorkspaceIds, workspace?.id, workspacePickerReturnWorkspaceId, workspaces, miniChatOptions, nativeWorkspaceTabsEnabled])
 
   // ─── Auto Agent Mode Effect ───────────────────────────────────────────────
   // Automatically enables agentMode on chat tiles when they get close to compatible tiles
@@ -1552,27 +1565,40 @@ function App(): JSX.Element {
         isFresh ? Promise.resolve(null) : window.electron.workspace.getActive(),
         window.electron.settings?.get()
       ])
-      const persistedWorkspaceTabs = readPersistedWorkspaceTabState()
+      const persistedWorkspaceTabs = nativeWorkspaceTabsEnabled
+        ? { openWorkspaceIds: [], currentWorkspaceId: null }
+        : readPersistedWorkspaceTabState()
       if (savedSettings) setSettings(withDefaultSettings(savedSettings))
       setWorkspaces(wsList)
       const workspaceById = new Map(wsList.map(entry => [entry.id, entry]))
       const miniWorkspaceId = getCanonicalWorkspaceId(wsList, miniChatOptions?.workspaceId ?? null)
+      const initialWorkspaceId = nativeWorkspaceTabsEnabled
+        ? getCanonicalWorkspaceId(wsList, initialWindowOptions.workspaceId)
+        : null
       const restoredWorkspaceId = getCanonicalWorkspaceId(wsList, persistedWorkspaceTabs.currentWorkspaceId)
       const activeWorkspaceId = getCanonicalWorkspaceId(wsList, active?.id ?? null)
       const fallbackWorkspaceId = getCanonicalWorkspaceId(wsList, wsList[0]?.id ?? null)
       const miniWorkspace = miniWorkspaceId
         ? (workspaceById.get(miniWorkspaceId) ?? null)
         : null
+      const initialWorkspace = initialWorkspaceId
+        ? (workspaceById.get(initialWorkspaceId) ?? null)
+        : null
       const restoredWorkspace = restoredWorkspaceId
         ? (workspaceById.get(restoredWorkspaceId) ?? null)
         : null
-      const targetWorkspace = miniWorkspace
-        ?? restoredWorkspace
-        ?? (activeWorkspaceId ? (workspaceById.get(activeWorkspaceId) ?? null) : null)
-        ?? (fallbackWorkspaceId ? (workspaceById.get(fallbackWorkspaceId) ?? null) : null)
-      const restoredOpenWorkspaceIds = persistedWorkspaceTabs.openWorkspaceIds
-        .map(id => getCanonicalWorkspaceId(wsList, id))
-        .filter((id): id is string => Boolean(id) && workspaceById.has(id))
+      const targetWorkspace = nativeWorkspaceTabsEnabled && initialWindowOptions.workspacePicker
+        ? null
+        : miniWorkspace
+          ?? initialWorkspace
+          ?? restoredWorkspace
+          ?? (activeWorkspaceId ? (workspaceById.get(activeWorkspaceId) ?? null) : null)
+          ?? (fallbackWorkspaceId ? (workspaceById.get(fallbackWorkspaceId) ?? null) : null)
+      const restoredOpenWorkspaceIds = nativeWorkspaceTabsEnabled
+        ? (targetWorkspace ? [targetWorkspace.id] : [])
+        : persistedWorkspaceTabs.openWorkspaceIds
+          .map(id => getCanonicalWorkspaceId(wsList, id))
+          .filter((id): id is string => typeof id === 'string' && workspaceById.has(id))
 
       if (targetWorkspace && !restoredOpenWorkspaceIds.includes(targetWorkspace.id)) {
         restoredOpenWorkspaceIds.push(targetWorkspace.id)
@@ -1632,7 +1658,7 @@ function App(): JSX.Element {
         }).catch(() => {})
       }
     }
-  }, [showEmptyLayoutPage, miniChatOptions?.workspaceId])
+  }, [showEmptyLayoutPage, miniChatOptions?.workspaceId, nativeWorkspaceTabsEnabled, initialWindowOptions.workspaceId, initialWindowOptions.workspacePicker])
 
   // ─── Subscribe to custom theme registrations from extensions ─────────────
   useEffect(() => {
@@ -2993,16 +3019,23 @@ function App(): JSX.Element {
     await handleSwitchWorkspace(ws.id)
   }, [handleSwitchWorkspace])
 
-  // Cmd+T → open next available workspace as a pill tab
+  // Cmd+T → open another workspace. On macOS this uses native AppKit tabs;
+  // elsewhere it keeps the legacy in-window workspace tab strip.
   useEffect(() => {
     return window.electron?.window?.onNewTab?.(() => {
-      const next = workspaces.find(w => !openWorkspaceIds.includes(w.id))
+      const next = nativeWorkspaceTabsEnabled
+        ? workspaces.find(w => w.id !== workspace?.id)
+        : workspaces.find(w => !openWorkspaceIds.includes(w.id))
+      if (nativeWorkspaceTabsEnabled) {
+        void window.electron?.window?.newWorkspaceTab?.(next?.id ?? null)
+        return
+      }
       if (next) {
         setOpenWorkspaceIds(prev => [...prev, next.id])
-        handleSwitchWorkspace(next.id)
+        void handleSwitchWorkspace(next.id)
       }
     })
-  }, [workspaces, openWorkspaceIds, handleSwitchWorkspace])
+  }, [workspaces, openWorkspaceIds, handleSwitchWorkspace, nativeWorkspaceTabsEnabled, workspace?.id])
 
   // Launch a layout template into the current workspace instead of creating a
   // separate "Project:Layout" workspace tab.
@@ -4801,15 +4834,20 @@ function App(): JSX.Element {
   const discoveryHighlightZIndex = 0
   const discoveryGlowZIndex = 0
   const discoveryPillZIndex = 99997
-  const openWorkspaceTabs = openWorkspaceIds
-    .map(id => workspaces.find(ws => ws.id === id) ?? null)
-    .filter((ws): ws is Workspace => Boolean(ws))
+  const showRendererWorkspaceTabs = !nativeWorkspaceTabsEnabled
+  const openWorkspaceTabs = showRendererWorkspaceTabs
+    ? openWorkspaceIds
+      .map(id => workspaces.find(ws => ws.id === id) ?? null)
+      .filter((ws): ws is Workspace => Boolean(ws))
+    : []
   const hasWorkspaceTabs = openWorkspaceTabs.length > 0
   const workspaceTitleFallback = workspace?.name?.trim() || 'WORKSPACES'
-  const showTopWorkspacePickerTab = showWorkspacePickerTab || (!workspace && openWorkspaceTabs.length === 0)
-  const isFirstTopWorkspaceTabSelected = showTopWorkspacePickerTab
-    ? openWorkspaceTabs.length === 0
-    : (hasWorkspaceTabs ? openWorkspaceTabs[0]?.id === workspace?.id : true)
+  const showTopWorkspacePickerTab = showRendererWorkspaceTabs && (showWorkspacePickerTab || (!workspace && openWorkspaceTabs.length === 0))
+  const isFirstTopWorkspaceTabSelected = showRendererWorkspaceTabs
+    ? (showTopWorkspacePickerTab
+      ? openWorkspaceTabs.length === 0
+      : (hasWorkspaceTabs ? openWorkspaceTabs[0]?.id === workspace?.id : true))
+    : false
   const mainPanelTopLeftRadius = !sidebarCollapsed && isFirstTopWorkspaceTabSelected ? 0 : mainPanelRadius
   const mainPanelCornerRadii = {
     topLeft: mainPanelTopLeftRadius,
@@ -4926,6 +4964,12 @@ function App(): JSX.Element {
     if (!miniChatOptions) return
     void window.electron?.window?.setTitle?.(miniChatOptions.title)
   }, [miniChatOptions])
+
+  useEffect(() => {
+    if (miniChatOptions) return
+    const title = workspace?.name?.trim() || (showWorkspacePickerTab ? 'New Workspace' : 'CodeSurf')
+    void window.electron?.window?.setTitle?.(title)
+  }, [workspace?.name, showWorkspacePickerTab, miniChatOptions])
 
   const miniChatTile = miniChatOptions
     ? tiles.find(tile => tile.id === miniChatOptions.tileId && tile.type === 'chat')
@@ -5330,7 +5374,7 @@ function App(): JSX.Element {
 
           <div
             style={{
-              display: 'flex',
+              display: showRendererWorkspaceTabs ? 'flex' : 'none',
               alignItems: 'flex-end',
               gap: 8,
               minWidth: 0,
@@ -5606,7 +5650,13 @@ function App(): JSX.Element {
 
             <button
               type="button"
-              onClick={() => showEmptyLayoutPage({ preserveOpenTabs: true })}
+              onClick={() => {
+                if (nativeWorkspaceTabsEnabled) {
+                  void window.electron?.window?.newWorkspaceTab?.(null)
+                  return
+                }
+                showEmptyLayoutPage({ preserveOpenTabs: true })
+              }}
               aria-label="New workspace"
               title="New workspace"
               style={{

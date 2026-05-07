@@ -296,6 +296,7 @@ contextBridge.exposeInMainWorld('electron', {
   window: {
     new: () => ipcRenderer.invoke('window:new'),
     newTab: () => ipcRenderer.invoke('window:newTab'),
+    newWorkspaceTab: (workspaceId?: string | null) => ipcRenderer.invoke('window:newWorkspaceTab', workspaceId ?? null),
     list: () => ipcRenderer.invoke('window:list'),
     getCurrentId: () => ipcRenderer.invoke('window:getCurrentId'),
     setTitle: (title: string) => ipcRenderer.invoke('window:setTitle', title),

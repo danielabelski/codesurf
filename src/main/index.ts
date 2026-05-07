@@ -108,7 +108,15 @@ if (!gotSingleInstanceLock) {
 const windowTitles = new Map<number, string>()
 const freshWindowIds = new Set<number>()
 const miniChatWindows = new Map<string, BrowserWindow>()
+const MAIN_WINDOW_TABBING_IDENTIFIER = `${APP_ID}.workspace-tabs`
 let extensionRegistry: ExtensionRegistry | null = null
+
+interface MainWindowOptions {
+  fresh?: boolean
+  workspaceId?: string | null
+  workspacePicker?: boolean
+  nativeTabOwner?: BrowserWindow | null
+}
 
 interface MiniChatWindowRequest {
   workspaceId?: unknown
@@ -123,6 +131,62 @@ function getMiniChatWindowKey(workspaceId: string, tileId: string): string {
 function getRendererQuery(params?: Record<string, string>): Record<string, string> | undefined {
   if (!params) return undefined
   return Object.fromEntries(Object.entries(params).filter(([, value]) => value.trim().length > 0))
+}
+
+function getMainWindowQuery(opts?: MainWindowOptions): Record<string, string> | undefined {
+  const query: Record<string, string> = {}
+  const workspaceId = typeof opts?.workspaceId === 'string' ? opts.workspaceId.trim() : ''
+  if (workspaceId) query.workspaceId = workspaceId
+  if (opts?.workspacePicker) query.workspacePicker = '1'
+  return Object.keys(query).length > 0 ? query : undefined
+}
+
+function getFocusedMainWindow(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && !focused.isDestroyed() && focused.tabbingIdentifier === MAIN_WINDOW_TABBING_IDENTIFIER) return focused
+  return getLiveWindows().find(win => win.tabbingIdentifier === MAIN_WINDOW_TABBING_IDENTIFIER) ?? null
+}
+
+function forceMergeNativeWorkspaceTabs(owner: BrowserWindow | null, tab: BrowserWindow): void {
+  if (process.platform !== 'darwin') return
+  if (!owner || owner.isDestroyed() || owner === tab) return
+
+  const merge = (): void => {
+    if (owner.isDestroyed() || tab.isDestroyed()) return
+    try {
+      owner.mergeAllWindows()
+      tab.focus()
+    } catch (error) {
+      console.warn('[window] Failed to merge native tabs:', error)
+    }
+  }
+
+  // Electron/AppKit can ignore immediate grouping if the NSWindow is still
+  // settling. Retry briefly so a separate window is pulled into the tab group.
+  setTimeout(merge, 0)
+  setTimeout(merge, 120)
+  setTimeout(merge, 400)
+}
+
+function addAsNativeWorkspaceTab(owner: BrowserWindow | null, tab: BrowserWindow): boolean {
+  if (process.platform !== 'darwin') return false
+  if (!owner || owner.isDestroyed() || owner === tab) return false
+  if (owner.tabbingIdentifier !== MAIN_WINDOW_TABBING_IDENTIFIER) return false
+  try {
+    owner.addTabbedWindow(tab)
+    forceMergeNativeWorkspaceTabs(owner, tab)
+    return true
+  } catch (error) {
+    console.warn('[window] Failed to attach native tab:', error)
+    forceMergeNativeWorkspaceTabs(owner, tab)
+    return false
+  }
+}
+
+function createWorkspaceTab(owner: BrowserWindow | null, opts?: MainWindowOptions): BrowserWindow {
+  const win = createWindow({ ...opts, fresh: opts?.fresh ?? true, nativeTabOwner: owner })
+  addAsNativeWorkspaceTab(owner, win)
+  return win
 }
 
 function loadRenderer(win: BrowserWindow, query?: Record<string, string>): void {
@@ -328,19 +392,25 @@ function installMediaPermissionHandlers(): void {
   })
 }
 
-function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
+function createWindow(opts?: MainWindowOptions): BrowserWindow {
   const iconPath = resolveAppIconPath()
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    show: false,
+    // Native AppKit tabs need a standard framed NSWindow. `hiddenInset` gives
+    // the Chrome-like integrated look, but Electron/AppKit refuses to group it
+    // reliably; use default titlebar when native grouping is enabled.
+    show: process.platform === 'darwin' && Boolean(opts?.nativeTabOwner),
     autoHideMenuBar: true,
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    frame: process.platform !== 'darwin',
+    titleBarStyle: 'default',
+    frame: true,
+    ...(process.platform === 'darwin' ? { tabbingIdentifier: MAIN_WINDOW_TABBING_IDENTIFIER } : {}),
     ...(iconPath ? { icon: iconPath } : {}),
-    ...getWindowAppearanceOptions(),
+    ...(process.platform === 'darwin'
+      ? { transparent: false, backgroundColor: '#1e1e1e', vibrancy: undefined, visualEffectState: undefined }
+      : getWindowAppearanceOptions()),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -354,9 +424,14 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
 
   win.on('ready-to-show', () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return
-    applyWindowAppearance(win)
-    win.setTitle('') // hide native title text; our pill tabs show workspace name
-    win.show()
+    if (process.platform === 'darwin') {
+      win.setBackgroundColor('#1e1e1e')
+      win.setVibrancy(null)
+    } else {
+      applyWindowAppearance(win)
+    }
+    if (!win.getTitle()) win.setTitle(APP_NAME)
+    if (!win.isVisible()) win.show()
     broadcastWindowList()
   })
 
@@ -395,7 +470,7 @@ function createWindow(opts?: { fresh?: boolean }): BrowserWindow {
     freshWindowIds.add(win.webContents.id)
   }
 
-  loadRenderer(win)
+  loadRenderer(win, getMainWindowQuery(opts))
 
   return win
 }
@@ -862,7 +937,23 @@ app.whenReady().then(async () => {
 
   // Window management
   ipcMain.handle('window:new', () => { createWindow({ fresh: true }); return null })
-  ipcMain.handle('window:newTab', () => { createWindow({ fresh: true }); return null })
+  ipcMain.handle('window:newTab', (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender) ?? getFocusedMainWindow()
+    if (process.platform === 'darwin') {
+      createWorkspaceTab(owner, { fresh: true, workspacePicker: true })
+    } else {
+      createWindow({ fresh: true })
+    }
+    return null
+  })
+  ipcMain.handle('window:newWorkspaceTab', (event, workspaceId?: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender) ?? getFocusedMainWindow()
+    const id = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    const win = process.platform === 'darwin'
+      ? createWorkspaceTab(owner, { fresh: true, workspaceId: id || null, workspacePicker: !id })
+      : createWindow({ fresh: true, workspaceId: id || null, workspacePicker: !id })
+    return { id: win.webContents.id }
+  })
   ipcMain.handle('window:isFresh', (event) => {
     const id = event.sender.id
     const isFresh = freshWindowIds.has(id)
@@ -889,7 +980,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('window:getCurrentId', (event) => event.sender.id)
 
   ipcMain.handle('window:setTitle', (event, title: string) => {
-    windowTitles.set(event.sender.id, title)
+    const cleanTitle = typeof title === 'string' && title.trim().length > 0 ? title.trim() : APP_NAME
+    windowTitles.set(event.sender.id, cleanTitle)
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (win && !win.isDestroyed()) win.setTitle(cleanTitle)
     broadcastWindowList()
   })
 
@@ -950,9 +1044,15 @@ app.whenReady().then(async () => {
           label: 'New Tab',
           accelerator: 'CmdOrCtrl+T',
           click: () => {
-            const win = BrowserWindow.getFocusedWindow()
-            if (win && !win.isDestroyed()) {
+            const win = getFocusedMainWindow()
+            if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
               win.webContents.send('workspace:newTab')
+              return
+            }
+            if (process.platform === 'darwin') {
+              createWorkspaceTab(null, { fresh: true, workspacePicker: true })
+            } else {
+              createWindow({ fresh: true })
             }
           }
         },
@@ -1003,6 +1103,15 @@ app.whenReady().then(async () => {
     }
   ])
   Menu.setApplicationMenu(menu)
+
+  app.on('new-window-for-tab', () => {
+    const owner = getFocusedMainWindow()
+    if (process.platform === 'darwin') {
+      createWorkspaceTab(owner, { fresh: true, workspacePicker: true })
+    } else {
+      createWindow({ fresh: true })
+    }
+  })
 
   createWindow()
 

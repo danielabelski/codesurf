@@ -236,6 +236,7 @@ interface ElectronAPI {
   window: {
     new(): Promise<void>
     newTab(): Promise<void>
+    newWorkspaceTab(workspaceId?: string | null): Promise<{ id: number }>
     isFresh(): Promise<boolean>
     list(): Promise<{ id: number; title: string; focused: boolean }[]>
     getCurrentId(): Promise<number>
@@ -245,6 +246,7 @@ interface ElectronAPI {
     openMiniChat(opts: { workspaceId: string; tileId: string; title?: string }): Promise<{ ok: boolean; id?: number; error?: string }>
     setSidebarCollapsed(collapsed: boolean): Promise<boolean>
     onListChanged(cb: (list: { id: number; title: string; focused: boolean }[]) => void): () => void
+    onNewTab(cb: () => void): () => void
   }
   canvas: {
     load(workspaceId: string): Promise<import('../../shared/types').CanvasState | null>
