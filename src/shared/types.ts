@@ -358,17 +358,17 @@ export interface FontSettings {
 
 // ── System font stacks ──────────────────────────────────────────────────────
 
-const SANS_STACK = '"SF Pro Rounded", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
-// Nerd Font variant kept at the front so terminal tiles render PUA icon
-// glyphs. Everything after is main's modernized fallback ordering.
-const MONO_STACK = '"FiraCode Nerd Font Mono", ui-monospace, "SF Mono", "Menlo", "Monaco", "JetBrains Mono", "Fira Code", monospace'
+const SANS_STACK = '"Saira", "SF Pro Rounded", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+// Geist Mono is the default UI monospace; Nerd Font remains in the fallback
+// stack so terminal tiles can still render PUA icon glyphs when installed.
+const MONO_STACK = '"Geist Mono", "FiraCode Nerd Font Mono", ui-monospace, "SF Mono", "Menlo", "Monaco", "JetBrains Mono", "Fira Code", monospace'
 
 // ── Default font tokens ─────────────────────────────────────────────────────
 
 export const DEFAULT_FONTS: FontSettings = {
-  primary:   { family: SANS_STACK, size: 14, lineHeight: 1.10, weight: 400 },
+  primary:   { family: SANS_STACK, size: 13, lineHeight: 1.15, weight: 400 },
   secondary: { family: SANS_STACK, size: 13, lineHeight: 1.00, weight: 400 },
-  mono:      { family: MONO_STACK, size: 13, lineHeight: 1.00, weight: 500 },
+  mono:      { family: MONO_STACK, size: 13, lineHeight: 1.25, weight: 600 },
 }
 
 /** Migrate old granular FontSettings to the simplified 3-token shape */
@@ -528,13 +528,13 @@ export interface ToolPermissionStore {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   fonts: { ...DEFAULT_FONTS },
-  appearance: 'dark',
-  themeId: 'default-dark',
-  canvasBackground: '#15171a',
+  appearance: 'light',
+  themeId: 'paper-light',
+  canvasBackground: '#f3f5f8',
   canvasGlowEnabled: true,
   canvasGlowRadius: 120,
-  gridColorSmall: '#2a2e35',
-  gridColorLarge: '#3a3f48',
+  gridColorSmall: '#d8dde6',
+  gridColorLarge: '#c5ccd8',
   gridSpacingSmall: 20,
   gridSpacingLarge: 100,
   snapToGrid: true,

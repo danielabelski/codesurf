@@ -4208,7 +4208,6 @@ function App(): JSX.Element {
 
     // Inject locked connections — these persist even when tiles move apart
     const tileMap = new Map(tiles.map(t => [t.id, t]))
-    if (lockedConnections.length > 0) console.log('[Discovery] Injecting locked connections:', lockedConnections.length)
     for (const lc of lockedConnections) {
       const src = tileMap.get(lc.sourceTileId)
       const tgt = tileMap.get(lc.targetTileId)

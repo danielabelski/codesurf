@@ -1322,6 +1322,14 @@ export function TileChrome({
 
   const pendingTasks = drawerData.tasks.filter(t => t.status !== 'done').length
   const totalActivity = pendingTasks + drawerData.tools.filter(t => t.status === 'running').length
+  const tilePanelShadow = theme.mode === 'light'
+    ? isSelected
+      ? `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 36%, white 16%, transparent), 0 0 0 1px rgba(15,23,42,0.17), 0 8px 18px rgba(15,23,42,0.11)`
+      : 'inset 0 0 0 1px rgba(255,255,255,0.88), 0 0 0 1px rgba(15,23,42,0.14), 0 7px 16px rgba(15,23,42,0.09)'
+    : isSelected ? getEdgeShadow(theme, 'accent') : getEdgeShadow(theme, 'strong')
+  const drawerPanelShadow = theme.mode === 'light'
+    ? 'inset 0 0 0 1px rgba(255,255,255,0.82), 0 0 0 1px rgba(15,23,42,0.13), 0 7px 16px rgba(15,23,42,0.08)'
+    : getEdgeShadow(theme, 'strong')
 
   return (
     <div
@@ -1348,7 +1356,7 @@ export function TileChrome({
           background: theme.surface.panelMuted,
           borderRadius: 10,
           border: '1px solid transparent',
-          boxShadow: getEdgeShadow(theme, 'strong'),
+          boxShadow: drawerPanelShadow,
           zIndex: -1,
           transform: drawerOpen ? 'translateX(0)' : `translateX(-${DRAWER_WIDTH}px)`,
           transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
@@ -1377,7 +1385,7 @@ export function TileChrome({
           width: '100%', height: '100%',
           borderRadius: getCurvierBlockRadius(tile.borderRadius), overflow: allowOverflow ? 'visible' : 'hidden',
           border: '1px solid transparent',
-          boxShadow: isSelected ? getEdgeShadow(theme, 'accent') : getEdgeShadow(theme, 'strong'),
+          boxShadow: tilePanelShadow,
           background: theme.surface.panel,
           position: 'relative',
           zIndex: 1,

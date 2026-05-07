@@ -373,8 +373,56 @@ async function getCurrentSessionTitleForTitleGeneration(
     return typeof match?.title === 'string' ? match.title : null
   }
 
-  const match = listThreadsFromDb(workspacePath).find(session => session.id === sessionEntryId)
-  return typeof match?.title === 'string' ? match.title : null
+  const indexedMatch = listThreadsFromDb(workspacePath).find(session => session.id === sessionEntryId)
+  if (typeof indexedMatch?.title === 'string') return indexedMatch.title
+
+  const daemonMatch = await daemonClient.listExternalSessions(workspacePath, true)
+    .then(sessions => sessions.find(session => session.id === sessionEntryId) ?? null)
+    .catch(() => null)
+  return typeof daemonMatch?.title === 'string' ? daemonMatch.title : null
+}
+
+async function renameSessionTitleForSidebar(
+  workspaceId: string,
+  sessionEntryId: string,
+  workspacePath: string | null,
+  title: string,
+): Promise<{ ok: boolean; error?: string; title?: string }> {
+  if (isLocalSessionEntry(sessionEntryId)) {
+    return await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }))
+  }
+
+  const scopedResult = await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+  }))
+  if (scopedResult.ok) {
+    renameIndexedThread(sessionEntryId, title)
+    return scopedResult
+  }
+
+  const globalResult = workspacePath
+    ? await daemonClient.renameExternalSession(null, sessionEntryId, title).catch(error => ({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      }))
+    : scopedResult
+  if (globalResult.ok) {
+    renameIndexedThread(sessionEntryId, title)
+    return globalResult
+  }
+
+  // Sidebar sessions are read from the SQLite thread index. Some sources are
+  // index-only from the main process, so the daemon may not be able to resolve
+  // them even though the row is visible and loadable. In that case persist the
+  // user-owned title override directly in the index instead of failing with
+  // "Session not found".
+  if (renameIndexedThread(sessionEntryId, title)) return { ok: true, title }
+
+  return globalResult.ok ? globalResult : scopedResult
 }
 
 function sameTileSessionSummary(a: TileSessionSummary | null, b: TileSessionSummary | null): boolean {
@@ -872,20 +920,9 @@ export function registerCanvasIPC(): void {
     assertSafeWorkspaceArtifactId(workspaceId)
     const workspacePath = await getWorkspacePathById(workspaceId)
 
-    const result = (sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:'))
-      ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }))
-      : await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        }))
+    const result = await renameSessionTitleForSidebar(workspaceId, sessionEntryId, workspacePath, title)
 
     if (result.ok) {
-      if (!(sessionEntryId.startsWith('codesurf-runtime:') || sessionEntryId.startsWith('codesurf-tile:') || sessionEntryId.startsWith('codesurf-job:'))) {
-        renameIndexedThread(sessionEntryId, title)
-      }
       broadcastSessionsChangedNow(workspaceId)
     }
     return result
@@ -899,9 +936,11 @@ export function registerCanvasIPC(): void {
   ) => {
     assertSafeWorkspaceArtifactId(workspaceId)
     const generationKey = `${workspaceId}::${sessionEntryId}`
-    const initialTitle = entryHint?.title ?? ''
 
     return await sessionTitleGenerationGate.run(generationKey, async () => {
+      const workspacePath = await getWorkspacePathById(workspaceId)
+      const currentTitleBeforeGeneration = await getCurrentSessionTitleForTitleGeneration(workspaceId, sessionEntryId, workspacePath)
+      const initialTitle = cleanSessionTitleCandidate(entryHint?.title) ?? currentTitleBeforeGeneration ?? ''
       const state = await loadSessionStateForTitleGeneration(workspaceId, sessionEntryId, entryHint ?? null)
       if (!Array.isArray(state.messages) || state.messages.length === 0) {
         return { ok: false, error: 'Session has no transcript to title.' }
@@ -923,7 +962,6 @@ export function registerCanvasIPC(): void {
         return { ok: false, error: 'Title generation returned an empty title.' }
       }
 
-      const workspacePath = await getWorkspacePathById(workspaceId)
       const currentTitle = await getCurrentSessionTitleForTitleGeneration(workspaceId, sessionEntryId, workspacePath)
       if (hasSessionTitleChangedDuringGeneration(initialTitle, currentTitle)) {
         return {
@@ -932,18 +970,9 @@ export function registerCanvasIPC(): void {
         }
       }
 
-      const result = isLocalSessionEntry(sessionEntryId)
-        ? await daemonClient.renameLocalSession(workspaceId, sessionEntryId, title).catch(error => ({
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-          }))
-        : await daemonClient.renameExternalSession(workspacePath, sessionEntryId, title).catch(error => ({
-            ok: false,
-            error: error instanceof Error ? error.message : String(error),
-          }))
+      const result = await renameSessionTitleForSidebar(workspaceId, sessionEntryId, workspacePath, title)
 
       if (result.ok) {
-        if (!isLocalSessionEntry(sessionEntryId)) renameIndexedThread(sessionEntryId, title)
         broadcastSessionsChangedNow(workspaceId, 'generateSessionTitle')
       }
 
