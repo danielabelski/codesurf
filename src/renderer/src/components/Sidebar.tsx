@@ -46,8 +46,8 @@ const PROJECT_SESSION_PREVIEW_COUNT = 5
 const PROJECT_SESSION_SHOW_MORE_COUNT = 10
 const SIDEBAR_RIGHT_RAIL_WIDTH = 44
 // Nudge action buttons onto the same optical center as the timestamp rail so
-// hovering a row swaps time→archive without a lateral jump.
-const SIDEBAR_RIGHT_RAIL_ACTION_RIGHT = 4
+// hovering a row swaps time for archive without a lateral jump.
+const SIDEBAR_RIGHT_RAIL_ACTION_RIGHT = 2
 type SessionReadWatermarks = Record<string, number>
 type PinnedSessionKeys = Record<string, true>
 

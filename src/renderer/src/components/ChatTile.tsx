@@ -2221,6 +2221,40 @@ function GuardedChatMarkdown({ text, isStreaming, className }: {
   return <ChatMarkdown text={text} isStreaming={isStreaming} className={className} />
 }
 
+type ExternalAgentMarkupSegment =
+  | { kind: 'md'; text: string }
+  | { kind: 'tool'; block: ToolBlock }
+
+function splitExternalAgentMarkup(text: string): ExternalAgentMarkupSegment[] {
+  const pattern = /\[external_agent_tool_call:\s*([^\]]+)\]([\s\S]*?)\[\/external_agent_tool_call\]|\[external_agent_tool_result(?::\s*([^\]]+))?\]([\s\S]*?)\[\/external_agent_tool_result\]/g
+  const segments: ExternalAgentMarkupSegment[] = []
+  let lastIndex = 0
+  let index = 0
+  for (const match of text.matchAll(pattern)) {
+    if (match.index == null) continue
+    const before = text.slice(lastIndex, match.index)
+    if (before) segments.push({ kind: 'md', text: before })
+    const callName = (match[1] ?? '').trim()
+    const resultLabel = (match[3] ?? '').trim()
+    const body = (match[2] ?? match[4] ?? '').trim()
+    const isResult = !callName
+    const isError = isResult && resultLabel.toLowerCase() === 'error'
+    segments.push({
+      kind: 'tool',
+      block: {
+        id: `external-agent-${match.index}-${index++}`,
+        name: callName || resultLabel || 'result',
+        input: body,
+        status: isError ? 'error' : 'done',
+      },
+    })
+    lastIndex = match.index + match[0].length
+  }
+  const tail = text.slice(lastIndex)
+  if (tail) segments.push({ kind: 'md', text: tail })
+  return segments.length > 0 ? segments : [{ kind: 'md', text }]
+}
+
 const ChatMessageContent = React.memo(({
   text,
   isStreaming,
@@ -2348,17 +2382,50 @@ const ChatMessageContent = React.memo(({
   // through the normal markdown pipeline.
   const accent = theme.accent.base
   const textColor = theme.text.primary
+  const externalAgentSegments = useMemo(() => splitExternalAgentMarkup(bodyText), [bodyText])
+  const hasExternalAgentMarkup = externalAgentSegments.some(seg => seg.kind === 'tool')
   const segments = useMemo(() => splitInsightSegments(bodyText), [bodyText])
-  const renderedBody = segments.length === 1 && segments[0].kind === 'md'
-    ? <GuardedChatMarkdown text={segments[0].text} isStreaming={isStreaming} className={className} />
-    : (
-      <div className={className}>
-        {segments.map((seg, i) => seg.kind === 'insight'
-          ? <InsightBlock key={i} text={seg.text} closed={seg.closed} isStreaming={isStreaming} accent={accent} textColor={textColor} />
-          : <GuardedChatMarkdown key={i} text={seg.text} isStreaming={isStreaming} />
-        )}
+  const renderedBody = hasExternalAgentMarkup
+    ? (
+      <div className={className} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+        {(() => {
+          const elements: JSX.Element[] = []
+          let chipRow: JSX.Element[] = []
+          let chipRowStart = 0
+          const flushChipRow = () => {
+            if (chipRow.length === 0) return
+            elements.push(
+              <div key={`external-tool-row-${chipRowStart}`} style={CHAT_CHIP_ROW_STYLE}>
+                {chipRow}
+              </div>
+            )
+            chipRow = []
+          }
+          externalAgentSegments.forEach((seg, i) => {
+            if (seg.kind === 'tool') {
+              if (chipRow.length === 0) chipRowStart = i
+              chipRow.push(<ToolBlockView key={seg.block.id} block={seg.block} />)
+              return
+            }
+            if (!seg.text.trim()) return
+            flushChipRow()
+            elements.push(<GuardedChatMarkdown key={`external-md-${i}`} text={seg.text} isStreaming={isStreaming} />)
+          })
+          flushChipRow()
+          return elements
+        })()}
       </div>
     )
+    : segments.length === 1 && segments[0].kind === 'md'
+      ? <GuardedChatMarkdown text={segments[0].text} isStreaming={isStreaming} className={className} />
+      : (
+        <div className={className}>
+          {segments.map((seg, i) => seg.kind === 'insight'
+            ? <InsightBlock key={i} text={seg.text} closed={seg.closed} isStreaming={isStreaming} accent={accent} textColor={textColor} />
+            : <GuardedChatMarkdown key={i} text={seg.text} isStreaming={isStreaming} />
+          )}
+        </div>
+      )
 
   if (!attachments) return renderedBody
   return <>{renderedBody}{attachments}</>
@@ -2522,7 +2589,7 @@ function ensureChatMdStyle(): void {
     .chat-md table {
       display: table; max-width: 100%; overflow: hidden; border-collapse: separate; border-spacing: 0;
       margin: 8px 0; width: 100%; font-size: 0.9em; table-layout: fixed;
-      border-radius: 12px; border: 1px solid transparent; box-shadow: var(--cs-edge-shadow);
+      border: 0; border-radius: 0; box-shadow: none;
     }
     .chat-md th, .chat-md td {
       border: 0; padding: 8px 12px; text-align: left; vertical-align: top;
@@ -8097,7 +8164,7 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
           minHeight: 22,
           boxSizing: 'border-box',
           cursor: hasContent ? 'pointer' : 'default',
-          color: isActive ? theme.accent.hover : theme.chat.muted,
+          color: theme.chat.muted,
           fontSize: 10.5,
           fontFamily: fonts.sans,
           fontWeight: 500,
@@ -8106,9 +8173,9 @@ const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { 
           maxWidth: '100%',
         }}
       >
-        <Brain size={11} style={{ opacity: isActive ? 0.9 : 0.5, flexShrink: 0 }} />
+        <Brain size={11} style={{ opacity: isActive ? 0.75 : 0.5, flexShrink: 0 }} />
         {isActive ? (
-          <ShimmerText baseColor={theme.accent.hover} style={{
+          <ShimmerText baseColor={theme.chat.muted} style={{
             fontSize: 10.5, fontWeight: 500, lineHeight: 1,
             minWidth: 0, flex: '1 1 auto',
             overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
@@ -8219,7 +8286,7 @@ const WorkingChipView = React.memo(function WorkingChipView({ message }: { messa
       padding: '0 8px',
       minHeight: 24,
       boxSizing: 'border-box',
-      color: theme.accent.hover,
+      color: theme.chat.muted,
       fontSize: 10.5,
       fontFamily: fonts.sans,
       fontWeight: 500,
@@ -8229,11 +8296,11 @@ const WorkingChipView = React.memo(function WorkingChipView({ message }: { messa
       flex: '0 0 auto',
     }}>
       <Cog size={11} style={{
-        opacity: 0.9,
+        opacity: 0.75,
         flexShrink: 0,
         animation: 'chat-spin 2.4s linear infinite',
       }} />
-      <ShimmerText baseColor={theme.accent.hover} style={{
+      <ShimmerText baseColor={theme.chat.muted} style={{
         fontSize: 10.5, fontWeight: 500, lineHeight: 1,
         minWidth: 0,
         overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',

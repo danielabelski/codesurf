@@ -5338,11 +5338,11 @@ function App(): JSX.Element {
               }}
               style={{
                 position: 'fixed',
-                top: 6,
-                left: 76,
+                top: 8,
+                left: 78,
                 zIndex: 2147483647,
-                width: 28,
-                height: 28,
+                width: collapsedSidebarPillSize,
+                height: collapsedSidebarPillSize,
                 // Tahoe toolbar control: the old hover state is now the
                 // resting state so it reads as an actual button next to the
                 // traffic lights instead of disappearing into vibrancy.
@@ -5377,7 +5377,7 @@ function App(): JSX.Element {
                   Symbol (which lucide doesn't ship — its PanelLeft variants
                   use only an outline divider, which read as visually identical
                   to one another at 17px). */}
-              <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
+              <svg width="12" height="12" viewBox="0 0 20 20" aria-hidden="true">
                 <rect x="2.5" y="3.5" width="15" height="13" rx="2.6" fill="none" stroke="currentColor" strokeWidth="1.6" />
                 <rect x="2.5" y="3.5" width="5.5" height="13" rx="2.6" fill="currentColor" />
               </svg>

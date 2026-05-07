@@ -257,8 +257,8 @@ button:focus-visible,
   box-shadow: var(--cs-edge-shadow);
 }
 
-#root [style*="border: 1px solid"][style*="border-radius"],
-#root [style*="border: 0.5px solid"][style*="border-radius"] {
+#root [style*="border: 1px solid"][style*="border-radius"]:not(table),
+#root [style*="border: 0.5px solid"][style*="border-radius"]:not(table) {
   border-color: transparent !important;
   box-shadow: var(--cs-edge-shadow);
 }
