@@ -782,6 +782,7 @@ const CHAT_CHIP_ROW_STYLE: React.CSSProperties = {
   minWidth: 0,
   maxWidth: '100%',
   overflow: 'visible',
+  paddingTop: 1,
 }
 const CHAT_OFFSCREEN_MESSAGE_STYLE: React.CSSProperties = {
   contentVisibility: 'auto',
@@ -6616,7 +6617,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             }
 
             const renderChipRow = (items: JSX.Element[], key: string): JSX.Element => {
-              if (items.length === 1) return items[0]
               return (
                 <div key={key} style={CHAT_CHIP_ROW_STYLE}>
                   {items}
@@ -6744,7 +6744,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 minWidth: 0,
                 alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
                 marginBottom: msg.role === 'user' ? 5 : 0,
-                gap: 6,
+                gap: 2,
                 ...(isLiveMessage ? {} : CHAT_OFFSCREEN_MESSAGE_STYLE),
               }}>
                 {/* Thinking block — show the pre-tools indicator only when there
