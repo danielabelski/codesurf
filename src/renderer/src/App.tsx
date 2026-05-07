@@ -995,7 +995,10 @@ function App(): JSX.Element {
   useAutoHideScrollbars()
   const miniChatOptions = useMemo(() => readMiniChatOptions(), [])
   const initialWindowOptions = useMemo(() => readInitialWindowOptions(), [])
-  const nativeWorkspaceTabsEnabled = !miniChatOptions && window.electron?.platform === 'darwin'
+  // Hybrid mode: keep BrowserWindow `tabbingIdentifier` for optional native
+  // macOS grouping, but use our Chrome-style renderer workspace tabs as the
+  // primary visible tab strip.
+  const nativeWorkspaceTabsEnabled = false
 
   const [tiles, setTiles] = useState<TileState[]>([])
   const [groups, setGroups] = useState<GroupState[]>([])
@@ -4834,7 +4837,7 @@ function App(): JSX.Element {
   const discoveryHighlightZIndex = 0
   const discoveryGlowZIndex = 0
   const discoveryPillZIndex = 99997
-  const showRendererWorkspaceTabs = !nativeWorkspaceTabsEnabled
+  const showRendererWorkspaceTabs = true
   const openWorkspaceTabs = showRendererWorkspaceTabs
     ? openWorkspaceIds
       .map(id => workspaces.find(ws => ws.id === id) ?? null)
@@ -4863,14 +4866,15 @@ function App(): JSX.Element {
       ? '0 8px 26px rgba(15,23,42,0.14)'
       : '0 8px 28px rgba(0,0,0,0.32)'
   const workspaceTabLabelSize = Math.max(12, appFonts.size - 1)
-  const workspaceTabBackground = panelLayout ? theme.surface.panel : mainPanelBackground
+  const chromeWorkspaceTabStripBackground = theme.mode === 'light' ? 'rgba(224, 229, 242, 0.92)' : 'rgba(9, 17, 42, 0.94)'
+  const workspaceTabBackground = theme.mode === 'light' ? 'rgba(255,255,255,0.96)' : 'rgba(3, 5, 12, 0.98)'
   const workspaceTabInactiveBackground = 'transparent'
-  const workspaceTabInactiveHoverBackground = theme.surface.hover
-  const workspaceTabActiveBorder = `color-mix(in srgb, ${theme.accent.base} 16%, transparent)`
-  const workspaceTabCloseHoverBackground = `color-mix(in srgb, ${theme.surface.selection} 70%, ${theme.surface.hover})`
-  const workspaceTabMaxWidth = 'min(248px, 24vw)'
-  const workspaceTabActiveHeight = 31
-  const workspaceTabInactiveHeight = 24
+  const workspaceTabInactiveHoverBackground = theme.mode === 'light' ? 'rgba(255,255,255,0.42)' : 'rgba(255,255,255,0.06)'
+  const workspaceTabActiveBorder = theme.mode === 'light' ? 'rgba(12,18,32,0.10)' : 'rgba(255,255,255,0.08)'
+  const workspaceTabCloseHoverBackground = theme.mode === 'light' ? 'rgba(15,23,42,0.10)' : 'rgba(255,255,255,0.12)'
+  const workspaceTabMaxWidth = 'min(270px, 24vw)'
+  const workspaceTabActiveHeight = 34
+  const workspaceTabInactiveHeight = 30
   const workspaceTabTextOffset = -1
   const workspaceTabInactiveTextOffset = 0
   const workspaceTabInactiveBottomGap = 3
@@ -5297,14 +5301,17 @@ function App(): JSX.Element {
         <div
           className="flex items-center flex-shrink-0"
           style={{
-            height: 38,            
+            height: 42,
             // @ts-ignore
             WebkitAppRegion: 'drag',
             paddingLeft: sidebarCollapsed ? 78 : sidebarWidth + 4,
             transition: 'padding-left 0.15s ease',
             position: 'relative',
             zIndex: 90,
-            paddingTop: 2,
+            paddingTop: 4,
+            background: showRendererWorkspaceTabs ? chromeWorkspaceTabStripBackground : 'transparent',
+            borderBottom: showRendererWorkspaceTabs ? `1px solid ${theme.mode === 'light' ? 'rgba(15,23,42,0.12)' : 'rgba(255,255,255,0.07)'}` : 'none',
+            boxShadow: showRendererWorkspaceTabs && theme.mode !== 'light' ? 'inset 0 -1px 0 rgba(0,0,0,0.55)' : 'none',
           }}
         >
           {!sidebarCollapsed && (
@@ -5376,7 +5383,7 @@ function App(): JSX.Element {
             style={{
               display: showRendererWorkspaceTabs ? 'flex' : 'none',
               alignItems: 'flex-end',
-              gap: 8,
+              gap: 3,
               minWidth: 0,
               height: '100%',
               paddingLeft: 8,
@@ -5398,12 +5405,15 @@ function App(): JSX.Element {
                     padding: '0 8px 0 10px',
                     gap: 5,
                     marginBottom: isActive ? workspaceTabAttachedBottomGap : workspaceTabInactiveBottomGap,
-                    borderRadius: isActive ? '8px 8px 0 0' : 8,
+                    borderRadius: isActive ? '14px 14px 0 0' : 10,
                     background: isActive ? workspaceTabBackground : workspaceTabInactiveBackground,
-                    color: isActive ? theme.accent.base : theme.text.secondary,
-                    transition: 'color 0.12s ease, background 0.12s ease, border-color 0.12s ease',
+                    color: isActive ? theme.text.primary : theme.text.secondary,
+                    transition: 'color 0.12s ease, background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease',
                     border: isActive ? `1px solid ${workspaceTabActiveBorder}` : '1px solid transparent',
                     borderBottom: isActive ? 'none' : '1px solid transparent',
+                    boxShadow: isActive
+                      ? (theme.mode === 'light' ? '0 -1px 2px rgba(15,23,42,0.06)' : '0 -1px 0 rgba(255,255,255,0.05), 0 8px 18px rgba(0,0,0,0.24)')
+                      : 'none',
                     boxSizing: 'border-box',
                     position: 'relative',
                     zIndex: isActive ? 1 : 0,
@@ -5507,9 +5517,9 @@ function App(): JSX.Element {
                   padding: '0 8px 0 10px',
                   gap: 5,
                   marginBottom: workspaceTabAttachedBottomGap,
-                  borderRadius: '8px 8px 0 0',
+                  borderRadius: '14px 14px 0 0',
                   background: workspaceTabBackground,
-                  color: theme.accent.base,
+                  color: theme.text.primary,
                   fontSize: Math.max(11, workspaceTabLabelSize),
                   fontWeight: 600,
                   lineHeight: 1,
@@ -5552,9 +5562,9 @@ function App(): JSX.Element {
                   padding: '0 10px',
                   gap: 5,
                   marginBottom: workspaceTabAttachedBottomGap,
-                  borderRadius: '8px 8px 0 0',
+                  borderRadius: '14px 14px 0 0',
                   background: workspaceTabBackground,
-                  color: theme.accent.base,
+                  color: theme.text.primary,
                   border: `1px solid ${workspaceTabActiveBorder}`,
                   borderBottom: 'none',
                   boxSizing: 'border-box',
@@ -5650,27 +5660,23 @@ function App(): JSX.Element {
 
             <button
               type="button"
-              onClick={() => {
-                if (nativeWorkspaceTabsEnabled) {
-                  void window.electron?.window?.newWorkspaceTab?.(null)
-                  return
-                }
-                showEmptyLayoutPage({ preserveOpenTabs: true })
-              }}
+              onClick={() => showEmptyLayoutPage({ preserveOpenTabs: true })}
               aria-label="New workspace"
               title="New workspace"
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                width: 28,
-                height: '100%',
+                width: 30,
+                height: 30,
+                marginBottom: workspaceTabInactiveBottomGap,
                 padding: 0,
                 border: 'none',
+                borderRadius: 999,
                 background: 'transparent',
                 color: theme.text.muted,
                 cursor: 'pointer',
-                transition: 'color 0.12s ease',
+                transition: 'color 0.12s ease, background 0.12s ease',
               }}
             >
               <Plus size={18} strokeWidth={2.1} />
