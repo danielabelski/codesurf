@@ -956,13 +956,15 @@ export function Sidebar({
   }, [activeProjectId])
 
   useEffect(() => {
-    const activeSession = sessions.find(session => isSessionActive(session, {
+    const activeSessions = sessions.filter(session => isSessionActive(session, {
       activeChatTileId,
       activeChatSessionId,
       activeChatSessionEntryId,
     }))
-    if (activeSession) setSelectedSessionKey(getSessionSelectionKey(activeSession))
-  }, [activeChatSessionEntryId, activeChatSessionId, activeChatTileId, sessions])
+    if (activeSessions.length === 0) return
+    if (activeSessions.some(session => getSessionSelectionKey(session) === selectedSessionKey)) return
+    setSelectedSessionKey(getSessionSelectionKey(activeSessions[0]))
+  }, [activeChatSessionEntryId, activeChatSessionId, activeChatTileId, selectedSessionKey, sessions])
 
   const scrollSessionsToTop = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -1751,11 +1753,10 @@ export function Sidebar({
   }, [projectEntries, sessions, setSessionArchived])
 
   const renderSessionRow = useCallback((session: DisplaySessionEntry) => {
-    const isSelected = isSessionActive(session, {
-      activeChatTileId,
-      activeChatSessionId,
-      activeChatSessionEntryId,
-    }) || selectedSessionKey === getSessionSelectionKey(session)
+    // Selection must be keyed by the concrete sidebar entry, not by the
+    // provider session id. Some agents reuse session ids across mirrored rows,
+    // which made multiple entries look selected at once.
+    const isSelected = selectedSessionKey === getSessionSelectionKey(session)
     const isStreaming =
       (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
       || streamingSnapshot.entryIds.has(session.id)

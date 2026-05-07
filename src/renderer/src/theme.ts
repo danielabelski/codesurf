@@ -119,7 +119,7 @@ export function getEdgeShadow(theme: Pick<AppTheme, 'mode' | 'accent'>, tone: Ed
 
   const whiteAlpha = theme.mode === 'light'
     ? tone === 'strong' ? 0.92 : tone === 'subtle' ? 0.68 : 0.82
-    : tone === 'strong' ? 0.28 : tone === 'subtle' ? 0.14 : 0.20
+    : tone === 'strong' ? 0.44 : tone === 'subtle' ? 0.22 : 0.32
   const blackAlpha = 0.04
 
   return `inset 0 0 0 1px rgba(255, 255, 255, ${whiteAlpha}), 0 0 0 1px rgba(0, 0, 0, ${blackAlpha})`

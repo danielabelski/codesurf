@@ -315,9 +315,9 @@ function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onP
               }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 4,
-                height: 24,
-                padding: '0 8px 0 9px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
-                fontSize: Math.max(9, fonts.secondarySize - 2), color: isActive ? theme.text.primary : theme.text.secondary,
+                height: 27,
+                padding: '0 9px 0 10px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
+                fontSize: Math.max(11, fonts.secondarySize), color: isActive ? theme.text.primary : theme.text.secondary,
                 background: isActive ? compactTabBackground : compactTabInactiveBackground,
                 marginBottom: 3,
                 borderRadius: 8,

@@ -2531,7 +2531,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const theme = useTheme()
   const chatViewportBackground = theme.surface.panel
   const composerBackground = theme.mode === 'dark'
-    ? theme.surface.panel
+    ? theme.chat.input
     : `color-mix(in srgb, ${theme.surface.panelMuted} 82%, ${theme.chat.input})`
   const composerBorder = theme.chat.inputBorder
   const fontSans = settings?.fonts?.primary?.family ?? settings?.primaryFont?.family ?? FONT_SANS

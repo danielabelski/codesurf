@@ -166,9 +166,9 @@
   --cs-chat-mini-height: 720px;
   --cs-accent: #3b82f6;
   --cs-surface-hover: rgba(255, 255, 255, 0.06);
-  --cs-edge-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.04);
-  --cs-edge-shadow-subtle: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 0 1px rgba(0, 0, 0, 0.04);
-  --cs-edge-shadow-strong: inset 0 0 0 1px rgba(255, 255, 255, 0.28), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --cs-edge-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --cs-edge-shadow-subtle: inset 0 0 0 1px rgba(255, 255, 255, 0.22), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --cs-edge-shadow-strong: inset 0 0 0 1px rgba(255, 255, 255, 0.44), 0 0 0 1px rgba(0, 0, 0, 0.04);
   --cs-edge-shadow-accent: inset 0 0 0 1px color-mix(in srgb, var(--cs-accent) 38%, white 18%, transparent), 0 0 0 1px rgba(0, 0, 0, 0.04);
 }
 
@@ -362,7 +362,9 @@ button:focus-visible,
 
 /* Soft vertical scroll fade: prevents scroll containers from hard-clipping
    content at their top/bottom edges. Apply to the actual scrolling element. */
-.cs-fade-scroll-y {
+.cs-fade-scroll-y,
+[data-scroll-fade="y"],
+:where([style*="overflow-y: auto"], [style*="overflow: auto"]):not([data-scroll-fade="none"]) {
   --cs-scroll-fade-size: 24px;
   -webkit-mask-image: linear-gradient(
     to bottom,

@@ -2144,17 +2144,26 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     >
       <div style={{
         width: '90vw', maxWidth: 1100, height: '85vh', maxHeight: 780,
-        background: theme.surface.panel, borderRadius: 14,
-        border: `1px solid ${theme.border.default}`,
+        borderRadius: 14,
+        border: '1px solid transparent',
         boxShadow: theme.shadow.modal,
-        display: 'flex', overflow: 'hidden',
-        fontFamily: fonts.primary, fontSize: fonts.size,
+        padding: 1,
+        overflow: 'visible',
       }}>
+        <div style={{
+          width: '100%', height: '100%',
+          background: theme.surface.panel, borderRadius: 13,
+          display: 'flex', overflow: 'hidden',
+          fontFamily: fonts.primary, fontSize: fonts.size,
+        }}>
 
         {/* Left nav */}
         <div style={{
           width: 200, background: theme.surface.panelElevated,
-          borderRight: `1px solid ${theme.border.default}`,
+          borderRight: '1px solid transparent',
+          boxShadow: theme.mode === 'light'
+            ? 'inset -1px 0 0 rgba(255,255,255,0.82)'
+            : 'inset -1px 0 0 rgba(255,255,255,0.28)',
           display: 'flex', flexDirection: 'column',
           padding: '20px 0',
           flexShrink: 0
@@ -2252,6 +2261,7 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
           <div className="cs-fade-scroll-y cs-fade-scroll-y-lg" style={{ flex: 1, overflowY: 'auto', scrollbarGutter: 'stable', padding: '4px 28px 34px' }}>
             {renderContent()}
           </div>
+        </div>
         </div>
       </div>
     </div>

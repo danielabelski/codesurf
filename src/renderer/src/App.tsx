@@ -4819,11 +4819,10 @@ function App(): JSX.Element {
     ? 'inset 0 0 0 1px rgba(255,255,255,0.96), inset -1px 0 0 rgba(15,23,42,0.025), inset 0 -1px 0 rgba(15,23,42,0.025)'
     : 'inset 0 0 0 1px rgba(255,255,255,0.28)'
   const mainPanelOuterEdgeShadow = '0 0 0 1px rgba(0,0,0,0.04)'
-  const mainPanelShadow = panelLayout
-    ? mainPanelOuterEdgeShadow
-    : theme.mode === 'light'
-      ? `${mainPanelOuterEdgeShadow}, 0 8px 26px rgba(15,23,42,0.14)`
-      : `${mainPanelOuterEdgeShadow}, 0 8px 28px rgba(0,0,0,0.32)`
+  const selectedTabDropShadow = theme.mode === 'light'
+    ? '0 5px 12px rgba(15,23,42,0.10)'
+    : '0 5px 12px rgba(0,0,0,0.18)'
+  const mainPanelShadow = `${mainPanelOuterEdgeShadow}, ${selectedTabDropShadow}`
   const workspaceTabLabelSize = Math.max(12, appFonts.size - 1)
   const workspaceTabBackground = panelLayout ? theme.surface.panel : mainPanelBackground
   const workspaceTabInactiveBackground = theme.mode === 'light'
@@ -5374,8 +5373,8 @@ function App(): JSX.Element {
                     border: '0.5px solid transparent',
                     boxShadow: isActive
                       ? (theme.mode === 'light'
-                          ? 'inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), 0 8px 18px rgba(15,23,42,0.12)'
-                          : 'var(--cs-edge-shadow-strong), 0 8px 18px rgba(0,0,0,0.24)')
+                          ? `inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), ${selectedTabDropShadow}`
+                          : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`)
                       : 'var(--cs-edge-shadow)',
                     boxSizing: 'border-box',
                     position: 'relative',
@@ -5489,8 +5488,8 @@ function App(): JSX.Element {
                   letterSpacing: 0,
                   border: '0.5px solid transparent',
                   boxShadow: theme.mode === 'light'
-                    ? 'inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), 0 8px 18px rgba(15,23,42,0.12)'
-                    : 'var(--cs-edge-shadow-strong), 0 8px 18px rgba(0,0,0,0.24)',
+                    ? `inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), ${selectedTabDropShadow}`
+                    : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`,
                   boxSizing: 'border-box',
                   position: 'relative',
                   zIndex: 1,
@@ -5532,8 +5531,8 @@ function App(): JSX.Element {
                   color: theme.text.primary,
                   border: '0.5px solid transparent',
                   boxShadow: theme.mode === 'light'
-                    ? 'inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), 0 8px 18px rgba(15,23,42,0.12)'
-                    : 'var(--cs-edge-shadow-strong), 0 8px 18px rgba(0,0,0,0.24)',
+                    ? `inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), ${selectedTabDropShadow}`
+                    : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`,
                   boxSizing: 'border-box',
                   position: 'relative',
                   zIndex: 1,

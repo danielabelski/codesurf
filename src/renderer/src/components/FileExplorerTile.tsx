@@ -1094,7 +1094,7 @@ export default function FileExplorerTile({
       </div>
 
       {/* File tree */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '10px 0 4px', position: 'relative' }} onContextMenu={handleBgCtxMenu}>
+      <div className="cs-fade-scroll-y cs-fade-scroll-y-lg" style={{ flex: 1, overflowY: 'auto', padding: '10px 0 4px', position: 'relative' }} onContextMenu={handleBgCtxMenu}>
         {!rootPath ? (
           <div style={{ padding: '16px', fontSize: fonts.size, color: theme.text.disabled, fontFamily: 'inherit' }}>No project open</div>
         ) : loadingTree && treeEntries.length === 0 ? (
