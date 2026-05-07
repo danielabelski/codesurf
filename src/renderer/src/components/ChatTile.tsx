@@ -2255,6 +2255,18 @@ function splitExternalAgentMarkup(text: string): ExternalAgentMarkupSegment[] {
   return segments.length > 0 ? segments : [{ kind: 'md', text }]
 }
 
+function getExternalAgentToolBlocks(text: string): ToolBlock[] {
+  return splitExternalAgentMarkup(text)
+    .filter((segment): segment is Extract<ExternalAgentMarkupSegment, { kind: 'tool' }> => segment.kind === 'tool')
+    .map(segment => segment.block)
+}
+
+function isExternalAgentToolOnlyText(text: string): boolean {
+  const segments = splitExternalAgentMarkup(text)
+  return segments.some(segment => segment.kind === 'tool')
+    && segments.every(segment => segment.kind === 'tool' || segment.text.trim().length === 0)
+}
+
 const ChatMessageContent = React.memo(({
   text,
   isStreaming,
@@ -6535,7 +6547,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                <div style={{
                  fontSize: 'clamp(24px, 3vw, 34px)',
                  lineHeight: 1.15,
-                 fontWeight: 650,
+                 fontWeight: 550,
                  color: theme.chat.text,
                  letterSpacing: 0,
                }}>
@@ -6623,6 +6635,18 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             const extractChipsFromMessage = (msg: ChatMessage, isLiveMessage: boolean): ChipItem[] => {
               const items: ChipItem[] = []
               const blocks = msg.contentBlocks ?? []
+              if (blocks.length === 0 && isExternalAgentToolOnlyText(msg.content ?? '')) {
+                for (const tb of getExternalAgentToolBlocks(msg.content ?? '')) {
+                  if (!shouldRenderToolBlock(tb)) continue
+                  items.push({
+                    kind: 'tool-single',
+                    key: `${msg.id}-${tb.id}`,
+                    block: tb,
+                    isLive: isLiveMessage,
+                  })
+                }
+                return items
+              }
               const { thinkingById, toolById } = buildMessageBlockLookup(msg)
               let i = 0
               while (i < blocks.length) {
@@ -6756,7 +6780,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             const isChipOnly = (msg: ChatMessage): boolean => {
               if (msg.role !== 'assistant') return false
               const blocks = msg.contentBlocks ?? []
-              if (blocks.length === 0) return false
+              if (blocks.length === 0) return isExternalAgentToolOnlyText(msg.content ?? '')
               if (blocks.some(b => b.type === 'text')) return false
               if ((msg.content ?? '').trim().length > 0) return false
               return blocks.some(b => b.type === 'tool' || b.type === 'thinking')
@@ -7064,8 +7088,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 {!isLiveMessage && msg.role === 'user' && (
                   <div style={{
                     fontSize: monoSize - 2, color: theme.chat.subtle, fontFamily: fontMono,
-                    padding: '0 4px', textAlign: 'right',
-                    marginTop: -5,
+                    padding: '0 6px', textAlign: 'right',
+                    marginTop: 2,
+                    lineHeight: 1.2,
+                    alignSelf: 'flex-end',
+                    overflow: 'visible',
                   }}>
                     {relativeTime(msg.timestamp)}
                   </div>
@@ -7680,8 +7707,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         boxShadow: isDropTarget
           ? `0 0 0 1px ${theme.border.accent}, 0 0 22px ${theme.accent.soft}`
           : theme.mode === 'light'
-            ? '0 0 0 1px rgba(15,23,42,0.12)'
-            : 'none',
+            ? '0 0 0 1px rgba(15,23,42,0.12), 0 10px 28px rgba(15,23,42,0.09)'
+            : '0 10px 28px rgba(0,0,0,0.18)',
         transition: 'border-color 120ms ease, background 120ms ease, box-shadow 120ms ease',
       }}>
         <ChatComposerAutocompletePopup
@@ -8672,16 +8699,14 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
           cursor: 'pointer',
           color: isDream
             ? theme.accent.base
-            : isCheckpoint
-              ? theme.status.success
-              : (isRunning ? theme.chat.textSecondary : theme.chat.muted),
+            : (isRunning ? theme.chat.textSecondary : theme.chat.muted),
           fontSize: 10, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
         }}
       >
         {isDream
           ? <Sparkles size={11} style={{ color: theme.accent.base, opacity: 0.95, flexShrink: 0 }} />
           : isCheckpoint
-            ? <History size={11} style={{ color: theme.status.success, opacity: 0.95, flexShrink: 0 }} />
+            ? <History size={11} style={{ opacity: 0.62, flexShrink: 0 }} />
             : <Wrench size={11} style={{ opacity: isRunning ? 0.7 : 0.5, flexShrink: 0 }} />}
 
         {/* Collapsed chip header shows only the tool name. Detailed summaries stay in the expanded body. */}
@@ -8766,7 +8791,7 @@ const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false 
             </span>
           )}
           {!isRunning && !block.elapsed && (
-            <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
+            <Check size={11} color={isCheckpoint ? theme.chat.muted : theme.status.success} style={{ flexShrink: 0, opacity: isCheckpoint ? 0.75 : 1 }} />
           )}
           <ChevronRight size={12} style={{
             transform: expanded ? 'rotate(90deg)' : 'none',

@@ -4838,7 +4838,8 @@ function App(): JSX.Element {
   const workspaceTabInactiveHeight = 24
   const workspaceTabTextOffset = -1
   const workspaceTabInactiveTextOffset = 0
-  const workspaceTabInactiveBottomGap = 3
+  const workspaceTabActiveBottomGap = 3
+  const workspaceTabInactiveBottomGap = workspaceTabActiveBottomGap + 3
   const workspaceTabAttachedBottomGap = -2
   // Discovery connection colors — adapt to theme mode
   const dsc = theme.mode === 'light'
@@ -5338,7 +5339,7 @@ function App(): JSX.Element {
               }}
               style={{
                 position: 'fixed',
-                top: 8,
+                top: 6,
                 left: 78,
                 zIndex: 2147483647,
                 width: collapsedSidebarPillSize,
@@ -5409,7 +5410,7 @@ function App(): JSX.Element {
                     height: isActive ? workspaceTabActiveHeight : workspaceTabInactiveHeight,
                     padding: '0 8px 0 10px',
                     gap: 5,
-                    marginBottom: isActive ? workspaceTabInactiveBottomGap : workspaceTabInactiveBottomGap,
+                    marginBottom: isActive ? workspaceTabActiveBottomGap : workspaceTabInactiveBottomGap,
                     borderRadius: 8,
                     background: isActive
                       ? (theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground)
@@ -5524,7 +5525,7 @@ function App(): JSX.Element {
                   height: workspaceTabActiveHeight,
                   padding: '0 8px 0 10px',
                   gap: 5,
-                  marginBottom: workspaceTabInactiveBottomGap,
+                  marginBottom: workspaceTabActiveBottomGap,
                   borderRadius: 8,
                   background: theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground,
                   color: theme.text.primary,
@@ -5571,7 +5572,7 @@ function App(): JSX.Element {
                   height: workspaceTabActiveHeight,
                   padding: '0 10px',
                   gap: 5,
-                  marginBottom: workspaceTabInactiveBottomGap,
+                  marginBottom: workspaceTabActiveBottomGap,
                   borderRadius: 8,
                   background: theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground,
                   color: theme.text.primary,

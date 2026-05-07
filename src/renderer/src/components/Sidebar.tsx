@@ -278,20 +278,37 @@ function SessionSidebarRow({
         paddingTop: meta ? 6 : 4,
         paddingBottom: meta ? 6 : 4,
         paddingLeft: `calc(var(--cs-sidebar-row-pad-x) + ${indent * indentUnit}px)`,
-        paddingRight: 0,
+        paddingRight: 5,
         minHeight: meta ? 40 : 28,
         cursor: 'pointer',
         userSelect: 'none',
         WebkitUserSelect: 'none',
         borderRadius: 'var(--cs-sidebar-row-radius)',
         margin: '0',
-        background: active ? activeBackground : hovered ? hoverBackground : 'transparent',
-        boxShadow: active ? activeShadow : 'none',
+        background: 'transparent',
+        boxShadow: 'none',
         transition: 'background 0.1s ease, box-shadow 0.1s ease',
         position: 'relative',
         ...({ '--cs-thread-row-accent': active ? theme.accent.base : theme.text.muted } as React.CSSProperties),
       }}
     >
+      {(active || hovered) && (
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            top: 1,
+            bottom: 1,
+            borderRadius: 'inherit',
+            background: active ? activeBackground : hoverBackground,
+            boxShadow: active ? activeShadow : 'var(--cs-edge-shadow-subtle)',
+            pointerEvents: 'none',
+            zIndex: 0,
+          }}
+        />
+      )}
       <span
         style={{
           width: 22,
@@ -300,6 +317,8 @@ function SessionSidebarRow({
           justifyContent: 'center',
           opacity: leadingVisible || hovered || active ? 1 : 0,
           transition: 'opacity 0.1s ease',
+          position: 'relative',
+          zIndex: 1,
         }}
       >
         {leading}
@@ -321,7 +340,7 @@ function SessionSidebarRow({
           {icon}
         </span>
       )}
-      <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: meta ? 2 : 0 }}>
+      <div style={{ minWidth: 0, flex: 1, display: 'flex', flexDirection: 'column', gap: meta ? 2 : 0, position: 'relative', zIndex: 1 }}>
         <span style={{
           fontSize: fonts.size,
           fontWeight: labelWeight,
@@ -359,6 +378,8 @@ function SessionSidebarRow({
           color: active ? theme.text.secondary : muted ? theme.text.disabled : theme.text.disabled,
           opacity: extra && hovered ? 0 : 1,
           transition: 'opacity 0.1s ease',
+          position: 'relative',
+          zIndex: 1,
         }}>
           {trailing}
         </span>
@@ -378,6 +399,7 @@ function SessionSidebarRow({
           opacity: hovered ? 1 : 0,
           visibility: hovered ? 'visible' : 'hidden',
           pointerEvents: hovered ? 'auto' : 'none',
+          zIndex: 1,
           transition: 'opacity 0.1s ease',
         }}>
           {extra}
@@ -2318,7 +2340,7 @@ export function Sidebar({
                         </span>
                         <span style={{
                           fontSize: fonts.size + 1,
-                          fontWeight: 800,
+                          fontWeight: 600,
                           color: groupSelected ? theme.text.primary : theme.text.secondary,
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
