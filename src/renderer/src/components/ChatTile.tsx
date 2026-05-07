@@ -2519,9 +2519,22 @@ function ensureChatMdStyle(): void {
       margin: 6px 0; opacity: 0.85;
     }
     .chat-md hr { border: none; border-top: 1px solid rgba(128,128,128,0.3); margin: 10px 0; }
-    .chat-md table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 0.9em; }
-    .chat-md th, .chat-md td { border: 1px solid rgba(128,128,128,0.3); padding: 4px 8px; text-align: left; }
-    .chat-md th { font-weight: 600; background: rgba(128,128,128,0.1); }
+    .chat-md table {
+      display: table; max-width: 100%; overflow: hidden; border-collapse: separate; border-spacing: 0;
+      margin: 8px 0; width: 100%; font-size: 0.9em; table-layout: fixed;
+      border-radius: 12px; border: 1px solid transparent; box-shadow: var(--cs-edge-shadow);
+    }
+    .chat-md th, .chat-md td {
+      border: 0; padding: 8px 12px; text-align: left; vertical-align: top;
+      overflow-wrap: anywhere; word-break: normal;
+    }
+    .chat-md th {
+      font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--color-muted-foreground); background: color-mix(in srgb, var(--color-muted) 62%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
+    }
+    .chat-md tbody tr + tr td { border-top: 1px solid color-mix(in srgb, var(--color-muted-foreground) 14%, transparent); }
+    .chat-md th:first-child, .chat-md td:first-child { width: 22%; min-width: 120px; overflow-wrap: normal; }
   `
 }
 
