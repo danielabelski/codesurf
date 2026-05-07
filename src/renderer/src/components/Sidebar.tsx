@@ -23,11 +23,11 @@ import {
   updateSessionTitleGenerationState,
 } from './sidebar/session-title-generation'
 import { getSessionOpenIntent } from './sidebar/session-open'
-import { SIDEBAR_MENU_WIDTH, SidebarItem, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
+import { SIDEBAR_MENU_WIDTH, SidebarMenuPortal, ThreadMenuItem, ThreadMenuSectionLabel } from './sidebar/ui'
 import { buildNestedSessionList, deriveProjectsFromWorkspaces, formatSessionTitleForSidebar, getProjectDisplayLabel, getSessionAgentIcon, getSessionAgentKey, getSessionAgentLabel, getWorkspaceProjectPaths, isCronSession, isSubagentSession, normalizeSidebarPath, RESOURCE_ITEMS, SpinnerIcon } from './sidebar/utils'
 import { isInternalMaintenanceSession } from './sidebar/session-filters'
-import { applySessionPromotions, isSessionActive, sortProjectEntriesByRecentSession } from './sidebar/session-ordering'
-import { type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
+import { applySessionPromotions, isSessionActive } from './sidebar/session-ordering'
+import { type DisplaySessionEntry, type ProjectListEntry, SESSION_PAGE_SIZE, type SessionEntry, type SessionProjectGroup, type ThreadOrganizeMode, type ThreadSortMode } from './sidebar/types'
 
 interface ExtTileEntry { extId: string; type: string; label: string; icon?: string }
 interface ExtensionEntrySummary { id: string; name: string; icon?: string | null; enabled: boolean }
@@ -832,6 +832,8 @@ export function Sidebar({
   const [generatingSessionTitleIds, setGeneratingSessionTitleIds] = useState<SessionTitleGenerationState>({})
   const [visibleSessionCount, setVisibleSessionCount] = useState(SESSION_PAGE_SIZE)
   const [sessionPromotions, setSessionPromotions] = useState<Record<string, number>>({})
+  const [selectedSessionKey, setSelectedSessionKey] = useState<string | null>(null)
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [sessionReadWatermarks, setSessionReadWatermarks] = useState<SessionReadWatermarks>(() => loadSessionReadWatermarks())
   const [pinnedSessionKeys, setPinnedSessionKeys] = useState<PinnedSessionKeys>(() => loadPinnedSessionKeys())
   const [textDialog, setTextDialog] = useState<SidebarTextDialogState | null>(null)
@@ -936,6 +938,19 @@ export function Sidebar({
   }, [projectEntries, workspace])
 
   const loadedSessionWorkspaceIdSet = useMemo(() => new Set(loadedSessionWorkspaceIds), [loadedSessionWorkspaceIds])
+
+  useEffect(() => {
+    if (activeProjectId) setSelectedProjectId(activeProjectId)
+  }, [activeProjectId])
+
+  useEffect(() => {
+    const activeSession = sessions.find(session => isSessionActive(session, {
+      activeChatTileId,
+      activeChatSessionId,
+      activeChatSessionEntryId,
+    }))
+    if (activeSession) setSelectedSessionKey(getSessionActivityKey(activeSession))
+  }, [activeChatSessionEntryId, activeChatSessionId, activeChatTileId, sessions])
 
   const scrollSessionsToTop = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -1058,11 +1073,12 @@ export function Sidebar({
 
   const isThreadGroupCollapsed = useCallback((group: SessionProjectGroup | ProjectListEntry) => {
     const groupKey = 'key' in group ? group.key : group.id
-    const projectId = 'projectId' in group ? group.projectId : group.id
     const explicit = collapsedThreadGroups[groupKey]
     if (typeof explicit === 'boolean') return explicit
-    return projectId !== activeProjectId
-  }, [collapsedThreadGroups, activeProjectId])
+    // The sidebar is shared chrome: switching workspace/tab state should only
+    // change the main panel, not silently reshape the conversation list.
+    return false
+  }, [collapsedThreadGroups])
 
   const allProjectThreadGroupsCollapsed = useMemo(() => {
     return projectEntries.length > 0 && projectEntries.every(projectEntry => isThreadGroupCollapsed(projectEntry))
@@ -1197,19 +1213,17 @@ export function Sidebar({
 
   const promotedSessions = useMemo(() => applySessionPromotions(sessions, sessionPromotions), [sessions, sessionPromotions])
 
-  const orderedProjectEntries = useMemo(
-    () => sortProjectEntriesByRecentSession(projectEntries, promotedSessions, getProjectDisplayLabel, sessionPromotions),
-    [projectEntries, promotedSessions, sessionPromotions],
-  )
+  const orderedProjectEntries = projectEntries
 
   const resizing = useRef(false)
   const startX = useRef(0)
   const startWidth = useRef(0)
 
   const toggleThreadGroup = useCallback((key: string) => {
+    setSelectedProjectId(key)
     const projectEntry = projectEntries.find(entry => entry.id === key) ?? null
     const isActiveGroup = key === activeProjectId
-    const isCollapsed = collapsedThreadGroups[key] ?? (key !== activeProjectId)
+    const isCollapsed = collapsedThreadGroups[key] ?? false
 
     if (!isActiveGroup && projectEntry) {
       setCollapsedThreadGroups(prev => ({ ...prev, [key]: false }))
@@ -1362,21 +1376,9 @@ export function Sidebar({
     setProjectSessionVisibleCounts({})
   }, [showArchivedSessions, showCronSessions, showSubagentSessions, threadOrganizeMode, threadSortMode])
 
-  useEffect(() => {
-    if (threadOrganizeMode !== 'project') return
-    setProjectSessionVisibleCounts(prev => {
-      const next: Record<string, number> = {}
-      let changed = false
-      for (const [key, count] of Object.entries(prev)) {
-        if (key === activeProjectId) {
-          next[key] = count
-        } else {
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
-  }, [activeProjectId, threadOrganizeMode])
+  // Keep per-project pagination independent of the active workspace tab. The
+  // sidebar should not reset visible thread counts just because the main view
+  // switched to another tab/workspace.
 
   const displayedSessions = useMemo(() => {
     if (threadOrganizeMode !== 'chronological') return normalVisibleSessions
@@ -1486,8 +1488,9 @@ export function Sidebar({
   }, [setSessionArchived])
 
   const openSessionFromSidebar = useCallback((session: SessionEntry, options?: { persist?: boolean }) => {
+    setSelectedSessionKey(getSessionActivityKey(session))
+    setSelectedProjectId(projectEntries.find(projectEntry => projectEntry.workspaceIds.includes(session.workspaceId))?.id ?? selectedProjectId)
     markSessionRead(session)
-    promoteSession(session)
     const intent = getSessionOpenIntent(session, options)
     if (intent.kind === 'chat') {
       onOpenSessionInChat(session, { persist: intent.persist })
@@ -1500,7 +1503,7 @@ export function Sidebar({
     if (intent.kind === 'file' && session.filePath) {
       onOpenFile(session.filePath, { persist: intent.persist })
     }
-  }, [markSessionRead, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, promoteSession])
+  }, [markSessionRead, onOpenFile, onOpenSessionInApp, onOpenSessionInChat, projectEntries, selectedProjectId])
 
   const openSessionMiniFromSidebar = useCallback((session: SessionEntry) => {
     const tileId = typeof session.tileId === 'string' ? session.tileId.trim() : ''
@@ -1508,8 +1511,9 @@ export function Sidebar({
       openSessionFromSidebar(session)
       return
     }
+    setSelectedSessionKey(getSessionActivityKey(session))
+    setSelectedProjectId(projectEntries.find(projectEntry => projectEntry.workspaceIds.includes(session.workspaceId))?.id ?? selectedProjectId)
     markSessionRead(session)
-    promoteSession(session)
     void window.electron.window.openMiniChat({
       workspaceId: session.workspaceId,
       tileId,
@@ -1518,7 +1522,7 @@ export function Sidebar({
       console.warn('[sidebar] failed to open mini chat window', error)
       openSessionFromSidebar(session)
     })
-  }, [markSessionRead, openSessionFromSidebar, promoteSession])
+  }, [markSessionRead, openSessionFromSidebar, projectEntries, selectedProjectId])
 
   const sessionContextMenuItems = useCallback((session: SessionEntry): MenuItem[] => {
     const items: MenuItem[] = []
@@ -1734,12 +1738,12 @@ export function Sidebar({
     ]
   }, [projectEntries, sessions, setSessionArchived])
 
-  const renderSessionRow = useCallback((session: SessionEntry) => {
+  const renderSessionRow = useCallback((session: DisplaySessionEntry) => {
     const isSelected = isSessionActive(session, {
       activeChatTileId,
       activeChatSessionId,
       activeChatSessionEntryId,
-    })
+    }) || selectedSessionKey === getSessionActivityKey(session)
     const isStreaming =
       (session.tileId ? streamingSnapshot.tileIds.has(session.tileId) : false)
       || streamingSnapshot.entryIds.has(session.id)
@@ -1966,6 +1970,7 @@ export function Sidebar({
     openSessionFromSidebar,
     openSessionMiniFromSidebar,
     pinnedSessionKeys,
+    selectedSessionKey,
     sessionReadWatermarks,
     streamingSnapshot.entryIds,
     streamingSnapshot.tileIds,
@@ -2231,6 +2236,7 @@ export function Sidebar({
                   : 0
                 const canShowLessProjectSessions = threadOrganizeMode === 'project' && displayedGroupSessions.length > PROJECT_SESSION_PREVIEW_COUNT
                 const groupCollapsed = threadOrganizeMode === 'project' && isThreadGroupCollapsed(group)
+                const groupSelected = threadOrganizeMode === 'project' && group.projectId === selectedProjectId
 
                 return (
                 <div key={group.key} style={{ paddingBottom: 8 }}>
@@ -2244,7 +2250,9 @@ export function Sidebar({
                         gap: 4,
                         width: '100%',
                         padding: '6px 4px 8px 0',
-                        color: group.projectId === activeProjectId ? theme.text.primary : theme.text.secondary,
+                        color: groupSelected ? theme.text.primary : theme.text.secondary,
+                        background: groupSelected ? theme.surface.selection : 'transparent',
+                        borderRadius: 8,
                       }}
                     >
                       <button
