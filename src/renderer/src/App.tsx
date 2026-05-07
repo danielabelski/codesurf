@@ -4791,7 +4791,7 @@ function App(): JSX.Element {
   const mainPanelTop = 39
   const mainStatusBarLeft = sidebarCollapsed ? 0 : sidebarWidth
   const openSidebarToolbarPadding = sidebarWidth + 16
-  const collapsedSidebarPillHeight = 32
+  const collapsedSidebarPillSize = 24
   // Sidebar's absolute wrapper sits at left: 6 with width sidebarWidth, so its
   // right edge is at (6 + sidebarWidth). Adding 12 here puts the main-panel
   // left edge 6px to the right of the sidebar — a visible 6px gap.
@@ -5668,34 +5668,39 @@ function App(): JSX.Element {
             style={{
               display: !sidebarPillVisible ? 'none' : 'flex',
               position: 'absolute',
-              left: 4,
+              left: 2,
               top: '50%',
               transform: 'translateY(-50%)',
               transition: 'opacity 0.12s ease',
-              width: 8,
-              height: collapsedSidebarPillHeight,
-              background: theme.surface.panelElevated,
-              border: `1px solid ${theme.border.strong}`,
-              borderRadius: 9999,
+              width: collapsedSidebarPillSize,
+              height: collapsedSidebarPillSize,
+              background: theme.mode === 'light' ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.10)',
+              backdropFilter: 'blur(20px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+              border: '0.5px solid transparent',
+              borderRadius: '50%',
+              boxShadow: theme.mode === 'light'
+                ? 'var(--cs-edge-shadow-strong), 0 0 0 1px rgba(15,23,42,0.14), 0 2px 6px rgba(15,23,42,0.10)'
+                : 'var(--cs-edge-shadow-strong), 0 0 0 1px rgba(0,0,0,0.22), 0 2px 6px rgba(0,0,0,0.18)',
               cursor: 'pointer',
               alignItems: 'center',
               justifyContent: 'center',
-              color: theme.text.disabled,
+              color: theme.text.primary,
               fontSize: 9,
               userSelect: 'none',
               zIndex: 200,
+            } as React.CSSProperties}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = theme.mode === 'light' ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.16)'
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = theme.surface.panelMuted }}
-            onMouseLeave={e => { e.currentTarget.style.background = theme.surface.panelElevated }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = theme.mode === 'light' ? 'rgba(255,255,255,0.78)' : 'rgba(255,255,255,0.10)'
+            }}
           >
-            <span style={{
-              width: 2,
-              height: 14,
-              borderRadius: 999,
-              background: theme.text.disabled,
-              opacity: 0.9,
-              transition: 'opacity 0.12s ease',
-            }} />
+            <svg width="12" height="12" viewBox="0 0 20 20" aria-hidden="true" style={{ transform: 'scaleX(-1)' }}>
+              <rect x="2.5" y="3.5" width="15" height="13" rx="2.6" fill="none" stroke="currentColor" strokeWidth="1.6" />
+              <rect x="2.5" y="3.5" width="5.5" height="13" rx="2.6" fill="currentColor" />
+            </svg>
           </div>
         )}
 
