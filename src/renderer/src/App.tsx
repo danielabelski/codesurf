@@ -5369,7 +5369,7 @@ function App(): JSX.Element {
                     background: isActive
                       ? (theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground)
                       : workspaceTabInactiveBackground,
-                    color: isActive ? theme.accent.base : theme.text.secondary,
+                    color: isActive ? theme.text.primary : theme.text.secondary,
                     transition: 'color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease',
                     border: '0.5px solid transparent',
                     boxShadow: isActive
@@ -5482,7 +5482,7 @@ function App(): JSX.Element {
                   marginBottom: workspaceTabInactiveBottomGap,
                   borderRadius: 8,
                   background: theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground,
-                  color: theme.accent.base,
+                  color: theme.text.primary,
                   fontSize: Math.max(11, workspaceTabLabelSize),
                   fontWeight: 700,
                   lineHeight: 1,
@@ -5529,7 +5529,7 @@ function App(): JSX.Element {
                   marginBottom: workspaceTabInactiveBottomGap,
                   borderRadius: 8,
                   background: theme.mode === 'light' ? 'rgba(255,255,255,0.86)' : workspaceTabBackground,
-                  color: theme.accent.base,
+                  color: theme.text.primary,
                   border: '0.5px solid transparent',
                   boxShadow: theme.mode === 'light'
                     ? 'inset 0 0 0 1px rgba(255,255,255,0.92), 0 0 0 1px rgba(15,23,42,0.12), 0 8px 18px rgba(15,23,42,0.12)'
