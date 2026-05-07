@@ -247,9 +247,9 @@ function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onP
   const fonts = useAppFonts()
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const compactTabBackground = 'transparent'
+  const compactTabBackground = theme.mode === 'light' ? 'rgba(226,228,235,0.88)' : 'rgba(255,255,255,0.13)'
   const compactTabInactiveBackground = 'transparent'
-  const compactTabHoverBackground = 'transparent'
+  const compactTabHoverBackground = theme.mode === 'light' ? 'rgba(255,255,255,0.32)' : 'rgba(255,255,255,0.055)'
   const compactTabMaxWidth = 'min(180px, 18vw)'
 
   useEffect(() => {
@@ -315,17 +315,18 @@ function TabBar({ tabs, activeTab, previewTabId = null, panelId, onActivate, onP
               }}
               style={{
                 display: 'flex', alignItems: 'center', gap: 4,
-                height: 27,
-                padding: '0 9px 0 10px', margin: '0 2px', cursor: 'grab', userSelect: 'none',
-                fontSize: Math.max(11, fonts.secondarySize), color: isActive ? theme.text.primary : theme.text.secondary,
+                height: 24,
+                padding: '0 9px 0 10px', margin: isActive ? '0 2px 4px' : '0 2px', cursor: 'grab', userSelect: 'none',
+                fontSize: 11, color: isActive ? theme.text.primary : theme.text.secondary,
                 background: isActive ? compactTabBackground : compactTabInactiveBackground,
-                marginBottom: 3,
+                marginBottom: isActive ? 4 : 3,
                 borderRadius: 8,
                 transition: 'color 0.15s, background 0.15s, border-color 0.15s',
                 flexShrink: 0, maxWidth: compactTabMaxWidth,
-                fontWeight: isActive ? 650 : 550,
-                letterSpacing: 0,
-                boxShadow: 'none',
+                fontWeight: isActive ? 700 : 600,
+                letterSpacing: 0.45,
+                textTransform: 'uppercase',
+                boxShadow: isActive ? 'var(--cs-edge-shadow-subtle)' : 'none',
                 border: isPreview
                   ? `1px dashed ${isActive ? theme.border.accent : theme.border.subtle}`
                   : '1px solid transparent',

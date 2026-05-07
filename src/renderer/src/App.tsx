@@ -4834,8 +4834,8 @@ function App(): JSX.Element {
   const workspaceTabActiveBorder = `color-mix(in srgb, ${theme.accent.base} 16%, transparent)`
   const workspaceTabCloseHoverBackground = `color-mix(in srgb, ${theme.surface.selection} 70%, ${theme.surface.hover})`
   const workspaceTabMaxWidth = 'min(248px, 24vw)'
-  const workspaceTabActiveHeight = 29
-  const workspaceTabInactiveHeight = 24
+  const workspaceTabActiveHeight = 27
+  const workspaceTabInactiveHeight = 22
   const workspaceTabTextOffset = -1
   const workspaceTabInactiveTextOffset = 0
   const workspaceTabActiveBottomGap = 3

@@ -790,12 +790,12 @@ function SidebarTopItem({
       onMouseLeave={() => setHovered(false)}
       style={{
         width: '100%',
-        minHeight: 25,
+        minHeight: 28,
         display: 'grid',
         gridTemplateColumns: '24px minmax(0, 1fr)',
         alignItems: 'center',
         columnGap: 8,
-        padding: '2px 10px 2px 8px',
+        padding: '3px 10px 3px 8px',
         border: 'none',
         borderRadius: 6,
         background: hovered ? theme.surface.hover : 'transparent',
@@ -804,7 +804,7 @@ function SidebarTopItem({
         fontFamily: fonts.primary,
         fontSize: fonts.size,
         fontWeight: fonts.weight,
-        lineHeight: fonts.lineHeight * 0.9,
+        lineHeight: fonts.lineHeight,
         textAlign: 'left',
       }}
     >
@@ -820,7 +820,7 @@ function SidebarTopItem({
       >
         {icon}
       </span>
-      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingBottom: 1 }}>
         {label}
       </span>
     </button>

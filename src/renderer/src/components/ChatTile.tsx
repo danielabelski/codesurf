@@ -6520,7 +6520,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           padding: isStartScreen ? '12px 14px 4px' : '12px 14px',
           overflowX: 'hidden',
           minHeight: 0,
-          // Scrollbar hidden for testing — no gutter reservation needed while hidden.
+          // Keep the transcript centerline stable while chat history loads and
+          // overflow flips on. Reserve both edges so the content doesn't jump
+          // left when the scroll container becomes scrollable.
+          scrollbarGutter: 'stable both-edges' as React.CSSProperties['scrollbarGutter'],
           scrollbarWidth: 'none' as React.CSSProperties['scrollbarWidth'],
           // Disable Chrome's built-in scroll anchoring. React pins scrollTop =
           // scrollHeight on every message update (useLayoutEffect below);
@@ -6959,10 +6962,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                                 : undefined,
                               borderRadius: 14,
                               padding: '8px 12px',
+                              margin: msg.role === 'user' ? '2px' : 0,
                               fontSize, lineHeight: fontLineHeight,
                               wordBreak: 'break-word',
                               color: theme.chat.text, position: 'relative',
-                              width: '100%', minWidth: 0, overflow: 'visible', boxSizing: 'border-box',
+                              width: msg.role === 'user' ? 'calc(100% - 4px)' : '100%', minWidth: 0, overflow: 'visible', boxSizing: 'border-box',
                             }}>
                               <ChatMessageContent text={block.text} isStreaming={isLiveMessage && isLastBlock} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
                             </div>
@@ -7017,10 +7021,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                           : undefined,
                         borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
                         padding: '8px 12px',
+                        margin: msg.role === 'user' ? '2px' : 0,
                         fontSize, lineHeight: fontLineHeight,
                         wordBreak: 'break-word',
                         color: theme.chat.text, position: 'relative',
-                        width: '100%', minWidth: 0, overflow: 'visible', boxSizing: 'border-box',
+                        width: msg.role === 'user' ? 'calc(100% - 4px)' : '100%', minWidth: 0, overflow: 'visible', boxSizing: 'border-box',
                       }}>
                         <ChatMessageContent text={msg.content} isStreaming={isLiveMessage} isUser={msg.role === 'user'} readAttachmentPaths={readAttachmentPaths} />
                         {isLiveMessage && msg.content.length === 0 && !hasVisibleToolBlocks && (
