@@ -89,7 +89,7 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
           background: theme.chat.assistantBubble,
           border: '0.5px solid transparent',
           boxShadow: theme.mode === 'light'
-            ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+            ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
             : 'var(--cs-edge-shadow)',
           margin: 1,
           borderRadius: 8,
@@ -212,7 +212,7 @@ export const WorkingChipView = React.memo(function WorkingChipView({ message }: 
       background: theme.chat.assistantBubble,
       border: '0.5px solid transparent',
       boxShadow: theme.mode === 'light'
-        ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+        ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
         : 'var(--cs-edge-shadow)',
       margin: 1,
       borderRadius: 8,
@@ -325,7 +325,7 @@ export const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { b
           background: theme.chat.assistantBubble,
           border: '0.5px solid transparent',
           boxShadow: theme.mode === 'light'
-            ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+            ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
             : 'var(--cs-edge-shadow)',
           margin: 1,
           borderRadius: 8,
@@ -435,7 +435,7 @@ export const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name,
           background: theme.chat.assistantBubble,
           border: '0.5px solid transparent',
           boxShadow: theme.mode === 'light'
-            ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+            ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
             : 'var(--cs-edge-shadow)',
           margin: 1,
           borderRadius: 8,
@@ -576,7 +576,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
         background: theme.chat.assistantBubble,
         border: '0.5px solid transparent',
         boxShadow: theme.mode === 'light'
-          ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+          ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
           : 'var(--cs-edge-shadow)',
         margin: 1,
         borderRadius: 8,

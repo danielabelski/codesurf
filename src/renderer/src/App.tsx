@@ -4866,13 +4866,13 @@ function App(): JSX.Element {
   // a glow. Only use text.primary for shadow tinting in light mode where
   // it's already dark.
   const mainPanelInsetEdgeShadow = theme.mode === 'light'
-    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 96%, transparent), inset -1px 0 0 color-mix(in srgb, ${theme.text.primary} 2.5%, transparent), inset 0 -1px 0 color-mix(in srgb, ${theme.text.primary} 2.5%, transparent)`
+    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 96%, transparent), inset -0.5px 0 0 color-mix(in srgb, ${theme.text.primary} 2.5%, transparent), inset 0 -0.5px 0 color-mix(in srgb, ${theme.text.primary} 2.5%, transparent)`
     // Dark inset hairline — pure white at low alpha so the contrast slider
     // doesn't pump it into a halo.
-    : `inset 0 0 0 1px rgba(255,255,255,0.045)`
+    : `inset 0 0 0 0.5px rgba(255,255,255,0.045)`
   const mainPanelOuterEdgeShadow = theme.mode === 'light'
-    ? `0 0 0 1px color-mix(in srgb, ${theme.text.primary} 4%, transparent)`
-    : `0 0 0 1px rgba(0,0,0,0.30)`
+    ? `0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 4%, transparent)`
+    : `0 0 0 0.5px rgba(0,0,0,0.30)`
   const selectedTabDropShadow = theme.mode === 'light'
     ? `0 5px 12px color-mix(in srgb, ${theme.text.primary} 10%, transparent)`
     : `0 5px 12px rgba(0,0,0,0.36)`
@@ -5487,7 +5487,11 @@ function App(): JSX.Element {
                     border: '0.5px solid transparent',
                     boxShadow: isActive
                       ? (theme.mode === 'light'
-                          ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
+                          // Match the non-selected tab's bright white "paper
+                          // edge" inset (--cs-edge-shadow-strong already has
+                          // it at 0.92 alpha in light mode); add a darker
+                          // outer hairline + drop shadow for elevation.
+                          ? `var(--cs-edge-shadow-strong), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
                           : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`)
                       : 'var(--cs-edge-shadow)',
                     boxSizing: 'border-box',
@@ -5602,7 +5606,7 @@ function App(): JSX.Element {
                   letterSpacing: 0,
                   border: '0.5px solid transparent',
                   boxShadow: theme.mode === 'light'
-                    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
+                    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
                     : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`,
                   boxSizing: 'border-box',
                   position: 'relative',
@@ -5645,7 +5649,7 @@ function App(): JSX.Element {
                   color: theme.text.primary,
                   border: '0.5px solid transparent',
                   boxShadow: theme.mode === 'light'
-                    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
+                    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), ${selectedTabDropShadow}`
                     : `var(--cs-edge-shadow-strong), ${selectedTabDropShadow}`,
                   boxSizing: 'border-box',
                   position: 'relative',
@@ -5796,8 +5800,8 @@ function App(): JSX.Element {
               border: '0.5px solid transparent',
               borderRadius: '50%',
               boxShadow: theme.mode === 'light'
-                ? `var(--cs-edge-shadow-strong), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 14%, transparent), 0 2px 6px color-mix(in srgb, ${theme.text.primary} 10%, transparent)`
-                : `var(--cs-edge-shadow-strong), 0 0 0 1px color-mix(in srgb, #000 22%, transparent), 0 2px 6px color-mix(in srgb, #000 18%, transparent)`,
+                ? `var(--cs-edge-shadow-strong), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 14%, transparent), 0 2px 6px color-mix(in srgb, ${theme.text.primary} 10%, transparent)`
+                : `var(--cs-edge-shadow-strong), 0 0 0 0.5px color-mix(in srgb, #000 22%, transparent), 0 2px 6px color-mix(in srgb, #000 18%, transparent)`,
               cursor: 'pointer',
               alignItems: 'center',
               justifyContent: 'center',

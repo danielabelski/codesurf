@@ -133,7 +133,7 @@ function InteractiveTree({ node, path, onDropOnLeaf, onDragLeaf, hoverPath, hove
     ? `color-mix(in srgb, ${theme.surface.panelMuted} 58%, transparent)`
     : theme.surface.panelMuted
   const leafEdge = isLight
-    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 74%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 8%, transparent)`
+    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 74%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 8%, transparent)`
     : 'var(--cs-edge-shadow)'
   const dividerHandle = isLight
     ? `color-mix(in srgb, ${theme.text.primary} 36%, transparent)`
@@ -332,13 +332,13 @@ export function LayoutBuilder({ onAddTile, onLaunchTemplate }: Props): JSX.Eleme
   const [hoveredLayoutCard, setHoveredLayoutCard] = useState<number | null>(null)
   const isLight = theme.mode === 'light'
   const layoutEdgeShadow = isLight
-    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 92%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
     : 'var(--cs-edge-shadow-strong)'
   const layoutRaisedShadow = isLight
-    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 94%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent), 0 8px 18px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 94%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), 0 8px 18px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
     : `var(--cs-edge-shadow-strong), 0 8px 18px color-mix(in srgb, #000 24%, transparent)`
   const layoutSubtleShadow = isLight
-    ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 78%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 8%, transparent)`
+    ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 78%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 8%, transparent)`
     : 'var(--cs-edge-shadow)'
 
   // Load saved templates into cards on first load
@@ -667,7 +667,7 @@ export function LayoutBuilder({ onAddTile, onLaunchTemplate }: Props): JSX.Eleme
                       : (isLight ? `color-mix(in srgb, ${theme.surface.app} 58%, transparent)` : theme.surface.panel),
                     boxShadow: isCardHovered
                       ? (isLight
-                          ? `inset 0 0 0 1px color-mix(in srgb, ${theme.surface.app} 94%, transparent), 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 42%, transparent), 0 8px 18px color-mix(in srgb, ${theme.text.primary} 14%, transparent)`
+                          ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 94%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.accent.base} 42%, transparent), 0 8px 18px color-mix(in srgb, ${theme.text.primary} 14%, transparent)`
                           : `var(--cs-edge-shadow-accent), 0 8px 18px color-mix(in srgb, #000 26%, transparent)`)
                       : isEmpty
                         ? layoutSubtleShadow

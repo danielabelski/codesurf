@@ -5570,7 +5570,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                               border: msg.role === 'user' ? '1px solid transparent' : '0',
                               boxShadow: msg.role === 'user'
                                 ? theme.mode === 'light'
-                                  ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+                                  ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
                                   : 'var(--cs-edge-shadow)'
                                 : undefined,
                               borderRadius: 14,
@@ -5628,7 +5628,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                         border: msg.role === 'user' ? '1px solid transparent' : '0',
                         boxShadow: msg.role === 'user'
                           ? theme.mode === 'light'
-                            ? `var(--cs-edge-shadow), 0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+                            ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
                             : 'var(--cs-edge-shadow)'
                           : undefined,
                         borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
@@ -6316,7 +6316,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         boxShadow: isDropTarget
           ? `0 0 0 1px ${theme.border.accent}, 0 0 22px ${theme.accent.soft}`
           : theme.mode === 'light'
-            ? `0 0 0 1px color-mix(in srgb, ${theme.text.primary} 12%, transparent), 0 10px 28px color-mix(in srgb, ${theme.text.primary} 9%, transparent)`
+            ? `0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), 0 10px 28px color-mix(in srgb, ${theme.text.primary} 9%, transparent)`
             : `0 10px 28px color-mix(in srgb, #000 18%, transparent)`,
         transition: 'border-color 120ms ease, background 120ms ease, box-shadow 120ms ease',
       }}>

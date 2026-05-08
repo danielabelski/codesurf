@@ -206,17 +206,17 @@
   --cs-accent: var(--cs-th-accent-base);
   --cs-surface-hover: color-mix(in srgb, var(--cs-th-text-primary) 6%, transparent);
   --cs-edge-shadow:
-    inset 0 0 0 1px rgb(255 255 255 / var(--cs-th-edge-white-alpha)),
-    0 0 0 1px rgb(0 0 0 / var(--cs-th-edge-black-alpha));
+    inset 0 0 0 0.5px rgb(255 255 255 / var(--cs-th-edge-white-alpha)),
+    0 0 0 0.5px rgb(0 0 0 / var(--cs-th-edge-black-alpha));
   --cs-edge-shadow-subtle:
-    inset 0 0 0 1px rgb(255 255 255 / var(--cs-th-edge-white-alpha-subtle)),
-    0 0 0 1px rgb(0 0 0 / var(--cs-th-edge-black-alpha-subtle));
+    inset 0 0 0 0.5px rgb(255 255 255 / var(--cs-th-edge-white-alpha-subtle)),
+    0 0 0 0.5px rgb(0 0 0 / var(--cs-th-edge-black-alpha-subtle));
   --cs-edge-shadow-strong:
-    inset 0 0 0 1px rgb(255 255 255 / var(--cs-th-edge-white-alpha-strong)),
-    0 0 0 1px rgb(0 0 0 / var(--cs-th-edge-black-alpha-strong));
+    inset 0 0 0 0.5px rgb(255 255 255 / var(--cs-th-edge-white-alpha-strong)),
+    0 0 0 0.5px rgb(0 0 0 / var(--cs-th-edge-black-alpha-strong));
   --cs-edge-shadow-accent:
-    inset 0 0 0 1px color-mix(in srgb, var(--cs-accent) 28%, transparent),
-    0 0 0 1px rgb(0 0 0 / var(--cs-th-edge-black-alpha));
+    inset 0 0 0 0.5px color-mix(in srgb, var(--cs-accent) 28%, transparent),
+    0 0 0 0.5px rgb(0 0 0 / var(--cs-th-edge-black-alpha));
 }
 
 * {

@@ -117,12 +117,12 @@ export type EdgeShadowTone = 'subtle' | 'default' | 'strong' | 'accent'
 export function getEdgeShadow(theme: Pick<AppTheme, 'mode' | 'accent'>, tone: EdgeShadowTone = 'default'): string {
   if (tone === 'accent') {
     return theme.mode === 'light'
-      ? `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 38%, white 18%, transparent), 0 0 0 1px rgba(0, 0, 0, 0.04)`
+      ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.accent.base} 38%, white 18%, transparent), 0 0 0 0.5px rgba(0, 0, 0, 0.04)`
       // Dark-mode accent: drop the `white 4%` admixture — at low ambient
       // brightness it shows up as a hard white halo on every accented panel.
       // Anchor the inset purely on the accent so the highlight reads as
       // "this is the active accent" not "this is a glowing outline".
-      : `inset 0 0 0 1px color-mix(in srgb, ${theme.accent.base} 28%, transparent), 0 0 0 1px rgba(0, 0, 0, 0.22)`
+      : `inset 0 0 0 0.5px color-mix(in srgb, ${theme.accent.base} 28%, transparent), 0 0 0 0.5px rgba(0, 0, 0, 0.22)`
   }
 
   // Light mode keeps its high-alpha "paper edge" highlights — they read as
@@ -140,7 +140,11 @@ export function getEdgeShadow(theme: Pick<AppTheme, 'mode' | 'accent'>, tone: Ed
     ? 0.04
     : tone === 'strong' ? 0.30 : tone === 'subtle' ? 0.16 : 0.22
 
-  return `inset 0 0 0 1px rgba(255, 255, 255, ${whiteAlpha}), 0 0 0 1px rgba(0, 0, 0, ${blackAlpha})`
+  // 0.5px hairline reads cleaner on hidpi than a full pixel — at 1px the
+  // inset highlight + outer line both grab a full device pixel and the
+  // edge feels too declarative. 0.5px gives a sub-pixel rim that still
+  // separates the panel from the canvas.
+  return `inset 0 0 0 0.5px rgba(255, 255, 255, ${whiteAlpha}), 0 0 0 0.5px rgba(0, 0, 0, ${blackAlpha})`
 }
 
 export function stackEdgeShadow(theme: Pick<AppTheme, 'mode' | 'accent'>, shadow?: string, tone: EdgeShadowTone = 'default'): string {
