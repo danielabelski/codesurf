@@ -11,17 +11,21 @@ import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 import {
   ShieldCheck, ChevronDown, AlertTriangle,
   Check, ArrowUp, ArrowDown, Square, MessageSquare, Bot,
-  Brain, ChevronRight, Clock, Cog, Copy, CornerDownRight, DollarSign,
-  FileText, GripVertical, History, Maximize2, Mic, Pencil, Plus, RotateCcw, Sparkles, Trash2, Wrench
+  Brain, ChevronRight, Cog, Copy, CornerDownRight, DollarSign,
+  FileText, GripVertical, Maximize2, Mic, Pencil, Plus, Sparkles, Trash2, Wrench
 } from 'lucide-react'
+import { useChatGitState } from '../hooks/useChatGitState'
 import { useMCPServers } from '../hooks/useMCPServers'
 import { useAutoSpeak, speakMessage, bargeIn } from '../hooks/useAutoSpeak'
 import { ttsPlayer, type TtsPlayerState } from '../utils/ttsPlayer'
-import { useVoiceActivityDetector, float32ToWav } from '../hooks/useVoiceActivityDetector'
+import { useChatDictation } from '../hooks/useChatDictation'
+import { useChatExecutionHosts } from '../hooks/useChatExecutionHosts'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
-import { ensureShimmerStyles, ShimmerText, WorkingDots, ChatMarkdown } from './shared/streamdown-utils'
+import { ensureShimmerStyles, WorkingDots, ChatMarkdown } from './shared/streamdown-utils'
 import { DiffView } from './chat/DiffView'
+import { normalizeMessagesForMemory, estimateMessageChars } from './chat/messageNormalization'
+import { CHAT_TILE_STYLES } from './chat/chatStyles'
 import {
   type BuiltinProvider, type ModelOption, type ModeOption, type ThinkingOption,
   DEFAULT_MODELS, DEFAULT_PROVIDER_ID, PROVIDER_MODES, EXTENSION_PROVIDER_MODE,
@@ -30,6 +34,7 @@ import {
 } from '../config/providers'
 import { stripCapabilityPrefix, getAllNodeTools } from '../../../shared/nodeTools'
 import type { ToolBlock, ThinkingBlock, ContentBlock, ChatMessage, BlockNote, FileChange } from '../../../shared/chat-types'
+import { useChatStreamHandler } from '../hooks/useChatStreamHandler'
 import type { SessionEntryHint } from '../../../shared/session-types'
 import { buildChatMessageHistoryFingerprint } from '../../../shared/chat-history'
 import { BlockNoteAffordance } from './chat/BlockNoteAffordance'
@@ -38,34 +43,37 @@ import { setChatStreaming } from './chatStreamingStore'
 import { recordChatMessageSent } from './chatMessageSentStore'
 import { setTileTodos, clearTileTodos, useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
 import { CUSTOMISATION_LOCATIONS_CHANGED_EVENT, type CustomisationLocationsChangedDetail } from './CustomisationTile'
-import { PlanCard } from './chat/PlanCard'
 import { PlanPane } from './chat/PlanPane'
 import { PlanChip } from './chat/PlanChip'
 import { JSXPreview, JSXPreviewContent, JSXPreviewError } from './ai-elements/JSXPreview'
 import {
-  ToolPermissionCard,
   ToolPermissionProvider,
-  useToolPermissionContext,
   type ToolPermissionDecision,
   type ToolPermissionRequest,
 } from './ai-elements/ToolPermission'
 import { handleBasicChatSurfaceRpc, normalizeChatSurfacePayload, type ChatSurfacePayload } from './chatSurfaceHostRpc'
-import { getCheckpointRestoreAction, isCheckpointToolBlock } from './chat/checkpointToolActions'
+import { isCheckpointToolBlock } from './chat/checkpointToolActions'
 import { DREAM_TOOL_ID_PREFIX, DREAM_TOOL_NAME, isDreamToolBlock } from './chat/dreamToolActions'
 import { CHAT_STREAM_FLUSH_INTERVAL_MS, isLargeArtifact, isLargeMessage, measureText, previewText, splitRawDiffText, type RawDiffFile } from './chat/largeContent'
-import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerDrawerFrame, ChatComposerInput, ChatComposerLocationMenu, ChatComposerModeMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap, type ChatComposerAutocompleteItem } from './chat/ChatComposer'
+import { ChatComposerAttachments, ChatComposerAutocompletePopup, ChatComposerBranchMenu, ChatComposerCard, ChatComposerContextUsageDial, ChatComposerDrawerFrame, ChatComposerInput, ChatComposerLocationMenu, ChatComposerModeMenu, ChatComposerPrimaryToolbar, ChatComposerProjectPathButton, ChatComposerSecondaryToolbar, ChatComposerSurfaceHost, ChatComposerVoiceStatus, ChatComposerWrap } from './chat/ChatComposer'
+import { useChatAutocomplete, CHAT_SLASH_COMMANDS, type AutocompleteItem } from '../hooks/useChatAutocomplete'
 import { ToolbarBtn, ToolbarPill } from './chat/ChatComposerControls'
 import { ComposerInsertMenu, Dropdown, DropdownItem, MenuPortal, ModelDropdown, type ChatSurfaceMenuEntry } from './chat/ChatComposerMenus'
+import {
+  AskUserQuestionContext,
+  AskUserQuestionFontsContext,
+} from './chat/AskUserQuestionForm'
+import {
+  ThinkingBlockView,
+  WorkingChipView,
+  StreamingLivenessIndicator,
+  MixedToolGroup,
+  CollapsedToolGroup,
+  ToolBlockView,
+  parsePlanToolTodos,
+} from './chat/ToolBlockView'
 
-const CHAT_SLASH_COMMANDS = [
-  { value: '/compact', description: 'Compact conversation' },
-  { value: '/clear', description: 'Clear conversation' },
-  { value: '/model', description: 'Switch model' },
-  { value: '/mode', description: 'Switch mode (plan, build, etc.)' },
-  { value: '/help', description: 'Show help' },
-  { value: '/init', description: 'Initialize workspace' },
-  { value: '/export-notes', description: 'Copy all attached block notes to the clipboard' },
-] as const
+
 
 const CHAT_DEFAULT_SKILL_LOCATIONS = [
   '$HOME/.claude/commands',
@@ -238,11 +246,11 @@ type LatestChangeDrawerState = {
   changeBlockCount: number
 }
 
-function hasVisibleFileChangeStats(change: Pick<FileChange, 'additions' | 'deletions'>): boolean {
+export function hasVisibleFileChangeStats(change: Pick<FileChange, 'additions' | 'deletions'>): boolean {
   return change.additions > 0 || change.deletions > 0
 }
 
-function hasRenderableFileChangeDiff(change: Pick<FileChange, 'diff'>): boolean {
+export function hasRenderableFileChangeDiff(change: Pick<FileChange, 'diff'>): boolean {
   return change.diff.trim().length > 0
 }
 
@@ -272,24 +280,6 @@ interface ChatTilePersistedState {
   executionTarget?: 'local' | 'cloud'
 }
 
-interface GitStatusSummary {
-  isRepo: boolean
-  root: string
-  changedCount: number
-}
-
-interface GitBranchSummary {
-  isRepo: boolean
-  root: string
-  current: string | null
-  branches: Array<{ name: string; current: boolean }>
-}
-
-interface CachedGitState {
-  status: GitStatusSummary
-  branches: GitBranchSummary
-  fetchedAt: number
-}
 
 interface DiscoveryPeer {
   peerId: string
@@ -362,8 +352,6 @@ function normalizePersistedChatSurfaces(value: unknown): ActiveChatSurface[] {
   }).filter((surface): surface is ActiveChatSurface => !!surface)
 }
 
-type AutocompleteItem = ChatComposerAutocompleteItem
-
 interface Props {
   tileId: string
   workspaceId: string
@@ -378,391 +366,14 @@ interface Props {
   connectedPeers?: DiscoveryPeer[]
 }
 
-// --- AskUserQuestion interactive form ------------------------------------------
-
-interface AskUserQuestionOption {
-  label: string
-  description?: string
-  preview?: string
-}
-interface AskUserQuestionItem {
-  question: string
-  header?: string
-  multiSelect?: boolean
-  options: AskUserQuestionOption[]
-}
-interface AskUserQuestionPayload {
-  questions: AskUserQuestionItem[]
-  metadata?: Record<string, unknown>
-}
-
-// Context provides the cardId so ToolBlockView (defined outside ChatTile) can
-// submit answers back to main via IPC without prop-drilling through groups.
-const AskUserQuestionContext = React.createContext<{ cardId: string } | null>(null)
-
-interface CheckpointRestoreContextValue {
+export interface CheckpointRestoreContextValue {
   workspaceId: string | null
   tileId: string
   restoringCheckpointId: string | null
   restoreCheckpoint: (checkpointId: string, sessionEntryId: string, label?: string) => Promise<void>
 }
 
-const CheckpointRestoreContext = React.createContext<CheckpointRestoreContextValue | null>(null)
-
-/**
- * Parses a ToolBlock.input string (streamed JSON, potentially partial) and
- * returns a fully-formed AskUserQuestion payload, or null if not yet parseable.
- */
-function parseAskUserQuestionInput(input: string): AskUserQuestionPayload | null {
-  if (!input) return null
-  try {
-    const parsed = JSON.parse(input) as { questions?: unknown; metadata?: unknown }
-    if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) return null
-    const questions: AskUserQuestionItem[] = []
-    for (const q of parsed.questions) {
-      if (!q || typeof q !== 'object') return null
-      const qq = q as Partial<AskUserQuestionItem>
-      if (typeof qq.question !== 'string' || !Array.isArray(qq.options) || qq.options.length < 2) return null
-      const options: AskUserQuestionOption[] = []
-      for (const opt of qq.options) {
-        if (!opt || typeof opt !== 'object' || typeof (opt as AskUserQuestionOption).label !== 'string') return null
-        options.push({
-          label: (opt as AskUserQuestionOption).label,
-          description: typeof (opt as AskUserQuestionOption).description === 'string' ? (opt as AskUserQuestionOption).description : undefined,
-          preview: typeof (opt as AskUserQuestionOption).preview === 'string' ? (opt as AskUserQuestionOption).preview : undefined,
-        })
-      }
-      questions.push({
-        question: qq.question,
-        header: typeof qq.header === 'string' ? qq.header : undefined,
-        multiSelect: qq.multiSelect === true,
-        options,
-      })
-    }
-    return { questions, metadata: (parsed.metadata as Record<string, unknown> | undefined) }
-  } catch {
-    return null
-  }
-}
-
-interface AskUserQuestionFormProps {
-  toolId: string
-  payload: AskUserQuestionPayload
-  onSubmitted: () => void
-}
-
-function AskUserQuestionForm({ toolId, payload, onSubmitted }: AskUserQuestionFormProps): JSX.Element {
-  const theme = useTheme()
-  const fonts = useFonts()
-  const ctx = React.useContext(AskUserQuestionContext)
-  // For single-select: Map<questionIndex, selectedLabel | '__other__'>
-  // For multi-select:  Map<questionIndex, Set<selectedLabel | '__other__'>>
-  const [singleChoice, setSingleChoice] = useState<Record<number, string>>({})
-  const [multiChoice, setMultiChoice] = useState<Record<number, Set<string>>>({})
-  const [otherText, setOtherText] = useState<Record<number, string>>({})
-  const [previewIdx, setPreviewIdx] = useState<Record<number, number | null>>({})
-  const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const toggleMulti = useCallback((qIdx: number, label: string) => {
-    setMultiChoice(prev => {
-      const cur = new Set(prev[qIdx] ?? [])
-      if (cur.has(label)) cur.delete(label)
-      else cur.add(label)
-      return { ...prev, [qIdx]: cur }
-    })
-  }, [])
-
-  const allAnswered = useMemo(() => {
-    return payload.questions.every((q, idx) => {
-      if (q.multiSelect) {
-        const set = multiChoice[idx]
-        if (!set || set.size === 0) return false
-        if (set.has('__other__') && !(otherText[idx]?.trim())) return false
-        return true
-      } else {
-        const pick = singleChoice[idx]
-        if (!pick) return false
-        if (pick === '__other__' && !(otherText[idx]?.trim())) return false
-        return true
-      }
-    })
-  }, [payload.questions, singleChoice, multiChoice, otherText])
-
-  const handleSubmit = useCallback(async () => {
-    if (!ctx?.cardId) { setError('Chat context unavailable'); return }
-    if (!allAnswered || submitting) return
-    setSubmitting(true)
-    setError(null)
-    const answers: Record<string, string> = {}
-    const annotations: Record<string, { notes?: string; preview?: string }> = {}
-    payload.questions.forEach((q, idx) => {
-      const otherTxt = otherText[idx]?.trim() ?? ''
-      let labelOut: string
-      if (q.multiSelect) {
-        const set = multiChoice[idx] ?? new Set<string>()
-        const parts: string[] = []
-        for (const v of set) {
-          if (v === '__other__') parts.push(otherTxt)
-          else parts.push(v)
-        }
-        labelOut = parts.join(', ')
-      } else {
-        const pick = singleChoice[idx] ?? ''
-        labelOut = pick === '__other__' ? otherTxt : pick
-      }
-      answers[q.question] = labelOut
-      // If a preview option is focused, include it as annotation.
-      const pIdx = previewIdx[idx]
-      if (pIdx != null && q.options[pIdx]?.preview) {
-        annotations[q.question] = { preview: q.options[pIdx].preview }
-      }
-    })
-    try {
-      const res = await window.electron?.chat?.answerUserQuestion?.({
-        cardId: ctx.cardId,
-        toolId,
-        answers,
-        annotations: Object.keys(annotations).length > 0 ? annotations : undefined,
-      })
-      if (res && res.ok === false) {
-        setError(res.error ?? 'Failed to submit')
-        setSubmitting(false)
-        return
-      }
-      onSubmitted()
-    } catch (err) {
-      setError((err as Error).message || 'Failed to submit')
-      setSubmitting(false)
-    }
-  }, [ctx?.cardId, toolId, payload.questions, singleChoice, multiChoice, otherText, previewIdx, allAnswered, submitting, onSubmitted])
-
-  return (
-    <div style={{
-      display: 'flex', flexDirection: 'column', gap: 12,
-      padding: 12,
-      borderTop: `1px solid ${theme.chat.assistantBubbleBorder}`,
-      fontFamily: fonts.sans, fontSize: 12, color: theme.chat.text,
-    }}>
-      {payload.questions.map((q, qIdx) => {
-        const activePreview = previewIdx[qIdx] != null ? q.options[previewIdx[qIdx] as number]?.preview : null
-        return (
-          <div key={qIdx} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {q.header && (
-                <span style={{
-                  fontSize: 9, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4,
-                  color: theme.chat.muted,
-                  background: theme.chat.assistantBubble,
-                  border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-                  padding: '2px 6px', borderRadius: 4,
-                }}>{q.header}</span>
-              )}
-              {q.multiSelect && (
-                <span style={{ fontSize: 9, color: theme.chat.muted }}>(choose any)</span>
-              )}
-            </div>
-            <div style={{ fontWeight: 500, fontSize: 13, lineHeight: 1.35 }}>{q.question}</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 2 }}>
-              {q.options.map((opt, oIdx) => {
-                const checked = q.multiSelect
-                  ? (multiChoice[qIdx]?.has(opt.label) ?? false)
-                  : singleChoice[qIdx] === opt.label
-                return (
-                  <label
-                    key={oIdx}
-                    onMouseEnter={() => { if (opt.preview) setPreviewIdx(p => ({ ...p, [qIdx]: oIdx })) }}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8,
-                      padding: '6px 8px',
-                      borderRadius: 6,
-                      border: `1px solid ${checked ? theme.accent.base : theme.chat.assistantBubbleBorder}`,
-                      background: checked ? theme.chat.assistantBubble : 'transparent',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type={q.multiSelect ? 'checkbox' : 'radio'}
-                      name={`ask-${toolId}-${qIdx}`}
-                      checked={checked}
-                      onChange={() => {
-                        if (q.multiSelect) toggleMulti(qIdx, opt.label)
-                        else setSingleChoice(prev => ({ ...prev, [qIdx]: opt.label }))
-                      }}
-                      style={{ marginTop: 2, accentColor: theme.accent.base }}
-                    />
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                      <span style={{ fontWeight: 500, fontSize: 12 }}>{opt.label}</span>
-                      {opt.description && (
-                        <span style={{ fontSize: 11, color: theme.chat.muted, lineHeight: 1.35 }}>{opt.description}</span>
-                      )}
-                    </div>
-                  </label>
-                )
-              })}
-              {/* Auto-included "Other" freeform option */}
-              {(() => {
-                const otherChecked = q.multiSelect
-                  ? (multiChoice[qIdx]?.has('__other__') ?? false)
-                  : singleChoice[qIdx] === '__other__'
-                return (
-                  <label
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8,
-                      padding: '6px 8px',
-                      borderRadius: 6,
-                      border: `1px solid ${otherChecked ? theme.accent.base : theme.chat.assistantBubbleBorder}`,
-                      background: otherChecked ? theme.chat.assistantBubble : 'transparent',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <input
-                      type={q.multiSelect ? 'checkbox' : 'radio'}
-                      name={`ask-${toolId}-${qIdx}`}
-                      checked={otherChecked}
-                      onChange={() => {
-                        if (q.multiSelect) toggleMulti(qIdx, '__other__')
-                        else setSingleChoice(prev => ({ ...prev, [qIdx]: '__other__' }))
-                      }}
-                      style={{ marginTop: 2, accentColor: theme.accent.base }}
-                    />
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, flex: 1 }}>
-                      <span style={{ fontWeight: 500, fontSize: 12 }}>Other…</span>
-                      <input
-                        type="text"
-                        placeholder="Type your own answer"
-                        value={otherText[qIdx] ?? ''}
-                        onFocus={() => {
-                          if (q.multiSelect) {
-                            if (!(multiChoice[qIdx]?.has('__other__'))) toggleMulti(qIdx, '__other__')
-                          } else {
-                            setSingleChoice(prev => ({ ...prev, [qIdx]: '__other__' }))
-                          }
-                        }}
-                        onChange={e => setOtherText(prev => ({ ...prev, [qIdx]: e.target.value }))}
-                        style={{
-                          background: theme.chat.input,
-                          color: theme.chat.text,
-                          border: `1px solid ${theme.chat.inputBorder}`,
-                          borderRadius: 4,
-                          padding: '4px 6px',
-                          fontSize: 12,
-                          fontFamily: fonts.sans,
-                          outline: 'none',
-                        }}
-                      />
-                    </div>
-                  </label>
-                )
-              })()}
-            </div>
-            {activePreview && (
-              <pre style={{
-                background: theme.chat.input,
-                color: theme.chat.text,
-                border: `1px solid ${theme.chat.inputBorder}`,
-                borderRadius: 6,
-                padding: 8,
-                fontSize: 11,
-                fontFamily: fonts.mono,
-                whiteSpace: 'pre-wrap',
-                overflow: 'auto',
-                maxHeight: 180,
-                margin: 0,
-              }}>{activePreview}</pre>
-            )}
-          </div>
-        )
-      })}
-      {error && (
-        <div style={{ fontSize: 11, color: theme.status.danger }}>{error}</div>
-      )}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-        <button
-          type="button"
-          disabled={!allAnswered || submitting}
-          onClick={handleSubmit}
-          style={{
-            background: allAnswered && !submitting ? theme.accent.base : theme.chat.assistantBubble,
-            color: allAnswered && !submitting ? theme.chat.input : theme.chat.muted,
-            border: `1px solid ${allAnswered && !submitting ? theme.accent.base : theme.chat.assistantBubbleBorder}`,
-            borderRadius: 6,
-            padding: '6px 14px',
-            fontSize: 12,
-            fontFamily: fonts.sans,
-            fontWeight: 500,
-            cursor: allAnswered && !submitting ? 'pointer' : 'not-allowed',
-            opacity: submitting ? 0.7 : 1,
-          }}
-        >
-          {submitting ? 'Sending…' : 'Submit answer'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/**
- * Chip-shell wrapper around AskUserQuestionForm so the rendering matches the
- * look of other tool blocks (bordered card with a header row).
- */
-function AskUserQuestionChip({ block, payload }: { block: ToolBlock; payload: AskUserQuestionPayload }): JSX.Element {
-  const theme = useTheme()
-  const fonts = useFonts()
-  const [submitted, setSubmitted] = useState(false)
-  return (
-    <div
-      data-ask-user-question={block.id}
-      style={{
-        background: theme.chat.assistantBubble,
-        border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-        borderRadius: 10,
-        overflow: 'hidden',
-        alignSelf: 'stretch',
-        width: '100%',
-      }}
-    >
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        padding: '8px 12px',
-        fontSize: 10.5,
-        fontFamily: fonts.sans,
-        color: theme.chat.muted,
-        textTransform: 'uppercase',
-        letterSpacing: 0.6,
-      }}>
-        <MessageSquare size={11} />
-        <span>Question</span>
-        {submitted && (
-          <span style={{
-            marginLeft: 'auto',
-            display: 'flex', alignItems: 'center', gap: 4,
-            color: theme.status.success,
-            textTransform: 'none', letterSpacing: 0,
-            fontSize: 11,
-          }}>
-            <Check size={11} /> Answer sent
-          </span>
-        )}
-      </div>
-      {submitted ? (
-        <div style={{
-          padding: '0 12px 12px',
-          fontSize: 12, fontFamily: fonts.sans, color: theme.chat.muted,
-        }}>
-          Waiting for the agent to continue…
-        </div>
-      ) : (
-        <AskUserQuestionForm
-          toolId={block.id}
-          payload={payload}
-          onSubmitted={() => setSubmitted(true)}
-        />
-      )}
-    </div>
-  )
-}
-
+export const CheckpointRestoreContext = React.createContext<CheckpointRestoreContextValue | null>(null)
 
 // --- Font defaults (used when no settings are provided) --------------------------
 
@@ -794,19 +405,7 @@ const CHAT_INITIAL_RENDER_WINDOW = CHAT_RENDER_PAGE_SIZE * CHAT_INITIAL_RENDER_P
 const LINKED_SESSION_LIVE_TAIL_LIMIT = 40
 const LINKED_SESSION_HISTORY_PAGE_SIZE = 20
 const LINKED_SESSION_HISTORY_LOAD_THRESHOLD = 32
-const CHAT_MEMORY_MESSAGE_LIMIT = 120
-const CHAT_MEMORY_CHAR_LIMIT = 180_000
-const CHAT_MEMORY_SINGLE_MESSAGE_LIMIT = 80_000
-const CHAT_MEMORY_PRESERVE_RICH_MESSAGE_COUNT = 12
-const CHAT_MEMORY_TOOL_INPUT_LIMIT = 2_000
-const CHAT_MEMORY_TOOL_INPUT_LIMIT_AGGRESSIVE = 500
-const CHAT_MEMORY_TOOL_SUMMARY_LIMIT = 2_000
-const CHAT_MEMORY_TOOL_SUMMARY_LIMIT_AGGRESSIVE = 600
-const CHAT_MEMORY_THINKING_LIMIT = 8_000
-const CHAT_MEMORY_THINKING_LIMIT_AGGRESSIVE = 1_200
-const CHAT_MEMORY_CONTENT_BLOCK_LIMIT = 8_000
-const CHAT_MEMORY_CONTENT_BLOCK_LIMIT_AGGRESSIVE = 1_500
-const CHAT_TRIM_NOTICE_PREFIX = '[CodeSurf memory guard]'
+
 const CHAT_COMPOSER_MAX_WIDTH = CHAT_MESSAGE_MAX_WIDTH
 const CHAT_COMPOSER_MIN_WIDTH = 'var(--cs-chat-composer-min-width)'
 const CHAT_COMPOSER_SIDE_INSET = 'var(--cs-chat-composer-side-inset)'
@@ -817,100 +416,19 @@ const CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT = 56
 const CHAT_AUTO_SCROLL_THRESHOLD = 48
 const TOOLBAR_ICON_SIZE = 16
 const TOOLBAR_PILL_ICON_SIZE = 14
-const TOOL_BLOCK_MAX_WIDTH = 420
+export const TOOL_BLOCK_MAX_WIDTH = 420
 
-function getToolDisplayName(name: string): string {
+export function getToolDisplayName(name: string): string {
   return name === 'exec_command' ? 'bash' : name
 }
 const LIVE_TOOL_COLLAPSE_GRACE_MS = 5000
-const GIT_STATE_CACHE_TTL_MS = 15_000
-const NON_SELECTABLE_UI_STYLE = {
+export const NON_SELECTABLE_UI_STYLE = {
   userSelect: 'none' as const,
   WebkitUserSelect: 'none' as const,
 }
-const TOOL_OUTPUT_METADATA_PATTERNS = [
-  /^Chunk ID:/i,
-  /^Wall time:/i,
-  /^Process exited with code /i,
-  /^Process running with session ID /i,
-  /^Original token count:/i,
-  /^Output:$/i,
-  /^\[CodeSurf memory guard\] Older tool (output|summary) /i,
-]
-
-const gitStateCache = new Map<string, CachedGitState>()
-const gitStateInflight = new Map<string, Promise<CachedGitState>>()
-
-function normalizeGitWorkspaceKey(workspaceDir: string): string {
-  return workspaceDir.replace(/\/+$/, '')
-}
-
-function createEmptyGitState(workspaceDir: string): CachedGitState {
-  return {
-    status: { isRepo: false, root: workspaceDir, changedCount: 0 },
-    branches: { isRepo: false, root: workspaceDir, current: null, branches: [] },
-    fetchedAt: 0,
-  }
-}
-
-function getCachedGitState(workspaceDir: string): CachedGitState | null {
-  if (!workspaceDir) return null
-  return gitStateCache.get(normalizeGitWorkspaceKey(workspaceDir)) ?? null
-}
-
-function isFreshGitState(entry: CachedGitState | null | undefined): entry is CachedGitState {
-  return Boolean(entry) && (Date.now() - entry.fetchedAt) < GIT_STATE_CACHE_TTL_MS
-}
-
-async function loadGitState(workspaceDir: string, force = false): Promise<CachedGitState> {
-  if (!workspaceDir || !window.electron?.git) return createEmptyGitState(workspaceDir)
-
-  const cacheKey = normalizeGitWorkspaceKey(workspaceDir)
-  const cached = gitStateCache.get(cacheKey)
-  if (!force && isFreshGitState(cached)) return cached
-
-  const pending = gitStateInflight.get(cacheKey)
-  if (!force && pending) return pending
-
-  const request = (async () => {
-    try {
-      const [statusResult, branchResult] = await Promise.all([
-        window.electron.git.status(workspaceDir),
-        window.electron.git.branches(workspaceDir),
-      ])
-
-      const next: CachedGitState = {
-        status: {
-          isRepo: statusResult?.isRepo === true,
-          root: statusResult?.root ?? workspaceDir,
-          changedCount: Array.isArray(statusResult?.files) ? statusResult.files.length : 0,
-        },
-        branches: {
-          isRepo: branchResult?.isRepo === true,
-          root: branchResult?.root ?? workspaceDir,
-          current: branchResult?.current ?? null,
-          branches: Array.isArray(branchResult?.branches) ? branchResult.branches : [],
-        },
-        fetchedAt: Date.now(),
-      }
-      gitStateCache.set(cacheKey, next)
-      return next
-    } catch {
-      const empty: CachedGitState = { ...createEmptyGitState(workspaceDir), fetchedAt: Date.now() }
-      gitStateCache.set(cacheKey, empty)
-      return empty
-    } finally {
-      gitStateInflight.delete(cacheKey)
-    }
-  })()
-
-  gitStateInflight.set(cacheKey, request)
-  return request
-}
-
 // Font context so sub-components can read settings-derived fonts without prop drilling
-const FontCtx = React.createContext({ sans: FONT_SANS, secondary: FONT_SANS, mono: FONT_MONO, size: FONT_SIZE_DEFAULT, monoSize: MONO_SIZE_DEFAULT, lineHeight: 1.5, weight: 400, monoLineHeight: 1.5, monoWeight: 400, secondarySize: 11, secondaryLineHeight: 1.4, secondaryWeight: 400 })
-function useFonts() { return React.useContext(FontCtx) }
+export const FontCtx = React.createContext({ sans: FONT_SANS, secondary: FONT_SANS, mono: FONT_MONO, size: FONT_SIZE_DEFAULT, monoSize: MONO_SIZE_DEFAULT, lineHeight: 1.5, weight: 400, monoLineHeight: 1.5, monoWeight: 400, secondarySize: 11, secondaryLineHeight: 1.4, secondaryWeight: 400 })
+export function useFonts() { return React.useContext(FontCtx) }
 
 // Dispatch context — lets deeply-nested tool renderers (e.g. AskUserQuestion form)
 // send answers back into the chat as the next user turn.
@@ -919,20 +437,6 @@ type ChatDispatchValue = {
 }
 const ChatDispatchCtx = React.createContext<ChatDispatchValue | null>(null)
 function useChatDispatch(): ChatDispatchValue | null { return React.useContext(ChatDispatchCtx) }
-
-function sanitizeToolOutputText(text: string | undefined): string | undefined {
-  if (!text) return text
-
-  const cleaned = text
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .filter(line => !TOOL_OUTPUT_METADATA_PATTERNS.some(pattern => pattern.test(line.trim())))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-
-  return cleaned || undefined
-}
 
 function buildOutgoingMessageContent(draftInput: string, draftAttachments: PendingAttachment[]): string {
   const trimmedInput = draftInput.trim()
@@ -1206,223 +710,6 @@ function collectModelReadPaths(messages: ChatMessage[]): Set<string> {
   return paths
 }
 
-function truncateTextForMemory(text: string | undefined, limit: number, label: string): string {
-  if (!text) return ''
-  if (text.length <= limit) return text
-  const keptTail = text.slice(-limit)
-  return `${CHAT_TRIM_NOTICE_PREFIX} Older ${label} was truncated to keep the renderer alive.\n\n${keptTail}`
-}
-
-function trimToolBlockForMemory(block: ToolBlock, aggressive: boolean): ToolBlock {
-  const input = truncateTextForMemory(
-    block.input,
-    aggressive ? CHAT_MEMORY_TOOL_INPUT_LIMIT_AGGRESSIVE : CHAT_MEMORY_TOOL_INPUT_LIMIT,
-    `tool input for ${block.name}`,
-  )
-  const sanitizedSummary = sanitizeToolOutputText(block.summary)
-  const summary = sanitizedSummary
-    ? truncateTextForMemory(
-      sanitizedSummary,
-      aggressive ? CHAT_MEMORY_TOOL_SUMMARY_LIMIT_AGGRESSIVE : CHAT_MEMORY_TOOL_SUMMARY_LIMIT,
-      `tool summary for ${block.name}`,
-    )
-    : sanitizedSummary
-  const fileChanges = block.fileChanges?.map(change => {
-    const diff = truncateTextForMemory(
-      change.diff,
-      aggressive ? CHAT_MEMORY_TOOL_SUMMARY_LIMIT_AGGRESSIVE : CHAT_MEMORY_TOOL_SUMMARY_LIMIT,
-      `tool diff for ${change.path}`,
-    )
-    if (diff === change.diff) return change
-    return { ...change, diff }
-  })
-  const commandEntries = block.commandEntries?.map(entry => {
-    const sanitizedOutput = sanitizeToolOutputText(entry.output)
-    if (!sanitizedOutput) {
-      if (!entry.output) return entry
-      return { ...entry, output: undefined }
-    }
-    const output = truncateTextForMemory(
-      sanitizedOutput,
-      aggressive ? CHAT_MEMORY_TOOL_SUMMARY_LIMIT_AGGRESSIVE : CHAT_MEMORY_TOOL_SUMMARY_LIMIT,
-      `tool output for ${entry.label}`,
-    )
-    if (output === entry.output) return entry
-    return { ...entry, output }
-  })
-
-  const fileChangesChanged = fileChanges?.some((change, index) => change !== block.fileChanges?.[index]) ?? false
-  const commandEntriesChanged = commandEntries?.some((entry, index) => entry !== block.commandEntries?.[index]) ?? false
-
-  if (input === block.input && summary === block.summary && !fileChangesChanged && !commandEntriesChanged) return block
-  return { ...block, input, summary, fileChanges, commandEntries }
-}
-
-function mergeToolBlockDuplicate(existing: ToolBlock, incoming: ToolBlock): ToolBlock {
-  return {
-    ...existing,
-    ...incoming,
-    name: incoming.name || existing.name,
-    input: incoming.input || existing.input,
-    summary: incoming.summary ?? existing.summary,
-    status: incoming.status === 'running' && existing.status !== 'running'
-      ? existing.status
-      : incoming.status,
-    elapsed: incoming.elapsed ?? existing.elapsed,
-    fileChanges: incoming.fileChanges ?? existing.fileChanges,
-    commandEntries: incoming.commandEntries ?? existing.commandEntries,
-  }
-}
-
-function normalizeMessageStructure(message: ChatMessage): ChatMessage {
-  const toolBlocks = message.toolBlocks
-  const contentBlocks = message.contentBlocks
-  if ((!toolBlocks || toolBlocks.length <= 1) && (!contentBlocks || contentBlocks.length <= 1)) return message
-
-  let nextToolBlocks = toolBlocks
-  if (toolBlocks?.length) {
-    const seen = new Map<string, number>()
-    const deduped: ToolBlock[] = []
-    let changed = false
-    for (const block of toolBlocks) {
-      const existingIndex = seen.get(block.id)
-      if (existingIndex == null) {
-        seen.set(block.id, deduped.length)
-        deduped.push(block)
-        continue
-      }
-      deduped[existingIndex] = mergeToolBlockDuplicate(deduped[existingIndex], block)
-      changed = true
-    }
-    if (changed) nextToolBlocks = deduped
-  }
-
-  let nextContentBlocks = contentBlocks
-  if (contentBlocks?.length) {
-    const seenToolRefs = new Set<string>()
-    const deduped = contentBlocks.filter(block => {
-      if (block.type !== 'tool') return true
-      if (seenToolRefs.has(block.toolId)) return false
-      seenToolRefs.add(block.toolId)
-      return true
-    })
-    if (deduped.length !== contentBlocks.length) nextContentBlocks = deduped
-  }
-
-  if (nextToolBlocks === toolBlocks && nextContentBlocks === contentBlocks) return message
-  return {
-    ...message,
-    toolBlocks: nextToolBlocks,
-    contentBlocks: nextContentBlocks,
-  }
-}
-
-function compactMessageForMemory(message: ChatMessage, options: { aggressive: boolean; preserveRichLayout: boolean }): ChatMessage {
-  const normalizedMessage = normalizeMessageStructure(message)
-  const aggressive = options.aggressive && !message.isStreaming
-  const content = truncateTextForMemory(normalizedMessage.content, CHAT_MEMORY_SINGLE_MESSAGE_LIMIT, 'message content')
-  let next: ChatMessage = content === normalizedMessage.content ? normalizedMessage : { ...normalizedMessage, content }
-
-  if (normalizedMessage.thinking?.content) {
-    const thinkingContent = truncateTextForMemory(
-      normalizedMessage.thinking.content,
-      aggressive ? CHAT_MEMORY_THINKING_LIMIT_AGGRESSIVE : CHAT_MEMORY_THINKING_LIMIT,
-      'thinking text',
-    )
-    if (thinkingContent !== normalizedMessage.thinking.content) {
-      next = next === normalizedMessage ? { ...normalizedMessage } : next
-      next.thinking = { ...normalizedMessage.thinking, content: thinkingContent }
-    }
-  }
-
-  if (normalizedMessage.toolBlocks?.length) {
-    const sourceBlocks = aggressive && normalizedMessage.toolBlocks.length > 3
-      ? normalizedMessage.toolBlocks.slice(-3)
-      : normalizedMessage.toolBlocks
-    const trimmedBlocks = sourceBlocks.map(block => trimToolBlockForMemory(block, aggressive))
-    const blocksChanged = sourceBlocks.length !== normalizedMessage.toolBlocks.length
-      || trimmedBlocks.some((block, index) => block !== sourceBlocks[index])
-    if (blocksChanged) {
-      next = next === normalizedMessage ? { ...normalizedMessage } : next
-      next.toolBlocks = trimmedBlocks.length > 0 ? trimmedBlocks : undefined
-    }
-  }
-
-  if (normalizedMessage.contentBlocks?.length) {
-    if (normalizedMessage.isStreaming || options.preserveRichLayout) {
-      const nextContentBlocks = normalizedMessage.contentBlocks.map(block => {
-        if (block.type !== 'text') return block
-        const text = truncateTextForMemory(
-          block.text,
-          aggressive ? CHAT_MEMORY_CONTENT_BLOCK_LIMIT_AGGRESSIVE : CHAT_MEMORY_CONTENT_BLOCK_LIMIT,
-          'interleaved message content',
-        )
-        if (text === block.text) return block
-        return {
-          ...block,
-          text,
-        }
-      })
-      if (nextContentBlocks.some((block, index) => block !== normalizedMessage.contentBlocks?.[index])) {
-        next = next === normalizedMessage ? { ...normalizedMessage } : next
-        next.contentBlocks = nextContentBlocks
-      }
-    } else {
-      next = next === normalizedMessage ? { ...normalizedMessage } : next
-      next.contentBlocks = undefined
-    }
-  }
-
-  return next
-}
-
-function estimateMessageChars(message: ChatMessage): number {
-  const toolChars = (message.toolBlocks ?? []).reduce((sum, block) => {
-    const fileChangeChars = (block.fileChanges ?? []).reduce((fileSum, change) => {
-      return fileSum + change.path.length + (change.previousPath?.length ?? 0) + change.diff.length
-    }, 0)
-    const commandEntryChars = (block.commandEntries ?? []).reduce((entrySum, entry) => {
-      return entrySum + entry.label.length + (entry.command?.length ?? 0) + (entry.output?.length ?? 0)
-    }, 0)
-    return sum + (block.name?.length ?? 0) + (block.input?.length ?? 0) + (block.summary?.length ?? 0) + fileChangeChars + commandEntryChars
-  }, 0)
-  const contentBlockChars = (message.contentBlocks ?? []).reduce((sum, block) => {
-    return sum + (block.type === 'text' ? (block.text?.length ?? 0) : 24)
-  }, 0)
-  return (message.content?.length ?? 0) + (message.thinking?.content?.length ?? 0) + toolChars + contentBlockChars
-}
-
-function normalizeMessagesForMemory(messages: ChatMessage[]): ChatMessage[] {
-  const withoutNotice = messages.filter(message => !(message.role === 'system' && message.content.startsWith(CHAT_TRIM_NOTICE_PREFIX)))
-  const sourceMessages = withoutNotice.length === messages.length ? messages : withoutNotice
-  const normalized = sourceMessages.map((message, index, arr) => compactMessageForMemory(message, {
-    aggressive: index < arr.length - CHAT_MEMORY_PRESERVE_RICH_MESSAGE_COUNT,
-    preserveRichLayout: index >= arr.length - CHAT_MEMORY_PRESERVE_RICH_MESSAGE_COUNT,
-  }))
-
-  let start = 0
-  let totalChars = normalized.reduce((sum, message) => sum + estimateMessageChars(message), 0)
-  while (normalized.length - start > CHAT_MEMORY_MESSAGE_LIMIT || totalChars > CHAT_MEMORY_CHAR_LIMIT) {
-    totalChars -= estimateMessageChars(normalized[start])
-    start += 1
-  }
-
-  if (start === 0) {
-    if (sourceMessages.length === messages.length && normalized.every((message, index) => message === messages[index])) {
-      return messages
-    }
-    return normalized
-  }
-
-  const notice: ChatMessage = {
-    id: `msg-memory-guard-${normalized[start]?.timestamp ?? Date.now()}`,
-    role: 'system',
-    content: `${CHAT_TRIM_NOTICE_PREFIX} Dropped ${start} older message${start === 1 ? '' : 's'} from live renderer state to avoid an out-of-memory crash. Remaining history may also be compacted.`,
-    timestamp: normalized[start]?.timestamp ?? Date.now(),
-  }
-  return [notice, ...normalized.slice(start)]
-}
-
 function canUsePagedLinkedHistory(
   linkedSessionEntryId: string | null | undefined,
   linkedSessionHint: SessionEntryHint | null | undefined,
@@ -1448,18 +735,6 @@ function mergeHistoricalMessages(
   out.sort((a, b) => a.timestamp - b.timestamp)
   return out
 }
-
-function getRelativeMentionPath(filePath: string, workspaceDir: string): string {
-  const normalizedFilePath = filePath.replace(/\\/g, '/')
-  const normalizedWorkspaceDir = workspaceDir.replace(/\\/g, '/').replace(/\/+$/, '')
-  if (!normalizedWorkspaceDir) return basename(normalizedFilePath)
-  if (normalizedFilePath === normalizedWorkspaceDir) return basename(normalizedFilePath)
-  if (normalizedFilePath.startsWith(`${normalizedWorkspaceDir}/`)) {
-    return normalizedFilePath.slice(normalizedWorkspaceDir.length + 1)
-  }
-  return basename(normalizedFilePath)
-}
-
 
 type RenderableMessageSegment =
   | { type: 'markdown'; text: string }
@@ -2554,67 +1829,7 @@ function ensureChatMdStyle(): void {
     style.id = SHIMMER_ID
     document.head.appendChild(style)
   }
-  style.textContent = `
-    /* Hide scrollbar on the messages pane (scroll still works) */
-    .chat-messages::-webkit-scrollbar { display: none; }
-    /* Chat markdown styles (Streamdown overrides) */
-    .chat-md { line-height: 1.55; color: inherit; max-width: 100%; overflow: hidden; }
-    .chat-md, .chat-md * { min-width: 0; }
-    .chat-md > * { max-width: 100%; }
-    .chat-md > *:first-child { margin-top: 0 !important; }
-    .chat-md > *:last-child { margin-bottom: 0 !important; }
-    .chat-md pre { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
-    .chat-md p, .chat-md .chat-md-p { margin: 0 0 8px; }
-    .chat-md p:last-child, .chat-md .chat-md-p:last-child { margin-bottom: 0; }
-    .chat-md h1 { font-size: 1.3em; font-weight: 700; margin: 12px 0 6px; color: inherit; }
-    .chat-md h2 { font-size: 1.15em; font-weight: 600; margin: 10px 0 4px; color: inherit; }
-    .chat-md h3 { font-size: 1.05em; font-weight: 600; margin: 8px 0 4px; color: inherit; }
-    .chat-md strong { font-weight: 600; }
-    .chat-md em { font-style: italic; }
-    .chat-md code:not(pre code) {
-      background: rgba(128,128,128,0.15); padding: 1px 5px; border-radius: 6px;
-      font-family: "JetBrains Mono", "Fira Code", monospace; font-size: 0.88em;
-      overflow-wrap: anywhere; word-break: break-word; white-space: normal;
-      -webkit-box-decoration-break: clone; box-decoration-break: clone;
-    }
-    .chat-md pre { margin: 8px 0; border-radius: 12px; overflow: hidden; }
-    .chat-md pre:first-child { margin-top: 0; }
-    .chat-md pre:last-child { margin-bottom: 0; }
-    .chat-md [data-streamdown="code-block"] { max-width: 100%; }
-    .chat-md [data-streamdown="code-block-body"] { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
-    .chat-md code { max-width: 100%; }
-    .chat-md ul, .chat-md ol { padding-left: 18px; margin: 6px 0; }
-    .chat-md ul:first-child, .chat-md ol:first-child { margin-top: 0; }
-    .chat-md ul:last-child, .chat-md ol:last-child { margin-bottom: 0; }
-    .chat-md li { line-height: 1.55; margin-bottom: 2px; }
-    .chat-md li > p, .chat-md li > .chat-md-p { margin: 0; }
-    .chat-md a,
-    .chat-md a:any-link,
-    .chat-md a:visited { color: var(--chat-link-color, #4f8cff) !important; opacity: 1; text-decoration: underline; text-underline-offset: 2px; }
-    .chat-md a:hover,
-    .chat-md a:focus-visible { color: var(--chat-link-hover-color, #77a2ff) !important; opacity: 1; }
-    .chat-md blockquote {
-      border-left: 3px solid rgba(128,128,128,0.4); padding-left: 10px;
-      margin: 6px 0; opacity: 0.85;
-    }
-    .chat-md hr { border: none; border-top: 1px solid rgba(128,128,128,0.3); margin: 10px 0; }
-    .chat-md table {
-      display: table; max-width: 100%; overflow: hidden; border-collapse: separate; border-spacing: 0;
-      margin: 8px 0; width: 100%; font-size: 0.9em; table-layout: fixed;
-      border: 0; border-radius: 0; box-shadow: none;
-    }
-    .chat-md th, .chat-md td {
-      border: 0; padding: 8px 12px; text-align: left; vertical-align: top;
-      overflow-wrap: anywhere; word-break: normal;
-    }
-    .chat-md th {
-      font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
-      color: var(--color-muted-foreground); background: color-mix(in srgb, var(--color-muted) 62%, transparent);
-      border-bottom: 1px solid color-mix(in srgb, var(--color-muted-foreground) 22%, transparent);
-    }
-    .chat-md tbody tr + tr td { border-top: 1px solid color-mix(in srgb, var(--color-muted-foreground) 14%, transparent); }
-    .chat-md th:first-child, .chat-md td:first-child { width: 22%; min-width: 120px; overflow-wrap: normal; }
-  `
+  style.textContent = CHAT_TILE_STYLES
 }
 
 
@@ -2955,8 +2170,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const loadEarlierMessagesRef = useRef<() => Promise<void>>(async () => {})
   const [jobId, setJobId] = useState<string | null>(() => initialJobId)
   const [jobSequence, setJobSequence] = useState<number>(() => initialJobSequence)
-  const [executionHosts, setExecutionHosts] = useState<import('../../../shared/types').ExecutionHostRecord[]>([])
-  const [localExecutionLabel, setLocalExecutionLabel] = useState('Local')
+  const { localExecutionLabel, remoteHosts, activeCloudHost, executionDisplayLabel, executionDisplayDetail } = useChatExecutionHosts({
+    executionPreference: settings?.execution ?? null,
+    executionTarget,
+    cloudHostId,
+  })
   const [opencodeModels, setOpencodeModels] = useState<ModelOption[]>(DEFAULT_MODELS.opencode)
   const [openclawAgents, setOpenclawAgents] = useState<ModelOption[]>(DEFAULT_MODELS.openclaw)
   const [modelFilter, setModelFilter] = useState('')
@@ -3019,8 +2237,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const [isDropTarget, setIsDropTarget] = useState(false)
   const [showScrollToLatest, setShowScrollToLatest] = useState(false)
   const [branchFilter, setBranchFilter] = useState('')
-  const [gitStatus, setGitStatus] = useState<GitStatusSummary>(() => getCachedGitState(_workspaceDir)?.status ?? createEmptyGitState(_workspaceDir).status)
-  const [gitBranches, setGitBranches] = useState<GitBranchSummary>(() => getCachedGitState(_workspaceDir)?.branches ?? createEmptyGitState(_workspaceDir).branches)
+  const { gitStatus, gitBranches, refreshGitState } = useChatGitState(_workspaceDir)
   const pagedLinkedHistoryEnabledRef = useRef(pagedLinkedHistoryEnabled)
   pagedLinkedHistoryEnabledRef.current = pagedLinkedHistoryEnabled
   const isStreamingRef = useRef(false)
@@ -3095,22 +2312,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const requestedProviderOptionsRef = useRef<{ opencode: boolean; openclaw: boolean }>({ opencode: false, openclaw: false })
   const isFlushingQueuedTurnRef = useRef(false)
 
-  // Voice dictation state.
-  // `isDictating` here means "VAD listening mode is on" — the mic is open
-  // and we're auto-detecting utterances. `isSpeaking` (from the VAD hook)
-  // means "an utterance is currently in progress". Together they drive the
-  // visual indicator: muted when off, pulsing red while speaking, soft
-  // accent while listening but silent.
-  const [isDictating, setIsDictating] = useState(false)
-  const [dictationText, setDictationText] = useState('')
-  const [dictationError, setDictationError] = useState<string | null>(null)
-  // Kept around for the legacy MediaRecorder fallback path; not used when
-  // the VAD path is active (which is the new default).
-  const recognitionRef = useRef<any>(null)
-  // Most-recent transcription job id, so concurrent VAD-triggered
-  // transcriptions don't append out of order.
-  const transcribeJobRef = useRef(0)
-
   // ─── TTS auto-speak (last-message-only, sentence-streamed) ──────────
   // Voice config comes from the persisted AppSettings.voice block (edited
   // via Settings → Voice). The ChatTile receives `settings` as a prop, so
@@ -3123,11 +2324,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     autoSpeak: 'off' as const,
     bargeIn: true,
   }
-  // Ref so memoized callbacks (toggleDictation) always read the current
-  // voice settings without needing them in their dep array (settings change
-  // mid-dictation is rare but should be honored on next press).
-  const voiceSettingsRef = useRef(voiceSettings)
-  voiceSettingsRef.current = voiceSettings
+
+  // Voice dictation — extracted to useChatDictation hook.
+  const dictation = useChatDictation({ voiceSettings })
+  const { isDictating, dictationText, dictationError, toggleDictation } = dictation
   const autoSpeakEnabled = voiceSettings.autoSpeak === 'last-message'
   // Track the most recent assistant message id + final text for auto-speak.
   // We need its id (for deduping in the hook) and its text (after stream
@@ -3170,10 +2370,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     if (planTodos && planTodos.length > 0) setPlanUpdatedAt(Date.now())
   }, [planTodos])
 
-  // Autocomplete state
-  const [acType, setAcType] = useState<'slash' | 'mention' | null>(null)
-  const [acQuery, setAcQuery] = useState('')
-  const [acIndex, setAcIndex] = useState(0)
+  // Autocomplete state (extracted to hook)
+  const { acType, setAcType, acQuery, setAcQuery, acIndex, setAcIndex, acItems } = useChatAutocomplete({
+    workspaceDir: _workspaceDir,
+    connectedPeers,
+    workspaceSkills,
+  })
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
@@ -3192,7 +2394,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const locationMenuRef = useRef<HTMLDivElement>(null)
   const branchMenuRef = useRef<HTMLDivElement>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
-  const latestGitWorkspaceKeyRef = useRef(normalizeGitWorkspaceKey(_workspaceDir))
 
   const loadEarlierMessages = useCallback(async () => {
     if (!pagedLinkedHistoryEnabled || !workspaceId || !linkedSessionEntryId || !hasEarlierMessages || loadingEarlier) return
@@ -3248,166 +2449,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   useEffect(() => {
     loadEarlierMessagesRef.current = loadEarlierMessages
   }, [loadEarlierMessages])
-
-  // Slash commands (built-in) + discovered skills (workspaceSkills already
-  // covers `.claude/commands`, `.claude/skills`, OpenCode skills, Cursor rules,
-  // and plugin-namespaced commands picked up from CHAT_DEFAULT_SKILL_LOCATIONS).
-  const SLASH_COMMANDS = CHAT_SLASH_COMMANDS
-
-  // Workspace file index for `@` mentions. Built once per workspace via a
-  // bounded recursive readDir; skips dot-folders and the usual heavy build
-  // artifact dirs so a typical repo stays under a few thousand entries.
-  const [workspaceFiles, setWorkspaceFiles] = useState<Array<{ path: string; relPath: string; name: string; depth: number }>>([])
-  useEffect(() => {
-    let cancelled = false
-    const root = _workspaceDir?.trim() || ''
-    if (!root) {
-      setWorkspaceFiles([])
-      return () => { cancelled = true }
-    }
-
-    const SKIP_DIRS = new Set([
-      'node_modules', 'dist', 'build', 'out', 'target', 'coverage',
-      '.git', '.next', '.turbo', '.cache', '.parcel-cache', '.vercel',
-      '.nuxt', '.svelte-kit', '.angular', '.expo', '.terraform',
-      'build-electrobun', 'dist-electron', '__pycache__', '.venv', 'venv',
-    ])
-    const MAX_FILES = 5000
-    const MAX_DEPTH = 4
-
-    ;(async () => {
-      const collected: Array<{ path: string; relPath: string; name: string; depth: number }> = []
-      const walk = async (dir: string, depth: number): Promise<void> => {
-        if (cancelled || collected.length >= MAX_FILES || depth > MAX_DEPTH) return
-        const entries: Array<{ name: string; path: string; isDir: boolean; ext: string }> = await window.electron.fs.readDir(dir).catch(() => [])
-        for (const entry of entries) {
-          if (cancelled || collected.length >= MAX_FILES) return
-          if (entry.name.startsWith('.') && depth === 0) continue
-          if (entry.isDir) {
-            if (SKIP_DIRS.has(entry.name)) continue
-            if (entry.name.startsWith('.') && entry.name !== '.claude') continue
-            await walk(entry.path, depth + 1)
-            continue
-          }
-          const relPath = getRelativeMentionPath(entry.path, root)
-          collected.push({ path: entry.path, relPath, name: entry.name, depth })
-        }
-      }
-      await walk(root, 0)
-      if (!cancelled) setWorkspaceFiles(collected)
-    })().catch(() => { if (!cancelled) setWorkspaceFiles([]) })
-
-    return () => { cancelled = true }
-  }, [_workspaceDir])
-
-  const mentionItems = useMemo<AutocompleteItem[]>(() => {
-    const query = acQuery.trim().toLowerCase()
-    const seenPaths = new Set<string>()
-    const connectedFileItems: AutocompleteItem[] = []
-
-    for (const peer of connectedPeers) {
-      if (!peer.filePath || seenPaths.has(peer.filePath)) continue
-      seenPaths.add(peer.filePath)
-
-      const mentionPath = getRelativeMentionPath(peer.filePath, _workspaceDir)
-      const searchText = [
-        mentionPath,
-        peer.filePath,
-        peer.label ?? '',
-        peer.peerType,
-      ].join('\n').toLowerCase()
-
-      if (query && !searchText.includes(query)) continue
-
-      connectedFileItems.push({
-        key: `connected-file:${peer.peerId}:${peer.filePath}`,
-        value: `@${mentionPath}`,
-        description: `Connected ${peer.peerType} · ${mentionPath}`,
-        attachPath: peer.filePath,
-        priority: peer.distance,
-      })
-    }
-
-    connectedFileItems.sort((a, b) => {
-      const priorityDelta = (a.priority ?? 0) - (b.priority ?? 0)
-      if (priorityDelta !== 0) return priorityDelta
-      return a.value.localeCompare(b.value)
-    })
-
-    const existingValues = new Set(connectedFileItems.map(item => item.value.toLowerCase()))
-
-    // Real workspace file results. Rank by: basename-prefix > basename-contains
-    // > path-contains, then by directory depth (shallower first), then
-    // alphabetical. Cap the dropdown so we never paint thousands of rows.
-    const FILE_RESULT_LIMIT = 40
-    const fileItems: Array<AutocompleteItem & { rank: number }> = []
-    if (workspaceFiles.length > 0) {
-      for (const file of workspaceFiles) {
-        const value = `@${file.relPath}`
-        if (existingValues.has(value.toLowerCase())) continue
-        const nameLower = file.name.toLowerCase()
-        const relLower = file.relPath.toLowerCase()
-        let rank = -1
-        if (!query) rank = 2
-        else if (nameLower.startsWith(query)) rank = 0
-        else if (nameLower.includes(query)) rank = 1
-        else if (relLower.includes(query)) rank = 2
-        if (rank < 0) continue
-        fileItems.push({
-          key: `workspace-file:${file.path}`,
-          value,
-          description: file.relPath,
-          attachPath: file.path,
-          priority: rank * 100 + file.depth,
-          rank,
-        })
-      }
-      fileItems.sort((a, b) => {
-        if (a.rank !== b.rank) return a.rank - b.rank
-        if ((a.priority ?? 0) !== (b.priority ?? 0)) return (a.priority ?? 0) - (b.priority ?? 0)
-        return a.value.localeCompare(b.value)
-      })
-    }
-
-    return [...connectedFileItems, ...fileItems.slice(0, FILE_RESULT_LIMIT).map(({ rank: _rank, ...rest }) => rest)]
-  }, [acQuery, connectedPeers, _workspaceDir, workspaceFiles])
-
-  const slashItems = useMemo<AutocompleteItem[]>(() => {
-    const q = acQuery.toLowerCase()
-    const seen = new Set<string>()
-    const items: AutocompleteItem[] = []
-
-    for (const command of SLASH_COMMANDS) {
-      if (!command.value.toLowerCase().startsWith('/' + q)) continue
-      if (seen.has(command.value)) continue
-      seen.add(command.value)
-      items.push({ key: `slash:${command.value}`, value: command.value, description: command.description })
-    }
-
-    // Discovered skills/commands. Skill `command` is the slash trigger
-    // (e.g. `cleanup` → `/cleanup`); fall back to `name` when absent.
-    for (const skill of workspaceSkills) {
-      const trigger = (skill.command || skill.name || '').trim()
-      if (!trigger) continue
-      const value = '/' + trigger.replace(/^\/+/, '')
-      if (seen.has(value)) continue
-      if (!value.toLowerCase().startsWith('/' + q)) continue
-      seen.add(value)
-      items.push({
-        key: `skill:${skill.id || value}`,
-        value,
-        description: skill.description?.trim() || `Skill · ${skill.name}`,
-      })
-    }
-
-    return items
-  }, [acQuery, SLASH_COMMANDS, workspaceSkills])
-
-  const acItems: AutocompleteItem[] = acType === 'slash'
-    ? slashItems
-    : acType === 'mention'
-      ? mentionItems
-      : []
 
   const renderedMessages = useMemo(() => {
     // Dedupe by message ID when combining historical (session-restore) with
@@ -3724,11 +2765,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
   }, [workspaceId, setMessagesSafe])
 
-  // Clamp index when filtered items change
-  useEffect(() => {
-    setAcIndex(i => Math.min(i, Math.max(0, acItems.length - 1)))
-  }, [acItems.length])
-
   useEffect(() => { ensureChatMdStyle() }, [])
 
   // Bumped whenever CustomisationTile saves a new set of skill/prompt
@@ -3912,44 +2948,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     }
   }, [provider])
 
-  useEffect(() => {
-    const listHosts = window.electron?.execution?.listHosts
-    if (typeof listHosts !== 'function') {
-      setExecutionHosts([])
-      return
-    }
 
-    listHosts()
-      .then((hosts) => setExecutionHosts(Array.isArray(hosts) ? hosts : []))
-      .catch(() => setExecutionHosts([]))
-  }, [])
-
-  useEffect(() => {
-    if (!settings?.execution) {
-      setLocalExecutionLabel('Instant')
-      return
-    }
-    const resolveTarget = window.electron?.execution?.resolveTarget
-    if (typeof resolveTarget !== 'function') {
-      setLocalExecutionLabel('Instant')
-      return
-    }
-
-    resolveTarget(settings.execution)
-      .then((resolution) => {
-        // Map resolution.host.type to our short two-word vocab:
-        //   'local-daemon' → "Local"  (full daemon execution)
-        //   'runtime'      → "Instant" (in-process fallback)
-        //   anything else  → use the host label verbatim
-        const type = (resolution.host as { type?: string } | null)?.type
-        if (type === 'local-daemon') setLocalExecutionLabel('Local')
-        else if (type === 'runtime') setLocalExecutionLabel('Instant')
-        else setLocalExecutionLabel(resolution.host.label || 'Instant')
-      })
-      .catch(() => {
-        setLocalExecutionLabel('Instant')
-      })
-  }, [settings?.execution])
 
   useEffect(() => {
     if (pagedLinkedHistoryEnabled) return
@@ -4558,41 +3557,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const contextUsageRatio = contextWindowLimit > 0 ? Math.min(1, estimatedContextTokens / contextWindowLimit) : 0
   const contextUsagePercent = Math.max(1, Math.round(contextUsageRatio * 100))
 
-  const applyGitState = useCallback((next: CachedGitState) => {
-    setGitStatus(next.status)
-    setGitBranches(next.branches)
-  }, [])
-
-  const refreshGitState = useCallback(async (force = false) => {
-    const requestWorkspaceDir = _workspaceDir
-    const requestKey = normalizeGitWorkspaceKey(requestWorkspaceDir)
-    if (!requestWorkspaceDir) {
-      applyGitState(createEmptyGitState(_workspaceDir))
-      return
-    }
-
-    const cached = getCachedGitState(requestWorkspaceDir)
-    if (!force && cached) {
-      if (latestGitWorkspaceKeyRef.current === requestKey) applyGitState(cached)
-      if (isFreshGitState(cached)) return
-    }
-
-    const next = await loadGitState(requestWorkspaceDir, force)
-    if (latestGitWorkspaceKeyRef.current !== requestKey) return
-    applyGitState(next)
-  }, [_workspaceDir, applyGitState])
-
-  useEffect(() => {
-    latestGitWorkspaceKeyRef.current = normalizeGitWorkspaceKey(_workspaceDir)
-    const cached = getCachedGitState(_workspaceDir)
-    applyGitState(cached ?? createEmptyGitState(_workspaceDir))
-    void refreshGitState(false)
-
-    const onFocus = () => { void refreshGitState(true) }
-    window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
-  }, [_workspaceDir, applyGitState, refreshGitState])
-
   const isGitRepo = gitStatus.isRepo || gitBranches.isRepo
   const branchMenuCreateEnabled = isGitRepo
     && branchFilter.trim().length > 0
@@ -4605,10 +3569,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const normalizedRepoRoot = activeRepoRoot.replace(/\/+$/, '')
   const projectFolderName = basename(normalizedRepoRoot) || 'No project'
   const currentBranchLabel = gitBranches.current ?? 'No branch'
-  const remoteHosts = useMemo(
-    () => executionHosts.filter(host => host.type === 'remote-daemon' && host.enabled !== false),
-    [executionHosts],
-  )
   useEffect(() => {
     if (executionTarget !== 'cloud') return
     if (remoteHosts.length === 0) {
@@ -4619,12 +3579,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       setCloudHostId(remoteHosts[0].id)
     }
   }, [executionTarget, remoteHosts, cloudHostId])
-  const activeCloudHost = remoteHosts.find(host => host.id === cloudHostId) ?? remoteHosts[0] ?? null
-  const locationLabel = executionTarget === 'cloud'
-    ? (activeCloudHost?.label ?? (remoteHosts.length > 0 ? 'Cloud' : 'No remote daemon'))
-    : localExecutionLabel
+  const locationLabel = executionDisplayLabel
   const activeProjectPathLabel = executionTarget === 'cloud'
-    ? (activeCloudHost?.url ?? (remoteHosts.length > 0 ? 'Cloud workspace' : 'No remote daemon configured'))
+    ? executionDisplayDetail
     : (normalizedRepoRoot || 'No project')
 
   const handleProjectFolderSwitch = useCallback(async () => {
@@ -4724,73 +3681,13 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setShowContextMenu(prev => which === 'context' ? !prev : false)
   }, [])
 
-  // ─── Silero VAD: hands-free dictation ───────────────────────────────
-  // The VAD hook owns the microphone while listening mode is on. It fires
-  // onSpeechEnd with a Float32 PCM buffer each time the user finishes an
-  // utterance (~700ms after they stop talking). We pack it into a WAV and
-  // send to the configured STT provider — no manual stop required.
-  //
-  // Listening stays on across multiple utterances until the user clicks
-  // mic again. Voice-initiated barge-in (the audio steer): when speech
-  // starts mid-TTS-playback, we stop the player so the user's voice cuts
-  // through cleanly.
-  const vad = useVoiceActivityDetector({
-    onSpeechStart: () => {
-      // Voice-initiated barge-in: speaking interrupts the AI talking.
-      bargeIn()
-    },
-    onSpeechEnd: async (audio) => {
-      const v = voiceSettingsRef.current
-      const jobId = ++transcribeJobRef.current
-      try {
-        const wav = float32ToWav(audio, 16000)
-        const result = await window.electron.transcribe.run({
-          audio: wav,
-          mimeType: 'audio/wav',
-          provider: v.sttProvider ?? 'deepgram',
-          lang: v.sttLang ?? 'en',
-          localBaseUrl: v.sttLocalBaseUrl,
-        })
-        if (jobId !== transcribeJobRef.current) return  // stale; user moved on
-        if (result.ok && result.text) {
-          setInput(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + result.text!)
-          setDictationError(null)
-        } else if (result.error) {
-          // eslint-disable-next-line no-console
-          console.warn('[dictation] transcribe error:', result.error)
-          setDictationError(result.error)
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn('[dictation] transcribe pipeline failed:', err)
-        setDictationError(err instanceof Error ? err.message : String(err))
-      }
-    },
-  })
-
-  // Reflect the VAD lifecycle into the existing isDictating / dictationText
-  // state so the indicator UI doesn't need to know which engine is driving it.
+  // ─── Voice dictation (via useChatDictation hook) ────────────────────
+  // Wire transcriptions into the input state.
   useEffect(() => {
-    setIsDictating(vad.isListening)
-    if (!vad.isListening) setDictationText('')
-    else if (vad.isSpeaking) setDictationText('Listening — speaking…')
-    else setDictationText('Listening — say something')
-  }, [vad.isListening, vad.isSpeaking])
-  useEffect(() => {
-    if (vad.error) setDictationError(vad.error)
-  }, [vad.error])
-
-  // Click mic / hold space toggles VAD listening mode (not single-shot
-  // recording). Holding space briefly is functionally equivalent to a
-  // click — both flip listening on or off.
-  const toggleDictation = useCallback(() => {
-    if (vad.isListening) {
-      void vad.stop()
-    } else {
-      bargeIn()  // any active TTS audio is silenced when we start listening
-      void vad.start()
-    }
-  }, [vad])
+    dictation.onTranscription((text: string) => {
+      setInput(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + text)
+    })
+  }, [dictation])
 
   const isNearLatest = useCallback((el: HTMLDivElement) => {
     return el.scrollHeight - el.scrollTop - el.clientHeight <= CHAT_AUTO_SCROLL_THRESHOLD
@@ -5057,307 +3954,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   }, [collectAllNotes])
 
   // Stream listener -- handles all rich event types from Claude Agent SDK
-  useEffect(() => {
-    const cleanup = window.electron?.stream?.onChunk((event: any) => {
-      if (event.cardId !== tileId) return
-
-      if (typeof event.sequence === 'number') {
-        if (event.sequence <= lastJobSequenceRef.current) return
-        lastJobSequenceRef.current = event.sequence
-        setJobSequence(event.sequence)
-      }
-      if (typeof event.jobId === 'string') {
-        setJobId(event.jobId)
-      }
-
-      const updateLast = (fn: (m: ChatMessage) => ChatMessage) =>
-        setMessagesSafe(prev => {
-          const last = prev[prev.length - 1]
-          if (last?.isStreaming) return [...prev.slice(0, -1), fn(last)]
-          return prev
-        })
-
-      if (event.type !== 'text') flushPendingStreamText()
-
-      switch (event.type) {
-        case 'session':
-          if (event.sessionId) setSessionId(event.sessionId)
-          break
-
-        case 'text':
-          if (event.text) queueStreamText(event.text)
-          break
-
-        case 'thinking_start': {
-          const thinkingId = typeof event.thinkingId === 'string'
-            ? event.thinkingId
-            : `think-${Date.now()}`
-          updateLast(m => ({
-            ...m,
-            // Keep legacy `thinking` in sync with the latest block so the
-            // fallback indicator keeps working for messages without ids.
-            thinking: { content: '', done: false, id: thinkingId },
-            thinkingBlocks: [...(m.thinkingBlocks ?? []), { id: thinkingId, content: '', done: false }],
-            contentBlocks: [...(m.contentBlocks ?? []), { type: 'thinking' as const, thinkingId }],
-          }))
-          break
-        }
-
-        case 'thinking':
-          if (event.text) updateLast(m => {
-            const targetId = typeof event.thinkingId === 'string' ? event.thinkingId : m.thinking?.id
-            const existing = m.thinkingBlocks ?? []
-            const idx = targetId
-              ? existing.findIndex(b => b.id === targetId)
-              : existing.length - 1
-            let nextBlocks: ThinkingBlock[]
-            let nextContentBlocks = m.contentBlocks
-            if (idx >= 0) {
-              nextBlocks = [...existing]
-              nextBlocks[idx] = { ...nextBlocks[idx], content: nextBlocks[idx].content + event.text, done: false }
-            } else {
-              // No start event seen yet — synthesise an entry + content-block so
-              // the delta still surfaces inline instead of being lost.
-              const syntheticId = targetId ?? `think-${Date.now()}`
-              nextBlocks = [...existing, { id: syntheticId, content: event.text, done: false }]
-              nextContentBlocks = [...(m.contentBlocks ?? []), { type: 'thinking' as const, thinkingId: syntheticId }]
-            }
-            return {
-              ...m,
-              thinking: { content: (m.thinking?.content ?? '') + event.text, done: false, id: m.thinking?.id },
-              thinkingBlocks: nextBlocks,
-              contentBlocks: nextContentBlocks,
-            }
-          })
-          break
-
-        case 'tool_start': {
-          const toolId = event.toolId ?? `tool-${Date.now()}`
-          updateLast(m => {
-            const nextBlock: ToolBlock = {
-              id: toolId,
-              name: event.toolName ?? 'tool',
-              input: '',
-              status: 'running',
-            }
-            const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === toolId)
-            const toolBlocks = existingIndex >= 0
-              ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? mergeToolBlockDuplicate(block, nextBlock) : block)
-              : [...(m.toolBlocks ?? []), nextBlock]
-            const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === toolId)
-            return {
-              ...m,
-              toolBlocks,
-              contentBlocks: hasContentRef
-                ? m.contentBlocks
-                : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId }],
-            }
-          })
-          break
-        }
-
-        case 'tool_input':
-          if (event.text) updateLast(m => {
-            const blocks = [...(m.toolBlocks ?? [])]
-            const targetIndex = event.toolId
-              ? blocks.findIndex(b => b.id === event.toolId)
-              : blocks.length - 1
-            const last = targetIndex >= 0 ? blocks[targetIndex] : null
-            if (last && targetIndex >= 0) blocks[targetIndex] = { ...last, input: last.input + event.text }
-            return { ...m, toolBlocks: blocks }
-          })
-          break
-
-        case 'tool_use':
-          updateLast(m => {
-            const blocks = [...(m.toolBlocks ?? [])]
-            const idx = event.toolId
-              ? blocks.findIndex(b => b.id === event.toolId)
-              : blocks.findIndex(b => b.name === event.toolName && b.status === 'running')
-            if (idx >= 0) {
-              blocks[idx] = {
-                ...blocks[idx],
-                name: event.toolName ?? blocks[idx].name,
-                input: event.toolInput ?? blocks[idx].input,
-                status: 'done',
-              }
-            }
-            return { ...m, toolBlocks: blocks }
-          })
-          break
-
-        case 'tool_summary':
-          updateLast(m => {
-            const blocks = [...(m.toolBlocks ?? [])]
-            const target = event.toolId
-              ? blocks.findIndex(b => b.id === event.toolId)
-              : (() => {
-                  const idx = blocks.findLastIndex(b => b.status === 'done' && !b.summary)
-                  return idx >= 0 ? idx : blocks.findLastIndex(b => b.status === 'running')
-                })()
-            if (target >= 0) {
-              blocks[target] = {
-                ...blocks[target],
-                name: event.toolName ?? blocks[target].name,
-                summary: typeof event.text === 'string' ? event.text : blocks[target].summary,
-                status: 'done',
-                fileChanges: Array.isArray(event.fileChanges) ? event.fileChanges : blocks[target].fileChanges,
-                commandEntries: Array.isArray(event.commandEntries) ? event.commandEntries : blocks[target].commandEntries,
-              }
-            }
-            return { ...m, toolBlocks: blocks }
-          })
-          break
-
-        case 'tool_permission_request': {
-          const pid = typeof event.toolId === 'string' ? event.toolId : null
-          if (!pid) break
-          const toolName = typeof event.toolName === 'string' ? event.toolName : 'tool'
-          const request: ToolPermissionRequest = {
-            toolId: pid,
-            toolName,
-            provider: typeof event.provider === 'string' ? event.provider : 'claude',
-            title: typeof event.title === 'string' ? event.title : null,
-            description: typeof event.description === 'string' ? event.description : null,
-            blockedPath: typeof event.blockedPath === 'string' ? event.blockedPath : null,
-            workspaceDir: typeof event.workspaceDir === 'string' ? event.workspaceDir : null,
-          }
-          updateLast(m => {
-            const nextBlock: ToolBlock = {
-              id: pid,
-              name: toolName,
-              input: '',
-              status: 'running',
-            }
-            const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
-            const toolBlocks = existingIndex >= 0
-              ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? mergeToolBlockDuplicate(block, nextBlock) : block)
-              : [...(m.toolBlocks ?? []), nextBlock]
-            const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
-            return {
-              ...m,
-              toolBlocks,
-              contentBlocks: hasContentRef
-                ? m.contentBlocks
-                : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId: pid }],
-            }
-          })
-          setPendingToolPermissions(prev => {
-            const next = new Map(prev)
-            next.set(pid, request)
-            return next
-          })
-          setResolvedToolPermissions(prev => {
-            if (!prev.has(pid)) return prev
-            const next = new Map(prev)
-            next.delete(pid)
-            return next
-          })
-          break
-        }
-
-        case 'tool_permission_resolved': {
-          const pid = typeof event.toolId === 'string' ? event.toolId : null
-          if (!pid) break
-          const decision: ToolPermissionDecision =
-            event.decision === 'deny' || event.decision === 'never' || event.decision === 'once' || event.decision === 'session'
-              || event.decision === 'today' || event.decision === 'forever'
-              ? event.decision
-              : 'once'
-          setPendingToolPermissions(prev => {
-            if (!prev.has(pid)) return prev
-            const next = new Map(prev)
-            next.delete(pid)
-            return next
-          })
-          // Only persist a visible "resolved" banner for denials — allowed
-          // tools let the normal chip render the tool result. Denials need a
-          // permanent explanation since no tool_result follows.
-          if (decision === 'deny' || decision === 'never') {
-            updateLast(m => {
-              const toolName = typeof event.toolName === 'string' ? event.toolName : 'tool'
-              const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
-              const toolBlocks = existingIndex >= 0
-                ? (m.toolBlocks ?? []).map(block => block.id === pid ? { ...block, name: toolName, status: 'done' as const } : block)
-                : [...(m.toolBlocks ?? []), { id: pid, name: toolName, input: '', status: 'done' as const }]
-              const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
-              return {
-                ...m,
-                toolBlocks,
-                contentBlocks: hasContentRef
-                  ? m.contentBlocks
-                  : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId: pid }],
-              }
-            })
-            setResolvedToolPermissions(prev => {
-              const next = new Map(prev)
-              next.set(pid, decision)
-              return next
-            })
-          }
-          break
-        }
-
-        case 'tool_progress':
-          updateLast(m => {
-            const blocks = [...(m.toolBlocks ?? [])]
-            const idx = blocks.findIndex(b => b.name === event.toolName && b.status === 'running')
-            if (idx >= 0) blocks[idx] = { ...blocks[idx], elapsed: event.elapsed }
-            return { ...m, toolBlocks: blocks }
-          })
-          break
-
-        case 'block_stop':
-          // Mark thinking as done and/or the last running tool as done when its block stops
-          updateLast(m => {
-            const blocks = [...(m.toolBlocks ?? [])]
-            const lastRunning = blocks.findLastIndex(b => b.status === 'running')
-            if (lastRunning >= 0) {
-              blocks[lastRunning] = { ...blocks[lastRunning], status: 'done' }
-            }
-            const thinkingBlocks = [...(m.thinkingBlocks ?? [])]
-            const targetId = typeof event.thinkingId === 'string' ? event.thinkingId : null
-            if (targetId) {
-              const ti = thinkingBlocks.findIndex(b => b.id === targetId)
-              if (ti >= 0) thinkingBlocks[ti] = { ...thinkingBlocks[ti], done: true }
-            } else {
-              const ti = thinkingBlocks.findLastIndex(b => !b.done)
-              if (ti >= 0) thinkingBlocks[ti] = { ...thinkingBlocks[ti], done: true }
-            }
-            return {
-              ...m,
-              thinking: m.thinking ? { ...m.thinking, done: true } : m.thinking,
-              thinkingBlocks,
-              toolBlocks: blocks,
-            }
-          })
-          break
-
-        case 'done':
-          if (event.sessionId) setSessionId(event.sessionId)
-          updateLast(m => ({
-            ...m,
-            isStreaming: false,
-            cost: event.cost ?? m.cost,
-            turns: event.turns ?? m.turns,
-            toolBlocks: m.toolBlocks?.map(b => b.status === 'running' ? { ...b, status: 'done' as const } : b),
-          }))
-          setIsStreaming(false)
-          window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
-            message: 'Assistant responded', role: 'assistant',
-          })
-          break
-
-        case 'error':
-          updateLast(m => ({
-            ...m, content: m.content || `Error: ${event.error}`, isStreaming: false,
-          }))
-          setIsStreaming(false)
-          break
-      }
-    })
-    return cleanup
-  }, [tileId, flushPendingStreamText, queueStreamText, setMessagesSafe])
+  useChatStreamHandler({
+    tileId,
+    setMessagesSafe,
+    setSessionId,
+    setIsStreaming,
+    setJobId,
+    setJobSequence,
+    flushPendingStreamText,
+    queueStreamText,
+    lastJobSequenceRef,
+    setPendingToolPermissions,
+    setResolvedToolPermissions,
+  })
 
   // Subscribe to incoming MCP peer commands on this tile's bus channel.
   // Strict gating so broadcasts from editor/extension peers don't spam every
@@ -6466,6 +5075,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   return (
     <ChatDispatchCtx.Provider value={chatDispatchValue}>
     <FontCtx.Provider value={fontCtxValue}>
+    <AskUserQuestionFontsContext.Provider value={fontCtxValue}>
     <AskUserQuestionContext.Provider value={{ cardId: tileId }}>
     <CheckpointRestoreContext.Provider value={checkpointRestoreContextValue}>
     <ToolPermissionProvider
@@ -6546,16 +5156,12 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                display: 'flex', flexDirection: 'column',
                alignItems: 'center', justifyContent: 'center',
                color: theme.chat.text, textAlign: 'center',
+               fontSize: 'clamp(24px, 3vw, 34px)',
+               lineHeight: 1.15,
+               fontWeight: 550,
+               letterSpacing: 0,
              }}>
-               <div style={{
-                 fontSize: 'clamp(24px, 3vw, 34px)',
-                 lineHeight: 1.15,
-                 fontWeight: 550,
-                 color: theme.chat.text,
-                 letterSpacing: 0,
-               }}>
-                 What do you want to build today with CodeSurf?
-               </div>
+               What do you want to build today with CodeSurf?
              </div>
            )}
 
@@ -6871,8 +5477,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
                 {/* Interleaved content blocks — text and tool calls in stream order */}
                 {(msg.contentBlocks?.length ?? 0) > 0 ? (
-                  <>
-                    {(() => {
+                    (() => {
                       const elements: JSX.Element[] = []
                       const blocks = msg.contentBlocks!
                       let i = 0
@@ -6979,8 +5584,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                       flushChipRow()
                       // WorkingChipView moved to the fixed zone above the input bar.
                       return elements
-                    })()}
-                  </>
+                    })()
                 ) : (
                   <>
                     {/* Fallback: legacy layout for messages without contentBlocks */}
@@ -7115,20 +5719,15 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
 
       <div style={{ flexShrink: 0, position: 'relative', overflow: 'visible' }}>
         {showScrollToLatest && (
-          <div style={{
-            position: 'absolute',
-            top: 0,
-            left: '50%',
-            transform: 'translate(-50%, -50%)',
-            display: 'flex',
-            justifyContent: 'center',
-            pointerEvents: 'none',
-            zIndex: 3,
-          }}>
             <button
               onClick={() => scrollToLatest()}
               title="Jump to latest"
               style={{
+                position: 'absolute',
+                top: 0,
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 3,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -7143,13 +5742,11 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 cursor: 'pointer',
                 boxShadow: theme.shadow.panel,
                 backdropFilter: 'blur(10px)',
-                pointerEvents: 'auto',
                 ...NON_SELECTABLE_UI_STYLE,
               }}
             >
               <ArrowDown size={15} strokeWidth={1.8} />
             </button>
-          </div>
         )}
 
         {liveComposerActivityChip}
@@ -7616,22 +6213,21 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
                 }}>
                   {isUrgent ? <AlertTriangle size={14} /> : <MessageSquare size={14} />}
                 </div>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div
-                    title={isUrgent ? 'This queued message looks like a pasted error/crash log' : undefined}
-                    style={{
-                      color: isUrgent ? theme.status.danger : theme.chat.textSecondary,
-                      fontWeight: isUrgent ? 600 : undefined,
-                      fontSize: Math.max(12, fontSize),
-                      fontFamily: fontSans,
-                      lineHeight: 1.35,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
-                    {turn.preview}
-                  </div>
+                <div
+                  title={isUrgent ? 'This queued message looks like a pasted error/crash log' : undefined}
+                  style={{
+                    minWidth: 0, flex: 1,
+                    color: isUrgent ? theme.status.danger : theme.chat.textSecondary,
+                    fontWeight: isUrgent ? 600 : undefined,
+                    fontSize: Math.max(12, fontSize),
+                    fontFamily: fontSans,
+                    lineHeight: 1.35,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {turn.preview}
                 </div>
                 <button
                   type="button"
@@ -7906,14 +6502,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
             )}
           </div>
 
-          <div style={{ flex: 1 }} />
-
+          <div style={{ marginLeft: 'auto' }}>
           <ToolbarBtn
             icon={<Maximize2 size={TOOLBAR_ICON_SIZE - 1} />}
             tooltip="Open this chat in a mini window"
             color={theme.chat.textSecondary}
             onClick={openMiniChat}
           />
+          </div>
 
           {/* Subtle liveness indicator — a breathing dot that sits next to the
               Stop button while streaming. If the server has been quiet for
@@ -8117,1253 +6713,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     </ToolPermissionProvider>
     </CheckpointRestoreContext.Provider>
     </AskUserQuestionContext.Provider>
+    </AskUserQuestionFontsContext.Provider>
     </FontCtx.Provider>
     </ChatDispatchCtx.Provider>
   )
 }
 
-// --- Rich message sub-components -------------------------------------------------
-
-const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinking }: { thinking: ThinkingBlock }): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const [expanded, setExpanded] = useState(false)
-  const isActive = !thinking.done
-  const hasContent = thinking.content.length > 0
-
-  // Track elapsed thinking time so we can show "Thought for Xs"
-  const startTimeRef = useRef<number | null>(null)
-  const finalElapsedRef = useRef<number | null>(null)
-  const [elapsedSec, setElapsedSec] = useState(0)
-
-  if (startTimeRef.current == null && isActive) {
-    startTimeRef.current = Date.now()
-  }
-
-  useEffect(() => {
-    if (!isActive) return
-    const id = setInterval(() => {
-      if (startTimeRef.current != null) {
-        setElapsedSec(Math.floor((Date.now() - startTimeRef.current) / 1000))
-      }
-    }, 250)
-    return () => clearInterval(id)
-  }, [isActive])
-
-  useEffect(() => {
-    if (thinking.done && finalElapsedRef.current == null) {
-      const start = startTimeRef.current ?? Date.now()
-      const finalSec = Math.max(1, Math.round((Date.now() - start) / 1000))
-      finalElapsedRef.current = finalSec
-      setElapsedSec(finalSec)
-    }
-  }, [thinking.done])
-
-  // No auto-expand — user opens thinking content on demand only
-
-  const displayedElapsed = finalElapsedRef.current ?? elapsedSec
-
-  // Styled to mirror the tool chip (CollapsedToolGroup / ToolBlockView) so it
-  // can sit inline in the same chip row without breaking the visual rhythm.
-  // The outer container is a column so the expanded quote content can still
-  // render underneath the chip in full width when opened.
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'flex-start',
-      gap: expanded ? 6 : 0,
-      width: 'fit-content',
-      maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-      minWidth: 0,
-      flex: '0 0 auto',
-    }}>
-      {/* Chip — matches tool chip sizing, border, and padding */}
-      <button
-        onClick={() => hasContent && setExpanded(e => !e)}
-        style={{
-          background: theme.chat.assistantBubble,
-          border: '0.5px solid transparent',
-          boxShadow: theme.mode === 'light'
-            ? 'var(--cs-edge-shadow), 0 0 0 1px rgba(15,23,42,0.12)'
-            : 'var(--cs-edge-shadow)',
-          margin: 1,
-          borderRadius: 8,
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 5,
-          padding: '0 8px',
-          minHeight: 22,
-          boxSizing: 'border-box',
-          cursor: hasContent ? 'pointer' : 'default',
-          color: theme.chat.muted,
-          fontSize: 10.5,
-          fontFamily: fonts.sans,
-          fontWeight: 500,
-          lineHeight: 1,
-          width: 'fit-content',
-          maxWidth: '100%',
-        }}
-      >
-        <Brain size={11} style={{ opacity: isActive ? 0.75 : 0.5, flexShrink: 0 }} />
-        {isActive ? (
-          <ShimmerText baseColor={theme.chat.muted} style={{
-            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
-            minWidth: 0, flex: '1 1 auto',
-            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-          }}>
-            {`Thinking for ${elapsedSec}s`}
-          </ShimmerText>
-        ) : (
-          <span style={{
-            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
-            minWidth: 0, flex: '1 1 auto',
-            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-          }}>
-            {`Thought for ${displayedElapsed}s`}
-          </span>
-        )}
-        {hasContent && (
-          <ChevronRight size={12} style={{
-            transform: expanded ? 'rotate(90deg)' : 'none',
-            transition: 'transform 0.15s',
-            opacity: 0.4, flexShrink: 0,
-          }} />
-        )}
-      </button>
-
-      {/* Expanded thinking content — quote-indent style, no background.
-          Rendered on its own row beneath the chip when expanded. */}
-      {expanded && hasContent && (
-        <div style={{
-          marginLeft: 6,
-          paddingLeft: 10,
-          paddingTop: 2,
-          paddingBottom: 2,
-          borderLeft: `2px solid ${theme.chat.muted}`,
-          fontSize: 12, lineHeight: fonts.lineHeight, color: theme.chat.muted,
-          whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          fontFamily: fonts.sans, maxHeight: 200, overflowY: 'auto',
-          background: 'transparent',
-          borderRadius: 0,
-          backdropFilter: 'none',
-          opacity: 0.85,
-        }}>
-          {thinking.content}
-          {isActive && (
-            <span style={{
-              display: 'inline-block', width: 5, height: 12,
-              marginLeft: 2, verticalAlign: 'text-bottom',
-              background: theme.chat.muted, borderRadius: 1,
-              animation: 'chat-pulse 1s ease-in-out infinite',
-            }} />
-          )}
-        </div>
-      )}
-    </div>
-  )
-})
-
-/**
- * WorkingChipView — sibling to ThinkingBlockView, shown at the end of a
- * streaming assistant message when the agent is "doing something" that isn't
- * thinking and isn't producing text.
- *
- * Two states, picked automatically:
- *   - A ToolBlock with `status: 'running'` exists → `Running {toolName}` chip
- *     with a live-ticking elapsed counter measured from the tool's first-seen
- *     running moment.
- *   - No running tool, but the message has been streaming for ≥ 2s → generic
- *     `Working for Ns` chip measured from message-stream start.
- *
- * Hidden whenever a thinking block is currently active — the ThinkingBlockView
- * chip is already occupying that visual slot. Also hidden on non-streaming
- * messages. The 2s grace keeps fast responses (< 2s, no tools) from flashing a
- * chip the user never reads.
- *
- * Mirrors the ThinkingBlockView chip shell so the two read as one family.
- */
-const WorkingChipView = React.memo(function WorkingChipView({ message }: { message: ChatMessage }): JSX.Element | null {
-  const theme = useTheme()
-  const fonts = useFonts()
-
-  const activeThinking = (message.thinkingBlocks ?? []).find(t => !t.done)
-  const activeTool = (() => {
-    const blocks = message.toolBlocks ?? []
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      if (blocks[i].status === 'running') return blocks[i]
-    }
-    return null
-  })()
-
-  if (!message.isStreaming) return null
-  if (activeThinking) return null
-
-  const label = activeTool
-    ? `Running ${getToolDisplayName(activeTool.name)}`
-    : 'Working'
-
-  return (
-    <div style={{
-      background: theme.chat.assistantBubble,
-      border: '0.5px solid transparent',
-      boxShadow: theme.mode === 'light'
-        ? 'var(--cs-edge-shadow), 0 0 0 1px rgba(15,23,42,0.12)'
-        : 'var(--cs-edge-shadow)',
-      margin: 1,
-      borderRadius: 8,
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 5,
-      padding: '0 8px',
-      minHeight: 24,
-      boxSizing: 'border-box',
-      color: theme.chat.muted,
-      fontSize: 10.5,
-      fontFamily: fonts.sans,
-      fontWeight: 500,
-      lineHeight: 1,
-      width: 'fit-content',
-      maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-      flex: '0 0 auto',
-    }}>
-      <Cog size={11} style={{
-        opacity: 0.75,
-        flexShrink: 0,
-        animation: 'chat-spin 2.4s linear infinite',
-      }} />
-      <ShimmerText baseColor={theme.chat.muted} style={{
-        fontSize: 10.5, fontWeight: 500, lineHeight: 1,
-        minWidth: 0,
-        overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-      }}>
-        {label}
-      </ShimmerText>
-    </div>
-  )
-})
-
-const StreamingLivenessIndicator = React.memo(function StreamingLivenessIndicator({ lastActivityAtMs }: {
-  lastActivityAtMs: number
-}): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const [, setTick] = useState(0)
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setTick(t => (t + 1) & 0xffff)
-    }, 500)
-    return () => window.clearInterval(id)
-  }, [])
-
-  const quietMs = Math.max(0, Date.now() - lastActivityAtMs)
-  const showCounter = quietMs > 2500
-  const elapsedSec = Math.floor(quietMs / 1000)
-
-  return (
-    <div
-      title={showCounter
-        ? `Waiting on server — ${elapsedSec}s since last update`
-        : 'Working…'}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        marginRight: 4,
-        color: theme.chat.muted,
-        fontSize: 10.5,
-        fontFamily: fonts.sans,
-        lineHeight: 1,
-        userSelect: 'none',
-        flexShrink: 0,
-      }}
-    >
-      <span style={{
-        width: 6,
-        height: 6,
-        borderRadius: '50%',
-        background: showCounter ? theme.status.warning : theme.accent.base,
-        animation: 'chat-pulse 1.6s ease-in-out infinite',
-        display: 'inline-block',
-      }} />
-      {showCounter && (
-        <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-          {elapsedSec}s
-        </span>
-      )}
-    </div>
-  )
-})
-
-/**
- * Collapses a mixed-name run of completed tool blocks into a single
- * "Called N tools" chip that expands horizontally to reveal the originals.
- */
-const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: ToolBlock[] }): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const [expanded, setExpanded] = useState(false)
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: expanded ? 6 : 0,
-      width: 'fit-content',
-      maxWidth: '100%',
-      minWidth: 0,
-      flex: '0 0 auto',
-    }}>
-      <div
-        onClick={() => setExpanded(e => !e)}
-        style={{
-          background: theme.chat.assistantBubble,
-          border: '0.5px solid transparent',
-          boxShadow: theme.mode === 'light'
-            ? 'var(--cs-edge-shadow), 0 0 0 1px rgba(15,23,42,0.12)'
-            : 'var(--cs-edge-shadow)',
-          margin: 1,
-          borderRadius: 8,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 5,
-          padding: '0 8px',
-          minHeight: 22,
-          boxSizing: 'border-box',
-          cursor: 'pointer',
-          color: theme.chat.muted,
-          fontSize: 10,
-          fontFamily: fonts.sans,
-          lineHeight: 1,
-          width: 'fit-content',
-          maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-        }}
-      >
-        <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
-        <span style={{
-          fontWeight: 500, fontSize: 10.5, lineHeight: 1,
-          minWidth: 0, flex: '1 1 auto',
-          overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-        }}>
-          Called {blocks.length} tools
-        </span>
-        <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
-        <ChevronRight size={12} style={{
-          transform: expanded ? 'rotate(90deg)' : 'none',
-          transition: 'transform 0.15s',
-          opacity: 0.4,
-          flexShrink: 0,
-        }} />
-      </div>
-      {expanded && (
-        <div style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: 6,
-          alignItems: 'flex-start',
-          alignContent: 'flex-start',
-          maxWidth: '100%',
-          overflow: 'visible',
-        }}>
-          {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
-        </div>
-      )}
-    </div>
-  )
-})
-
-/** Collapses consecutive same-name completed tool chips into "Read x6" style. */
-/**
- * Human-friendly label for a collapsed group of same-tool calls.
- * Falls back to "Ran N <tool> calls" for unrecognised tools so the chip
- * still reads as a past-tense summary instead of raw tool-name + ×N badge.
- */
-function getGroupedToolLabel(name: string, count: number): string {
-  switch (name) {
-    case 'Edit':
-    case 'MultiEdit':
-      return `Edited ${count} file${count === 1 ? '' : 's'}`
-    case 'Write':
-      return `Wrote ${count} file${count === 1 ? '' : 's'}`
-    case 'Read':
-      return `Read ${count} file${count === 1 ? '' : 's'}`
-    case 'Bash':
-    case 'exec_command':
-      return `Ran ${count} command${count === 1 ? '' : 's'}`
-    case 'Grep':
-      return `Searched ${count} time${count === 1 ? '' : 's'}`
-    case 'Glob':
-      return `Matched ${count} pattern${count === 1 ? '' : 's'}`
-    case 'WebFetch':
-      return `Fetched ${count} URL${count === 1 ? '' : 's'}`
-    case 'WebSearch':
-      return `Searched the web ${count} time${count === 1 ? '' : 's'}`
-    case 'TodoWrite':
-      return `Updated todos ${count} time${count === 1 ? '' : 's'}`
-    case 'update_plan':
-      return `Updated plan ${count} time${count === 1 ? '' : 's'}`
-    case 'Task':
-      return `Ran ${count} sub-agent${count === 1 ? '' : 's'}`
-    default:
-      return `Used ${getToolDisplayName(name)} ${count} time${count === 1 ? '' : 's'}`
-  }
-}
-
-const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[] }): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const [expanded, setExpanded] = useState(false)
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      gap: expanded ? 6 : 0,
-      width: 'fit-content',
-      maxWidth: '100%',
-      minWidth: 0,
-      flex: '0 0 auto',
-    }}>
-      <div
-        onClick={() => setExpanded(e => !e)}
-        style={{
-          background: theme.chat.assistantBubble,
-          border: '0.5px solid transparent',
-          boxShadow: theme.mode === 'light'
-            ? 'var(--cs-edge-shadow), 0 0 0 1px rgba(15,23,42,0.12)'
-            : 'var(--cs-edge-shadow)',
-          margin: 1,
-          borderRadius: 8,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 5,
-          padding: '0 8px',
-          minHeight: 22,
-          boxSizing: 'border-box',
-          cursor: 'pointer',
-          color: theme.chat.muted,
-          fontSize: 10,
-          fontFamily: fonts.sans,
-          lineHeight: 1,
-          width: 'fit-content',
-          maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-        }}
-      >
-        <Wrench size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
-        <span style={{
-          fontWeight: 500, fontSize: 10.5, lineHeight: 1,
-          minWidth: 0, flex: '1 1 auto',
-          overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-        }}>
-          {getGroupedToolLabel(name, blocks.length)}
-        </span>
-        <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
-        <ChevronRight size={12} style={{
-          transform: expanded ? 'rotate(90deg)' : 'none',
-          transition: 'transform 0.15s',
-          opacity: 0.4,
-          flexShrink: 0,
-        }} />
-      </div>
-      {expanded && (
-        <div style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: 6,
-          alignItems: 'flex-start',
-          alignContent: 'flex-start',
-          maxWidth: '100%',
-          overflow: 'visible',
-        }}>
-          {blocks.map(b => <ToolBlockView key={b.id} block={b} />)}
-        </div>
-      )}
-    </div>
-  )
-})
-
-
-const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false }: { block: ToolBlock; isLive?: boolean }): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const codePanelFontSize = Math.max(11, fonts.size - 1)
-  const isFileChangeBlock = (block.fileChanges?.length ?? 0) > 0
-  const checkpointRestoreCtx = React.useContext(CheckpointRestoreContext)
-
-  // Intercept tool-permission requests — when the agent needs user approval for
-  // this tool call, show an inline Allow/Deny prompt instead of (or alongside)
-  // the raw tool chip. Mirrors the AskUserQuestion pattern.
-  const permissionCtx = useToolPermissionContext()
-  const permissionRequest = permissionCtx?.pending.get(block.id) ?? null
-  const resolvedDecision = permissionCtx?.resolved.get(block.id) ?? null
-  if (permissionRequest || resolvedDecision) {
-    return (
-      <ToolPermissionCard
-        toolId={block.id}
-        fallbackToolName={block.name}
-        request={permissionRequest}
-        resolvedDecision={resolvedDecision}
-        theme={theme}
-        fonts={{ sans: fonts.sans, mono: fonts.mono }}
-      />
-    )
-  }
-
-  // Intercept AskUserQuestion tool blocks: render an interactive form so the user
-  // can actually answer the question instead of seeing a raw JSON chip.
-  // Once submitted, the main process emits a tool_summary so `block.summary`
-  // is set, at which point we fall through to the normal chip rendering.
-  if (block.name === 'AskUserQuestion' && !block.summary) {
-    const askPayload = parseAskUserQuestionInput(block.input)
-    if (askPayload && askPayload.questions.length > 0) {
-      return (
-        <AskUserQuestionChip
-          block={block}
-          payload={askPayload}
-        />
-      )
-    }
-  }
-  const fileChangeSummary = useMemo(() => {
-    const fileChanges = block.fileChanges ?? []
-    return {
-      fileCount: fileChanges.length,
-      additions: fileChanges.reduce((sum, change) => sum + change.additions, 0),
-      deletions: fileChanges.reduce((sum, change) => sum + change.deletions, 0),
-    }
-  }, [block.fileChanges])
-  const [expanded, setExpanded] = useState(isFileChangeBlock)
-  // For file-change blocks default the per-file diff panels to open: the
-  // whole reason we're showing a file-change block is the diff itself. For
-  // regular tool blocks (Bash output, etc.) default to closed — users click
-  // to drill in.
-  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>(() => {
-    if (!isFileChangeBlock) return {}
-    const map: Record<string, boolean> = {}
-    block.fileChanges?.forEach((change, index) => {
-      map[`${change.path}:${index}`] = hasRenderableFileChangeDiff(change)
-    })
-    return map
-  })
-  const isRunning = isLive && block.status === 'running'
-  const hasNestedData = (block.fileChanges?.length ?? 0) > 0 || (block.commandEntries?.length ?? 0) > 0
-  const isCheckpoint = isCheckpointToolBlock(block)
-  const isDream = isDreamToolBlock(block)
-  const checkpointRestoreAction = checkpointRestoreCtx
-    ? getCheckpointRestoreAction(block, checkpointRestoreCtx)
-    : null
-  const isRestoringCheckpoint = Boolean(
-    checkpointRestoreAction
-    && checkpointRestoreCtx?.restoringCheckpointId === checkpointRestoreAction.checkpointId,
-  )
-
-  const toggleFile = useCallback((key: string) => {
-    setExpandedFiles(prev => {
-      const current = prev[key] ?? false
-      return { ...prev, [key]: !current }
-    })
-  }, [])
-
-  return (
-    <div
-      data-tool-block-kind={isFileChangeBlock ? 'file-changes' : 'tool'}
-      style={{
-        background: theme.chat.assistantBubble,
-        border: '0.5px solid transparent',
-        boxShadow: theme.mode === 'light'
-          ? 'var(--cs-edge-shadow), 0 0 0 1px rgba(15,23,42,0.12)'
-          : 'var(--cs-edge-shadow)',
-        margin: 1,
-        borderRadius: 8,
-        overflow: 'hidden',
-        maxWidth: expanded || isFileChangeBlock ? 'calc(100% - 2px)' : `min(calc(100% - 2px), ${TOOL_BLOCK_MAX_WIDTH}px)`,
-        width: expanded || isFileChangeBlock ? 'calc(100% - 2px)' : 'fit-content',
-        alignSelf: 'stretch',
-        flex: expanded || isFileChangeBlock ? '1 1 100%' : '0 0 auto',
-        minWidth: 0,
-      }}
-    >
-      <button
-        onClick={() => setExpanded(e => !e)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 5,
-          width: '100%',
-          maxWidth: expanded || isFileChangeBlock ? '100%' : `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
-          padding: isFileChangeBlock ? '12px 16px' : '0 8px',
-          // ToolBlockView is a nested chip: the outer <div> carries the 1px
-          // border, so we shave 2px off the inner button's minHeight to land
-          // at an outer rendered height of 22px — matching the single-layer
-          // ThinkingBlockView / CollapsedToolGroup / MixedToolGroup chips so
-          // they line up on a shared chip row.
-          minHeight: isFileChangeBlock ? undefined : 20,
-          boxSizing: 'border-box',
-          background: 'none', border: 'none',
-          cursor: 'pointer',
-          color: isDream
-            ? theme.accent.base
-            : (isRunning ? theme.chat.textSecondary : theme.chat.muted),
-          fontSize: 10, fontFamily: fonts.sans, lineHeight: 1, minWidth: 0,
-        }}
-      >
-        {isDream
-          ? <Sparkles size={11} style={{ color: theme.accent.base, opacity: 0.95, flexShrink: 0 }} />
-          : isCheckpoint
-            ? <History size={11} style={{ opacity: 0.62, flexShrink: 0 }} />
-            : <Wrench size={11} style={{ opacity: isRunning ? 0.7 : 0.5, flexShrink: 0 }} />}
-
-        {/* Collapsed chip header shows only the tool name. Detailed summaries stay in the expanded body. */}
-        {isRunning ? (
-          <ShimmerText baseColor={theme.chat.textSecondary} style={{
-            fontSize: 10.5,
-            fontFamily: fonts.sans,
-            fontWeight: 500,
-            minWidth: 0,
-            flex: expanded || isFileChangeBlock ? 1 : '0 1 auto',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {getToolDisplayName(block.name)}
-          </ShimmerText>
-        ) : (
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            minWidth: 0,
-            flex: expanded || isFileChangeBlock ? 1 : '0 1 auto',
-            overflow: 'hidden',
-          }}>
-            {isFileChangeBlock ? (
-              <div style={{
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: 8,
-                minWidth: 0,
-                flexWrap: 'nowrap',
-                overflow: 'hidden',
-              }}>
-                <span style={{
-                  display: 'block',
-                  fontWeight: 600,
-                  fontSize: 10.5,
-                  color: theme.chat.text,
-                  flexShrink: 1,
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  whiteSpace: 'nowrap',
-                  textOverflow: 'ellipsis',
-                }}>
-                  {fileChangeSummary.fileCount} file{fileChangeSummary.fileCount === 1 ? '' : 's'} changed
-                </span>
-                {hasVisibleFileChangeStats(fileChangeSummary) && (
-                  <>
-                    <span style={{ color: theme.status.success, fontSize: 10.5, fontWeight: 600, flexShrink: 0 }}>
-                      +{fileChangeSummary.additions}
-                    </span>
-                    <span style={{ color: theme.status.danger, fontSize: 10.5, fontWeight: 600, flexShrink: 0 }}>
-                      -{fileChangeSummary.deletions}
-                    </span>
-                  </>
-                )}
-              </div>
-            ) : (
-              <span style={{
-                fontWeight: 500,
-                fontSize: 10.5,
-                flex: '1 1 auto',
-                flexShrink: 1,
-                minWidth: 0,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}>
-                {getToolDisplayName(block.name)}
-              </span>
-            )}
-          </div>
-        )}
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 'auto', flexShrink: 0 }}>
-          {block.elapsed != null && (
-            <span style={{
-              fontSize: 10, color: theme.chat.muted, display: 'flex', alignItems: 'center', gap: 3,
-              fontFamily: fonts.mono, flexShrink: 0,
-            }}>
-              <Clock size={9} /> {block.elapsed.toFixed(1)}s
-            </span>
-          )}
-          {!isRunning && !block.elapsed && (
-            <Check size={11} color={isCheckpoint ? theme.chat.muted : theme.status.success} style={{ flexShrink: 0, opacity: isCheckpoint ? 0.75 : 1 }} />
-          )}
-          <ChevronRight size={12} style={{
-            transform: expanded ? 'rotate(90deg)' : 'none',
-            transition: 'transform 0.15s',
-            opacity: 0.4, flexShrink: 0,
-          }} />
-        </div>
-      </button>
-
-      {/* Expanded: show imported file-change structure first when available */}
-      {expanded && hasNestedData && (
-        <div style={{
-          padding: isFileChangeBlock ? 0 : '4px 10px 8px 10px',
-          borderTop: `1px solid ${theme.chat.assistantBubbleBorder}`,
-        }}>
-          {(block.fileChanges?.length ?? 0) > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: isFileChangeBlock ? 0 : 6 }}>
-              {block.fileChanges?.map((change, index) => {
-                const fileKey = `${change.path}:${index}`
-                const fileHasDiff = hasRenderableFileChangeDiff(change)
-                const isExpanded = expandedFiles[fileKey] ?? false
-                return (
-                  <div key={fileKey} style={{
-                    borderRadius: isFileChangeBlock ? 0 : 8,
-                    border: isFileChangeBlock
-                      ? 'none'
-                      : `1px solid ${theme.chat.assistantBubbleBorder}`,
-                    overflow: 'hidden',
-                    background: isFileChangeBlock ? 'transparent' : theme.surface.panelMuted,
-                    borderTop: isFileChangeBlock && index > 0 ? `1px solid ${theme.chat.assistantBubbleBorder}` : undefined,
-                  }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (fileHasDiff) toggleFile(fileKey)
-                      }}
-                      style={{
-                        width: '100%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        background: 'transparent',
-                        border: 'none',
-                        padding: isFileChangeBlock ? '14px 16px' : '8px 10px',
-                        cursor: fileHasDiff ? 'pointer' : 'default',
-                        color: theme.chat.text,
-                        fontFamily: isFileChangeBlock ? fonts.sans : fonts.mono,
-                        fontSize: isFileChangeBlock ? fonts.size : 11,
-                        fontWeight: isFileChangeBlock ? 500 : fonts.monoWeight,
-                        textAlign: 'left',
-                      }}
-                    >
-                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {change.path}
-                      </span>
-                      {hasVisibleFileChangeStats(change) && (
-                        <>
-                          <span style={{ color: theme.status.success, flexShrink: 0 }}>+{change.additions}</span>
-                          <span style={{ color: theme.status.danger, flexShrink: 0 }}>-{change.deletions}</span>
-                        </>
-                      )}
-                      <ChevronRight size={12} style={{
-                        transform: isExpanded ? 'rotate(90deg)' : 'none',
-                        transition: 'transform 0.15s',
-                        opacity: fileHasDiff ? 0.5 : 0,
-                        flexShrink: 0,
-                      }} />
-                    </button>
-                    {isExpanded && fileHasDiff && (
-                      <div style={{ borderTop: `1px solid ${theme.chat.assistantBubbleBorder}` }}>
-                        <DiffView
-                          diff={change.diff}
-                          path={change.path}
-                          fontSize={codePanelFontSize}
-                        />
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {(block.commandEntries?.length ?? 0) > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: (block.fileChanges?.length ?? 0) > 0 ? 8 : 0 }}>
-              {block.commandEntries?.map((entry, index) => (
-                <div key={`${entry.command ?? entry.label}:${index}`} style={{
-                  padding: '8px 10px',
-                  borderRadius: 8,
-                  background: theme.chat.background,
-                  border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-                }}>
-                  <div style={{
-                    fontSize: codePanelFontSize,
-                    color: theme.chat.text,
-                    fontFamily: fonts.mono,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                  }}>
-                    {entry.command ?? entry.label}
-                  </div>
-                  {entry.output && (
-                    <pre style={{
-                      margin: '6px 0 0',
-                      fontSize: codePanelFontSize,
-                      lineHeight: fonts.monoLineHeight,
-                      color: theme.chat.muted,
-                      fontFamily: fonts.mono,
-                      fontWeight: fonts.monoWeight,
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      maxHeight: 120,
-                      overflowY: 'auto',
-                    }}>
-                      {entry.output}
-                    </pre>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-        </div>
-      )}
-
-      {expanded && checkpointRestoreAction && (
-        <div style={{
-          padding: '8px 10px',
-          borderTop: `1px solid ${theme.chat.assistantBubbleBorder}`,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
-        }}>
-          {block.input && (
-            <ToolInputView
-              toolName={getToolDisplayName(block.name)}
-              input={block.input}
-              codePanelFontSize={codePanelFontSize}
-            />
-          )}
-          {block.summary && (
-            <div style={{
-              fontSize: 11,
-              color: theme.chat.muted,
-              fontFamily: fonts.sans,
-              lineHeight: 1.4,
-            }}>
-              {block.summary}
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={event => {
-              event.stopPropagation()
-              if (!checkpointRestoreCtx || !checkpointRestoreAction || isRestoringCheckpoint) return
-              void checkpointRestoreCtx.restoreCheckpoint(
-                checkpointRestoreAction.checkpointId,
-                checkpointRestoreAction.sessionEntryId,
-                checkpointRestoreAction.label,
-              )
-            }}
-            disabled={isRestoringCheckpoint || !checkpointRestoreCtx}
-            title="Restore workspace files from this checkpoint"
-            style={{
-              alignSelf: 'flex-start',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              border: `1px solid ${theme.chat.assistantBubbleBorder}`,
-              background: theme.surface.panelMuted,
-              color: isRestoringCheckpoint ? theme.chat.muted : theme.chat.text,
-              borderRadius: 999,
-              padding: '5px 9px',
-              fontSize: 11,
-              fontFamily: fonts.sans,
-              fontWeight: 600,
-              cursor: isRestoringCheckpoint ? 'default' : 'pointer',
-              opacity: isRestoringCheckpoint ? 0.65 : 1,
-              ...NON_SELECTABLE_UI_STYLE,
-            }}
-          >
-            <RotateCcw size={12} />
-            {isRestoringCheckpoint ? 'Restoring…' : 'Restore this checkpoint'}
-          </button>
-        </div>
-      )}
-
-      {expanded && !checkpointRestoreAction && !hasNestedData && block.input && (
-        <div style={{
-          padding: '4px 10px 8px 10px',
-          borderTop: `1px solid ${theme.chat.assistantBubbleBorder}`,
-        }}>
-          <ToolInputView
-            toolName={getToolDisplayName(block.name)}
-            input={block.input}
-            codePanelFontSize={codePanelFontSize}
-          />
-          {block.summary && (
-            <div style={{
-              marginTop: 6, padding: '4px 0',
-              fontSize: 11, color: theme.chat.muted, fontFamily: fonts.mono,
-            }}>
-              {block.summary}
-            </div>
-          )}
-        </div>
-      )}
-
-    </div>
-  )
-})
-
-function formatToolInput(input: string): string {
-  try {
-    return JSON.stringify(JSON.parse(input), null, 2)
-  } catch {
-    return input
-  }
-}
-
-// Strip the "[CodeSurf memory guard] Older … truncated …" preamble that gets
-// prepended to stale tool inputs, returning { notice, rest } so the UI can
-// render a small badge instead of dumping the message inline.
-function splitMemoryGuard(raw: string): { notice: string | null; body: string } {
-  const trimmed = raw.trimStart()
-  const m = /^\[CodeSurf memory guard\][^\n]*\n\n?/i.exec(trimmed)
-  if (!m) return { notice: null, body: raw }
-  return { notice: m[0].trim(), body: trimmed.slice(m[0].length) }
-}
-
-function tryParseToolInput(input: string): unknown {
-  try { return JSON.parse(input) } catch { return null }
-}
-
-function getStr(obj: unknown, key: string): string | null {
-  if (!obj || typeof obj !== 'object') return null
-  const v = (obj as Record<string, unknown>)[key]
-  return typeof v === 'string' ? v : null
-}
-
-function getNum(obj: unknown, key: string): number | null {
-  if (!obj || typeof obj !== 'object') return null
-  const v = (obj as Record<string, unknown>)[key]
-  return typeof v === 'number' ? v : null
-}
-
-function getBool(obj: unknown, key: string): boolean | null {
-  if (!obj || typeof obj !== 'object') return null
-  const v = (obj as Record<string, unknown>)[key]
-  return typeof v === 'boolean' ? v : null
-}
-
-function isPlanToolName(toolName: string): boolean {
-  return toolName === 'TodoWrite' || toolName === 'update_plan'
-}
-
-function extractPlanTodosFromParsedInput(toolName: string, parsed: unknown): TileTodoItem[] {
-  if (!parsed || typeof parsed !== 'object') return []
-
-  if (toolName === 'TodoWrite') {
-    const todosRaw = Array.isArray((parsed as Record<string, unknown>).todos)
-      ? (parsed as Record<string, unknown>).todos as unknown[]
-      : []
-    const normalized: TileTodoItem[] = []
-    for (const t of todosRaw) {
-      const content = getStr(t, 'content') ?? ''
-      if (!content) continue
-      const status = (getStr(t, 'status') ?? 'pending') as TileTodoItem['status']
-      const activeForm = getStr(t, 'activeForm') ?? undefined
-      normalized.push({ content, status, activeForm })
-    }
-    return normalized
-  }
-
-  if (toolName === 'update_plan') {
-    const planRaw = Array.isArray((parsed as Record<string, unknown>).plan)
-      ? (parsed as Record<string, unknown>).plan as unknown[]
-      : []
-    const normalized: TileTodoItem[] = []
-    for (const step of planRaw) {
-      const content = getStr(step, 'step') ?? getStr(step, 'content') ?? ''
-      if (!content) continue
-      const status = (getStr(step, 'status') ?? 'pending') as TileTodoItem['status']
-      normalized.push({ content, status })
-    }
-    return normalized
-  }
-
-  return []
-}
-
-function parsePlanToolTodos(toolName: string, input: string): { todos: TileTodoItem[] } | null {
-  if (!isPlanToolName(toolName)) return null
-  const parsed = tryParseToolInput(input)
-  if (!parsed || typeof parsed !== 'object') return null
-  return { todos: extractPlanTodosFromParsedInput(toolName, parsed) }
-}
-
-function ToolInputView({ toolName, input, codePanelFontSize }: {
-  toolName: string
-  input: string
-  codePanelFontSize: number
-}): JSX.Element {
-  const fonts = useFonts()
-  const theme = useTheme()
-  const { notice, body } = splitMemoryGuard(input)
-  const parsed = tryParseToolInput(body)
-
-  // Tool-input payloads are often dense — force a tighter font than the
-  // general code-panel size so long Edit/Write payloads don't dominate the
-  // chat. Cap at 11px to match our Streamdown code-block font; small
-  // reductions from the caller's font-size still apply below 11px.
-  const toolInputFontSize = Math.min(11, codePanelFontSize)
-  const codeStyle: React.CSSProperties = {
-    margin: 0, padding: 8, borderRadius: 6,
-    background: theme.surface.panelMuted, color: theme.chat.textSecondary,
-    fontSize: toolInputFontSize, lineHeight: 1.45,
-    fontFamily: fonts.mono, fontWeight: fonts.monoWeight,
-    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-    maxHeight: 240, overflowY: 'auto',
-  }
-  const labelStyle: React.CSSProperties = {
-    fontSize: 10, fontWeight: 600, letterSpacing: 0.4,
-    color: theme.chat.muted, fontFamily: fonts.sans,
-    textTransform: 'uppercase', marginBottom: 3,
-  }
-  const pathStyle: React.CSSProperties = {
-    fontSize: toolInputFontSize, fontFamily: fonts.mono,
-    color: theme.chat.text, wordBreak: 'break-all', padding: '2px 0',
-  }
-  const diffBlockStyle = (kind: 'add' | 'del'): React.CSSProperties => ({
-    ...codeStyle,
-    background: kind === 'add'
-      ? `color-mix(in srgb, ${theme.status.success} 12%, ${theme.surface.panelMuted})`
-      : `color-mix(in srgb, ${theme.status.danger} 12%, ${theme.surface.panelMuted})`,
-    borderLeft: `3px solid ${kind === 'add' ? theme.status.success : theme.status.danger}`,
-  })
-
-  const noticeBanner = notice
-    ? (
-        <div style={{
-          fontSize: 10, color: theme.chat.muted, fontFamily: fonts.sans,
-          padding: '3px 8px', marginBottom: 6, borderRadius: 4,
-          border: `1px dashed ${theme.chat.divider}`,
-          background: 'transparent',
-        }}>
-          Older tool input truncated to save memory
-        </div>
-      )
-    : null
-
-  const renderKeyValue = (label: string, value: string, mono = true) => (
-    <div key={label} style={{ marginBottom: 6 }}>
-      <div style={labelStyle}>{label}</div>
-      <div style={mono ? pathStyle : { ...pathStyle, fontFamily: fonts.sans }}>{value}</div>
-    </div>
-  )
-
-  // --- Per-tool layouts ----------------------------------------------------
-  if (toolName === 'Edit' && parsed) {
-    const filePath = getStr(parsed, 'file_path')
-    const oldStr = getStr(parsed, 'old_string') ?? ''
-    const newStr = getStr(parsed, 'new_string') ?? ''
-    const replaceAll = getBool(parsed, 'replace_all')
-    return (
-      <>
-        {noticeBanner}
-        {filePath && renderKeyValue('File', filePath)}
-        {replaceAll && (
-          <div style={{ ...labelStyle, color: theme.status.warning, marginBottom: 4 }}>Replace all occurrences</div>
-        )}
-        <div style={labelStyle}>Old</div>
-        <pre style={diffBlockStyle('del')}>{oldStr}</pre>
-        <div style={{ ...labelStyle, marginTop: 6 }}>New</div>
-        <pre style={diffBlockStyle('add')}>{newStr}</pre>
-      </>
-    )
-  }
-
-  if (toolName === 'MultiEdit' && parsed) {
-    const filePath = getStr(parsed, 'file_path')
-    const edits = Array.isArray((parsed as Record<string, unknown>).edits)
-      ? ((parsed as Record<string, unknown>).edits as unknown[])
-      : []
-    return (
-      <>
-        {noticeBanner}
-        {filePath && renderKeyValue('File', filePath)}
-        {edits.map((edit, index) => {
-          const oldStr = getStr(edit, 'old_string') ?? ''
-          const newStr = getStr(edit, 'new_string') ?? ''
-          return (
-            <div key={index} style={{ marginTop: index > 0 ? 10 : 0 }}>
-              <div style={labelStyle}>Edit {index + 1} — Old</div>
-              <pre style={diffBlockStyle('del')}>{oldStr}</pre>
-              <div style={{ ...labelStyle, marginTop: 4 }}>Edit {index + 1} — New</div>
-              <pre style={diffBlockStyle('add')}>{newStr}</pre>
-            </div>
-          )
-        })}
-      </>
-    )
-  }
-
-  if (toolName === 'Write' && parsed) {
-    const filePath = getStr(parsed, 'file_path')
-    const content = getStr(parsed, 'content') ?? ''
-    return (
-      <>
-        {noticeBanner}
-        {filePath && renderKeyValue('File', filePath)}
-        <div style={labelStyle}>Content</div>
-        <pre style={codeStyle}>{content}</pre>
-      </>
-    )
-  }
-
-  if (toolName === 'Bash' && parsed) {
-    const command = getStr(parsed, 'command') ?? ''
-    const description = getStr(parsed, 'description')
-    const timeout = getNum(parsed, 'timeout')
-    return (
-      <>
-        {noticeBanner}
-        {description && renderKeyValue('Description', description, false)}
-        <div style={labelStyle}>Command</div>
-        <pre style={codeStyle}>{command}</pre>
-        {timeout != null && (
-          <div style={{ ...labelStyle, marginTop: 4 }}>Timeout: {timeout}ms</div>
-        )}
-      </>
-    )
-  }
-
-  if ((toolName === 'Read' || toolName === 'NotebookEdit') && parsed) {
-    const filePath = getStr(parsed, 'file_path') ?? getStr(parsed, 'notebook_path')
-    const offset = getNum(parsed, 'offset')
-    const limit = getNum(parsed, 'limit')
-    const pages = getStr(parsed, 'pages')
-    const newSource = getStr(parsed, 'new_source')
-    return (
-      <>
-        {noticeBanner}
-        {filePath && renderKeyValue('File', filePath)}
-        {(offset != null || limit != null) && (
-          <div style={pathStyle}>
-            {offset != null && <>offset: {offset}</>}
-            {offset != null && limit != null && ' · '}
-            {limit != null && <>limit: {limit}</>}
-          </div>
-        )}
-        {pages && renderKeyValue('Pages', pages)}
-        {newSource != null && (
-          <>
-            <div style={{ ...labelStyle, marginTop: 6 }}>New source</div>
-            <pre style={codeStyle}>{newSource}</pre>
-          </>
-        )}
-      </>
-    )
-  }
-
-  if ((toolName === 'Grep' || toolName === 'Glob') && parsed) {
-    const pattern = getStr(parsed, 'pattern') ?? ''
-    const path = getStr(parsed, 'path')
-    const glob = getStr(parsed, 'glob')
-    const ftype = getStr(parsed, 'type')
-    const outputMode = getStr(parsed, 'output_mode')
-    return (
-      <>
-        {noticeBanner}
-        <div style={labelStyle}>Pattern</div>
-        <pre style={codeStyle}>{pattern}</pre>
-        {path && renderKeyValue('Path', path)}
-        {glob && renderKeyValue('Glob', glob)}
-        {ftype && renderKeyValue('Type', ftype, false)}
-        {outputMode && renderKeyValue('Output mode', outputMode, false)}
-      </>
-    )
-  }
-
-  if (toolName === 'WebFetch' && parsed) {
-    const url = getStr(parsed, 'url') ?? ''
-    const prompt = getStr(parsed, 'prompt')
-    return (
-      <>
-        {noticeBanner}
-        {renderKeyValue('URL', url)}
-        {prompt && (
-          <>
-            <div style={labelStyle}>Prompt</div>
-            <pre style={codeStyle}>{prompt}</pre>
-          </>
-        )}
-      </>
-    )
-  }
-
-  if (toolName === 'WebSearch' && parsed) {
-    const query = getStr(parsed, 'query') ?? ''
-    return (
-      <>
-        {noticeBanner}
-        {renderKeyValue('Query', query, false)}
-      </>
-    )
-  }
-
-  if (parsed && isPlanToolName(toolName)) {
-    const normalized = extractPlanTodosFromParsedInput(toolName, parsed)
-    if (normalized.length === 0) {
-      return (
-        <>
-          {noticeBanner}
-          <pre style={codeStyle}>{formatToolInput(body)}</pre>
-        </>
-      )
-    }
-    return (
-      <>
-        {noticeBanner}
-        <PlanCard todos={normalized} variant="inline" />
-      </>
-    )
-  }
-
-  // Shape-based fallback: some providers emit tool calls whose toolName
-  // doesn't match our exact whitelist above (e.g. "str_replace_based_edit_tool"
-  // instead of "Edit"), but the payload shape is recognisable. Detect by keys
-  // so we still render the pretty diff layout instead of a raw JSON dump.
-  if (parsed && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>
-    const looksLikeEdit = typeof obj.old_string === 'string' && typeof obj.new_string === 'string'
-    if (looksLikeEdit) {
-      const filePath = getStr(parsed, 'file_path')
-      const oldStr = getStr(parsed, 'old_string') ?? ''
-      const newStr = getStr(parsed, 'new_string') ?? ''
-      const replaceAll = getBool(parsed, 'replace_all')
-      return (
-        <>
-          {noticeBanner}
-          {filePath && renderKeyValue('File', filePath)}
-          {replaceAll && (
-            <div style={{ ...labelStyle, color: theme.status.warning, marginBottom: 4 }}>Replace all occurrences</div>
-          )}
-          <div style={labelStyle}>Old</div>
-          <pre style={diffBlockStyle('del')}>{oldStr}</pre>
-          <div style={{ ...labelStyle, marginTop: 6 }}>New</div>
-          <pre style={diffBlockStyle('add')}>{newStr}</pre>
-        </>
-      )
-    }
-  }
-
-  // Fallback: unescape JSON strings so embedded newlines render as actual line
-  // breaks instead of literal "\n" sequences, and drop the memory-guard banner.
-  // Unescaping is applied EVEN when parsing failed — some providers emit
-  // slightly malformed JSON (trailing comma, unquoted key) but the string
-  // is still readable once \n / \" / \t are decoded.
-  const unescape = (s: string): string => s.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\t/g, '\t')
-  const prettyFallback = parsed != null
-    ? unescape(JSON.stringify(parsed, null, 2))
-    : unescape(body)
-  return (
-    <>
-      {noticeBanner}
-      <pre style={codeStyle}>{prettyFallback}</pre>
-    </>
-  )
-}
