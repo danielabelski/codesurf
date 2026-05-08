@@ -399,13 +399,13 @@ function createWindow(opts?: MainWindowOptions): BrowserWindow {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    // Native AppKit tabs need a standard framed NSWindow. `hiddenInset` gives
-    // the Chrome-like integrated look, but Electron/AppKit refuses to group it
-    // reliably; use default titlebar when native grouping is enabled.
+    // Keep the renderer-drawn toolbar integrated with the macOS traffic lights.
+    // A default titlebar adds an extra native strip above our custom workspace tabs.
     show: process.platform === 'darwin' && Boolean(opts?.nativeTabOwner),
     autoHideMenuBar: true,
-    titleBarStyle: 'default',
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     frame: true,
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 14, y: 14 } } : {}),
     ...(process.platform === 'darwin' ? { tabbingIdentifier: MAIN_WINDOW_TABBING_IDENTIFIER } : {}),
     ...(iconPath ? { icon: iconPath } : {}),
     ...(process.platform === 'darwin'

@@ -21,7 +21,7 @@
   .app {
     width: 100%;
     height: 100%;
-    padding: 10px;
+    padding: 0;
   }
 
   .surface {
@@ -29,20 +29,16 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    border-radius: 16px;
-    background: var(--ct-panel, rgba(0,0,0,.04));
-    border: 1px solid var(--ct-border, rgba(0,0,0,.1));
+    gap: 5px;
+    padding: 7px 10px 8px;
+    border-radius: 0;
+    background: transparent;
+    border: none;
     overflow: hidden;
   }
 
   .surface-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 28px;
-    flex-shrink: 0;
+    display: none;
   }
 
   .surface-icon {
@@ -86,15 +82,15 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
     overflow: hidden;
   }
 
   .variant-head {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 10px;
+    justify-content: flex-end;
+    gap: 8px;
     min-height: 24px;
     flex-shrink: 0;
   }
@@ -125,22 +121,12 @@
   }
 
   .variant-head-copy {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    display: none;
   }
 
-  .variant-head-title {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--ct-text, #111);
-  }
-
+  .variant-head-title,
   .variant-head-subtitle {
-    font-size: 11px;
-    color: var(--ct-dim, #999);
-    line-height: 1.35;
+    display: none;
   }
 
   .variant-grid-wrap {
@@ -151,7 +137,7 @@
 
   .variant-grid {
     display: grid;
-    gap: 10px;
+    gap: 7px;
     min-height: 100%;
   }
 
@@ -160,8 +146,8 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
+    gap: 5px;
+    padding: 7px;
     border-radius: 12px;
     border: 1px solid var(--ct-border, rgba(0,0,0,.1));
     background: var(--ct-panel-2, rgba(0,0,0,.06));
@@ -184,6 +170,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    min-height: 27px;
   }
 
   .variant-title {
@@ -538,9 +525,20 @@
     display: none;
   }
 
+  html[data-render-mode="canvas"] .app,
+  html[data-render-mode="docked"] .app {
+    padding: 0;
+  }
+
+  html[data-render-mode="canvas"] .surface,
+  html[data-render-mode="docked"] .surface {
+    padding: 6px 9px 8px;
+    gap: 5px;
+  }
+
   html[data-render-mode="canvas"] .variant-preview,
   html[data-render-mode="docked"] .variant-preview {
-    min-height: 220px;
+    min-height: 260px;
   }
 
   @media (max-width: 980px) {

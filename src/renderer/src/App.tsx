@@ -5019,12 +5019,16 @@ function App(): JSX.Element {
         <div
           className="cs-mini-window-titlebar"
           style={{
-            height: 34,
+            height: 38,
             flexShrink: 0,
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            padding: '0 10px 0 14px',
+            // Leave room for the macOS traffic lights (which overlay the
+            // renderer at top-left when titleBarStyle: 'hiddenInset').
+            padding: window.electron?.platform === 'darwin'
+              ? '0 10px 0 80px'
+              : '0 10px 0 14px',
             borderBottom: `1px solid ${theme.border.subtle}`,
             background: theme.mode === 'light' ? 'rgba(250,250,252,0.92)' : 'rgba(14,16,20,0.88)',
             backdropFilter: 'blur(18px)',
@@ -5089,7 +5093,7 @@ function App(): JSX.Element {
                 workspaceId={workspace?.id ?? miniChatOptions.workspaceId}
                 workspaceDir={workspace?.path ?? ''}
                 width={Math.max(360, window.innerWidth)}
-                height={Math.max(360, window.innerHeight - 34)}
+                height={Math.max(360, window.innerHeight - 38)}
                 reloadToken={chatReloadTokens[miniChatTile.id] ?? 0}
                 settings={settings}
                 onChatModePreferenceChange={rememberChatProviderMode}
@@ -5338,7 +5342,7 @@ function App(): JSX.Element {
               }}
               style={{
                 position: 'fixed',
-                top: 6,
+                top: 10,
                 left: 78,
                 zIndex: 2147483647,
                 width: collapsedSidebarPillSize,
