@@ -27,12 +27,15 @@ import { resolveAuthoritativeAgentMode } from './agent-mode-resolver.mjs'
 import {
   OMNIGENT_DEFAULT_BASE_URL,
   OMNIGENT_DEFAULT_CLI,
+  buildOmnigentSessionBody,
+  chooseOmnigentHost,
   decodeOmnigentModelId,
   extractOmnigentSessionId,
   mapOmnigentStreamEvent,
   normalizeOmnigentServerRoot,
   omnigentAuthHeaders,
   omnigentEndpointUrl,
+  parseOmnigentHosts,
   parseOmnigentServerUrl,
   parseOmnigentSseChunk,
   parseOmnigentStatusJson,
@@ -676,6 +679,25 @@ async function resolveOmnigentAgentId(modelId, settings, baseUrl, apiKey, signal
   const first = rows.find(row => typeof row?.id === 'string' && row.id.trim())
   if (!first) throw new Error('Omnigent returned no agents from /v1/agents; configure settings.omnigent.agentId.')
   return first.id.trim()
+}
+
+// Resolve the runner host_id to bind a new Omnigent session to. Without it the
+// backend never launches a runner and every turn fails with runner_unavailable
+// ("No runner bound for session"). settings.hostId wins (operator pin); else GET
+// /v1/hosts and auto-pick the first online host (first host if none report
+// status), mirroring the CLI provider. FAIL CLOSED on zero hosts: throw a clear
+// error rather than create a session that is guaranteed to fail at turn time.
+async function resolveOmnigentHostId(settings, baseUrl, apiKey, signal) {
+  const configured = String(settings?.hostId ?? '').trim()
+  if (configured) return configured
+  const payload = await omnigentFetchJson(baseUrl, '/v1/hosts', apiKey, signal ? { signal } : {})
+  const hosts = parseOmnigentHosts(payload)
+  if (hosts.length === 0) {
+    throw new Error('Omnigent returned no runner hosts from /v1/hosts; no runner host is registered. Start a runner host (or set settings.omnigent.hostId) before creating a session.')
+  }
+  const chosen = chooseOmnigentHost(hosts)
+  if (!chosen?.id) throw new Error('Omnigent /v1/hosts returned hosts without a usable id.')
+  return chosen.id
 }
 
 function omnigentTitleFromPrompt(text) {
@@ -2195,11 +2217,17 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       let sessionId = typeof request.sessionId === 'string' && request.sessionId.trim() ? request.sessionId.trim() : null
       if (!sessionId) {
         const agentId = await resolveOmnigentAgentId(request.model, settings, baseUrl, apiKey, abortController.signal)
-        const body = {
-          agent_id: agentId,
+        // Bind the session to a runner host. Required: a session created without
+        // host_id never gets a runner bound, so its turns fail with
+        // runner_unavailable. Resolved before create so a missing host fails the
+        // job cleanly here instead of mid-turn.
+        const hostId = await resolveOmnigentHostId(settings, baseUrl, apiKey, abortController.signal)
+        const body = buildOmnigentSessionBody({
+          agentId,
+          hostId,
           title: omnigentTitleFromPrompt(lastUserMsg.content ?? ''),
-          ...(workspaceDir ? { workspace: workspaceDir } : {}),
-        }
+          workspace: workspaceDir,
+        })
         const created = await omnigentFetchJson(baseUrl, '/v1/sessions', apiKey, {
           method: 'POST',
           body: JSON.stringify(body),

@@ -63,6 +63,57 @@ export function extractOmnigentSessionId(payload) {
   return typeof nestedId === 'string' && nestedId.trim() ? nestedId.trim() : null
 }
 
+// Normalize the /v1/hosts response into `{ id, name, status }` rows. Mirrors the
+// CLI provider's parseOmnigentHosts: accept a bare array, `{ hosts: [...] }`, or
+// `{ data: [...] }`, and prefer `host_id` over `id` for the runner id (the
+// backend keys runner registration on host_id). Rows without an id are dropped.
+export function parseOmnigentHosts(payload) {
+  const record = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+  const rows = Array.isArray(payload)
+    ? payload
+    : Array.isArray(record.hosts)
+      ? record.hosts
+      : Array.isArray(record.data)
+        ? record.data
+        : []
+  return rows
+    .map(item => {
+      const row = item && typeof item === 'object' ? item : null
+      const id = typeof row?.host_id === 'string' && row.host_id.trim()
+        ? row.host_id.trim()
+        : typeof row?.id === 'string' && row.id.trim()
+          ? row.id.trim()
+          : ''
+      if (!id) return null
+      const name = typeof row?.name === 'string' && row.name.trim() ? row.name.trim() : undefined
+      const status = typeof row?.status === 'string' && row.status.trim() ? row.status.trim() : undefined
+      return { id, name, status }
+    })
+    .filter(Boolean)
+}
+
+// Pick the runner host to bind a new session to: the first host reporting status
+// `online`, else the first host (covers backends that omit status). Mirrors the
+// CLI provider's chooseOmnigentHost. Returns the chosen row or null when empty.
+export function chooseOmnigentHost(hosts) {
+  const rows = Array.isArray(hosts) ? hosts : []
+  return rows.find(host => host?.status === 'online') ?? rows[0] ?? null
+}
+
+// Build the POST /v1/sessions request body. Pure + exported (mirrors
+// buildCodexExecArgs in chat-jobs.mjs) so the daemon test can assert host_id is
+// included alongside agent_id without importing the Claude SDK that chat-jobs.mjs
+// pulls in. host_id is the load-bearing field: without it the Omnigent backend
+// never binds a runner and every turn fails with runner_unavailable.
+export function buildOmnigentSessionBody({ agentId, hostId, title, workspace } = {}) {
+  return {
+    agent_id: agentId,
+    ...(hostId ? { host_id: hostId } : {}),
+    title,
+    ...(workspace ? { workspace } : {}),
+  }
+}
+
 export function parseOmnigentServerUrl(output) {
   const match = String(output ?? '').match(/https?:\/\/[^\s)]+/i)
   return match ? normalizeOmnigentServerRoot(match[0]) : null

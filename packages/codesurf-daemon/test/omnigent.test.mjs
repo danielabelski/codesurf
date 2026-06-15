@@ -4,12 +4,15 @@ import { test } from 'node:test'
 import { resolveOmnigentSettings } from '../bin/omnigent-settings.mjs'
 import {
   OMNIGENT_DEFAULT_BASE_URL,
+  buildOmnigentSessionBody,
+  chooseOmnigentHost,
   decodeOmnigentModelId,
   extractOmnigentSessionId,
   mapOmnigentStreamEvent,
   normalizeOmnigentServerRoot,
   omnigentAuthHeaders,
   omnigentEndpointUrl,
+  parseOmnigentHosts,
   parseOmnigentSseChunk,
 } from '../bin/omnigent-provider.mjs'
 
@@ -20,18 +23,20 @@ test('resolveOmnigentSettings defaults are sensible and provider works out of th
     baseUrl: OMNIGENT_DEFAULT_BASE_URL,
     apiKey: '',
     agentId: '',
+    hostId: '',
     autoStart: true,
   })
 })
 
 test('resolveOmnigentSettings reads settings.omnigent and honors env overrides', () => {
   const settings = {
-    omnigent: { enabled: true, baseUrl: 'http://host:9000/v1', apiKey: 'cfg', agentId: 'agent-cfg', autoStart: false },
+    omnigent: { enabled: true, baseUrl: 'http://host:9000/v1', apiKey: 'cfg', agentId: 'agent-cfg', hostId: 'host-cfg', autoStart: false },
   }
   const fromCfg = resolveOmnigentSettings({ settings, env: {} })
   assert.equal(fromCfg.baseUrl, 'http://host:9000/v1')
   assert.equal(fromCfg.apiKey, 'cfg')
   assert.equal(fromCfg.agentId, 'agent-cfg')
+  assert.equal(fromCfg.hostId, 'host-cfg')
   assert.equal(fromCfg.autoStart, false)
 
   const overridden = resolveOmnigentSettings({
@@ -40,6 +45,7 @@ test('resolveOmnigentSettings reads settings.omnigent and honors env overrides',
       CODESURF_OMNIGENT_BASE_URL: 'http://override:1234',
       CODESURF_OMNIGENT_API_KEY: 'env-key',
       CODESURF_OMNIGENT_AGENT_ID: 'env-agent',
+      CODESURF_OMNIGENT_HOST_ID: 'env-host',
       CODESURF_OMNIGENT_AUTO_START: 'true',
       CODESURF_OMNIGENT_ENABLED: 'false',
     },
@@ -47,8 +53,43 @@ test('resolveOmnigentSettings reads settings.omnigent and honors env overrides',
   assert.equal(overridden.baseUrl, 'http://override:1234')
   assert.equal(overridden.apiKey, 'env-key')
   assert.equal(overridden.agentId, 'env-agent')
+  assert.equal(overridden.hostId, 'env-host')
   assert.equal(overridden.autoStart, true)
   assert.equal(overridden.enabled, false)
+})
+
+test('parseOmnigentHosts normalizes array / {hosts} / {data} shapes and prefers host_id', () => {
+  // host_id wins over id; rows without an id are dropped.
+  assert.deepEqual(parseOmnigentHosts([{ host_id: 'h1', name: 'A', status: 'online' }, { id: 'h2' }, { name: 'no-id' }]), [
+    { id: 'h1', name: 'A', status: 'online' },
+    { id: 'h2', name: undefined, status: undefined },
+  ])
+  assert.deepEqual(parseOmnigentHosts({ hosts: [{ host_id: 'hh' }] }), [{ id: 'hh', name: undefined, status: undefined }])
+  assert.deepEqual(parseOmnigentHosts({ data: [{ id: 'hd', status: 'offline' }] }), [{ id: 'hd', name: undefined, status: 'offline' }])
+  assert.deepEqual(parseOmnigentHosts(null), [])
+})
+
+test('chooseOmnigentHost auto-picks the first online host, else the first host', () => {
+  // Auto-pick: the online host wins even when a non-online host comes first.
+  assert.equal(chooseOmnigentHost([{ id: 'a', status: 'offline' }, { id: 'b', status: 'online' }])?.id, 'b')
+  // Fall back to the first host when none report status.
+  assert.equal(chooseOmnigentHost([{ id: 'a' }, { id: 'b' }])?.id, 'a')
+  assert.equal(chooseOmnigentHost([]), null)
+})
+
+test('buildOmnigentSessionBody includes host_id alongside agent_id (the runner-binding fix)', () => {
+  const onlineHost = chooseOmnigentHost(parseOmnigentHosts({ hosts: [{ host_id: 'runner-1', status: 'online' }] }))
+  const body = buildOmnigentSessionBody({
+    agentId: 'agent-x',
+    hostId: onlineHost.id,
+    title: 'hello',
+    workspace: '/tmp/ws',
+  })
+  assert.deepEqual(body, { agent_id: 'agent-x', host_id: 'runner-1', title: 'hello', workspace: '/tmp/ws' })
+  // host_id is the load-bearing field: it must be present so the backend binds a runner.
+  assert.equal(body.host_id, 'runner-1')
+  // workspace is omitted when not provided; a blank hostId drops host_id entirely.
+  assert.deepEqual(buildOmnigentSessionBody({ agentId: 'a', title: 't' }), { agent_id: 'a', title: 't' })
 })
 
 test('normalizeOmnigentServerRoot strips trailing slash and /v1', () => {
