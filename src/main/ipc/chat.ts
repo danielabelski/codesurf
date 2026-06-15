@@ -402,7 +402,11 @@ async function getExecutionRoutingState(): Promise<{
 }
 
 function supportsDaemonChatProvider(provider: string | null | undefined): boolean {
-  return provider === 'claude' || provider === 'codex' || provider === 'opencode' || provider === 'hermes'
+  return provider === 'claude' || provider === 'codex' || provider === 'opencode' || provider === 'hermes' || provider === 'omnigent'
+}
+
+function requiresDaemonChatProvider(provider: string | null | undefined): boolean {
+  return provider === 'omnigent'
 }
 
 function supportsProviderNativeBackground(provider: string | null | undefined): boolean {
@@ -630,10 +634,10 @@ async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostR
   if (!supportsDaemonChatProvider(provider)) {
     const providerLabel = provider || 'This provider'
     if (req.executionTarget === 'cloud') {
-      throw new Error(`${providerLabel} does not support remote daemon execution yet. Daemon-backed chat currently supports Claude, Codex, OpenCode, and Hermes only.`)
+      throw new Error(`${providerLabel} does not support remote daemon execution yet. Daemon-backed chat currently supports Claude, Codex, OpenCode, Hermes, and Omnigent only.`)
     }
     if (executionPreference.mode === 'daemon-only' || executionPreference.mode === 'specific-host') {
-      throw new Error(`${providerLabel} does not support daemon-backed chat yet. Supported daemon providers: Claude, Codex, OpenCode, and Hermes.`)
+      throw new Error(`${providerLabel} does not support daemon-backed chat yet. Supported daemon providers: Claude, Codex, OpenCode, Hermes, and Omnigent.`)
     }
     return null
   }
@@ -654,7 +658,21 @@ async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostR
     preference: executionPreference,
     localDaemonAvailable,
   })
-  return resolution.host.type === 'runtime' ? null : resolution.host
+  if (resolution.host.type !== 'runtime') return resolution.host
+
+  if (requiresDaemonChatProvider(provider)) {
+    if (!localDaemonAvailable) {
+      throw new Error(`${provider || 'This provider'} requires daemon-backed chat, but the local daemon is unavailable.`)
+    }
+    const localDaemonHost = hosts.find(host => host.type === 'local-daemon' && host.enabled !== false)
+      ?? getBuiltinExecutionHosts().find(host => host.type === 'local-daemon')
+    if (!localDaemonHost) {
+      throw new Error(`${provider || 'This provider'} requires daemon-backed chat, but no local daemon host is registered.`)
+    }
+    return localDaemonHost
+  }
+
+  return null
 }
 
 async function buildProjectContext(workspaceDir: string | undefined): Promise<{
@@ -768,14 +786,21 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
     effective: describeProjectContextEnvelope(projectContext),
   })
 
+  const requestWithProviderSettings: ChatRequest = req.provider === 'omnigent'
+    ? {
+      ...req,
+      omnigent: req.omnigent ?? readSettingsSync().omnigent,
+    }
+    : req
+
   const job = await hostRequest<{
     id: string
     status: string
   }>(host, '/chat/job/start', {
     body: {
       request: {
-        ...req,
-        messages: getPreparedMessages(req),
+        ...requestWithProviderSettings,
+        messages: getPreparedMessages(requestWithProviderSettings),
         projectContext,
       },
     },

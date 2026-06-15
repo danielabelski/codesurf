@@ -36,6 +36,7 @@ const PROVIDER_ICON: Record<BuiltinProvider, React.ReactNode> = {
   opencode: React.createElement(Bot, { size: TOOLBAR_PILL_ICON_SIZE }),
   openclaw: React.createElement(OpenClawIcon, { size: TOOLBAR_PILL_ICON_SIZE }),
   hermes: React.createElement(HermesIcon, { size: TOOLBAR_PILL_ICON_SIZE }),
+  omnigent: React.createElement(Bot, { size: TOOLBAR_PILL_ICON_SIZE }),
   csagent: React.createElement(PiIcon, { size: TOOLBAR_PILL_ICON_SIZE }),
 }
 
@@ -169,6 +170,14 @@ export function useChatTileProviders({
       models: DEFAULT_MODELS.hermes,
       kind: 'builtin',
     },
+    omnigent: {
+      id: 'omnigent',
+      label: PROVIDER_LABELS.omnigent,
+      noun: 'agent',
+      icon: PROVIDER_ICON.omnigent,
+      models: DEFAULT_MODELS.omnigent,
+      kind: 'builtin',
+    },
     csagent: {
       id: 'csagent',
       label: PROVIDER_LABELS.csagent,
@@ -213,6 +222,7 @@ export function useChatTileProviders({
     builtinProviderEntries.opencode,
     builtinProviderEntries.openclaw,
     builtinProviderEntries.hermes,
+    builtinProviderEntries.omnigent,
     builtinProviderEntries.csagent,
     ...extensionProviderEntries,
   ], [builtinProviderEntries, extensionProviderEntries])

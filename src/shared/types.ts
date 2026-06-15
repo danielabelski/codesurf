@@ -593,6 +593,14 @@ export interface CodexExecutionSettings {
   executionProvider: 'cli' | 'sdk'
 }
 
+export interface OmnigentSettings {
+  enabled: boolean
+  baseUrl: string
+  apiKey: string
+  agentId: string
+  autoStart: boolean
+}
+
 export interface AppSettings {
   // The three font tokens
   fonts: FontSettings
@@ -647,6 +655,8 @@ export interface AppSettings {
   execution: ExecutionPreference
   // Codex execution backend for daemon-backed jobs.
   codex: CodexExecutionSettings
+  // Omnigent daemon provider configuration.
+  omnigent: OmnigentSettings
   // Last selected chat execution / permission mode by provider.
   chatProviderModes: Partial<Record<string, string>>
   // Daemon-owned background memory consolidation.
@@ -784,6 +794,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
   codex: {
     executionProvider: 'cli',
+  },
+  omnigent: {
+    enabled: true,
+    baseUrl: 'http://127.0.0.1:6767',
+    apiKey: '',
+    agentId: '',
+    autoStart: true,
   },
   chatProviderModes: {},
   autoDream: {
@@ -987,6 +1004,10 @@ export function withDefaultSettings(input: Partial<AppSettings> | null | undefin
     codex: {
       ...DEFAULT_SETTINGS.codex,
       ...(settings.codex ?? {}),
+    },
+    omnigent: {
+      ...DEFAULT_SETTINGS.omnigent,
+      ...(settings.omnigent ?? {}),
     },
     chatProviderModes,
     autoDream: {

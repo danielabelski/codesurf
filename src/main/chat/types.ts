@@ -1,4 +1,4 @@
-import type { Persona, ExecutionPreference, ExtensionChatTransportConfig } from '../../shared/types'
+import type { Persona, ExecutionPreference, ExtensionChatTransportConfig, OmnigentSettings } from '../../shared/types'
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
@@ -74,6 +74,7 @@ export interface ChatRequest {
   executionTarget?: 'local' | 'cloud'
   cloudHostId?: string | null
   executionPreference?: ExecutionPreference | null
+  omnigent?: OmnigentSettings | null
   jobId?: string | null
   jobSequence?: number
   runMode?: 'foreground' | 'background'

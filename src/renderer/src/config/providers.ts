@@ -1,6 +1,6 @@
 /** Chat provider/model/mode configuration — extracted from ChatTile for reuse. */
 
-export type BuiltinProvider = 'claude' | 'codex' | 'opencode' | 'openclaw' | 'hermes' | 'csagent'
+export type BuiltinProvider = 'claude' | 'codex' | 'opencode' | 'openclaw' | 'hermes' | 'omnigent' | 'csagent'
 
 export interface ModelOption {
   id: string
@@ -69,6 +69,9 @@ export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
     { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', description: 'openrouter' },
     { id: 'openrouter/qwen/qwen3.6-plus', label: 'Qwen 3.6 Plus', description: 'openrouter' },
   ],
+  omnigent: [
+    { id: 'omnigent:default', label: 'Default agent', description: 'Configured/default Omnigent agent' },
+  ],
   csagent: [
     { id: 'anthropic/claude-sonnet-4-6', label: 'Sonnet 4.6' },
   ],
@@ -105,6 +108,9 @@ export const PROVIDER_MODES: Record<BuiltinProvider, ModeOption[]> = {
     { id: 'terminal', label: 'Terminal', description: 'Terminal + file tools', color: '#ffb432' },
     { id: 'web', label: 'Web', description: 'Web + browser tools', color: '#3fb950' },
     { id: 'query', label: 'Query', description: 'No tools, query only', color: '#58a6ff' },
+  ],
+  omnigent: [
+    { id: 'default', label: 'Default', description: 'Use Omnigent agent defaults', color: '#3fb950' },
   ],
   csagent: [
     { id: 'default', label: 'Default', description: 'Ask before risky actions', color: '#3fb950' },
@@ -148,6 +154,7 @@ export const PROVIDER_LABELS: Record<BuiltinProvider, string> = {
   opencode: 'OpenCode',
   openclaw: 'OpenClaw',
   hermes: 'Hermes',
+  omnigent: 'Omnigent',
   csagent: 'Pi',
 }
 
@@ -157,6 +164,7 @@ export function isBuiltinProvider(providerId: string): providerId is BuiltinProv
     || providerId === 'opencode'
     || providerId === 'openclaw'
     || providerId === 'hermes'
+    || providerId === 'omnigent'
     || providerId === 'csagent'
 }
 
@@ -194,6 +202,7 @@ export function getApproxSystemOverheadTokens(providerId: string, modelId: strin
   if (normalizedProvider === 'opencode') return 12_000
   if (normalizedProvider === 'openclaw') return 12_000
   if (normalizedProvider === 'hermes') return 8_000
+  if (normalizedProvider === 'omnigent') return 8_000
   return 6_000
 }
 
