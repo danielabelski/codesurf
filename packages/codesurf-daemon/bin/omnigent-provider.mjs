@@ -93,11 +93,13 @@ export function parseOmnigentHosts(payload) {
 }
 
 // Pick the runner host to bind a new session to: the first host reporting status
-// `online`, else the first host (covers backends that omit status). Mirrors the
-// CLI provider's chooseOmnigentHost. Returns the chosen row or null when empty.
+// `online`, else the first host (covers backends that omit status). Status is
+// compared case-insensitively — backends/CLIs report ONLINE/Online/online — so a
+// non-lowercase online host isn't missed in favor of a stale first host. Mirrors
+// the CLI provider's chooseOmnigentHost. Returns the chosen row or null when empty.
 export function chooseOmnigentHost(hosts) {
   const rows = Array.isArray(hosts) ? hosts : []
-  return rows.find(host => host?.status === 'online') ?? rows[0] ?? null
+  return rows.find(host => String(host?.status ?? '').toLowerCase() === 'online') ?? rows[0] ?? null
 }
 
 // Build the POST /v1/sessions request body. Pure + exported (mirrors

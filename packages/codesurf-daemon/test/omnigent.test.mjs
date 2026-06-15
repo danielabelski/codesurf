@@ -72,6 +72,9 @@ test('parseOmnigentHosts normalizes array / {hosts} / {data} shapes and prefers 
 test('chooseOmnigentHost auto-picks the first online host, else the first host', () => {
   // Auto-pick: the online host wins even when a non-online host comes first.
   assert.equal(chooseOmnigentHost([{ id: 'a', status: 'offline' }, { id: 'b', status: 'online' }])?.id, 'b')
+  // Status match is case-insensitive: an uppercase ONLINE host is picked over a
+  // non-online first host (backends/CLIs report ONLINE/Online/online).
+  assert.equal(chooseOmnigentHost([{ id: 'a', status: 'OFFLINE' }, { id: 'b', status: 'ONLINE' }])?.id, 'b')
   // Fall back to the first host when none report status.
   assert.equal(chooseOmnigentHost([{ id: 'a' }, { id: 'b' }])?.id, 'a')
   assert.equal(chooseOmnigentHost([]), null)
