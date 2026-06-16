@@ -2,8 +2,8 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
@@ -42,6 +42,54 @@ const execFileAsync = promisify(execFile)
 
 function ensureDir(dirPath) {
   mkdirSync(dirPath, { recursive: true })
+}
+
+// The Claude Agent SDK persists each session's transcript at
+//   <CLAUDE_CONFIG_DIR|~/.claude>/projects/<encoded-cwd>/<sessionId>.jsonl
+// where <encoded-cwd> is the realpath-resolved cwd with every non-alphanumeric
+// char replaced by '-' (long paths get a hash suffix). Resuming with a
+// sessionId that has NO such transcript — e.g. a foreign codex/UUIDv7 thread id
+// handed over after a provider switch, or a stale id — makes the SDK return
+// num_turns:0 with zero assistant content, surfacing as an empty reply.
+//
+// Defense-in-depth guard: confirm a real transcript exists before we set the
+// SDK `resume` option. We scan every project dir for `<sessionId>.jsonl`
+// (size > 0) rather than reconstruct the encoded-cwd key, which sidesteps the
+// SDK's realpath + NFC + hash-suffix encoding entirely. Foreign ids have no
+// transcript anywhere → returns null → caller starts a fresh turn (model runs
+// normally) instead of resuming a non-existent session. A valid same-provider
+// Claude id always has its transcript on disk → resume is preserved.
+function claudeProjectsDir() {
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+  return join(configDir, 'projects')
+}
+
+function findClaudeResumeTranscript(sessionId) {
+  if (typeof sessionId !== 'string') return null
+  const id = sessionId.trim()
+  if (!id) return null
+  // Reject anything that could escape the projects tree; real Claude session
+  // ids are UUIDs and never contain path separators.
+  if (id.includes('/') || id.includes('\\') || id.includes('..')) return null
+
+  const projectsDir = claudeProjectsDir()
+  const fileName = `${id}.jsonl`
+  let entries
+  try {
+    entries = readdirSync(projectsDir, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const candidate = join(projectsDir, entry.name, fileName)
+    try {
+      if (statSync(candidate).size > 0) return candidate
+    } catch {
+      // not in this project dir — keep scanning
+    }
+  }
+  return null
 }
 
 function readPermissionGrants(homeDir) {
@@ -1230,6 +1278,17 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     job.cancel = () => abortController.abort()
     let claudeStderr = ''
 
+    // Defense-in-depth: only resume when the sessionId maps to a real on-disk
+    // Claude transcript. A foreign/stale id (e.g. a codex thread id handed over
+    // after a provider switch) would otherwise make the SDK return num_turns:0
+    // with no assistant content — an empty reply. When there's no transcript we
+    // omit `resume` so the model runs a fresh turn instead.
+    const resumeTranscriptPath = findClaudeResumeTranscript(request.sessionId)
+    const willResume = Boolean(resumeTranscriptPath)
+    if (request.sessionId && !willResume) {
+      console.warn(`[chat-jobs] claude job ${job.id}: no transcript for session ${request.sessionId}; starting fresh instead of resuming`)
+    }
+
     const modeMap = {
       default: 'default',
       acceptEdits: 'acceptEdits',
@@ -1351,7 +1410,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       thinking: thinkingMap[request.thinking ?? ''] ?? { type: 'adaptive' },
       cwd: workspaceDir || undefined,
       stderr: data => { claudeStderr += data },
-      ...(request.sessionId ? { resume: request.sessionId } : {}),
+      ...(willResume ? { resume: request.sessionId } : {}),
     }
 
     // Agent-definition tools allow-list → restrict the built-in tools the model
