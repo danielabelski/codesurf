@@ -130,13 +130,20 @@ export function buildCodexSpawnArgs(input: CodexSpawnInput): string[] {
     agentPersona,
   )
 
+  // Codex CLI grammar is `codex exec [OPTIONS] resume <SESSION_ID> [PROMPT]`:
+  // every exec-level OPTION (--json, --model, sandbox/approval flags,
+  // --ignore-user-config, --skip-git-repo-check, -C <dir>) MUST precede the
+  // `resume` subcommand — only SESSION_ID and PROMPT follow it. Emitting
+  // `resume` before the options makes codex reject the trailing flags with
+  // `error: unexpected argument '-C' found`, breaking multi-turn resume. So push
+  // all options first, THEN (when resuming) `resume <threadId>`, THEN the prompt.
   const args: string[] = ['exec']
-  if (input.resumeThreadId) args.push('resume', input.resumeThreadId)
   args.push('--json', '--model', input.model)
   args.push(...sandboxApprovalFlags)
   args.push('--ignore-user-config')
   if (input.workspaceDir) args.push('--skip-git-repo-check', '-C', input.workspaceDir)
   else args.push('--skip-git-repo-check')
+  if (input.resumeThreadId) args.push('resume', input.resumeThreadId)
   args.push(promptText)
   return args
 }

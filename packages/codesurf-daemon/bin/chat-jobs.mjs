@@ -700,20 +700,24 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
   // Multi-turn continuity: when the request carries the Codex thread id from a
   // prior turn (emitted as a `thread.started` session event and echoed back by
   // the client as request.sessionId), resume that thread so the model keeps the
-  // full conversation — `codex exec resume <threadId> ...`. This mirrors the
-  // runtime builder (src/main/chat/providers/agent-mode-payloads.ts
-  // buildCodexSpawnArgs), which places `resume <id>` immediately after `exec`.
+  // full conversation — `codex exec [OPTIONS] resume <threadId> [PROMPT]`.
+  // Codex's CLI grammar requires every exec-level OPTION (--json, --model,
+  // --skip-git-repo-check, -C <dir>, sandbox/approval flags) to precede the
+  // `resume` subcommand; only SESSION_ID and PROMPT follow it. Placing `resume`
+  // before the options makes codex reject the trailing flags (e.g.
+  // `error: unexpected argument '-C' found`). Mirrors the runtime builder
+  // (src/main/chat/providers/agent-mode-payloads.ts buildCodexSpawnArgs).
   // First turn (no sessionId) starts a fresh thread (unchanged behavior).
   const resumeArgs = request.sessionId ? ['resume', request.sessionId] : []
   const codexArgs = [
     'exec',
-    ...resumeArgs,
     '--json',
     '--model',
     request.model,
     '--skip-git-repo-check',
     ...(workspaceDir ? ['-C', workspaceDir] : []),
     ...sandboxApprovalFlags,
+    ...resumeArgs,
   ]
   codexArgs.push(buildCodexPrompt(
     lastUserMsg?.content ?? '',
