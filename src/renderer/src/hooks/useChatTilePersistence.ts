@@ -53,6 +53,7 @@ export interface UseChatTilePersistenceOptions {
   linkedSessionHint: SessionEntryHint | null
   hasEarlierMessages: boolean
   sessionId: string | null
+  sessionIdsByProvider: Record<string, string>
   jobId: string | null
   jobSequence: number
   cloudHostId: string | null
@@ -79,6 +80,7 @@ export interface UseChatTilePersistenceOptions {
   setLinkedSessionHint: Dispatch<SetStateAction<SessionEntryHint | null>>
   setHasEarlierMessages: Dispatch<SetStateAction<boolean>>
   setSessionId: Dispatch<SetStateAction<string | null>>
+  setSessionIdsByProvider: Dispatch<SetStateAction<Record<string, string>>>
   setJobId: Dispatch<SetStateAction<string | null>>
   setJobSequence: Dispatch<SetStateAction<number>>
   setCloudHostId: Dispatch<SetStateAction<string | null>>
@@ -119,6 +121,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
     linkedSessionHint,
     hasEarlierMessages,
     sessionId,
+    sessionIdsByProvider,
     jobId,
     jobSequence,
     cloudHostId,
@@ -144,6 +147,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
     setLinkedSessionHint,
     setHasEarlierMessages,
     setSessionId,
+    setSessionIdsByProvider,
     setJobId,
     setJobSequence,
     setCloudHostId,
@@ -190,6 +194,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       linkedSessionHint,
       hasEarlierMessages,
       sessionId,
+      sessionIdsByProvider,
       jobId,
       jobSequence,
       cloudHostId,
@@ -200,7 +205,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       if (isChatTileRuntimeStateDisposed(tileId)) return
       setChatTileRuntimeState(tileId, latestStateRef.current)
     }
-  }, [tileId, messages, input, attachments, queuedTurns, openChatSurfaces, activeChatSurfaceId, executionTarget, provider, model, mcpEnabled, mode, thinking, agentId, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, jobId, jobSequence, cloudHostId, isStreaming, activeView])
+  }, [tileId, messages, input, attachments, queuedTurns, openChatSurfaces, activeChatSurfaceId, executionTarget, provider, model, mcpEnabled, mode, thinking, agentId, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, sessionIdsByProvider, jobId, jobSequence, cloudHostId, isStreaming, activeView])
 
   useEffect(() => {
     reviveChatTileRuntimeState(tileId)
@@ -270,14 +275,27 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       }
       if (typeof saved.hasEarlierMessages === 'boolean') setHasEarlierMessages(saved.hasEarlierMessages)
       else if (saved.linkedSessionEntryId == null) setHasEarlierMessages(false)
-      if (typeof saved.sessionId === 'string' || saved.sessionId === null) setSessionId(saved.sessionId)
+      if (saved.sessionIdsByProvider && typeof saved.sessionIdsByProvider === 'object') {
+        setSessionIdsByProvider({ ...saved.sessionIdsByProvider })
+        const restoredProvider = typeof saved.provider === 'string' ? saved.provider : fallbackProvider
+        const restoredSessionId = saved.sessionIdsByProvider[restoredProvider] ?? saved.sessionId ?? null
+        setSessionId(typeof restoredSessionId === 'string' ? restoredSessionId : null)
+      } else if (typeof saved.sessionId === 'string' || saved.sessionId === null) {
+        setSessionId(saved.sessionId)
+        const restoredProvider = typeof saved.provider === 'string' ? saved.provider : fallbackProvider
+        if (saved.sessionId) {
+          setSessionIdsByProvider({ [restoredProvider]: saved.sessionId })
+        }
+      }
       if (typeof saved.jobId === 'string' || saved.jobId === null) setJobId(saved.jobId ?? null)
       if (typeof saved.jobSequence === 'number') {
         setJobSequence(saved.jobSequence)
         lastJobSequenceRef.current = saved.jobSequence
       }
       if (typeof saved.cloudHostId === 'string' || saved.cloudHostId === null) setCloudHostId(saved.cloudHostId ?? null)
-      if (typeof saved.isStreaming === 'boolean') setIsStreaming(saved.isStreaming)
+      if (typeof saved.isStreaming === 'boolean') {
+        setIsStreaming(saved.isStreaming && Boolean(saved.jobId))
+      }
       if (saved.activeView !== undefined) setActiveView(normalizeActiveView(saved.activeView))
     }
 

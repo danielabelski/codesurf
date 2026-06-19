@@ -22,8 +22,8 @@ import {
   getPreparedMessages,
   upsertRuntimeSessionState,
   activeProcesses,
-  sessionIds,
-  persistSessionIds,
+  getCardSessionId,
+  setCardSessionId,
 } from '../runtime'
 
 const execFileAsync = promisify(execFile)
@@ -314,7 +314,7 @@ export function chatCodex(req: ChatRequest): void {
   const shellPath = getShellEnvPath()
   const peerPrompt = buildPeerSystemPrompt(req.peers)
   const runtimeMessages = cloneChatMessages(req.messages)
-  const resumeThreadId = req.sessionId ?? sessionIds.get(req.cardId) ?? null
+  const resumeThreadId = req.sessionId ?? getCardSessionId(req.cardId, req.provider) ?? null
   const runtimeSession: RuntimeChatSessionState = {
     provider: req.provider,
     model: req.model,
@@ -395,8 +395,7 @@ export function chatCodex(req: ChatRequest): void {
     }
 
     if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
-      sessionIds.set(req.cardId, evt.thread_id)
-      persistSessionIds()
+      setCardSessionId(req.cardId, req.provider, evt.thread_id)
       runtimeSession.sessionId = evt.thread_id
       void upsertRuntimeSessionState(req, runtimeSession)
       sendStream(req.cardId, { type: 'session', sessionId: evt.thread_id })
@@ -565,7 +564,7 @@ export function chatCodex(req: ChatRequest): void {
           { role: 'assistant', content: assistantText },
         ]
       }
-      runtimeSession.sessionId = sessionIds.get(req.cardId) ?? runtimeSession.sessionId
+      runtimeSession.sessionId = getCardSessionId(req.cardId, req.provider) ?? runtimeSession.sessionId
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
       if (code !== 0 && stderrBuf.trim()) {
@@ -579,7 +578,7 @@ export function chatCodex(req: ChatRequest): void {
           { role: 'assistant', content: assistantText },
         ]
       }
-      runtimeSession.sessionId = sessionIds.get(req.cardId) ?? runtimeSession.sessionId
+      runtimeSession.sessionId = getCardSessionId(req.cardId, req.provider) ?? runtimeSession.sessionId
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
       if (code !== 0 && stderrBuf.trim()) {

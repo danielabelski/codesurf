@@ -76,6 +76,7 @@ import {
   activeHttpRequests,
   sessionIds,
   persistSessionIds,
+  deleteCardSessionIds,
 } from '../chat/runtime'
 
 export { warmOpenCodeModelsOnStartup } from '../chat/providers/opencode'
@@ -658,6 +659,9 @@ async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostR
     preference: executionPreference,
     localDaemonAvailable,
   })
+  if (executionPreference.mode === 'daemon-only' && resolution.host.type === 'runtime') {
+    throw new Error('Execution requires the local daemon, but it is unavailable.')
+  }
   if (resolution.host.type !== 'runtime') return resolution.host
 
   if (requiresDaemonChatProvider(provider)) {
@@ -793,18 +797,26 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
     }
     : req
 
-  const job = await hostRequest<{
-    id: string
-    status: string
-  }>(host, '/chat/job/start', {
-    body: {
-      request: {
-        ...requestWithProviderSettings,
-        messages: getPreparedMessages(requestWithProviderSettings),
-        projectContext,
+  let job: { id: string; status: string }
+  try {
+    job = await hostRequest<{
+      id: string
+      status: string
+    }>(host, '/chat/job/start', {
+      body: {
+        request: {
+          ...requestWithProviderSettings,
+          messages: getPreparedMessages(requestWithProviderSettings),
+          projectContext,
+        },
       },
-    },
-  })
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    sendStream(req.cardId, { type: 'error', error: message })
+    sendStream(req.cardId, { type: 'done' })
+    return { ok: false, jobId: '' }
+  }
 
   if (req.runMode !== 'background') {
     void attachDaemonJobStream(req.cardId, host, job.id, 0).catch((error: Error) => {
@@ -1133,7 +1145,7 @@ export function registerChatIPC(): void {
   // unbounded across the install lifetime.
   ipcMain.handle('chat:disposeCard', async (_, cardId: string) => {
     if (!cardId || typeof cardId !== 'string') return { ok: false }
-    sessionIds.delete(cardId)
+    deleteCardSessionIds(cardId)
     clearOpenCodeSession(cardId)
     clearOpenclawSession(cardId)
     clearHermesSession(cardId)
@@ -1146,7 +1158,7 @@ export function registerChatIPC(): void {
 
   // Clear session for a card (start fresh conversation)
   ipcMain.handle('chat:clearSession', async (_, cardId: string) => {
-    sessionIds.delete(cardId)
+    deleteCardSessionIds(cardId)
     clearOpenCodeSession(cardId)
     clearOpenclawSession(cardId)
     clearHermesSession(cardId)

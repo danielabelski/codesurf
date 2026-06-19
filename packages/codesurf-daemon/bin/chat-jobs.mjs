@@ -678,6 +678,20 @@ async function resolveOmnigentAgentId(modelId, settings, baseUrl, apiKey, signal
   return first.id.trim()
 }
 
+/** Claude SDK sessions are UUID v4; Codex/Omnigent thread ids are v7. Reject foreign ids. */
+function isValidClaudeResumeSessionId(sessionId) {
+  if (!sessionId || typeof sessionId !== 'string') return false
+  const match = sessionId.trim().match(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-([0-9a-f])([0-9a-f]{3})-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  )
+  if (!match) return false
+  return parseInt(match[1], 16) === 4
+}
+
+function resolveClaudeResumeSessionId(sessionId) {
+  return isValidClaudeResumeSessionId(sessionId) ? sessionId : undefined
+}
+
 function omnigentTitleFromPrompt(text) {
   const oneLine = String(text ?? '').replace(/\s+/g, ' ').trim()
   if (!oneLine) return 'CodeSurf session'
@@ -700,20 +714,20 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
   // Multi-turn continuity: when the request carries the Codex thread id from a
   // prior turn (emitted as a `thread.started` session event and echoed back by
   // the client as request.sessionId), resume that thread so the model keeps the
-  // full conversation — `codex exec resume <threadId> ...`. This mirrors the
-  // runtime builder (src/main/chat/providers/agent-mode-payloads.ts
-  // buildCodexSpawnArgs), which places `resume <id>` immediately after `exec`.
+  // full conversation. Codex's clap parser treats `resume` as an `exec`
+  // subcommand: exec-level flags like `-C` and `-s` must appear before
+  // `resume`, while the session id and prompt follow it.
   // First turn (no sessionId) starts a fresh thread (unchanged behavior).
   const resumeArgs = request.sessionId ? ['resume', request.sessionId] : []
   const codexArgs = [
     'exec',
-    ...resumeArgs,
     '--json',
     '--model',
     request.model,
     '--skip-git-repo-check',
     ...(workspaceDir ? ['-C', workspaceDir] : []),
     ...sandboxApprovalFlags,
+    ...resumeArgs,
   ]
   codexArgs.push(buildCodexPrompt(
     lastUserMsg?.content ?? '',
@@ -1246,6 +1260,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       high: { type: 'enabled', budget_tokens: 32768 },
       max: { type: 'enabled', budget_tokens: 131072 },
     }
+    const claudeResumeSessionId = resolveClaudeResumeSessionId(request.sessionId)
     const options = {
       model: request.model,
       abortController,
@@ -1351,7 +1366,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       thinking: thinkingMap[request.thinking ?? ''] ?? { type: 'adaptive' },
       cwd: workspaceDir || undefined,
       stderr: data => { claudeStderr += data },
-      ...(request.sessionId ? { resume: request.sessionId } : {}),
+      ...(claudeResumeSessionId ? { resume: claudeResumeSessionId } : {}),
     }
 
     // Agent-definition tools allow-list → restrict the built-in tools the model

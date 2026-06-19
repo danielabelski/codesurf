@@ -55,8 +55,29 @@ export const activeProcesses = new Map<string, ChildProcess>()
 // Active HTTP requests (proxy-backed providers)
 export const activeHttpRequests = new Map<string, http.ClientRequest>()
 
-// Stored session IDs for multi-turn conversations
+// Stored session IDs for multi-turn conversations (keyed by `cardId:provider`).
 export const sessionIds = new Map<string, string>()
+
+export function sessionStorageKey(cardId: string, provider: string): string {
+  return `${cardId}:${provider}`
+}
+
+export function getCardSessionId(cardId: string, provider: string): string | undefined {
+  return sessionIds.get(sessionStorageKey(cardId, provider))
+}
+
+export function setCardSessionId(cardId: string, provider: string, sessionId: string): void {
+  sessionIds.set(sessionStorageKey(cardId, provider), sessionId)
+  persistSessionIds()
+}
+
+export function deleteCardSessionIds(cardId: string): void {
+  for (const key of [...sessionIds.keys()]) {
+    if (key === cardId || key.startsWith(`${cardId}:`)) {
+      sessionIds.delete(key)
+    }
+  }
+}
 
 // Persist session IDs to disk so they survive main-process restarts.
 export const SESSION_IDS_PATH = join(CONTEX_HOME, 'session-ids.json')

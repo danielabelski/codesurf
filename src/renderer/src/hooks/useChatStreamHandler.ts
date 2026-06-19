@@ -86,6 +86,33 @@ export function useChatStreamHandler({
           updateLast(m => applyChatStreamEvent(m, event))
           break
 
+        case 'ask_user_question': {
+          const pid = typeof event.toolId === 'string' ? event.toolId : null
+          if (!pid || !Array.isArray(event.questions) || event.questions.length === 0) break
+          const askInput = JSON.stringify({ questions: event.questions })
+          updateLast(m => {
+            const nextBlock: ToolBlock = {
+              id: pid,
+              name: 'AskUserQuestion',
+              input: askInput,
+              status: 'running',
+            }
+            const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
+            const toolBlocks = existingIndex >= 0
+              ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? { ...block, ...nextBlock } : block)
+              : [...(m.toolBlocks ?? []), nextBlock]
+            const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
+            return {
+              ...m,
+              toolBlocks,
+              contentBlocks: hasContentRef
+                ? m.contentBlocks
+                : [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId: pid }],
+            }
+          })
+          break
+        }
+
         case 'tool_permission_request': {
           const pid = typeof event.toolId === 'string' ? event.toolId : null
           if (!pid) break

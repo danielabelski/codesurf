@@ -379,6 +379,14 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
         peers: peers.length > 0 ? peers : undefined,
         sessionId: activeSessionId,
       })
+      if (result && typeof result === 'object' && 'ok' in result && (result as { ok?: unknown }).ok === false) {
+        setMessagesSafe(prev => prev.map(m =>
+          m.id === assistantId ? { ...m, content: 'Error: chat request failed', isStreaming: false } : m
+        ))
+        setIsStreaming(false)
+        focusComposer()
+        return false
+      }
       if (result && typeof result === 'object' && 'jobId' in result && typeof (result as { jobId?: unknown }).jobId === 'string') {
         const nextJobId = (result as { jobId: string }).jobId
         setJobId(nextJobId)
@@ -693,9 +701,11 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
 
     void (async () => {
       const sent = await dispatchMessageContent(nextTurn.content)
-      const remaining = queuedTurns.filter(turn => turn.id !== nextTurn.id)
-      setQueuedTurns(remaining)
-      flushQueueStateNow(remaining)
+      setQueuedTurns(prev => {
+        const remaining = prev.filter(turn => turn.id !== nextTurn.id)
+        flushQueueStateNow(remaining)
+        return remaining
+      })
       logQueueEvent('dispatch', { queueId: nextTurn.id })
       if (!sent) {
         setInput(current => current.trim() ? current : nextTurn.content)

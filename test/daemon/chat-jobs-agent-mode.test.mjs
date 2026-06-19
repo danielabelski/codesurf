@@ -509,9 +509,9 @@ test('daemon Codex: a request with sessionId resumes the thread (`exec resume <i
   // immediately after `exec` (mirrors the runtime buildCodexSpawnArgs shape).
   const resumed = buildCodexExecArgs({ ...base, sessionId: 'thread-1' }, '/ws')
   const execIdx = resumed.indexOf('exec')
-  assert.equal(resumed[execIdx + 1], 'resume', '`resume` must immediately follow `exec`')
-  assert.equal(resumed[execIdx + 2], 'thread-1', 'the thread id must follow `resume`')
-  // (a plain includes('resume thread-1') would be false — they are two argv elements.)
+  const resumeIdx = resumed.indexOf('resume')
+  assert.ok(resumeIdx > execIdx, '`resume` must appear after exec-level flags')
+  assert.equal(resumed[resumeIdx + 1], 'thread-1', 'the thread id must follow `resume`')
   assert.ok(resumed.includes('resume') && resumed.includes('thread-1'))
 
   // First turn (no sessionId): a fresh thread, NO resume subcommand.

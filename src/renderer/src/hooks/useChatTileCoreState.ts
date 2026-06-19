@@ -74,6 +74,10 @@ export interface UseChatTileCoreStateResult {
   setActiveChatSurfaceId: Dispatch<SetStateAction<string | null>>
   sessionId: string | null
   setSessionId: Dispatch<SetStateAction<string | null>>
+  sessionIdsByProvider: Record<string, string>
+  setSessionIdsByProvider: Dispatch<SetStateAction<Record<string, string>>>
+  commitSessionId: (id: string | null, providerId?: string) => void
+  swapProviderSession: (fromProvider: string, toProvider: string) => void
   jobId: string | null
   setJobId: Dispatch<SetStateAction<string | null>>
   jobSequence: number
@@ -133,7 +137,7 @@ export function useChatTileCoreState({
   )
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(
-    () => initialRuntimeStateRef.current?.isStreaming ?? false,
+    () => (initialRuntimeStateRef.current?.isStreaming && initialJobId) ? true : false,
   )
   const lastActivityAtRef = useRef<number>(Date.now())
   const [toolCollapseTick, setToolCollapseTick] = useState(0)
@@ -175,9 +179,47 @@ export function useChatTileCoreState({
   const [autoAgentMode, setAutoAgentMode] = useState(
     () => initialRuntimeStateRef.current?.autoAgentMode ?? false,
   )
-  const [sessionId, setSessionId] = useState<string | null>(
-    () => initialRuntimeStateRef.current?.sessionId ?? null,
-  )
+  const [sessionIdsByProvider, setSessionIdsByProvider] = useState<Record<string, string>>(() => {
+    const saved = initialRuntimeStateRef.current
+    if (saved?.sessionIdsByProvider && typeof saved.sessionIdsByProvider === 'object') {
+      return { ...saved.sessionIdsByProvider }
+    }
+    if (saved?.sessionId && saved.provider) {
+      return { [saved.provider]: saved.sessionId }
+    }
+    return {}
+  })
+  const [sessionId, setSessionId] = useState<string | null>(() => {
+    const saved = initialRuntimeStateRef.current
+    const providerKey = saved?.provider ?? initialProvider
+    if (saved?.sessionIdsByProvider?.[providerKey]) {
+      return saved.sessionIdsByProvider[providerKey] ?? null
+    }
+    return saved?.sessionId ?? null
+  })
+  const commitSessionId = useCallback((id: string | null, providerId?: string) => {
+    const key = providerId ?? provider
+    setSessionId(id)
+    setSessionIdsByProvider(prev => {
+      if (!id) {
+        if (!(key in prev)) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      }
+      if (prev[key] === id) return prev
+      return { ...prev, [key]: id }
+    })
+  }, [provider])
+  const swapProviderSession = useCallback((fromProvider: string, toProvider: string) => {
+    setSessionIdsByProvider(prev => {
+      const next = { ...prev }
+      if (sessionId) next[fromProvider] = sessionId
+      else delete next[fromProvider]
+      setSessionId(next[toProvider] ?? null)
+      return next
+    })
+  }, [sessionId])
   const [linkedSessionEntryId, setLinkedSessionEntryId] = useState<string | null>(
     () => initialRuntimeStateRef.current?.linkedSessionEntryId ?? null,
   )
@@ -251,6 +293,10 @@ export function useChatTileCoreState({
     setActiveChatSurfaceId,
     sessionId,
     setSessionId,
+    sessionIdsByProvider,
+    setSessionIdsByProvider,
+    commitSessionId,
+    swapProviderSession,
     jobId,
     setJobId,
     jobSequence,

@@ -34,9 +34,9 @@ import {
   getPreparedMessages,
   isActiveQuery,
   log,
-  persistSessionIds,
+  getCardSessionId,
   sendStream,
-  sessionIds,
+  setCardSessionId,
   upsertRuntimeSessionState,
 } from '../runtime'
 
@@ -484,12 +484,11 @@ export function chatClaude(req: ChatRequest): void {
   }
 
   // Restore sessionId from frontend (survives app restart via tile state)
-  if (req.sessionId && !sessionIds.has(req.cardId)) {
-    sessionIds.set(req.cardId, req.sessionId)
-    persistSessionIds()
+  if (req.sessionId && !getCardSessionId(req.cardId, req.provider)) {
+    setCardSessionId(req.cardId, req.provider, req.sessionId)
   }
 
-  const existingSessionId = sessionIds.get(req.cardId)
+  const existingSessionId = getCardSessionId(req.cardId, req.provider) ?? req.sessionId ?? null
   const runtimeMessages = cloneChatMessages(req.messages)
   const runtimeSession: RuntimeChatSessionState = {
     provider: req.provider,
@@ -775,8 +774,7 @@ export function chatClaude(req: ChatRequest): void {
             const sid = (msg as any).session_id
             if (sid) {
               log('captured session_id:', sid.slice(0, 8))
-              sessionIds.set(req.cardId, sid)
-              persistSessionIds()
+              setCardSessionId(req.cardId, req.provider, sid)
               runtimeSession.sessionId = sid
               void upsertRuntimeSessionState(req, runtimeSession)
               sendStream(req.cardId, { type: 'session', sessionId: sid })
@@ -897,9 +895,8 @@ export function chatClaude(req: ChatRequest): void {
             })
             clearActiveClaudeQuery(req.cardId, q)
             // Also capture from result if we missed earlier
-            if (result.session_id && !sessionIds.has(req.cardId)) {
-              sessionIds.set(req.cardId, result.session_id)
-              persistSessionIds()
+            if (result.session_id && !getCardSessionId(req.cardId, req.provider)) {
+              setCardSessionId(req.cardId, req.provider, result.session_id)
             }
           }
         }

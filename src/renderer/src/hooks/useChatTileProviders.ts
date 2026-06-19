@@ -54,6 +54,7 @@ export interface UseChatTileProvidersOptions {
   peerContextRef: MutableRefObject<Map<string, Record<string, unknown>>>
   peerContextVersion: number
   onProviderChanged?: () => void
+  swapProviderSession?: (fromProvider: string, toProvider: string) => void
 }
 
 export interface UseChatTileProvidersResult {
@@ -80,6 +81,7 @@ export function useChatTileProviders({
   peerContextRef,
   peerContextVersion,
   onProviderChanged,
+  swapProviderSession,
 }: UseChatTileProvidersOptions): UseChatTileProvidersResult {
   const [opencodeModels, setOpencodeModels] = useState<ModelOption[]>(DEFAULT_MODELS.opencode)
   const [openclawAgents, setOpenclawAgents] = useState<ModelOption[]>(DEFAULT_MODELS.openclaw)
@@ -276,11 +278,14 @@ export function useChatTileProviders({
   const handleProviderChange = useCallback((providerId: string) => {
     const nextProvider = providerEntryById.get(providerId)
     if (!nextProvider) return
+    if (nextProvider.id !== provider) {
+      swapProviderSession?.(provider, nextProvider.id)
+    }
     setProvider(nextProvider.id)
     setModel(nextProvider.models[0]?.id ?? '')
     setMode(resolveProviderModeId(nextProvider.id, settings?.chatProviderModes?.[nextProvider.id]))
     onProviderChanged?.()
-  }, [providerEntryById, settings?.chatProviderModes, setProvider, setModel, setMode, onProviderChanged])
+  }, [provider, providerEntryById, settings?.chatProviderModes, setProvider, setModel, setMode, onProviderChanged, swapProviderSession])
 
   return {
     providerEntries,

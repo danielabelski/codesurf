@@ -52,6 +52,8 @@ export interface ChatTilePersistedState {
   linkedSessionHint?: SessionEntryHint | null
   hasEarlierMessages?: boolean
   sessionId: string | null
+  /** Per-provider session ids so switching providers does not cross-contaminate resume ids. */
+  sessionIdsByProvider?: Record<string, string>
   jobId?: string | null
   jobSequence?: number
   cloudHostId?: string | null

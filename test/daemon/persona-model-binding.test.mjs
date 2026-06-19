@@ -328,7 +328,7 @@ test('locked => the model + provider pills are disabled (ChatTileComposer wiring
   assert.match(src, /label=\{currentModelLabel\}[\s\S]*?disabled=\{modelLocked\}/, 'the model pill must disable when modelLocked')
   // The provider pill (shown pre-conversation) disables too.
   assert.match(src, /label=\{currentProviderEntry\?\.label \?\? 'Provider'\}[\s\S]*?disabled=\{modelLocked\}/, 'the provider pill must disable when modelLocked')
-  assert.match(src, /title=\{modelLocked \? lockReason/, 'the disabled pill must surface the lock reason as its tooltip')
+  assert.match(src, /title=\{modelLocked \? \(lockReason/, 'the disabled pill must surface the lock reason as its tooltip')
   // ToolbarPill already drops onClick + renders a Lock glyph when disabled.
   const controls = readFileSync(join(ROOT_DIR, 'src/renderer/src/components/chat/ChatComposerControls.tsx'), 'utf8')
   assert.match(controls, /onClick=\{disabled \? undefined : onClick\}/, 'a disabled ToolbarPill must not invoke onClick')

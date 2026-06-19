@@ -112,7 +112,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     mode, setMode, thinking, setThinking, agentId, setAgentId, autoAgentMode, setAutoAgentMode,
     attachments, setAttachments, queuedTurns, setQueuedTurns,
     openChatSurfaces, setOpenChatSurfaces, activeChatSurfaceId, setActiveChatSurfaceId,
-    sessionId, setSessionId, jobId, setJobId, jobSequence, setJobSequence,
+    sessionId, setSessionId, sessionIdsByProvider, setSessionIdsByProvider, commitSessionId, swapProviderSession,
+    jobId, setJobId, jobSequence, setJobSequence,
     linkedSessionEntryId, setLinkedSessionEntryId, linkedSessionHint, setLinkedSessionHint,
     preserveSessionSummary, setPreserveSessionSummary, hasEarlierMessages, setHasEarlierMessages,
     activeView, setActiveView,
@@ -168,6 +169,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     peerContextRef,
     peerContextVersion,
     onProviderChanged: () => closeProviderMenuRef.current(),
+    swapProviderSession,
   })
   const {
     showModelMenu,
@@ -339,6 +341,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     linkedSessionHint,
     hasEarlierMessages,
     sessionId,
+    sessionIdsByProvider,
     jobId,
     jobSequence,
     cloudHostId,
@@ -364,6 +367,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setLinkedSessionHint,
     setHasEarlierMessages,
     setSessionId,
+    setSessionIdsByProvider,
     setJobId,
     setJobSequence,
     setCloudHostId,
@@ -610,7 +614,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   useChatStreamHandler({
     tileId,
     setMessagesSafe,
-    setSessionId,
+    setSessionId: commitSessionId,
     setIsStreaming,
     setJobId,
     setJobSequence,
