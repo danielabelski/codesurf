@@ -79,6 +79,8 @@ import {
   deleteCardSessionIds,
 } from '../chat/runtime'
 
+const BUILTIN_CHAT_PROVIDERS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'hermes', 'omnigent', 'csagent'])
+
 export { warmOpenCodeModelsOnStartup } from '../chat/providers/opencode'
 
 export type {
@@ -1054,6 +1056,18 @@ export function registerChatIPC(): void {
     // that covers every provider in one place.
     if (agentModeUnresolved(requestWithFileReferences)) {
       sendStream(requestWithFileReferences.cardId, { type: 'error', error: AGENT_MODE_UNRESOLVED_ERROR })
+      sendStream(requestWithFileReferences.cardId, { type: 'done' })
+      return { ok: false }
+    }
+
+    if (
+      requestWithFileReferences.providerTransport?.type === 'local-proxy'
+      && BUILTIN_CHAT_PROVIDERS.has(requestWithFileReferences.provider)
+    ) {
+      sendStream(requestWithFileReferences.cardId, {
+        type: 'error',
+        error: `Extension provider id cannot use reserved built-in provider: ${requestWithFileReferences.provider}`,
+      })
       sendStream(requestWithFileReferences.cardId, { type: 'done' })
       return { ok: false }
     }

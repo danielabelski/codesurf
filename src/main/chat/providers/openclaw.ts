@@ -4,6 +4,7 @@
 
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
+import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
 import { buildCodeSurfOutputConvention } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import {
@@ -153,15 +154,7 @@ export function chatOpenclaw(req: ChatRequest): void {
     args.push('--agent', selectedAgentId ?? 'main')
   }
 
-  const thinkingMap: Record<string, string> = {
-    none: 'off',
-    low: 'minimal',
-    medium: 'medium',
-    high: 'high',
-    max: 'xhigh',
-    adaptive: 'medium',
-  }
-  const thinking = thinkingMap[req.thinking ?? '']
+  const thinking = normalizeOpenClawThinking(req.thinking)
   if (thinking) {
     args.push('--thinking', thinking)
   }

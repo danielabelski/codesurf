@@ -241,10 +241,29 @@ export function buildOpenClawAgentArgs(request: {
     args.push('--agent', request.agentId || 'main')
   }
   args.push('--message', request.prompt)
-  pushFlag(args, '--thinking', request.thinking)
+  pushFlag(args, '--thinking', normalizeOpenClawThinking(request.thinking))
   pushFlag(args, '--timeout', request.timeoutSeconds)
   if (request.local) args.push('--local')
   return args
+}
+
+export function normalizeOpenClawThinking(thinking?: string | null): string | null {
+  const value = typeof thinking === 'string' ? thinking.trim() : ''
+  if (!value) return null
+
+  const thinkingMap: Record<string, string> = {
+    none: 'off',
+    low: 'minimal',
+    medium: 'medium',
+    high: 'high',
+    max: 'xhigh',
+    adaptive: 'medium',
+    off: 'off',
+    minimal: 'minimal',
+    xhigh: 'xhigh',
+  }
+
+  return thinkingMap[value] ?? value
 }
 
 function extractOpenClawTextPayload(payload: any): string {

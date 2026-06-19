@@ -309,9 +309,15 @@ export function getOpenCodeModelsSnapshot(): {
 
 // Store opencode session IDs separately (keyed by cardId)
 const opencodeSessionIds = new Map<string, string>()
+const opencodeSessionPermissionModes = new Map<string, string>()
+
+function normalizeOpenCodePermissionMode(mode?: string | null): string {
+  return mode === 'plan' || mode === 'bypassPermissions' ? mode : 'default'
+}
 
 export function clearOpenCodeSession(cardId: string): void {
   opencodeSessionIds.delete(cardId)
+  opencodeSessionPermissionModes.delete(cardId)
 }
 
 export async function abortOpenCodeSession(cardId: string): Promise<void> {
@@ -363,10 +369,24 @@ export function chatOpencode(req: ChatRequest): void {
   const providerID = slashIdx > 0 ? req.model.slice(0, slashIdx) : 'anthropic'
   const modelID = slashIdx > 0 ? req.model.slice(slashIdx + 1) : req.model
 
+  const requestedPermissionMode = normalizeOpenCodePermissionMode(req.mode)
   if (req.sessionId && !opencodeSessionIds.has(req.cardId)) {
     opencodeSessionIds.set(req.cardId, req.sessionId)
   }
-  const existingSessionId = opencodeSessionIds.get(req.cardId)
+  const recordedPermissionMode = opencodeSessionPermissionModes.get(req.cardId)
+  const sessionPermissionModeMatches = recordedPermissionMode === requestedPermissionMode
+  const existingSessionId = sessionPermissionModeMatches ? opencodeSessionIds.get(req.cardId) : undefined
+  if (!sessionPermissionModeMatches && opencodeSessionIds.has(req.cardId)) {
+    // OpenCode permissions are fixed at session creation. If the mode is unknown
+    // after process restart, fail closed by creating a fresh session.
+    log('opencode session permission mode changed; creating new session', {
+      cardId: req.cardId,
+      from: recordedPermissionMode ?? 'unknown',
+      to: requestedPermissionMode,
+    })
+    opencodeSessionIds.delete(req.cardId)
+    opencodeSessionPermissionModes.delete(req.cardId)
+  }
   log('chatOpencode starting', {
     model: req.model,
     providerID,
@@ -395,6 +415,7 @@ export function chatOpencode(req: ChatRequest): void {
           throw new Error('Failed to create OpenCode session — no session ID returned')
         }
         opencodeSessionIds.set(req.cardId, sessionID)
+        opencodeSessionPermissionModes.set(req.cardId, requestedPermissionMode)
         log('opencode session created:', sessionID, req.mode === 'plan'
           ? '(plan mode)'
           : req.mode === 'bypassPermissions'

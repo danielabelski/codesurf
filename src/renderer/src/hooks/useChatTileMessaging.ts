@@ -251,9 +251,9 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     const { bodyText: userBodyText } = splitMessageAttachmentPaths(trimmedContent)
 
     const state = latestStateRef.current
-    const activeProvider = state?.provider ?? provider
-    const activeModel = state?.model ?? model
-    const activeThinking = state?.thinking ?? thinking
+    const activeProvider = provider || state?.provider || ''
+    const activeModel = model || state?.model || ''
+    const activeThinking = thinking || state?.thinking || 'adaptive'
     const activeSessionId = state?.sessionId ?? sessionId
     const activeMcpEnabled = state?.mcpEnabled ?? mcpEnabled
     const activeMessages = state?.messages ?? messages

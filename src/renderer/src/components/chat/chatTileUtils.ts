@@ -7,6 +7,7 @@ import type { ToolBlock, ChatMessage, FileChange } from '../../../../shared/chat
 import type { SessionEntryHint } from '../../../../shared/session-types'
 import { buildChatMessageHistoryFingerprint } from '../../../../shared/chat-history'
 import { normalizeChatSurfacePayload, type ChatSurfacePayload } from '../chatSurfaceHostRpc'
+import { isBuiltinProvider } from '../../config/providers'
 
 export const CHAT_DEFAULT_SKILL_LOCATIONS = [
   '$HOME/.claude/commands',
@@ -587,6 +588,7 @@ export function normalizeExtensionProviders(value: unknown): ExtensionChatProvid
     const label = typeof provider.label === 'string' ? provider.label.trim() : ''
     const transport = provider.transport
     if (!id || !label || !transport || typeof transport !== 'object') return []
+    if (isBuiltinProvider(id)) return []
 
     const transportConfig = transport as Record<string, unknown>
     if (transportConfig.type !== 'local-proxy') return []
