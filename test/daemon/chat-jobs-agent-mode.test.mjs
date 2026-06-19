@@ -500,24 +500,37 @@ test('daemon Codex: AgentMode.systemPrompt is injected into the prompt arg', () 
 
 // ─── daemon Codex: multi-turn continuity (resume) ────────────────────────────
 
-test('daemon Codex: a request with sessionId resumes the thread (`exec resume <id>`), first turn does NOT', () => {
+test('daemon Codex: a request with sessionId resumes the thread (`exec [OPTIONS] resume <id>`), first turn does NOT', () => {
   const base = { provider: 'codex', model: 'gpt-test', mode: 'default', messages: [{ role: 'user', content: 'do it' }] }
 
   // Continuation turn: the Codex thread id from a prior turn is echoed back as
-  // request.sessionId. The argv must resume that thread so the model keeps the
-  // full conversation — `codex exec resume <id> ...`, with `resume <id>`
-  // immediately after `exec` (mirrors the runtime buildCodexSpawnArgs shape).
+  // request.sessionId. Codex's CLI grammar is `codex exec [OPTIONS] resume
+  // <SESSION_ID> [PROMPT]` — ALL exec-level options (--json, --model,
+  // --skip-git-repo-check, -C <dir>, sandbox/approval flags) MUST precede the
+  // `resume` subcommand; only the SESSION_ID and PROMPT follow it. Emitting
+  // `resume` before the options makes codex reject the trailing flags
+  // (`error: unexpected argument '-C' found`), which broke multi-turn resume.
   const resumed = buildCodexExecArgs({ ...base, sessionId: 'thread-1' }, '/ws')
   const execIdx = resumed.indexOf('exec')
   const resumeIdx = resumed.indexOf('resume')
-  assert.ok(resumeIdx > execIdx, '`resume` must appear after exec-level flags')
-  assert.equal(resumed[resumeIdx + 1], 'thread-1', 'the thread id must follow `resume`')
-  assert.ok(resumed.includes('resume') && resumed.includes('thread-1'))
+  // `resume` must NOT sit immediately after `exec` — it comes AFTER the options.
+  assert.notEqual(resumed[execIdx + 1], 'resume', '`resume` must NOT immediately follow `exec` (options come first)')
+  assert.equal(resumed[execIdx + 1], '--json', 'exec-level options lead the argv')
+  assert.equal(resumed[resumeIdx + 1], 'thread-1', 'the thread id must immediately follow `resume`')
+  // The thread id and the prompt are the only args after `resume`.
+  assert.equal(resumeIdx, resumed.length - 3, '`resume` must be third-from-last (resume, <id>, <prompt>)')
+  assert.match(resumed.at(-1), /do it/, 'the prompt is the final positional arg')
+  // Every exec-level option/flag must appear BEFORE `resume`.
+  for (const flag of ['--json', '--model', 'gpt-test', '--skip-git-repo-check', '-C', '/ws', '-s', 'workspace-write', '-c', 'approval_policy=on-request']) {
+    assert.ok(resumed.indexOf(flag) > -1 && resumed.indexOf(flag) < resumeIdx, `${flag} must precede resume`)
+  }
+  // `-C <dir>` must never appear after `resume` (the exact bug codex rejected).
+  assert.ok(resumed.lastIndexOf('-C') < resumeIdx, '`-C` must never follow `resume`')
 
   // First turn (no sessionId): a fresh thread, NO resume subcommand.
   const fresh = buildCodexExecArgs({ ...base }, '/ws')
   assert.ok(!fresh.includes('resume'), 'first turn (no sessionId) must NOT resume')
-  assert.equal(fresh[fresh.indexOf('exec') + 1], '--json', 'first turn keeps the unchanged flag order after exec')
+  assert.equal(fresh[fresh.indexOf('exec') + 1], '--json', 'first turn keeps the flag order after exec')
 
   // Empty-string sessionId is falsy → treated as a first turn (no resume).
   assert.ok(!buildCodexExecArgs({ ...base, sessionId: '' }, '/ws').includes('resume'))
@@ -525,6 +538,38 @@ test('daemon Codex: a request with sessionId resumes the thread (`exec resume <i
   // Resume must not disturb the sandbox/approval flags (continuity is orthogonal
   // to permission enforcement).
   assert.deepEqual(codexSandboxAndApproval(resumed), { sandbox: 'workspace-write', approval: 'on-request' })
+})
+
+// ─── runtime Codex: multi-turn continuity (resume) — buildCodexSpawnArgs ──────
+
+test('runtime Codex: buildCodexSpawnArgs places exec-level options before `resume <id>`, first turn does NOT resume', () => {
+  const base = { agentMode: null, mode: 'default', model: 'gpt-test', userContent: 'do it', workspaceDir: '/ws' }
+
+  // Same Codex CLI grammar invariant as the daemon builder: `codex exec
+  // [OPTIONS] resume <SESSION_ID> [PROMPT]`. buildCodexSpawnArgs is the function
+  // chatCodex actually spawns (the runtime path); BUG 1 was that it pushed
+  // `resume <id>` before the option flags, so codex rejected `-C` on resume.
+  const resumed = buildCodexSpawnArgs({ ...base, resumeThreadId: 'thread-9' })
+  const execIdx = resumed.indexOf('exec')
+  const resumeIdx = resumed.indexOf('resume')
+  assert.equal(resumed[execIdx + 1], '--json', 'exec-level options must lead the argv (not `resume`)')
+  assert.notEqual(resumed[execIdx + 1], 'resume', '`resume` must NOT immediately follow `exec`')
+  assert.equal(resumed[resumeIdx + 1], 'thread-9', 'the thread id must immediately follow `resume`')
+  assert.equal(resumeIdx, resumed.length - 3, '`resume` must be third-from-last (resume, <id>, <prompt>)')
+  // Prompt is the final positional; `resume <id>` are the two args before it.
+  assert.equal(resumed[resumed.length - 2], 'thread-9', '<id> precedes the prompt')
+  assert.match(resumed.at(-1), /do it/, 'the prompt is the final positional arg')
+  // Every exec-level option/flag must precede `resume`, and `-C` must not follow it.
+  for (const flag of ['--json', '--model', 'gpt-test', '--ignore-user-config', '--skip-git-repo-check', '-C', '/ws', '-s', 'workspace-write', '-c', 'approval_policy=on-request']) {
+    assert.ok(resumed.indexOf(flag) > -1 && resumed.indexOf(flag) < resumeIdx, `${flag} must precede resume`)
+  }
+  assert.ok(resumed.lastIndexOf('-C') < resumeIdx, '`-C` must never follow `resume`')
+
+  // First turn (no resumeThreadId): no resume subcommand, prompt stays last.
+  const fresh = buildCodexSpawnArgs({ ...base })
+  assert.ok(!fresh.includes('resume'), 'first turn must NOT resume')
+  assert.equal(fresh[fresh.indexOf('exec') + 1], '--json', 'first turn keeps the flag order after exec')
+  assert.match(fresh.at(-1), /do it/, 'prompt is last on a fresh turn too')
 })
 
 // ─── daemon Codex SDK provider: opt-in mapping + resume ──────────────────────
