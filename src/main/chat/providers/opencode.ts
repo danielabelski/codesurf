@@ -14,7 +14,7 @@ import {
   type ToolPermissionRequest,
 } from '../../permissions'
 import type { ToolPermissionDecision } from '../../ipc/chat'
-import { buildCodeSurfOutputConvention } from '../prompt-conventions'
+import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import { log, sendStream, getPreparedMessages } from '../runtime'
 
@@ -440,8 +440,9 @@ export function chatOpencode(req: ChatRequest): void {
       // Claude/Codex. On subsequent turns the session already carries the
       // convention in its running history.
       const isFirstTurn = !existingSessionId
+      const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
       const promptText = isFirstTurn
-        ? `${buildCodeSurfOutputConvention()}\n\n---\n\n${lastUserMsg.content}`
+        ? `${promptConvention}\n\n---\n\n${lastUserMsg.content}`
         : lastUserMsg.content
       const promptPromise = client.session.prompt({
         sessionID,

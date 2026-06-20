@@ -54,16 +54,16 @@ export function buildCodeSurfOutputConvention(): string {
   return CODESURF_OUTPUT_CONVENTION
 }
 
-// CodeSurf-wide "Insight" convention. This is intentionally NOT injected into
-// normal provider prompts; examples of the star-framed format strongly prime
-// models to emit it on every small task. Only add this block when the user
-// explicitly asks for insights.
+// CodeSurf-wide "Insight" convention. Injected into provider prompts so every
+// model can produce the renderer-recognized star-framed callout when it has a
+// genuinely useful, non-obvious observation.
 export const CODESURF_INSIGHT_CONVENTION = [
   '## CodeSurf Insight Convention',
   '',
-  'Do not emit an Insight block unless the user explicitly asks for an insight.',
+  'Use an Insight block when you notice a non-obvious constraint, risk, hidden dependency, or design implication that the user should understand before trusting the answer.',
+  'Do not emit an Insight block for routine summaries, obvious statements, or tiny mechanical edits.',
   '',
-  'When explicitly requested, use this exact wrapper:',
+  'When you emit one, use this exact wrapper:',
   '`★ Insight ─────────────────────────────────────`',
   '- [point 1]',
   '- [point 2]',

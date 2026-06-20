@@ -176,8 +176,8 @@ export function ChatComposerDrawerFrame({
       className={`cs-chat-composer-drawer${joinedToPrevious ? ' cs-chat-composer-drawer-joined' : ''}${collapsed ? ' cs-chat-composer-drawer-collapsed' : ''}`}
       style={{
         flexShrink: 0,
-        border: `1px solid ${theme.chat.divider}`,
-        borderTop: joinedToPrevious ? 'none' : `1px solid ${theme.chat.divider}`,
+        border: `0.5px solid ${theme.chat.divider}`,
+        borderTop: joinedToPrevious ? 'none' : `0.5px solid ${theme.chat.divider}`,
         borderBottom: 'none',
         borderRadius: joinedToPrevious ? 0 : '16px 16px 0 0',
         background: collapsed ? theme.chat.background : theme.surface.panelMuted,
@@ -1042,7 +1042,7 @@ export function ChatComposerAttachments({
           title={item.path}
           style={{
             flexShrink: 0,
-            maxWidth: item.kind === 'image' ? 140 : 180,
+            maxWidth: 180,
             height: 54,
             borderRadius: 12,
             border: `1px solid ${theme.chat.dropdownBorder}`,
@@ -1053,21 +1053,13 @@ export function ChatComposerAttachments({
             alignItems: 'stretch',
           }}
         >
-          {item.kind === 'image' ? (
-            <img
-              src={item.path}
-              alt={basename(item.path)}
-              style={{ width: 54, height: 54, objectFit: 'cover', display: 'block', background: theme.chat.background, flexShrink: 0 }}
-            />
-          ) : (
-            <div style={{
-              width: 36, flexShrink: 0,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: theme.chat.muted, borderRight: `1px solid ${theme.border.subtle}`, fontSize: 15,
-            }}>
-              <FileText size={13} />
-            </div>
-          )}
+          <div style={{
+            width: 36, flexShrink: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: theme.chat.muted, borderRight: `1px solid ${theme.border.subtle}`, fontSize: 15,
+          }}>
+            <FileText size={13} />
+          </div>
           <div style={{
             minWidth: 0,
             padding: '8px 26px 8px 10px',

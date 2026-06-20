@@ -1,4 +1,4 @@
-export type SessionSource = 'codesurf' | 'claude' | 'codex' | 'cursor' | 'hermes' | 'openclaw' | 'opencode'
+export type SessionSource = 'codesurf' | 'claude' | 'codex' | 'cursor' | 'hermes' | 'openclaw' | 'opencode' | 'csagent'
 export type SessionScope = 'workspace' | 'project' | 'user'
 
 export interface SessionEntryHint {

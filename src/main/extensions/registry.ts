@@ -143,6 +143,7 @@ export class ExtensionRegistry {
    *  so their power-tier main scripts do not execute. They appear in the
    *  gallery as available-to-install entries. */
   private catalogDirs: string[]
+  private rescanQueue: Promise<void> = Promise.resolve()
 
   constructor(opts?: { bundledDirs?: string[]; catalogDirs?: string[] }) {
     this.bundledDirs = (opts?.bundledDirs ?? []).filter(Boolean)
@@ -174,14 +175,19 @@ export class ExtensionRegistry {
   }
 
   async rescan(workspacePath?: string | null): Promise<void> {
-    this.deactivateAll()
-    this.extensions.clear()
-    this.extraMCPTools = []
-    this.activeWorkspacePath = workspacePath ?? null
-    await this.scan()
-    if (workspacePath) {
-      await this.scanWorkspace(workspacePath)
+    const run = async (): Promise<void> => {
+      this.deactivateAll()
+      this.extensions.clear()
+      this.extraMCPTools = []
+      this.activeWorkspacePath = workspacePath ?? null
+      await this.scan()
+      if (workspacePath) {
+        await this.scanWorkspace(workspacePath)
+      }
     }
+
+    this.rescanQueue = this.rescanQueue.then(run, run)
+    return this.rescanQueue
   }
 
   async scanLightweight(workspacePath?: string | null): Promise<ExtensionManifest[]> {

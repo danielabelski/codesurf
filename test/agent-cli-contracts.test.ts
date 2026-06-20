@@ -271,13 +271,14 @@ describe('agent CLI contract builders', () => {
     expect(args).toEqual(['run', 'Plan the work'])
   })
 
-  test('daemon chat routing recognizes OpenCode and Hermes as daemon-capable providers', () => {
+  test('daemon chat routing recognizes OpenCode, Hermes, and Omnigent as daemon-capable providers', () => {
     const ipcSource = readFileSync(`${process.cwd()}/src/main/ipc/chat.ts`, 'utf8')
     const daemonSource = readFileSync(`${process.cwd()}/packages/codesurf-daemon/bin/chat-jobs.mjs`, 'utf8')
 
-    expect(ipcSource).toContain("return provider === 'claude' || provider === 'codex' || provider === 'opencode' || provider === 'hermes'")
-    expect(ipcSource).toContain('Supported daemon providers: Claude, Codex, OpenCode, and Hermes.')
+    expect(ipcSource).toContain("return provider === 'claude' || provider === 'codex' || provider === 'opencode' || provider === 'hermes' || provider === 'omnigent'")
+    expect(ipcSource).toContain('Supported daemon providers: Claude, Codex, OpenCode, Hermes, and Omnigent.')
     expect(daemonSource).toContain("request.provider === 'hermes'")
+    expect(daemonSource).toContain("request.provider === 'omnigent'")
     expect(daemonSource).toContain('Daemon execution is only implemented for Claude, Codex, OpenCode, Hermes, and Omnigent right now')
   })
 
@@ -294,7 +295,7 @@ describe('agent CLI contract builders', () => {
   test('main-process Hermes chat uses shared model/provider contract helpers', () => {
     const source = readFileSync(`${process.cwd()}/src/main/chat/providers/hermes.ts`, 'utf8')
 
-    expect(source).toContain('buildHermesChatArgs({')
+    expect(source).toContain('buildHermesSpawnArgs({')
     expect(source).toContain('sanitizeAgentCliDiagnostic(stderrBuf.trim())')
     expect(source).not.toContain("args.push('--model', req.model)")
   })

@@ -586,6 +586,25 @@ function joinPromptSections(...sections) {
   return normalized.length > 0 ? normalized.join('\n\n') : undefined
 }
 
+const CODESURF_INSIGHT_CONVENTION = [
+  '## CodeSurf Insight Convention',
+  '',
+  'Use an Insight block when you notice a non-obvious constraint, risk, hidden dependency, or design implication that the user should understand before trusting the answer.',
+  'Do not emit an Insight block for routine summaries, obvious statements, or tiny mechanical edits.',
+  '',
+  'When you emit one, use this exact wrapper:',
+  '`★ Insight ─────────────────────────────────────`',
+  '- [point 1]',
+  '- [point 2]',
+  '`─────────────────────────────────────────────────`',
+  '',
+  'Keep it to 1–2 bullets. It must explain non-obvious reasoning, not summarize the work.',
+].join('\n')
+
+function buildCodeSurfInsightConvention() {
+  return CODESURF_INSIGHT_CONVENTION
+}
+
 function summarizeMemoryContext(contextBuckets, instructionPrompt) {
   return describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
 }
@@ -605,12 +624,14 @@ function agentPersonaPrompt(request) {
 function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
   const peerPrompt = buildClaudeSystemPrompt(peers)
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt)
+  const insightConvention = buildCodeSurfInsightConvention()
+  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention)
 }
 
 function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt)
+  const insightConvention = buildCodeSurfInsightConvention()
+  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention)
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
@@ -985,6 +1006,19 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
   // timeline if a crash loses the last sub-flush window.
   const METADATA_FLUSH_MS = 250
   const metadataFlushTimers = new Map() // jobId -> timeout
+  const timelineWriteChains = new Map() // jobId -> Promise<void>
+
+  function enqueueTimelineWrite(jobId, payload) {
+    const previous = timelineWriteChains.get(jobId) ?? Promise.resolve()
+    const next = previous
+      .catch(() => {})
+      .then(() => fs.appendFile(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`, 'utf8'))
+    timelineWriteChains.set(jobId, next)
+    next.finally(() => {
+      if (timelineWriteChains.get(jobId) === next) timelineWriteChains.delete(jobId)
+    }).catch(() => {})
+    return next
+  }
 
   // Periodic SSE heartbeat so clients can detect a silently-dead stream (e.g. a
   // half-open socket, or the post-crash wedge that streamJob's liveness guard
@@ -1081,10 +1115,20 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       ...event,
     }
 
-    await fs.appendFile(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`, 'utf8')
-
     if (live) {
       live.metadata = metadata
+    }
+
+    // Fast path: deliver provider deltas to subscribers before touching disk.
+    // Timeline persistence is still ordered per job, but it runs behind the SSE
+    // fanout so token rendering latency is provider/network-bound, not fs-bound.
+    const timelineWrite = enqueueTimelineWrite(jobId, payload)
+
+    const listeners = subscribers.get(jobId)
+    if (listeners) {
+      for (const res of listeners) {
+        writeSseEvent(res, payload)
+      }
     }
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
@@ -1093,16 +1137,10 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const isTerminalEvent = event.type === 'done' || event.type === 'error'
     if (isTerminalEvent || event.sessionId || !live) {
       clearMetadataFlush(jobId)
+      await timelineWrite.catch(() => {})
       await writeJobMetadata(metadata)
     } else {
       scheduleMetadataFlush(jobId)
-    }
-
-    const listeners = subscribers.get(jobId)
-    if (listeners) {
-      for (const res of listeners) {
-        writeSseEvent(res, payload)
-      }
     }
 
     if (event.type === 'done' || event.type === 'error') {

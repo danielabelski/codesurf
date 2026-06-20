@@ -3312,11 +3312,15 @@ const server = createServer(async (req, res) => {
         return
       }
 
+      req.socket?.setNoDelay?.(true)
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
       })
+      res.flushHeaders?.()
+      res.write(': connected\n\n')
 
       const keepOpen = await chatJobs.streamJob(jobId, sinceSequence, res)
       if (!keepOpen) {

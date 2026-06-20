@@ -204,7 +204,10 @@ export function normalizePersistedChatSurfaces(value: unknown): ActiveChatSurfac
 }
 
 export function getToolDisplayName(name: string): string {
-  return name === 'exec_command' ? 'bash' : name
+  if (name === 'exec_command') return 'bash'
+  if (name === 'Workspace File References') return 'files'
+  if (name === 'Workspace Instructions') return 'instructions'
+  return name
 }
 
 export function buildOutgoingMessageContent(draftInput: string, draftAttachments: PendingAttachment[]): string {

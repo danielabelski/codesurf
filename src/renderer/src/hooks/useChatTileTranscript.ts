@@ -78,6 +78,7 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
   const stickToBottomRef = useRef(true)
   const lastScrollTopRef = useRef<number>(0)
   const showScrollToLatestRef = useRef(false)
+  const programmaticScrollToLatestRef = useRef(false)
   const pendingHistoryPrependRef = useRef<{ previousHeight: number; previousTop: number } | null>(null)
   const loadEarlierMessagesRef = useRef<() => Promise<void>>(async () => {})
   const annotationComposerActiveRef = useRef(false)
@@ -192,13 +193,18 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
     setShowScrollToLatest(next)
   }, [])
 
-  const scrollToLatest = useCallback((behavior: ScrollBehavior = 'smooth') => {
+  const scrollToLatest = useCallback((behavior?: ScrollBehavior) => {
     const el = messagesRef.current
     if (!el) return
     stickToBottomRef.current = true
+    programmaticScrollToLatestRef.current = true
     syncScrollToLatestVisibility(false)
-    el.scrollTo({ top: el.scrollHeight, behavior })
-  }, [syncScrollToLatestVisibility])
+    const resolvedBehavior = behavior ?? (isStreaming ? 'auto' : 'smooth')
+    el.scrollTo({ top: el.scrollHeight, behavior: resolvedBehavior })
+    if (resolvedBehavior === 'auto') {
+      lastScrollTopRef.current = el.scrollTop
+    }
+  }, [isStreaming, syncScrollToLatestVisibility])
 
   const reviewLatestChanges = useCallback(() => {
     const scroller = messagesRef.current
@@ -217,6 +223,7 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
 
   const handleMessagesWheel = useCallback((ev: React.WheelEvent<HTMLDivElement>) => {
     if (ev.deltaY < 0) {
+      programmaticScrollToLatestRef.current = false
       stickToBottomRef.current = false
       syncScrollToLatestVisibility(true)
     }
@@ -224,6 +231,7 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
 
   const handleMessagesKeyDown = useCallback((ev: React.KeyboardEvent<HTMLDivElement>) => {
     if (ev.key === 'ArrowUp' || ev.key === 'PageUp' || ev.key === 'Home') {
+      programmaticScrollToLatestRef.current = false
       stickToBottomRef.current = false
       syncScrollToLatestVisibility(true)
     }
@@ -237,13 +245,14 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
     const currentTop = el.scrollTop
     lastScrollTopRef.current = currentTop
 
-    if (currentTop < prevTop) {
-      if (stickToBottomRef.current) stickToBottomRef.current = false
-      syncScrollToLatestVisibility(true)
-    } else if (isNearLatest(el)) {
+    if (isNearLatest(el)) {
+      programmaticScrollToLatestRef.current = false
       if (!stickToBottomRef.current) stickToBottomRef.current = true
       if (visibleMessageLimit !== CHAT_INITIAL_RENDER_WINDOW) setVisibleMessageLimit(CHAT_INITIAL_RENDER_WINDOW)
       syncScrollToLatestVisibility(false)
+    } else if (currentTop < prevTop && !programmaticScrollToLatestRef.current) {
+      if (stickToBottomRef.current) stickToBottomRef.current = false
+      syncScrollToLatestVisibility(true)
     }
 
     if (el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD && !loadingEarlier) {
@@ -296,6 +305,8 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
       return
     }
     el.scrollTop = el.scrollHeight
+    lastScrollTopRef.current = el.scrollTop
+    programmaticScrollToLatestRef.current = false
     syncScrollToLatestVisibility(false)
   }, [messages, syncScrollToLatestVisibility])
 

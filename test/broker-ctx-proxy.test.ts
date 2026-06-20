@@ -151,3 +151,38 @@ test('ctx.ipc.handle registers local handler and marshals to (ipc, handle, [full
   assert.equal(calls[0].method, 'handle')
   assert.equal(calls[0].args[0], 'ext:my-ext:my-channel')
 })
+
+test('ctx.ipc.handle catches rejected registration calls instead of emitting unhandled rejections', async () => {
+  const calls: CallRecord[] = []
+  const error = new Error('Attempted to register a second handler')
+  const call = async (capability: string, method: string, args: unknown[]) => {
+    calls.push({ capability, method, args })
+    throw error
+  }
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  const originalConsoleError = console.error
+  const logged: unknown[][] = []
+  console.error = (...args: unknown[]) => { logged.push(args) }
+  process.on('unhandledRejection', onUnhandled)
+
+  try {
+    const ctx = createCtxProxy(call as never, 'my-ext') as Record<string, unknown>
+    const ipc = ctx.ipc as Record<string, unknown>
+
+    ;(ipc.handle as (ch: string, h: () => void) => void)('my-channel', () => 'result')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].capability, 'ipc')
+    assert.equal(calls[0].method, 'handle')
+    assert.deepEqual(unhandled, [])
+    assert.ok(
+      logged.some(args => String(args.join(' ')).includes('ipc.handle(ext:my-ext:my-channel) failed')),
+      `expected rejected registration to be logged, got ${JSON.stringify(logged)}`,
+    )
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    console.error = originalConsoleError
+  }
+})

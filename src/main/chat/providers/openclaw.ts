@@ -5,7 +5,7 @@
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
-import { buildCodeSurfOutputConvention } from '../prompt-conventions'
+import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import {
   log,
@@ -163,8 +163,9 @@ export function chatOpenclaw(req: ChatRequest): void {
   // so the CodeSurf output convention rides along with the first user message.
   // Session history carries it forward on subsequent turns.
   const openClawIsFirstTurn = !existingSessionId
+  const openClawConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
   const openClawMessage = openClawIsFirstTurn
-    ? `${buildCodeSurfOutputConvention()}\n\n---\n\n${lastUserMsg.content}`
+    ? `${openClawConvention}\n\n---\n\n${lastUserMsg.content}`
     : lastUserMsg.content
   args.push('--message', openClawMessage)
 

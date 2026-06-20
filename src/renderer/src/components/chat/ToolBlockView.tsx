@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react'
 import { Brain, Check, ChevronRight, Clock, Cog, History, RotateCcw, Sparkles, Wrench } from 'lucide-react'
 import type { ToolBlock, ThinkingBlock, ChatMessage } from '../../../../shared/chat-types'
 import type { TileTodoItem } from '../../state/tileTodosStore'
@@ -37,7 +37,7 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
   const isActive = !thinking.done
   const hasContent = thinking.content.length > 0
 
-  // Track elapsed thinking time so we can show "Thought for Xs"
+  // Track elapsed thinking time so the chip can show just the duration.
   const startTimeRef = useRef<number | null>(null)
   const finalElapsedRef = useRef<number | null>(null)
   const [elapsedSec, setElapsedSec] = useState(0)
@@ -73,6 +73,11 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
   // can sit inline in the same chip row without breaking the visual rhythm.
   // The outer container is a column so the expanded quote content can still
   // render underneath the chip in full width when opened.
+  const thinkLightLine = `color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+  const thinkOuterDark = theme.mode === 'light'
+    ? `color-mix(in srgb, ${theme.text.primary} 45%, transparent)`
+    : `rgba(0,0,0,0.75)`
+
   return (
     <div style={{
       display: 'flex',
@@ -84,61 +89,76 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
       minWidth: 0,
       flex: '0 0 auto',
     }}>
-      {/* Chip — matches tool chip sizing, border, and padding */}
-      <button
-        onClick={() => hasContent && setExpanded(e => !e)}
-        style={{
-          background: theme.chat.assistantBubble,
-          border: '0.5px solid transparent',
-          boxShadow: theme.mode === 'light'
-            ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
-            : 'var(--cs-edge-shadow)',
-          margin: 1,
-          borderRadius: 8,
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 5,
-          padding: '0 8px',
-          minHeight: 22,
-          boxSizing: 'border-box',
-          cursor: hasContent ? 'pointer' : 'default',
-          color: theme.chat.muted,
-          fontSize: 10.5,
-          fontFamily: fonts.sans,
-          fontWeight: 500,
-          lineHeight: 1,
-          width: 'fit-content',
-          maxWidth: '100%',
-        }}
-      >
-        <Brain size={11} style={{ opacity: isActive ? 0.75 : 0.5, flexShrink: 0 }} />
-        {isActive ? (
-          <ShimmerText baseColor={theme.chat.muted} style={{
-            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
-            minWidth: 0, flex: '1 1 auto',
-            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-            textTransform: 'uppercase', letterSpacing: 0.3,
-          }}>
-            {`Thinking for ${elapsedSec}s`}
-          </ShimmerText>
-        ) : (
-          <span style={{
-            fontSize: 10.5, fontWeight: 500, lineHeight: 1,
-            minWidth: 0, flex: '1 1 auto',
-            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
-            textTransform: 'uppercase', letterSpacing: 0.3,
-          }}>
-            {`Thought for ${displayedElapsed}s`}
-          </span>
-        )}
-        {hasContent && (
-          <ChevronRight size={12} style={{
-            transform: expanded ? 'rotate(90deg)' : 'none',
-            transition: 'transform 0.15s',
-            opacity: 0.4, flexShrink: 0,
-          }} />
-        )}
-      </button>
+      {/* Chip pill — same chrome as ToolBlockView */}
+      <div style={{
+        background: theme.chat.assistantBubble,
+        border: '0.5px solid transparent',
+        boxShadow: `var(--cs-edge-shadow), 0 0 0 0.5px ${thinkLightLine}, 0 0 0 1px ${thinkOuterDark}`,
+        margin: 1,
+        borderRadius: 8,
+        overflow: 'hidden',
+        width: 'fit-content',
+        maxWidth: `min(calc(100% - 2px), ${TOOL_BLOCK_MAX_WIDTH}px)`,
+        flex: '0 0 auto',
+        minWidth: 0,
+      }}>
+        <button
+          onClick={() => hasContent && setExpanded(e => !e)}
+          style={{
+            background: 'none',
+            border: 'none',
+            boxShadow: 'none',
+            margin: 0,
+            padding: '0 8px',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            minHeight: 20,
+            boxSizing: 'border-box',
+            cursor: hasContent ? 'pointer' : 'default',
+            color: isActive ? theme.chat.textSecondary : theme.chat.muted,
+            fontSize: 10.5,
+            fontFamily: fonts.sans,
+            fontWeight: 500,
+            lineHeight: 1,
+            width: 'fit-content',
+            maxWidth: '100%',
+          }}
+        >
+          <Brain size={11} style={{ opacity: isActive ? 0.75 : 0.5, flexShrink: 0 }} />
+          {isActive ? (
+            <ShimmerText baseColor={theme.chat.textSecondary} style={{
+              fontSize: 10.5, fontWeight: 500, lineHeight: 1,
+              minWidth: 0, flex: '1 1 auto',
+              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+              letterSpacing: 0.2,
+            }}>
+              {`${elapsedSec}s`}
+            </ShimmerText>
+          ) : (
+            <span style={{
+              fontSize: 10.5, fontWeight: 500, lineHeight: 1,
+              minWidth: 0, flex: '1 1 auto',
+              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+              letterSpacing: 0.2,
+            }}>
+              {`${displayedElapsed}s`}
+            </span>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 2, flexShrink: 0 }}>
+            {!isActive && (
+              <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
+            )}
+            {hasContent && (
+              <ChevronRight size={12} style={{
+                transform: expanded ? 'rotate(90deg)' : 'none',
+                transition: 'transform 0.15s',
+                opacity: 0.4, flexShrink: 0,
+              }} />
+            )}
+          </div>
+        </button>
+      </div>
 
       {/* Expanded thinking content — quote-indent style, no background.
           Rendered on its own row beneath the chip when expanded. */}
@@ -211,28 +231,32 @@ export const WorkingChipView = React.memo(function WorkingChipView({ message }: 
     ? `Running ${getToolDisplayName(activeTool.name)}`
     : 'Working'
 
+  const lightLine = `color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+  const outerDarkLine = theme.mode === 'light'
+    ? `color-mix(in srgb, ${theme.text.primary} 45%, transparent)`
+    : `rgba(0,0,0,0.75)`
+
   return (
     <div style={{
       background: theme.chat.assistantBubble,
       border: '0.5px solid transparent',
-      boxShadow: theme.mode === 'light'
-        ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
-        : 'var(--cs-edge-shadow)',
+      boxShadow: `var(--cs-edge-shadow), 0 0 0 0.5px ${lightLine}, 0 0 0 1px ${outerDarkLine}`,
       margin: 1,
       borderRadius: 8,
+      overflow: 'hidden',
       display: 'inline-flex',
       alignItems: 'center',
       gap: 5,
       padding: '0 8px',
-      minHeight: 24,
+      minHeight: 22,
       boxSizing: 'border-box',
-      color: theme.chat.muted,
+      color: theme.chat.textSecondary,
       fontSize: 10.5,
       fontFamily: fonts.sans,
       fontWeight: 500,
       lineHeight: 1,
       width: 'fit-content',
-      maxWidth: `min(100%, ${TOOL_BLOCK_MAX_WIDTH}px)`,
+      maxWidth: `min(calc(100% - 2px), ${TOOL_BLOCK_MAX_WIDTH}px)`,
       flex: '0 0 auto',
     }}>
       <Cog size={11} style={{
@@ -240,7 +264,7 @@ export const WorkingChipView = React.memo(function WorkingChipView({ message }: 
         flexShrink: 0,
         animation: 'chat-spin 2.4s linear infinite',
       }} />
-      <ShimmerText baseColor={theme.chat.muted} style={{
+      <ShimmerText baseColor={theme.chat.textSecondary} style={{
         fontSize: 10.5, fontWeight: 500, lineHeight: 1,
         minWidth: 0,
         overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
@@ -307,12 +331,13 @@ export const StreamingLivenessIndicator = React.memo(function StreamingLivenessI
 
 /**
  * Collapses a mixed-name run of completed tool blocks into a single
- * "Called N tools" chip that expands horizontally to reveal the originals.
+ * "N tools" chip that expands horizontally to reveal the originals.
  */
 export const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { blocks: ToolBlock[] }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
   const [expanded, setExpanded] = useState(false)
+  const toggle = () => startTransition(() => setExpanded(e => !e))
 
   return (
     <div style={{
@@ -325,7 +350,7 @@ export const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { b
       flex: '0 0 auto',
     }}>
       <div
-        onClick={() => setExpanded(e => !e)}
+        onClick={toggle}
         style={{
           background: theme.chat.assistantBubble,
           border: '0.5px solid transparent',
@@ -356,7 +381,7 @@ export const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { b
           overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
           textTransform: 'uppercase', letterSpacing: 0.3,
         }}>
-          Called {blocks.length} tools
+          {blocks.length} tools
         </span>
         <Check size={11} color={theme.status.success} style={{ flexShrink: 0 }} />
         <ChevronRight size={12} style={{
@@ -383,47 +408,18 @@ export const MixedToolGroup = React.memo(function MixedToolGroup({ blocks }: { b
   )
 })
 
-/** Collapses consecutive same-name completed tool chips into "Read x6" style. */
-/**
- * Human-friendly label for a collapsed group of same-tool calls.
- * Falls back to "Ran N <tool> calls" for unrecognised tools so the chip
- * still reads as a past-tense summary instead of raw tool-name + ×N badge.
- */
+/** Collapses consecutive same-name completed tool chips into "5 reads" style. */
 function getGroupedToolLabel(name: string, count: number): string {
-  switch (name) {
-    case 'Edit':
-    case 'MultiEdit':
-      return `Edited ${count} file${count === 1 ? '' : 's'}`
-    case 'Write':
-      return `Wrote ${count} file${count === 1 ? '' : 's'}`
-    case 'Read':
-      return `Read ${count} file${count === 1 ? '' : 's'}`
-    case 'Bash':
-    case 'exec_command':
-      return `Ran ${count} command${count === 1 ? '' : 's'}`
-    case 'Grep':
-      return `Searched ${count} time${count === 1 ? '' : 's'}`
-    case 'Glob':
-      return `Matched ${count} pattern${count === 1 ? '' : 's'}`
-    case 'WebFetch':
-      return `Fetched ${count} URL${count === 1 ? '' : 's'}`
-    case 'WebSearch':
-      return `Searched the web ${count} time${count === 1 ? '' : 's'}`
-    case 'TodoWrite':
-      return `Updated todos ${count} time${count === 1 ? '' : 's'}`
-    case 'update_plan':
-      return `Updated plan ${count} time${count === 1 ? '' : 's'}`
-    case 'Task':
-      return `Ran ${count} sub-agent${count === 1 ? '' : 's'}`
-    default:
-      return `Used ${getToolDisplayName(name)} ${count} time${count === 1 ? '' : 's'}`
-  }
+  const label = getToolDisplayName(name).trim() || 'tool'
+  const plural = count === 1 || label.toLowerCase().endsWith('s') ? label : `${label}s`
+  return `${count} ${plural}`
 }
 
 export const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name, blocks }: { name: string; blocks: ToolBlock[] }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
   const [expanded, setExpanded] = useState(false)
+  const toggle = () => startTransition(() => setExpanded(e => !e))
 
   return (
     <div style={{
@@ -436,7 +432,7 @@ export const CollapsedToolGroup = React.memo(function CollapsedToolGroup({ name,
       flex: '0 0 auto',
     }}>
       <div
-        onClick={() => setExpanded(e => !e)}
+        onClick={toggle}
         style={{
           background: theme.chat.assistantBubble,
           border: '0.5px solid transparent',
@@ -578,6 +574,24 @@ export const ToolGroupChip = React.memo(function ToolGroupChip({ toolName, count
   )
 })
 
+/** Thinking summary: `12×THOUGHT`. Controlled inline-explode chip. */
+export const ThinkingGroupChip = React.memo(function ThinkingGroupChip({ count, expanded, onToggle }: {
+  count: number
+  expanded: boolean
+  onToggle: () => void
+}): JSX.Element {
+  const theme = useTheme()
+  return (
+    <CollationSummaryChip
+      icon={<Brain size={11} style={{ opacity: 0.75, flexShrink: 0, color: theme.accent.base }} />}
+      label="THOUGHT"
+      count={count}
+      expanded={expanded}
+      onToggle={onToggle}
+    />
+  )
+})
+
 /** Tier-2 mega summary: `12×TOOLS`. Controlled inline-explode chip. */
 export const ToolMegaChip = React.memo(function ToolMegaChip({ count, expanded, onToggle }: {
   count: number
@@ -597,7 +611,7 @@ export const ToolMegaChip = React.memo(function ToolMegaChip({ count, expanded, 
 })
 
 
-export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false }: { block: ToolBlock; isLive?: boolean }): JSX.Element {
+export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive = false, chipVariant }: { block: ToolBlock; isLive?: boolean; chipVariant?: 'a' | 'b' }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
   const codePanelFontSize = Math.max(11, fonts.size - 1)
@@ -684,9 +698,15 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
       style={{
         background: theme.chat.assistantBubble,
         border: '0.5px solid transparent',
-        boxShadow: theme.mode === 'light'
-          ? `var(--cs-edge-shadow), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
-          : 'var(--cs-edge-shadow)',
+        boxShadow: (() => {
+          const lightLine = `color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
+          const base = `var(--cs-edge-shadow), 0 0 0 0.5px ${lightLine}`
+          const outerDarkLine = theme.mode === 'light'
+            ? `color-mix(in srgb, ${theme.text.primary} 45%, transparent)`
+            : `rgba(0,0,0,0.75)`
+          if (chipVariant) return `${base}, 0 0 0 1px ${outerDarkLine}`
+          return base
+        })(),
         margin: 1,
         borderRadius: 8,
         overflow: 'hidden',
@@ -698,7 +718,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
       }}
     >
       <button
-        onClick={() => setExpanded(e => !e)}
+        onClick={() => startTransition(() => setExpanded(e => !e))}
         style={{
           display: 'flex',
           alignItems: 'center',

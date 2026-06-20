@@ -1,3 +1,4 @@
+import { startTransition } from 'react'
 import { Mic } from 'lucide-react'
 import type { ToolBlock, ChatMessage } from '../../../../shared/chat-types'
 import type { VoiceSettings } from '../../../../shared/types'
@@ -12,6 +13,7 @@ import {
   ThinkingBlockView,
   MixedToolGroup,
   CollapsedToolGroup,
+  ThinkingGroupChip,
   ToolGroupChip,
   ToolMegaChip,
   ToolBlockView,
@@ -109,12 +111,23 @@ export function ChatTileTranscriptMessages({
     return items
   }
 
-  const renderChipItem = (item: ReturnType<typeof collateClusterChips>[number], clusterId: string): JSX.Element => {
+  const renderChipItem = (item: ReturnType<typeof collateClusterChips>[number], clusterId: string, itemIndex?: number): JSX.Element => {
     if (item.kind === 'thinking') {
       return <ThinkingBlockView key={item.key} thinking={item.block} />
     }
+    if (item.kind === 'thinking-group') {
+      return (
+        <ThinkingGroupChip
+          key={item.key}
+          count={item.blocks.length}
+          expanded={item.expanded}
+          onToggle={() => startTransition(() => toggleExplodedChipGroup(clusterId, item.id))}
+        />
+      )
+    }
     if (item.kind === 'tool-single') {
-      return <ToolBlockView key={item.key} block={item.block} isLive={item.isLive} />
+      const variant = itemIndex !== undefined ? 'b' : undefined
+      return <ToolBlockView key={item.key} block={item.block} isLive={item.isLive} chipVariant={variant} />
     }
     if (item.kind === 'tool-group') {
       return (
@@ -123,7 +136,7 @@ export function ChatTileTranscriptMessages({
           toolName={item.toolName}
           count={item.blocks.length}
           expanded={item.expanded}
-          onToggle={() => toggleExplodedChipGroup(clusterId, item.id)}
+          onToggle={() => startTransition(() => toggleExplodedChipGroup(clusterId, item.id))}
         />
       )
     }
@@ -132,7 +145,7 @@ export function ChatTileTranscriptMessages({
         key={item.key}
         count={item.blocks.length}
         expanded={item.expanded}
-        onToggle={() => toggleExplodedChipGroup(clusterId, item.id)}
+        onToggle={() => startTransition(() => toggleExplodedChipGroup(clusterId, item.id))}
       />
     )
   }
@@ -173,7 +186,7 @@ export function ChatTileTranscriptMessages({
         onComposerActiveChange={onAnnotationComposerActiveChange}
         onUpdateNote={(text) => updateBlockNote({ kind: 'message', messageId: lastId }, text)}
       >
-        {renderChipRow(finalItems.map(item => renderChipItem(item, clusterId)), `cluster-row-${clusterId}`)}
+        {renderChipRow(finalItems.map((item, idx) => renderChipItem(item, clusterId, idx)), `cluster-row-${clusterId}`)}
       </BlockNoteAffordance>
     )
     clusterItems = []
@@ -286,7 +299,7 @@ export function ChatTileTranscriptMessages({
                       }
                       continue
                     }
-                    chipRow.push(<ToolBlockView key={tb.id} block={tb} isLive={isLiveMessage} />)
+                    chipRow.push(<ToolBlockView key={tb.id} block={tb} isLive={isLiveMessage} chipVariant="b" />)
                   }
                   continue
                 }
@@ -373,48 +386,45 @@ export function ChatTileTranscriptMessages({
             </>
           )}
 
-          {msg.role === 'assistant' && (
+          {msg.role === 'assistant' && !isLiveMessage && msg.cost != null && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 8,
               fontSize: monoSize - 2, color: theme.chat.subtle, fontFamily: fontMono,
               padding: '0 4px',
-              marginTop: -5,
-              minHeight: monoSize + 2,
-              visibility: (!isLiveMessage && msg.cost != null) ? 'visible' : 'hidden',
+              marginTop: 2,
+              lineHeight: 1.2,
             }}>
-              {!isLiveMessage && msg.cost != null && (<>
-                <span>${msg.cost.toFixed(4)}</span>
-                {msg.turns != null && (
-                  <span>{msg.turns} turn{msg.turns !== 1 ? 's' : ''}</span>
-                )}
-                <span>{relativeTime(msg.timestamp)}</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (ttsState.currentMessageId === msg.id) {
-                      ttsPlayer.stopMessage(msg.id)
-                    } else {
-                      void speakMessage({
-                        messageId: msg.id,
-                        text: msg.content,
-                        ttsProvider: voiceSettings.ttsProvider,
-                        ttsVoice: voiceSettings.ttsVoice,
-                        spokifyModel: voiceSettings.spokifyModel,
-                        force: true,
-                      })
-                    }
-                  }}
-                  onMouseDown={e => e.preventDefault()}
-                  title={ttsState.currentMessageId === msg.id ? 'Stop speaking' : 'Speak this message'}
-                  style={{
-                    marginLeft: 'auto', background: 'transparent', border: 'none',
-                    cursor: 'pointer', padding: 2, display: 'flex',
-                    color: ttsState.currentMessageId === msg.id ? theme.accent.base : theme.chat.subtle,
-                  }}
-                >
-                  <Mic size={10} strokeWidth={2.2} />
-                </button>
-              </>)}
+              <span>${msg.cost.toFixed(4)}</span>
+              {msg.turns != null && (
+                <span>{msg.turns} turn{msg.turns !== 1 ? 's' : ''}</span>
+              )}
+              <span>{relativeTime(msg.timestamp)}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (ttsState.currentMessageId === msg.id) {
+                    ttsPlayer.stopMessage(msg.id)
+                  } else {
+                    void speakMessage({
+                      messageId: msg.id,
+                      text: msg.content,
+                      ttsProvider: voiceSettings.ttsProvider,
+                      ttsVoice: voiceSettings.ttsVoice,
+                      spokifyModel: voiceSettings.spokifyModel,
+                      force: true,
+                    })
+                  }
+                }}
+                onMouseDown={e => e.preventDefault()}
+                title={ttsState.currentMessageId === msg.id ? 'Stop speaking' : 'Speak this message'}
+                style={{
+                  marginLeft: 'auto', background: 'transparent', border: 'none',
+                  cursor: 'pointer', padding: 2, display: 'flex',
+                  color: ttsState.currentMessageId === msg.id ? theme.accent.base : theme.chat.subtle,
+                }}
+              >
+                <Mic size={10} strokeWidth={2.2} />
+              </button>
             </div>
           )}
 

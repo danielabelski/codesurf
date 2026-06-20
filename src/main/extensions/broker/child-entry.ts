@@ -20,6 +20,8 @@
 
 import { JsonRpcPeer, type JsonValue } from './json-rpc.ts'
 import type { ActivateParams, BusEventParams, InvokeIpcParams, InvokeToolParams } from './protocol.ts'
+import { fileURLToPath } from 'node:url'
+import { resolve } from 'node:path'
 
 // ── Transport ────────────────────────────────────────────────────────────────
 
@@ -32,14 +34,29 @@ declare const process: NodeJS.Process & {
   }
 }
 
-if (!process.parentPort) {
-  // Running as a standalone Node process (e.g. tests) — use stdio fallback.
-  const peer = buildPeer(line => process.stdout.write(line + '\n'))
-  process.stdin.setEncoding('utf8')
-  process.stdin.on('data', (chunk: string) => peer.feed(chunk))
-} else {
-  const peer = buildPeer(line => process.parentPort!.postMessage(line))
-  process.parentPort.on('message', (e: { data: unknown }) => peer.feed(String(e.data) + '\n'))
+function isDirectEntry(): boolean {
+  try {
+    return resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)
+  } catch {
+    return false
+  }
+}
+
+export function startBrokerChildTransport(): void {
+  if (!process.parentPort) {
+    // Running as a standalone Node process — use stdio fallback. This is only
+    // started for direct execution, not when tests import createCtxProxy().
+    const peer = buildPeer(line => process.stdout.write(line + '\n'))
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('data', (chunk: string) => peer.feed(chunk))
+  } else {
+    const peer = buildPeer(line => process.parentPort!.postMessage(line))
+    process.parentPort.on('message', (e: { data: unknown }) => peer.feed(String(e.data) + '\n'))
+  }
+}
+
+if (process.parentPort || isDirectEntry()) {
+  startBrokerChildTransport()
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -104,6 +121,15 @@ function buildPeer(writeLine: (line: string) => void) {
   })
 
   return peer
+}
+
+function reportAsyncCapabilityError(label: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error)
+  console.error(`[BrokerChild] ${label} failed: ${message}`)
+}
+
+function fireAndReport(promise: Promise<unknown>, label: string): void {
+  void promise.catch(error => reportAsyncCapabilityError(label, error))
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -199,12 +225,12 @@ set: (patch: Record<string, unknown>) => {
 },
       replace: (value: Record<string, unknown>) => {
         storeSnapshot = { ...value }
-        call('store', 'replace', [value as unknown as JsonValue])
+        fireAndReport(call('store', 'replace', [value as unknown as JsonValue]), 'store.replace')
       },
       update: (fn: (current: Record<string, unknown>) => Record<string, unknown>) => {
         const next = fn({ ...storeSnapshot })
         storeSnapshot = next
-        call('store', 'replace', [next as unknown as JsonValue])
+        fireAndReport(call('store', 'replace', [next as unknown as JsonValue]), 'store.update')
       },
       subscribe: (cb: (state: Record<string, unknown>) => void) => {
         const id = nextId('storeSub')
@@ -212,10 +238,10 @@ set: (patch: Record<string, unknown>) => {
           const payload = (evt as { payload?: { state?: Record<string, unknown> } })?.payload
           cb(payload?.state ?? {})
         })
-        call('store', 'subscribe', [id])
+        fireAndReport(call('store', 'subscribe', [id]), 'store.subscribe')
         return () => {
           busSubscriptions.delete(id)
-          call('store', 'unsubscribe', [id])
+          fireAndReport(call('store', 'unsubscribe', [id]), 'store.unsubscribe')
         }
       },
     },
@@ -227,13 +253,13 @@ set: (patch: Record<string, unknown>) => {
       subscribe: (channel: string, subscriberId: string, cb: (event: unknown) => void) => {
         const id = nextId('busSub')
         busSubscriptions.set(id, cb)
-        call('bus', 'subscribe', [channel, subscriberId, id])
+        fireAndReport(call('bus', 'subscribe', [channel, subscriberId, id]), `bus.subscribe(${channel})`)
         return id
       },
 
       unsubscribe: (id: string) => {
         busSubscriptions.delete(id)
-        call('bus', 'unsubscribe', [id])
+        fireAndReport(call('bus', 'unsubscribe', [id]), `bus.unsubscribe(${id})`)
       },
     },
 
@@ -246,12 +272,12 @@ set: (patch: Record<string, unknown>) => {
       }) => {
         const registrationId = nextId('tool')
         mcpToolHandlers.set(registrationId, tool.handler)
-        call('mcp', 'registerTool', [{
+        fireAndReport(call('mcp', 'registerTool', [{
           name: tool.name,
           description: tool.description,
           inputSchema: tool.inputSchema as unknown as JsonValue,
           registrationId,
-        } as unknown as JsonValue])
+        } as unknown as JsonValue]), `mcp.registerTool(${tool.name})`)
       },
     },
 
@@ -259,7 +285,7 @@ set: (patch: Record<string, unknown>) => {
       handle: (channel: string, handler: (...args: unknown[]) => unknown) => {
         const fullChannel = `ext:${extensionId}:${channel}`
         ipcHandlers.set(fullChannel, handler)
-        call('ipc', 'handle', [fullChannel])
+        fireAndReport(call('ipc', 'handle', [fullChannel]), `ipc.handle(${fullChannel})`)
       },
     },
 

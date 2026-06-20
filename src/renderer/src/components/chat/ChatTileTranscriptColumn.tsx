@@ -158,7 +158,7 @@ export function ChatTileTranscriptColumn({
           display: terminalActive ? 'none' : undefined,
           flex: isStartScreen ? '0 0 auto' : 1,
           overflowY: isStartScreen ? 'visible' : 'auto',
-          padding: isStartScreen ? '12px 14px 4px' : '12px 14px',
+          padding: isStartScreen ? '12px 14px 4px' : '12px 14px 44px',
           overflowX: 'hidden',
           minHeight: 0,
           scrollbarGutter: 'stable both-edges' as React.CSSProperties['scrollbarGutter'],

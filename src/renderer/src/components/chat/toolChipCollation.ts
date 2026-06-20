@@ -20,8 +20,9 @@
 // re-collapse target.
 //
 // Unlike grok-cli, contex clusters also interleave `thinking` chips (which
-// grok-cli has no equivalent of). Those are kept as loose individuals in
-// chronological order — they never group.
+// grok-cli has no equivalent of). Those now get their own single summary chip
+// when numerous, so long reasoning/tool sessions don't produce a wall of `1S`
+// thought chips.
 
 import type { ToolBlock, ThinkingBlock } from '../../../../shared/chat-types'
 
@@ -29,6 +30,7 @@ export const CHIP_GROUP_THRESHOLD = 3
 export const CHIP_MEGA_THRESHOLD = 3
 
 export const MEGA_ID = '__mega'
+export const THINKING_GROUP_ID = '__thinking'
 export const GROUP_ID_PREFIX = '__group:'
 
 /** Source chip slots fed into collation, in chronological order. */
@@ -39,6 +41,13 @@ export type ClusterChip =
 /** Output display items the chip row should render, in order. */
 export type ChipDisplayItem =
   | { kind: 'thinking'; key: string; block: ThinkingBlock }
+  | {
+      kind: 'thinking-group'
+      id: string
+      key: string
+      blocks: ThinkingBlock[]
+      expanded: boolean
+    }
   | { kind: 'tool-single'; key: string; block: ToolBlock; isLive: boolean }
   | {
       kind: 'tool-group'
@@ -64,7 +73,8 @@ export type ChipDisplayItem =
  * caller's expansion state into the ordered list the chip row should render.
  *
  * Ordering contract (adapted from grok-cli for contex's interleaved layout):
- *   1. Done `thinking` chips, in chronological order
+ *   1. Done `thinking` chips, grouped as `N×THOUGHT` at the same threshold
+ *      as tools, or loose in chronological order below that threshold
  *   2. Mega chip OR tier-1 group chips (first-seen-tool-name order)
  *   3. Loose done tool chips, in chronological order
  *   4. Running tool chips, in chronological order
@@ -111,8 +121,25 @@ export function collateClusterChips(
 
   const items: ChipDisplayItem[] = []
 
-  // 1. Done thinking chips lead the row (collapsed reasoning summaries).
-  for (const t of thinking) items.push({ kind: 'thinking', key: t.key, block: t.block })
+  // 1. Done thinking chips lead the row. Collapse noisy reasoning runs into
+  // a controlled summary chip, with inline expansion back to the individual
+  // elapsed-time chips so their per-block content remains inspectable.
+  const thinkingGroupActive = thinking.length >= CHIP_GROUP_THRESHOLD
+  const thinkingGroupExploded = thinkingGroupActive && explodedGroups.has(THINKING_GROUP_ID)
+  if (thinkingGroupActive) {
+    items.push({
+      kind: 'thinking-group',
+      id: THINKING_GROUP_ID,
+      key: `thinking-${thinking[0].key}`,
+      blocks: thinking.map(t => t.block),
+      expanded: thinkingGroupExploded,
+    })
+    if (thinkingGroupExploded) {
+      for (const t of thinking) items.push({ kind: 'thinking', key: t.key, block: t.block })
+    }
+  } else {
+    for (const t of thinking) items.push({ kind: 'thinking', key: t.key, block: t.block })
+  }
 
   const megaActive = groupable.length >= CHIP_MEGA_THRESHOLD
   const megaExploded = megaActive && explodedGroups.has(MEGA_ID)

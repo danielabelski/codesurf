@@ -322,6 +322,17 @@ export class ExtensionBrokerHost {
         }
         // Register directly with ipcMain — ExtensionContext.ipc.handle namespaces
         // with ext:{id}:, but the child already sends the full channel.
+        //
+        // Registration is intentionally replacement-safe for this extension's
+        // own namespace. A hot reload, overlapping scan, or extension bug can
+        // re-register the same ext:{id}:* channel; Electron throws on duplicate
+        // ipcMain.handle(), and that rejection used to surface as unhandled
+        // broker-child warnings. Remove the previous owned handler first so the
+        // latest child owns the channel deterministically.
+        if (this.ipcChannels.includes(fullChannel)) {
+          ipcMain.removeHandler(fullChannel)
+          this.ipcChannels = this.ipcChannels.filter(channel => channel !== fullChannel)
+        }
         ipcMain.handle(fullChannel, async (_event, ...ipcArgs) => {
           const result = await peer.call<{ returnValue: JsonValue }>('broker.invokeIpc', {
             channel: fullChannel,

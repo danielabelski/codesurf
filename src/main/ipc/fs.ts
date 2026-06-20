@@ -58,6 +58,7 @@ const SENSITIVE_DIRS = ['.ssh', '.gnupg', '.aws', '.config']
 export interface FsPathScopeOptions {
   restrictToWorkspaceRoots?: boolean
   allowedRoots?: string[]
+  allowReadOnlyOpenCodeConfig?: boolean
 }
 
 export function isPathUnderRoot(candidatePath: string, rootPath: string): boolean {
@@ -90,11 +91,36 @@ export function assertPathAllowedForFs(
   throw new Error(`Access denied: path "${resolvedPath}" is outside allowed workspace roots`)
 }
 
+function isAllowedReadOnlyOpenCodeConfigPath(resolvedPath: string, home: string): boolean {
+  const allowedRoots = [
+    path.join(home, '.config', 'opencode', 'skills'),
+    path.join(home, '.config', 'opencode', 'prompts'),
+    path.join(home, '.config', 'opencode', 'agents'),
+  ]
+  return allowedRoots.some(root => isPathUnderRoot(resolvedPath, root))
+}
+
+async function validateReadOnlyOpenCodeConfigRealPath(resolvedPath: string, home: string): Promise<void> {
+  try {
+    const realPath = await fs.realpath(resolvedPath)
+    if (!isAllowedReadOnlyOpenCodeConfigPath(realPath, home)) {
+      throw new Error(`Access denied: path "${resolvedPath}" resolves outside allowed OpenCode config roots`)
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+}
+
 export function validateFsPath(filePath: string, options?: FsPathScopeOptions): string {
   const resolved = path.resolve(resolveFsPath(filePath))
   const home = resolveHome()
   // Always allow app config paths
   if (resolved.startsWith(CONTEX_HOME + path.sep) || resolved === CONTEX_HOME) return resolved
+
+  if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, home)) {
+    return resolved
+  }
 
   // Reject paths to sensitive directories
   for (const dir of SENSITIVE_DIRS) {
@@ -117,7 +143,7 @@ export function validateFsPath(filePath: string, options?: FsPathScopeOptions): 
   return resolved
 }
 
-async function validateFsPathForHandler(filePath: string, workspaceId?: string): Promise<string> {
+async function validateFsPathForHandler(filePath: string, workspaceId?: string, options?: FsPathScopeOptions): Promise<string> {
   const {
     readSettingsSync,
     getAllWorkspaceProjectPaths,
@@ -126,17 +152,26 @@ async function validateFsPathForHandler(filePath: string, workspaceId?: string):
   const { applyNewInstallSecurityDefaults } = await import('../../shared/types.ts')
   const settings = applyNewInstallSecurityDefaults(readSettingsSync())
   if (!settings.security.restrictFsToWorkspaceRoots) {
-    return validateFsPath(filePath)
+    const resolved = validateFsPath(filePath, options)
+    if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, resolveHome())) {
+      await validateReadOnlyOpenCodeConfigRealPath(resolved, resolveHome())
+    }
+    return resolved
   }
 
   const allowedRoots = workspaceId
     ? await getWorkspaceProjectPathsById(workspaceId)
     : await getAllWorkspaceProjectPaths()
 
-  return validateFsPath(filePath, {
+  const resolved = validateFsPath(filePath, {
+    ...options,
     restrictToWorkspaceRoots: true,
     allowedRoots,
   })
+  if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, resolveHome())) {
+    await validateReadOnlyOpenCodeConfigRealPath(resolved, resolveHome())
+  }
+  return resolved
 }
 
 export function assertSafeCardId(cardId: string): void {
@@ -230,7 +265,7 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:readDir', async (_, dirPath: string, workspaceId?: string) => {
     try {
-      const resolvedDirPath = await validateFsPathForHandler(dirPath, workspaceId)
+      const resolvedDirPath = await validateFsPathForHandler(dirPath, workspaceId, { allowReadOnlyOpenCodeConfig: true })
       const entries = await fs.readdir(resolvedDirPath, { withFileTypes: true })
       const result: FsEntry[] = entries.map(e => ({
         name: e.name,
@@ -255,7 +290,7 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:readFile', async (_, filePath: string, workspaceId?: string) => {
     try {
-      return await fs.readFile(await validateFsPathForHandler(filePath, workspaceId), 'utf8')
+      return await fs.readFile(await validateFsPathForHandler(filePath, workspaceId, { allowReadOnlyOpenCodeConfig: true }), 'utf8')
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       // Access-denied errors must propagate: returning '' would let a
@@ -322,7 +357,7 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:probeDir', async (_, dirPath: string, workspaceId?: string) => {
     try {
-      const resolved = await validateFsPathForHandler(dirPath, workspaceId)
+      const resolved = await validateFsPathForHandler(dirPath, workspaceId, { allowReadOnlyOpenCodeConfig: true })
       const stats = await fs.stat(resolved)
       if (!stats.isDirectory()) return { ok: false, code: 'ENOTDIR' }
       return { ok: true }
@@ -334,7 +369,7 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:stat', async (_, filePath: string, workspaceId?: string) => {
     try {
-      const stats = await fs.stat(await validateFsPathForHandler(filePath, workspaceId))
+      const stats = await fs.stat(await validateFsPathForHandler(filePath, workspaceId, { allowReadOnlyOpenCodeConfig: true }))
       return {
         size: stats.size,
         mtimeMs: stats.mtimeMs,

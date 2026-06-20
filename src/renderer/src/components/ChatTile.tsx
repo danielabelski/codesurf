@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } from 'react'
 import type { AppSettings, Persona } from '../../../shared/types'
-import { loadPersonas, getAgentIcon, DEFAULT_PERSONAS } from '../config/agentModes'
+import { loadPersonas, DEFAULT_PERSONAS } from '../config/agentModes'
 import { resolvePersonaModelSeed, resolveSkillModelLock } from '../hooks/personaModelBinding'
 import { MONO_DEFAULT } from '../FontContext'
 
@@ -280,10 +280,23 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     chatSurfaceThemeVars,
   })
   const pagedLinkedHistoryEnabled = canUsePagedLinkedHistory(linkedSessionEntryId, linkedSessionHint, sessionId)
+  const lastStreamingAssistantMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role !== 'assistant') continue
+      if (m.isStreaming) return true
+      if ((m.toolBlocks ?? []).some(tb => tb.status === 'running')) return true
+      if (m.thinking && !m.thinking.done) return true
+      if ((m.thinkingBlocks ?? []).some(tb => !tb.done)) return true
+      return false
+    }
+    return false
+  }, [messages])
+  const hasStreamingContent = isStreaming || lastStreamingAssistantMessage
   const { isStreamingRef, setMessagesSafe, queueStreamText, flushPendingStreamText } = useChatTileStreamBuffer({
     setMessages,
     pagedLinkedHistoryEnabled,
-    isStreaming,
+    isStreaming: hasStreamingContent,
   })
   const { localExecutionLabel, remoteHosts, activeCloudHost, executionDisplayLabel, executionDisplayDetail } = useChatExecutionHosts({
     executionPreference: settings?.execution ?? null,
@@ -452,7 +465,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     enabled: autoSpeakEnabled,
     messageId: lastAssistantMessage?.id ?? null,
     text: lastAssistantMessage?.content ?? null,
-    isStreaming: Boolean(lastAssistantMessage?.isStreaming) || isStreaming,
+    isStreaming: Boolean(lastAssistantMessage?.isStreaming) || hasStreamingContent,
     ttsProvider: voiceSettings.ttsProvider,
     ttsVoice: voiceSettings.ttsVoice,
     spokifyModel: voiceSettings.spokifyModel,
@@ -826,24 +839,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
       }}
     >
 
-      {/* Active agent definition header — surfaces the selected AgentMode's
-          colour + icon so the persona driving this tile is visible at a glance. */}
-      {resolvedAgentMode && (
-        <div
-          title={resolvedAgentMode.description}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '4px 10px', flexShrink: 0,
-            borderBottom: `0.5px solid ${composerBorder}`,
-            color: resolvedAgentMode.color,
-            background: `color-mix(in srgb, ${resolvedAgentMode.color} 10%, transparent)`,
-            fontSize: 11, fontWeight: 600, letterSpacing: 0.2,
-          }}
-        >
-          <span style={{ display: 'flex', alignItems: 'center' }}>{getAgentIcon(resolvedAgentMode.icon)}</span>
-          <span>{resolvedAgentMode.name}</span>
-        </div>
-      )}
 
       {/* Horizontal split: [transcript + composer column] | [plan pane] */}
       <div style={{

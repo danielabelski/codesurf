@@ -265,7 +265,7 @@ export function ChatTileQueuedTurnsDrawer({
                 minWidth: 0, flex: 1,
                 color: isUrgent ? theme.status.danger : theme.chat.textSecondary,
                 fontWeight: isUrgent ? 600 : undefined,
-                fontSize: Math.max(12, fontSize),
+                fontSize: Math.max(11, fontSize - 2),
                 fontFamily: fontSans,
                 lineHeight: 1.35,
                 overflow: 'hidden',

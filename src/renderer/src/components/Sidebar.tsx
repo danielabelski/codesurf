@@ -58,6 +58,7 @@ function getSessionSidebarIndicatorColor(session: SessionEntry, theme: ReturnTyp
   if (key === 'cursor') return '#b792ff'
   if (key === 'openclaw') return '#62cfa6'
   if (key === 'opencode') return '#64d2ff'
+  if (key === 'csagent' || key === 'pi') return '#a78bfa'
   if (key === 'codesurf') return '#95a1b3'
   return theme.accent.base
 }

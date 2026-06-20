@@ -222,6 +222,7 @@ async function readExtensionSettings(registry: ExtensionRegistry, extId: string)
 export function registerExtensionIPC(registry: ExtensionRegistry): void {
   let lastScannedWorkspacePath: string | null = null
   let hasScanned = false
+  let inFlightLoad: { workspacePath: string | null; promise: Promise<void> } | null = null
 
   const ensureLoaded = async (workspacePath?: string | null, force = false): Promise<void> => {
     const settings = readSettingsSync()
@@ -234,9 +235,22 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
     const targetWorkspacePath = workspacePath ?? registry.getActiveWorkspacePath() ?? null
     if (!force && hasScanned && lastScannedWorkspacePath === targetWorkspacePath) return
 
-    await registry.rescan(targetWorkspacePath)
-    lastScannedWorkspacePath = targetWorkspacePath
-    hasScanned = true
+    if (!force && inFlightLoad && inFlightLoad.workspacePath === targetWorkspacePath) {
+      await inFlightLoad.promise
+      return
+    }
+
+    const loadPromise = registry.rescan(targetWorkspacePath)
+      .then(() => {
+        lastScannedWorkspacePath = targetWorkspacePath
+        hasScanned = true
+      })
+      .finally(() => {
+        if (inFlightLoad?.promise === loadPromise) inFlightLoad = null
+      })
+
+    inFlightLoad = { workspacePath: targetWorkspacePath, promise: loadPromise }
+    await loadPromise
   }
 
   // List all loaded extensions

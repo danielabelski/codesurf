@@ -33,6 +33,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { CONTEX_HOME } from '../paths'
+import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
 
 /** Internal provider id (neutral). Never surface 'pi'/'earendil' to users. */
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
@@ -585,7 +586,9 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
 
     // First/idle prompt: NO streamingBehavior (only required while streaming).
     const images = await buildCsagentImages(req.imageAttachments)
-    await session.prompt(req.prompt, {
+    const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
+    const promptText = storedId ? req.prompt : `${promptConvention}\n\n---\n\n${req.prompt}`
+    await session.prompt(promptText, {
       ...(images.length > 0 ? { images } : {}),
       source: 'interactive',
     })

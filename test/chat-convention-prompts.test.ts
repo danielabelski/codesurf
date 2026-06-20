@@ -23,8 +23,9 @@ import {
 
 const CHAT_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/ipc/chat.ts'), 'utf8')
 const CLAUDE_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/claude.ts'), 'utf8')
-const CODEX_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/codex.ts'), 'utf8')
+const CODEX_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/agent-mode-payloads.ts'), 'utf8')
 const HERMES_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/hermes.ts'), 'utf8')
+const PI_RUNTIME_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/pi-runtime.ts'), 'utf8')
 const OPENCLAW_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/openclaw.ts'), 'utf8')
 const OPENCODE_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/opencode.ts'), 'utf8')
 
@@ -37,8 +38,8 @@ describe('CodeSurf prompt conventions — values', () => {
     expect(CODESURF_OUTPUT_CONVENTION).toContain('CONCERNS:')
   })
 
-  test('CODESURF_INSIGHT_CONVENTION is opt-in and keeps the literal star-framed container', () => {
-    expect(CODESURF_INSIGHT_CONVENTION).toContain('Do not emit an Insight block unless the user explicitly asks')
+  test('CODESURF_INSIGHT_CONVENTION is provider-ready and keeps the literal star-framed container', () => {
+    expect(CODESURF_INSIGHT_CONVENTION).toContain('Use an Insight block when you notice a non-obvious constraint')
     // The exact framing must survive — the chat renderer matches on these
     // characters. Changing the framing means updating the renderer too.
     expect(CODESURF_INSIGHT_CONVENTION).toContain('★ Insight ─────────────────────────────────────')
@@ -65,50 +66,45 @@ describe('CodeSurf prompt conventions — provider wiring', () => {
     return match![0]
   }
 
-  test('Claude prompt builder injects output convention but not automatic insights', () => {
+  test('Claude prompt builder injects output and insight conventions', () => {
     const block = extractFunction(CLAUDE_SOURCE, 'claude.ts', 'buildClaudeAgentPrompt')
     expect(block).toContain('buildCodeSurfOutputConvention')
-    expect(block).not.toContain('buildCodeSurfInsightConvention')
+    expect(block).toContain('buildCodeSurfInsightConvention')
     expect(block).toContain('joinPromptSections')
   })
 
-  test('Codex prompt builder injects output convention but not automatic insights', () => {
-    const block = extractFunction(CODEX_SOURCE, 'codex.ts', 'buildCodexPrompt')
+  test('Codex prompt builder injects output and insight conventions', () => {
+    const block = extractFunction(CODEX_SOURCE, 'agent-mode-payloads.ts', 'buildCodexPrompt')
     expect(block).toContain('buildCodeSurfOutputConvention')
-    expect(block).not.toContain('buildCodeSurfInsightConvention')
+    expect(block).toContain('buildCodeSurfInsightConvention')
     expect(block).toContain('joinPromptSections')
   })
 
-  test('OpenCode prepends only the output convention on the first turn of a fresh session', () => {
+  test('OpenCode prepends output and insight conventions on the first turn of a fresh session', () => {
     assert.match(
       OPENCODE_SOURCE,
-      /const isFirstTurn = !existingSessionId[\s\S]{0,400}buildCodeSurfOutputConvention\(\)[\s\S]{0,80}---/,
+      /const promptConvention = joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\)\)[\s\S]{0,180}---/,
     )
   })
 
-  test('OpenClaw prepends only the output convention on the first turn', () => {
+  test('OpenClaw prepends output and insight conventions on the first turn', () => {
     assert.match(
       OPENCLAW_SOURCE,
-      /openClawIsFirstTurn[\s\S]{0,400}buildCodeSurfOutputConvention\(\)[\s\S]{0,80}---/,
+      /const openClawConvention = joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\)\)[\s\S]{0,180}---/,
     )
   })
 
-  test('Hermes prepends only the output convention on the first turn', () => {
+  test('Hermes receives output and insight conventions on the first turn', () => {
     assert.match(
-      HERMES_SOURCE,
-      /hermesIsFirstTurn[\s\S]{0,400}buildCodeSurfOutputConvention\(\)[\s\S]{0,80}---/,
+      CODEX_SOURCE,
+      /outputConvention: joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\)\)/,
     )
   })
 
-  test('normal provider prompt wiring never calls the insight convention helper', () => {
-    const normalPromptPath = [
-      extractFunction(CLAUDE_SOURCE, 'claude.ts', 'buildClaudeAgentPrompt'),
-      extractFunction(CODEX_SOURCE, 'codex.ts', 'buildCodexPrompt'),
-    ].join('\n')
-    expect(normalPromptPath).not.toContain('buildCodeSurfInsightConvention')
-    assert.doesNotMatch(
-      [CHAT_SOURCE, OPENCODE_SOURCE].join('\n'),
-      /buildCodeSurfOutputConvention\(\)[\s\S]{0,200}buildCodeSurfInsightConvention\(\)/,
+  test('Pi runtime prepends output and insight conventions on fresh sessions', () => {
+    assert.match(
+      PI_RUNTIME_SOURCE,
+      /const promptConvention = joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\)\)[\s\S]{0,180}session\.prompt\(promptText/,
     )
   })
 })

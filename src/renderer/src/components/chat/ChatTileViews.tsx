@@ -4,7 +4,7 @@ import {
   Brain, Bug, Check, ChevronRight, ClipboardCheck, Cog, Copy, FileText,
   Pencil, ShieldCheck, Sparkles, Wrench, Bot,
 } from 'lucide-react'
-import { basename, isImagePath } from '../../utils/dnd'
+import { basename } from '../../utils/dnd'
 import { dispatchOpenLink } from '../../utils/links'
 import { useAppFonts } from '../../FontContext'
 import { useTheme } from '../../ThemeContext'
@@ -498,7 +498,6 @@ export const ChatMessageContent = React.memo(({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, minWidth: 0 }}>
         {attachmentPaths.map(path => {
           const wasRead = readAttachmentPaths?.has(path) === true
-          const isImage = isImagePath(path)
           return (
             <button
               key={path}
@@ -515,27 +514,11 @@ export const ChatMessageContent = React.memo(({
                 border: `1px solid ${chipBorder}`,
                 background: chipBackground,
                 color: chipText,
-                padding: isImage ? 3 : '3px 7px',
+                padding: '3px 7px',
                 cursor: 'pointer',
               }}
             >
-              {isImage ? (
-                <img
-                  src={`contex-file://${encodeURI(path).replace(/#/g, '%23')}`}
-                  alt={basename(path)}
-                  style={{
-                    width: 28,
-                    height: 28,
-                    objectFit: 'cover',
-                    borderRadius: 4,
-                    flexShrink: 0,
-                    display: 'block',
-                    background: theme.surface.panelMuted,
-                  }}
-                />
-              ) : (
-                <FileText size={10} color={chipText} style={{ flexShrink: 0, opacity: 0.85 }} />
-              )}
+              <FileText size={10} color={chipText} style={{ flexShrink: 0, opacity: 0.85 }} />
               <span
                 style={{
                   minWidth: 0,
@@ -546,7 +529,7 @@ export const ChatMessageContent = React.memo(({
                   fontSize: Math.max(10, fonts.size - 2),
                   lineHeight: 1.2,
                   color: chipText,
-                  paddingRight: isImage ? 6 : 0,
+                  paddingRight: 0,
                 }}
               >
                 {basename(path)}
@@ -555,7 +538,7 @@ export const ChatMessageContent = React.memo(({
                 <Check
                   size={10}
                   color={theme.status.success}
-                  style={{ flexShrink: 0, marginRight: isImage ? 4 : 0 }}
+                  style={{ flexShrink: 0, marginRight: 0 }}
                   aria-label="Read by the model"
                 />
               )}

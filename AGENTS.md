@@ -99,3 +99,22 @@ New untracked file: `src/main/ipc/chat.ts`
 - MCP server port is random — always read from config file, never hardcode
 - Canvas undo state holds full snapshots — don't accidentally push to undo stack in hot paths
 - `cluso-widget` is an optional local file dependency (`file:../agentation-real`) — may not exist in all environments
+
+## Chat Chip Chrome Map (DO NOT BREAK)
+
+Every chip component has a deliberate chrome decision. Before touching any chip styling, check this:
+
+| Component | Chrome |
+|---|---|
+| `ThinkingBlockView` (individual 🧠 in transcript) | **Full chip** — background + border + shadow |
+| `WorkingChipView` (live WORKING indicator) | **Full chip** — background + border + shadow |
+| `ToolBlockView` (individual tool chip) | **Full chip** — the canonical reference |
+| `CollationSummaryChip` / group chips | **Accent chip** — coloured background/border, still bordered |
+
+**Critical:** `ThinkingBlockView` and `WorkingChipView` are independent components. If one needs chrome changed, do NOT touch the other. This caused three regressions in one session.
+
+**Canvas overlap ≠ transcript CSS:** When chips or elements look like they overlap, check App.tsx canvas z-index (`bringToFront`, `nextZIndex`) FIRST. Do not add `position: relative` + `zIndex` to transcript rows to fix canvas stacking issues — it makes things worse.
+
+**`textTransform: uppercase` kills units:** `${n}s` → `NS`. Remove uppercase transform from any span that contains a number+unit, or render them as separate elements.
+
+**Chip expansion performance:** Use `React.startTransition` on all expand toggles. The collation system (`collateClusterChips`) is already lazy — unexploded groups emit zero individual items. The cost is synchronous mount on expand, not data flow.

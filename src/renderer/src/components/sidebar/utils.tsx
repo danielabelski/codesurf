@@ -118,6 +118,7 @@ export function getSessionAgentLabel(session: SessionEntry): string {
   if (key === 'hermes') return 'Hermes'
   if (key === 'openclaw') return 'OpenClaw'
   if (key === 'opencode') return 'OpenCode'
+  if (key === 'csagent' || key === 'pi') return 'Pi Agent'
   return session.sourceLabel || 'CodeSurf'
 }
 
@@ -242,6 +243,7 @@ import {
   HermesIcon,
   OpenClawIcon,
   OpenCodeIcon,
+  PiIcon,
 } from '../icons/providerIcons'
 
 export const SESSION_SOURCE_ICONS: Record<string, React.JSX.Element> = {
@@ -252,6 +254,7 @@ export const SESSION_SOURCE_ICONS: Record<string, React.JSX.Element> = {
   hermes:   <HermesIcon size={14} />,
   openclaw: <OpenClawIcon size={14} />,
   opencode: <OpenCodeIcon size={14} />,
+  csagent: <PiIcon size={14} />,
 }
 
 export function SpinnerIcon({ size = 14, color = 'currentColor' }: { size?: number; color?: string }): React.JSX.Element {

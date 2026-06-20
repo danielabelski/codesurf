@@ -21,7 +21,7 @@ import type { Persona } from '../../../shared/types'
 import { buildHermesChatArgs } from '../../agents/agent-cli-contracts.ts'
 import { buildHermesTurnPrompt } from './hermes-prompt.ts'
 import { buildAsyncExecutionPrompt } from '../prompt-builders.ts'
-import { buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions.ts'
+import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions.ts'
 import {
   resolveAgentToolAllowList,
   hermesToolsetsFromAllowList,
@@ -68,7 +68,7 @@ export function buildHermesSpawnArgs(input: HermesSpawnInput): string[] {
     userContent: input.userContent,
     agentPersona,
     isFirstTurn: !input.existingSessionId,
-    outputConvention: buildCodeSurfOutputConvention(),
+    outputConvention: joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention()),
   })
   return buildHermesChatArgs({
     prompt,
@@ -91,9 +91,10 @@ function buildCodexPrompt(
 ): string {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const outputConvention = buildCodeSurfOutputConvention()
+  const insightConvention = buildCodeSurfInsightConvention()
   // Persona leads the preamble — Codex has no system-prompt flag, so it rides
   // along ahead of memory/skills in the prompt.
-  const preamble = joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention)
+  const preamble = joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention)
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
