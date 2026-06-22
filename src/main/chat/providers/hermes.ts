@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
-import { buildSafeSpawnEnv } from '../../ipc/terminal'
+import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import {
   sanitizeAgentCliDiagnostic,
 } from '../../agents/agent-cli-contracts'

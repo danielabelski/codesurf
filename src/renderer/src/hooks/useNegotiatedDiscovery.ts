@@ -192,7 +192,11 @@ export function useNegotiatedDiscovery(params: UseNegotiatedDiscoveryParams) {
       routes.set(key, { key, route, distance: dist, locked: true })
     }
 
-    if (autoConnectionsEnabled) {
+    // Skip O(n²) findDiscoveryMatch during active drags — the discovery
+    // graph doesn't need to be recomputed while tiles are moving. This
+    // prevents frame drops during drag with many tiles.
+    const isActiveDrag = dragState.type === 'tile' || dragState.type === 'group' || dragState.type === 'resize' || dragState.type === 'connection'
+    if (autoConnectionsEnabled && !isActiveDrag) {
       for (const tile of tiles) {
         const discovery = findDiscoveryMatch(tile.id, tiles, new Set(), gridStep, maxDistance)
         if (!discovery?.match) continue

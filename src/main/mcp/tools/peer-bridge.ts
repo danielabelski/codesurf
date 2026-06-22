@@ -182,7 +182,9 @@ export async function handlePeerBridgeTool(
     try {
       const notePath = await findNoteTileBackingFile(tileId)
       if (notePath) return await fs.readFile(notePath, 'utf8')
-    } catch { /**/ }
+    } catch (err) {
+      console.warn(`[peer-bridge] note_read_content failed for ${tileId}:`, err)
+    }
     return `Note block ${tileId} is empty or not found`
   }
 
@@ -192,7 +194,10 @@ export async function handlePeerBridgeTool(
     try {
       const notePath = await findNoteTileBackingFile(tileId)
       if (notePath) await fs.writeFile(notePath, content, 'utf8')
-    } catch { /**/ }
+    } catch (err) {
+      console.warn(`[peer-bridge] note_write_content failed for ${tileId}:`, err)
+      return `Failed to write note: ${(err as Error).message}`
+    }
     return publishPeerCommand(tileId, name, { content }, ctx)
   }
 
@@ -207,7 +212,9 @@ export async function handlePeerBridgeTool(
           const next = previous ? `${previous}\n${content}` : content
           await fs.writeFile(notePath, next, 'utf8')
         }
-      } catch { /**/ }
+      } catch (err) {
+        console.warn(`[peer-bridge] note_append_context failed for ${tileId}:`, err)
+      }
     }
     return publishPeerCommand(tileId, name, { content }, ctx)
   }

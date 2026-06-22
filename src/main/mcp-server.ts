@@ -26,6 +26,29 @@ import type { McpToolContext, McpToolSchema } from './mcp/types'
 const MCP_TOKEN = randomUUID()
 const MAX_BODY = 1024 * 1024 // 1MB
 
+// Per-tile token registry — limits blast radius if a tile's token leaks.
+// The global MCP_TOKEN remains for server discovery and renderer IPC.
+const tileTokens = new Map<string, string>()
+
+/** Generate a per-tile token for scoped MCP auth. */
+export function generateTileToken(tileId: string): string {
+  const existing = tileTokens.get(tileId)
+  if (existing) return existing
+  const token = randomUUID()
+  tileTokens.set(tileId, token)
+  return token
+}
+
+/** Revoke a tile's MCP token (call on tile deletion). */
+export function revokeTileToken(tileId: string): void {
+  tileTokens.delete(tileId)
+}
+
+/** Get a tile-specific token, generating one if needed. */
+export function getTileToken(tileId: string): string {
+  return generateTileToken(tileId)
+}
+
 // SSE client registry: cardId → response streams
 const sseClients = new Map<string, Set<ServerResponse>>()
 
@@ -226,11 +249,12 @@ export function getMCPToken(): string {
   return MCP_TOKEN
 }
 
-export function buildContexHttpMcpServerEntry(contexUrl: string): Record<string, unknown> {
+export function buildContexHttpMcpServerEntry(contexUrl: string, tileId?: string): Record<string, unknown> {
+  const token = tileId ? getTileToken(tileId) : MCP_TOKEN
   return {
     type: 'http',
     url: contexUrl.replace(/\/$/, ''),
-    headers: { Authorization: `Bearer ${MCP_TOKEN}` },
+    headers: { Authorization: `Bearer ${token}` },
   }
 }
 
@@ -410,17 +434,21 @@ let serverPort: number | null = null
 let mcpHttpServer: Server | null = null
 
 function setCorsHeaders(res: ServerResponse, req?: IncomingMessage): void {
-  // The real DNS-rebinding defense is isLoopbackHost() below — every request
-  // that reaches a handler has a loopback Host. CORS is NOT the boundary for
-  // the side-effecting endpoints (/push, /inject): those are reachable by
-  // "simple" cross-origin POSTs regardless of ACAO, so they rely on the random
-  // port, 0o600 config, and Host validation instead. Reflect the caller's
-  // Origin (so the in-app renderer works whatever its scheme — file:// sends
-  // Origin "null", dev uses http://localhost, prod a custom scheme) and fall
-  // back to '*' for non-browser clients (agents/MCP transport) that send none.
+  // Restrictive CORS: allow only known Electron origins. DNS-rebinding defense
+  // is isLoopbackHost() below — every request that reaches a handler has a
+  // loopback Host. CORS restricts which browser origins can read responses.
+  // Non-browser clients (agents/MCP transport) don't send Origin and work fine.
   const origin = req?.headers.origin
-  res.setHeader('Access-Control-Allow-Origin', origin || '*')
-  if (origin) res.setHeader('Vary', 'Origin')
+  const isAllowedOrigin = !origin ||
+    origin === 'null' ||                              // file:// in production
+    origin.startsWith('http://localhost:') ||          // dev server
+    origin === 'http://localhost' ||
+    origin.startsWith('app://') ||                    // custom Electron schemes
+    origin === 'app://codesurf'
+  if (isAllowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*')
+    if (origin) res.setHeader('Vary', 'Origin')
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Cache-Control, Authorization')
 }
@@ -462,13 +490,15 @@ export function requireMcpAuth(
     ? readQueryToken(options.url)
     : null
   const token = bearer ?? queryToken
-  if (token !== MCP_TOKEN) {
-    setCorsHeaders(res, req)
-    res.writeHead(401, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ error: 'Unauthorized' }))
-    return false
-  }
-  return true
+
+  // Check against global token first, then per-tile tokens
+  if (token === MCP_TOKEN) return true
+  if (token && tileTokens.has(token)) return true
+
+  setCorsHeaders(res, req)
+  res.writeHead(401, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ error: 'Unauthorized' }))
+  return false
 }
 
 export function stopMCPServer(): Promise<void> {
@@ -667,7 +697,11 @@ export async function startMCPServer(): Promise<number> {
         const existingRaw = await fs.readFile(configPath, 'utf8')
         const parsed = JSON.parse(existingRaw)
         if (parsed && typeof parsed === 'object') existingConfig = parsed as Record<string, unknown>
-      } catch { /**/ }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('[mcp] Failed to read existing config for merge:', err)
+        }
+      }
 
       const existingServers = typeof existingConfig.mcpServers === 'object' && existingConfig.mcpServers !== null
         ? existingConfig.mcpServers as Record<string, unknown>
@@ -740,7 +774,11 @@ export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<
     const raw = await fs.readFile(mcpJsonPath, 'utf8')
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object') existing = parsed as Record<string, unknown>
-  } catch { /**/ }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.warn('[mcp] Failed to read existing .mcp.json for merge:', err)
+    }
+  }
 
   const existingServers = typeof existing.mcpServers === 'object' && existing.mcpServers !== null
     ? existing.mcpServers as Record<string, unknown>

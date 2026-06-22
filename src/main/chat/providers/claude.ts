@@ -15,13 +15,8 @@ import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildC
 import { buildClaudeAgentModeOptions } from './agent-mode-payloads'
 import { daemonClient } from '../../daemon/client'
 import { getDisconnectedPeerBridgeMcpToolNames } from '../../../shared/nodeTools'
-import {
-  persistGrant,
-  resolveStoredPermission,
-  storeSessionGrant,
-  type ToolPermissionRequest,
-} from '../../permissions'
-import type { ToolPermissionDecision } from '../../ipc/chat'
+import { type ToolPermissionRequest } from '../../permissions'
+import { resolveInlineToolPermission } from '../permission-flow'
 import type {
   ChatImageAttachment,
   ChatRequest,
@@ -635,63 +630,19 @@ export function chatClaude(req: ChatRequest): void {
         workspaceDir: req.workspaceDir,
       }
 
-      // Stored grant? Short-circuit without prompting the user.
-      //   'allow' → allow session/today/forever grant matches
-      //   'deny'  → `never` (persistent deny) — reject silently
-      const storedDecision = resolveStoredPermission(permissionRequest)
-      if (storedDecision === 'allow') {
-        return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
-      }
-      if (storedDecision === 'deny') {
-        // Surface the resolved state in the stream so the renderer can
-        // render a "Blocked" card rather than leaving the tool pending.
-        const toolUseID = typeof toolOptions?.toolUseID === 'string'
-          ? toolOptions.toolUseID
-          : `claude-permission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-        sendStream(req.cardId, {
-          type: 'tool_permission_resolved',
-          toolId: toolUseID,
-          toolName,
-          decision: 'never',
-        })
-        return {
-          behavior: 'deny',
-          message: 'Tool permission permanently denied (Never). Clear it in Settings → Permissions to re-enable prompts.',
-          toolUseID: toolOptions?.toolUseID,
-        }
-      }
-
-      // Ask the renderer inline — same pattern as AskUserQuestion.
       const sdkToolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
-      const toolUseID = sdkToolUseID ?? `claude-permission-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      let decision: ToolPermissionDecision
-      try {
-        const { awaitToolPermissionAnswer } = await import('../../ipc/chat')
-        decision = await awaitToolPermissionAnswer(req.cardId, toolUseID, permissionRequest)
-      } catch (err) {
-        log('tool permission await error:', (err as Error).message)
+      const result = await resolveInlineToolPermission(req.cardId, permissionRequest, sdkToolUseID)
+
+      if ('error' in result) {
         return {
           behavior: 'deny',
-          message: 'Tool permission request was cancelled.',
-          toolUseID: sdkToolUseID ?? toolOptions?.toolUseID,
+          message: result.error,
+          toolUseID: result.toolUseID ?? toolOptions?.toolUseID,
         }
       }
 
-      // Tell the renderer the prompt is resolved so the UI can collapse it.
-      sendStream(req.cardId, {
-        type: 'tool_permission_resolved',
-        toolId: toolUseID,
-        toolName,
-        decision,
-      })
-
+      const { decision } = result
       if (decision === 'deny' || decision === 'never') {
-        // Persist the "never" choice as a deny-grant so the next call is
-        // auto-rejected without another prompt. `deny` is one-shot.
-        if (decision === 'never') {
-          try { persistGrant(permissionRequest, 'never') }
-          catch (err) { log('tool permission persist (never) error:', (err as Error).message) }
-        }
         return {
           behavior: 'deny',
           message: decision === 'never'
@@ -699,14 +650,6 @@ export function chatClaude(req: ChatRequest): void {
             : 'Tool permission denied by the user.',
           toolUseID: sdkToolUseID ?? toolOptions?.toolUseID,
         }
-      }
-
-      // Persist grant scope so future calls skip the prompt.
-      try {
-        if (decision === 'session') storeSessionGrant(permissionRequest)
-        else if (decision === 'today' || decision === 'forever') persistGrant(permissionRequest, decision)
-      } catch (err) {
-        log('tool permission persist error:', (err as Error).message)
       }
 
       return await allowToolWithCheckpoint(req, toolName, input, toolOptions)

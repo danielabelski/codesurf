@@ -126,7 +126,11 @@ export function registerMcpConfigIPC(): void {
       try {
         const raw = await fsP.readFile(mcpConfigPath, 'utf8')
         globalCfg = JSON.parse(raw)
-      } catch { /**/ }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('[mcp-config] Failed to read global MCP config:', err)
+        }
+      }
 
       // Workspace servers
       let wsServers: Record<string, unknown> = {}
@@ -134,7 +138,11 @@ export function registerMcpConfigIPC(): void {
         const wsPath = join(CONTEX_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
         const raw = await fsP.readFile(wsPath, 'utf8')
         wsServers = JSON.parse(raw)
-      } catch { /**/ }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('[mcp-config] Failed to read workspace MCP config:', err)
+        }
+      }
 
       // Merge: global mcpServers + workspace servers
       const globalServers = (globalCfg as Record<string, Record<string, unknown>>).mcpServers ?? {}

@@ -2,14 +2,14 @@ import { ipcMain, WebContents } from 'electron'
 import { existsSync, chmodSync } from 'fs'
 import { promises as fsP } from 'fs'
 import { execFileSync } from 'child_process'
-import { homedir } from 'os'
 import { join } from 'path'
 import { bus } from '../event-bus'
-import { writeMCPConfigToWorkspace } from '../mcp-server'
+import { writeMCPConfigToWorkspace, getTileToken, revokeTileToken } from '../mcp-server'
 import { CONTEX_HOME, workspaceTileDir, legacyWorkspaceTileDir } from '../paths'
 import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
 import { readSettingsSync } from './workspace'
+import { isAllowedBinary, expandHome, buildSafeSpawnEnv } from './terminal-helpers'
 
 function ensureNodePtySpawnHelperExecutable(): void {
   // On Windows, node-pty uses conpty (no spawn-helper needed)
@@ -45,95 +45,9 @@ function ensureNodePtySpawnHelperExecutable(): void {
 
 ensureNodePtySpawnHelperExecutable()
 
-// --- Security: binary allowlist for pty spawn (SEC-04) ---
-const ALLOWED_SHELLS = new Set([
-  '/bin/bash', '/bin/zsh', '/bin/sh', '/usr/bin/bash', '/usr/bin/zsh',
-  '/usr/local/bin/bash', '/usr/local/bin/zsh', '/usr/local/bin/fish',
-  '/opt/homebrew/bin/bash', '/opt/homebrew/bin/zsh', '/opt/homebrew/bin/fish',
-])
-
-// Windows shells
-if (process.platform === 'win32') {
-  ALLOWED_SHELLS.add('powershell.exe')
-  ALLOWED_SHELLS.add('pwsh.exe')
-  ALLOWED_SHELLS.add('cmd.exe')
-  const sysRoot = process.env.SystemRoot || 'C:\\Windows'
-  ALLOWED_SHELLS.add(`${sysRoot}\\System32\\cmd.exe`)
-  ALLOWED_SHELLS.add(`${sysRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`)
-  // Add pwsh if installed
-  const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-  ALLOWED_SHELLS.add(`${programFiles}\\PowerShell\\7\\pwsh.exe`)
-}
-
-// Also allow the user's default shell
-const userShell = process.env.SHELL || (process.platform === 'win32' ? process.env.COMSPEC : undefined)
-if (userShell) ALLOWED_SHELLS.add(userShell)
-
-// Known agent CLIs that are allowed to be spawned directly
-const ALLOWED_AGENT_BINS = ['claude', 'codex', 'aider', 'opencode', 'openclaw', 'hermes']
-
-function isAllowedBinary(bin: string): boolean {
-  // Allow known shells
-  if (ALLOWED_SHELLS.has(bin)) return true
-  // Allow known agent CLIs (matched by basename, handle both / and \ separators,
-  // strip any Windows shim extension so .exe / .cmd / .bat / .ps1 all match)
-  const base = (bin.split(/[/\\]/).pop() || '').replace(/\.(exe|cmd|bat|ps1)$/i, '')
-  if (ALLOWED_AGENT_BINS.includes(base)) return true
-  return false
-}
-
 // node-pty must be required (not imported) due to native module ESM issues
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pty = require('node-pty')
-
-// Build a sanitized spawn environment — keep essential vars, strip known secrets.
-// This prevents leaking API keys and tokens from the Electron main process to
-// every spawned terminal and agent subprocess.
-const SPAWN_ENV_ALLOWLIST = new Set([
-  'PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
-  'TERM', 'TMPDIR', 'TEMP', 'TMP', 'DISPLAY', 'EDITOR', 'VISUAL',
-  'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
-  'NODE_PATH', 'NVM_DIR', 'NVM_BIN', 'FNM_DIR', 'VOLTA_HOME',
-  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
-  'SSH_AUTH_SOCK', 'GPG_AGENT_INFO',
-  // Platform essentials
-  ...(process.platform === 'win32' ? [
-    'SystemRoot', 'COMSPEC', 'ProgramFiles', 'ProgramFiles(x86)',
-    'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'USERNAME', 'COMPUTERNAME',
-    'HOMEDRIVE', 'HOMEPATH', 'PATHEXT', 'WINDIR',
-  ] : []),
-])
-const SPAWN_ENV_DENYLIST_RE = /(_API_KEY|_SECRET|_TOKEN|_PASSWORD|_PRIVATE_KEY|_CREDENTIALS)$/i
-
-export function buildSafeSpawnEnv(extra: Record<string, string> = {}): Record<string, string> {
-  const env: Record<string, string> = {}
-  for (const [key, value] of Object.entries(process.env as Record<string, string>)) {
-    if (SPAWN_ENV_ALLOWLIST.has(key) && !SPAWN_ENV_DENYLIST_RE.test(key)) {
-      env[key] = value
-    }
-  }
-  return { ...env, ...extra }
-}
-
-function expandHome(arg: string): string {
-  if (!arg.startsWith('~')) return arg
-  const home = homedir()
-  if (arg === '~') return home
-
-  // Resolve legacy ~/.contex/ and current ~/.codesurf/ paths to CONTEX_HOME
-  if (arg.startsWith('~/.contex/')) {
-    return join(CONTEX_HOME, arg.slice('~/.contex/'.length))
-  }
-  if (arg.startsWith('~\\.contex\\')) {
-    return join(CONTEX_HOME, arg.slice('~\\.contex\\'.length))
-  }
-  if (arg.startsWith('~/.codesurf/')) {
-    return join(CONTEX_HOME, arg.slice('~/.codesurf/'.length))
-  }
-
-  if (arg.startsWith('~/') || arg.startsWith('~\\')) return join(home, arg.slice(2))
-  return arg
-}
 
 // --- tmux session persistence ---------------------------------------------------
 
@@ -356,6 +270,9 @@ export function registerTerminalIPC(): void {
     if (isAgent) {
       const mcpConfigPath = join(CONTEX_HOME, 'mcp-server.json')
       spawnEnv.CONTEX_MCP_CONFIG = mcpConfigPath
+
+      // Per-tile MCP token — limits blast radius if leaked from this terminal
+      spawnEnv.CONTEX_MCP_TILE_TOKEN = getTileToken(tileId)
 
       // Ensure .contex dir exists before reading/spawning
       await fsP.mkdir(join(contexDir, 'context'), { recursive: true })
@@ -611,6 +528,9 @@ export function registerTerminalIPC(): void {
     if (buf?.timer) clearTimeout(buf.timer)
     terminalBuffers.delete(tileId)
     removePeerTile(tileId)
+    
+    // Revoke the tile's MCP token since the tile is being destroyed
+    revokeTileToken(tileId)
   })
 
   // terminal:detach — disconnects the PTY attachment but leaves tmux session alive

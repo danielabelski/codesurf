@@ -4,7 +4,7 @@
 
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
-import { buildSafeSpawnEnv } from '../../ipc/terminal'
+import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'

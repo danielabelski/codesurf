@@ -8,9 +8,9 @@ import { tmpdir } from 'os'
 import { dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
-import { buildSafeSpawnEnv } from '../../ipc/terminal'
+import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import { daemonClient } from '../../daemon/client'
-import { writeMCPConfigToWorkspace } from '../../mcp-server'
+import { writeMCPConfigToWorkspace, getTileToken } from '../../mcp-server'
 import { CONTEX_HOME } from '../../paths'
 import { buildPeerSystemPrompt } from '../prompt-builders'
 import { sanitizeToolOutputText } from '../output-sanitizers'
@@ -363,6 +363,7 @@ export function chatCodex(req: ChatRequest): void {
 
   const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) })
   spawnEnv.CONTEX_MCP_CONFIG = join(CONTEX_HOME, 'mcp-server.json')
+  spawnEnv.CONTEX_MCP_TILE_TOKEN = getTileToken(req.cardId)
 
   const proc = spawn(codexBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],

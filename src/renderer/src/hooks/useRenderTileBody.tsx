@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react'
+import React, { useCallback, useEffect, useRef } from 'react'
 import type { AppSettings, TileState, TileType, Workspace } from '../../../shared/types'
 import { getCurvierBlockRadius } from '../../../shared/types'
 import { stripCapabilityPrefix } from '../../../shared/nodeTools'
@@ -107,6 +107,23 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
     getExtensionActions,
   } = params
 
+  // --- volatile-dep refs: keep the callback identity stable across drags/zooms ---
+  const viewportZoomRef = useRef(viewportZoom)
+  const tileByIdMapRef = useRef(tileByIdMap)
+  const chatReloadTokensRef = useRef(chatReloadTokens)
+  const byTileConnectionsRef = useRef(byTileConnections)
+  const connectedTileIdsRef = useRef(connectedTileIds)
+  const sidebarSelectedPathRef = useRef(sidebarSelectedPath)
+  const onFocusLinkedTileRef = useRef(onFocusLinkedTile)
+
+  useEffect(() => { viewportZoomRef.current = viewportZoom }, [viewportZoom])
+  useEffect(() => { tileByIdMapRef.current = tileByIdMap }, [tileByIdMap])
+  useEffect(() => { chatReloadTokensRef.current = chatReloadTokens }, [chatReloadTokens])
+  useEffect(() => { byTileConnectionsRef.current = byTileConnections }, [byTileConnections])
+  useEffect(() => { connectedTileIdsRef.current = connectedTileIds }, [connectedTileIds])
+  useEffect(() => { sidebarSelectedPathRef.current = sidebarSelectedPath }, [sidebarSelectedPath])
+  useEffect(() => { onFocusLinkedTileRef.current = onFocusLinkedTile }, [onFocusLinkedTile])
+
   return useCallback((tile: TileState, options?: RenderTileBodyOptions): React.ReactNode => {
     const isTileInteracting = Boolean(options?.isInteracting)
     const isTileSelected = Boolean(options?.isSelected)
@@ -138,7 +155,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
             onReplaceFilePath={onImageReplaceSource}
             isSelected={isTileSelected}
             borderRadius={getCurvierBlockRadius(tile.borderRadius)}
-            zoom={viewportZoom}
+            zoom={viewportZoomRef.current}
           />
         ) : null
       case 'media':
@@ -163,7 +180,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
             zIndex={tile.zIndex}
             isInteracting={isTileInteracting}
             isVisible={options?.isActive !== false}
-            connectedPeers={byTileConnections.get(tile.id)?.map(link => link.peerId) ?? []}
+            connectedPeers={byTileConnectionsRef.current.get(tile.id)?.map(link => link.peerId) ?? []}
             hideNavbar={tile.hideNavbar}
           />
         )
@@ -175,11 +192,11 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
             workspaceDir={workspace?.path ?? ''}
             width={tile.width}
             height={tile.height}
-            onFocusTile={onFocusLinkedTile}
+            onFocusTile={onFocusLinkedTileRef.current}
           />
         )
       case 'chat': {
-        const chatPeers = mapConnectedPeers(tile.id, byTileConnections, tileByIdMap, getExtensionActions)
+        const chatPeers = mapConnectedPeers(tile.id, byTileConnectionsRef.current, tileByIdMapRef.current, getExtensionActions)
         const useWebviewChat = (settings as { experimental?: { chatTileWebview?: boolean } } | undefined)
           ?.experimental?.chatTileWebview === true
         const ChatComponent = useWebviewChat ? LazyChatTileWebview : LazyChatTile
@@ -190,17 +207,17 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
             workspaceDir={workspace?.path ?? ''}
             width={tile.width}
             height={tile.height}
-            reloadToken={chatReloadTokens[tile.id] ?? 0}
+            reloadToken={chatReloadTokensRef.current[tile.id] ?? 0}
             settings={settings}
             onChatModePreferenceChange={onChatModePreferenceChange}
-            isConnected={connectedTileIds.has(tile.id)}
-            isAutoConnected={tile.autoAgentMode && connectedTileIds.has(tile.id)}
+            isConnected={connectedTileIdsRef.current.has(tile.id)}
+            isAutoConnected={tile.autoAgentMode && connectedTileIdsRef.current.has(tile.id)}
             connectedPeers={chatPeers}
           />
         )
       }
       case 'files': {
-        const terminalPeerIds = (byTileConnections.get(tile.id) ?? [])
+        const terminalPeerIds = (byTileConnectionsRef.current.get(tile.id) ?? [])
           .filter(link => link.peerType === 'terminal')
           .map(link => link.peerId)
         return (
@@ -211,15 +228,15 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
             height={tile.height}
             onOpenFile={(filePath, openOptions) => onOpenFile(filePath, { ...openOptions, sourceTileId: tile.id })}
             onOpenWorkspace={onOpenWorkspace}
-            selectedFilePath={sidebarSelectedPath}
+            selectedFilePath={sidebarSelectedPathRef.current}
             connectedTerminalIds={terminalPeerIds}
           />
         )
       }
       default:
         if (tile.type.startsWith('ext:')) {
-          const extensionPeers = (byTileConnections.get(tile.id) ?? []).map(peer => {
-            const peerTile = tileByIdMap.get(peer.peerId)
+          const extensionPeers = (byTileConnectionsRef.current.get(tile.id) ?? []).map(peer => {
+            const peerTile = tileByIdMapRef.current.get(peer.peerId)
             return {
               peerId: peer.peerId,
               peerType: peer.peerType,
@@ -256,14 +273,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
     settings,
     terminalFontFamily,
     terminalFontSize,
-    viewportZoom,
-    tileByIdMap,
-    chatReloadTokens,
-    byTileConnections,
-    connectedTileIds,
-    sidebarSelectedPath,
     onImageReplaceSource,
-    onFocusLinkedTile,
     onChatModePreferenceChange,
     onOpenFile,
     onOpenWorkspace,

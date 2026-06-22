@@ -7,14 +7,9 @@ import * as net from 'net'
 import { BrowserWindow } from 'electron'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
-import { buildSafeSpawnEnv } from '../../ipc/terminal'
-import {
-  persistGrant,
-  resolveStoredPermission,
-  storeSessionGrant,
-  type ToolPermissionRequest,
-} from '../../permissions'
-import type { ToolPermissionDecision } from '../../ipc/chat'
+import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
+import { type ToolPermissionRequest } from '../../permissions'
+import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import { log, sendStream, getPreparedMessages } from '../runtime'
@@ -630,13 +625,9 @@ export function chatOpencode(req: ChatRequest): void {
               const permReq = props as any
               log('opencode permission asked:', permReq.permission, 'id:', permReq.id)
               try {
-                const toolUseID = typeof permReq.id === 'string' && permReq.id.trim()
-                  ? permReq.id
-                  : `opencode-permission-${Date.now()}`
                 const permissionRequest: ToolPermissionRequest = {
                   provider: 'opencode',
                   toolName: typeof permReq.permission === 'string' ? permReq.permission : 'tool',
-                  // Prefer a structured summary if OpenCode supplies one —
                   title: typeof permReq.title === 'string' ? permReq.title : null,
                   description: typeof permReq.description === 'string'
                     ? permReq.description
@@ -645,53 +636,20 @@ export function chatOpencode(req: ChatRequest): void {
                   workspaceDir: req.workspaceDir,
                 }
 
-                const storedDecision = resolveStoredPermission(permissionRequest)
-                let decision: ToolPermissionDecision
-                let fromStored = false
-                if (storedDecision === 'allow') {
-                  decision = 'once'
-                  fromStored = true
-                } else if (storedDecision === 'deny') {
-                  decision = 'never'
-                  fromStored = true
-                } else {
-                  sendStream(req.cardId, {
-                    type: 'tool_permission_request',
-                    toolId: toolUseID,
-                    provider: 'opencode',
-                    toolName: permissionRequest.toolName,
-                    title: permissionRequest.title,
-                    description: permissionRequest.description,
-                    blockedPath: permissionRequest.blockedPath,
-                    workspaceDir: permissionRequest.workspaceDir,
-                  })
-                  const { awaitToolPermissionAnswer } = await import('../../ipc/chat')
-                  decision = await awaitToolPermissionAnswer(req.cardId, toolUseID, permissionRequest)
+                const toolUseIDHint = typeof permReq.id === 'string' ? permReq.id : null
+                const result = await resolveInlineToolPermission(req.cardId, permissionRequest, toolUseIDHint)
+
+                if ('error' in result) {
+                  log('opencode permission error:', result.error)
+                  break
                 }
 
-                sendStream(req.cardId, {
-                  type: 'tool_permission_resolved',
-                  toolId: toolUseID,
-                  toolName: permissionRequest.toolName,
-                  decision,
-                })
-
-                if (!fromStored) {
-                  if (decision === 'never') {
-                    persistGrant(permissionRequest, 'never')
-                  } else if (decision === 'session') {
-                    storeSessionGrant(permissionRequest)
-                  } else if (decision === 'today' || decision === 'forever') {
-                    persistGrant(permissionRequest, decision)
-                  }
-                }
+                const { decision, toolUseID } = result
 
                 // Map our richer scope model to OpenCode's three-value enum.
-                //   forever        → 'always'   (persistent approval; OpenCode's own state mirrors ours)
-                //   today/session/once → 'once' (auto-approved but per-call on OpenCode side; our own
-                //                                 grant store still short-circuits subsequent calls)
-                //   deny / never   → 'reject'  (never also persists a deny-grant so future calls
-                //                                 are auto-rejected via stored lookup)
+                //   forever        → 'always'   (persistent approval)
+                //   today/session/once → 'once' (auto-approved but per-call)
+                //   deny / never   → 'reject'
                 const allowed = decision !== 'deny' && decision !== 'never'
                 const reply: 'once' | 'always' | 'reject' = allowed
                   ? (decision === 'forever' ? 'always' : 'once')
@@ -703,7 +661,7 @@ export function chatOpencode(req: ChatRequest): void {
                     ? 'Tool permission permanently denied. Future calls will be auto-rejected.'
                     : 'Tool permission denied by the user.' }),
                 })
-                log('opencode permission decision:', permReq.id, reply, decision ? `(scope=${decision})` : '')
+                log('opencode permission decision:', permReq.id, reply, `(scope=${decision})`)
               } catch (permErr: any) {
                 log('opencode permission reply error:', permErr.message)
               }
