@@ -1,14 +1,13 @@
-import { app, BrowserWindow, shell, ipcMain, Menu, nativeTheme, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { autoUpdater } from 'electron-updater'
 import { initWorkspaces, registerWorkspaceIPC, migrateFsScopingIfNeeded, migrateGenerationKeysToKeychain } from './ipc/workspace'
 import { registerFsIPC } from './ipc/fs'
 import { registerCanvasIPC } from './ipc/canvas'
 import { registerTerminalIPC } from './ipc/terminal'
-import { startMCPServer, getMCPPort, getMCPToken, buildContexHttpMcpServerEntry, setExtensionRegistryProvider } from './mcp-server'
+import { startMCPServer, setExtensionRegistryProvider } from './mcp-server'
 import { registerAgentsIPC } from './ipc/agents'
 import { registerStreamIPC } from './ipc/stream'
 import { registerGitIPC } from './ipc/git'
@@ -37,9 +36,14 @@ import { registerSpokifyIpc } from './ipc/spokify'
 import { registerTtsIpc } from './ipc/tts'
 import { registerTranscribeIpc } from './ipc/transcribe'
 import { registerSecretsIpc } from './ipc/secrets-ipc'
+import { registerMcpConfigIPC } from './ipc/mcp-config'
+import { registerOwlIPC } from './ipc/owl'
+import { registerWindowIPC } from './ipc/window'
+import { registerUpdaterIPC } from './ipc/updater'
+import { registerAppearanceIPC } from './ipc/appearance'
 import { applyWindowAppearance, getWindowAppearanceOptions } from './windowAppearance'
 import { migrateLegacyStorage } from './migration'
-import { APP_ID, APP_NAME, CONTEX_HOME } from './paths'
+import { APP_ID, APP_NAME } from './paths'
 import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
@@ -49,9 +53,8 @@ import {
   attachGuestWebviewSecurityHandlers,
   createMainWindowWebPreferences,
 } from './secure-web-preferences'
-import { getOwlSupervisor, isOwlHostProcess, runOwlHostProcess, stopOwlSupervisor } from './owl/runtime'
+import { isOwlHostProcess, runOwlHostProcess, stopOwlSupervisor } from './owl/runtime'
 import { isBrokerTestProcess, runBrokerTestHost } from './extensions/broker/test-harness'
-// browserTile BrowserView IPC was removed — renderer uses <webview> tag directly
 
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
 const envMaxOldSpaceSizeMb = Number.parseInt(process.env.CODESURF_MAX_OLD_SPACE_SIZE_MB ?? '', 10)
@@ -319,14 +322,6 @@ function applyRuntimeAppBranding(): void {
 
 function getLiveWindows(): BrowserWindow[] {
   return BrowserWindow.getAllWindows().filter(w => !w.isDestroyed() && !w.webContents.isDestroyed())
-}
-
-function broadcastAppearanceToRenderers(): void {
-  const payload = { shouldUseDark: nativeTheme.shouldUseDarkColors }
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-    win.webContents.send('appearance:updated', payload)
-  }
 }
 
 function broadcastWindowList(): void {
@@ -630,6 +625,17 @@ function createMiniChatWindow(owner: BrowserWindow | null, request: MiniChatWind
 async function openExternalIfSafe(rawUrl: string, source: 'window' | 'ipc'): Promise<boolean> {
   const trimmed = String(rawUrl ?? '').trim()
   if (trimmed.startsWith('file://')) {
+    // Restrict file:// to workspace-scoped paths only — a compromised renderer
+    // must not be able to open arbitrary local files via OS default handlers
+    // (which can execute .command scripts, launch apps, etc.).
+    try {
+      const filePath = fileURLToPath(trimmed)
+      const { validateFsPath } = await import('./ipc/fs')
+      validateFsPath(filePath)
+    } catch (err) {
+      console.warn(`[shell] Blocked file:// outside allowed roots from ${source}:`, (err as Error).message)
+      return false
+    }
     try {
       const errorMessage = await shell.openPath(fileURLToPath(trimmed))
       if (errorMessage) {
@@ -656,56 +662,6 @@ async function openExternalIfSafe(rawUrl: string, source: 'window' | 'ipc'): Pro
     console.warn(`[shell] Failed to open external URL from ${source}:`, error)
     return false
   }
-}
-
-function registerOwlIPC(): void {
-  const callOwl = (method: string, params?: Record<string, unknown>) =>
-    getOwlSupervisor().call(method, (params ?? {}) as Record<string, never>)
-
-  ipcMain.handle('owl:health', () => callOwl('health'))
-  ipcMain.handle('owl:session:create', (_event, options: {
-    appName?: string
-    buildFlavor?: string
-  } = {}) => callOwl('session.create', {
-    appName: typeof options.appName === 'string' && options.appName.trim() ? options.appName.trim() : APP_NAME,
-    buildFlavor: typeof options.buildFlavor === 'string' ? options.buildFlavor : app.isPackaged ? 'prod' : 'dev',
-  }))
-  ipcMain.handle('owl:profile:create', (_event, options: {
-    sessionId: string
-    name?: string
-    persistent?: boolean
-    storageKey?: string
-    isolateForAgent?: boolean
-  }) => callOwl('profile.create', options as Record<string, unknown>))
-  ipcMain.handle('owl:webview:create', (_event, options: {
-    profileId: string
-    initialUrl?: string
-    width?: number
-    height?: number
-    deviceScaleFactor?: number
-    visible?: boolean
-  }) => callOwl('webview.create', options as Record<string, unknown>))
-  ipcMain.handle('owl:webview:navigate', (_event, options: { webViewId: string; url: string }) =>
-    callOwl('webview.navigate', options))
-  ipcMain.handle('owl:webview:setGeometry', (_event, options: {
-    webViewId: string
-    width: number
-    height: number
-    deviceScaleFactor?: number
-  }) => callOwl('webview.setGeometry', options as Record<string, unknown>))
-  ipcMain.handle('owl:webview:dispatchInput', (_event, options: {
-    webViewId: string
-    route?: 'content' | 'browser'
-    event: Record<string, unknown>
-  }) => callOwl('webview.dispatchInput', options as Record<string, unknown>))
-  ipcMain.handle('owl:webview:capture', (_event, options: { webViewId: string; includePopups?: boolean }) =>
-    callOwl('webview.capture', options as Record<string, unknown>))
-  ipcMain.handle('owl:webview:destroy', (_event, webViewId: string) =>
-    callOwl('webview.destroy', { webViewId }))
-  ipcMain.handle('owl:stop', () => {
-    stopOwlSupervisor()
-    return { ok: true }
-  })
 }
 
 if (isOwlHost) {
@@ -783,6 +739,7 @@ app.whenReady().then(async () => {
   registerTtsIpc()
   registerTranscribeIpc()
   registerSecretsIpc()
+  registerMcpConfigIPC()
   registerOwlIPC()
   registerFileProtocol()
   registerAgentPathsIPC()
@@ -804,327 +761,27 @@ app.whenReady().then(async () => {
   registerExtensionIPC(extensionRegistry)
   setExtensionRegistryProvider(() => extensionRegistry)
 
-  // Native dark/light preference — drives "system" appearance in renderer
-  nativeTheme.on('updated', broadcastAppearanceToRenderers)
-  ipcMain.handle('appearance:shouldUseDark', () => nativeTheme.shouldUseDarkColors)
-  ipcMain.handle('appearance:setThemeSource', (_, mode: string) => {
-    if (mode === 'dark' || mode === 'light' || mode === 'system') {
-      nativeTheme.themeSource = mode
-    }
-    broadcastAppearanceToRenderers()
-    return true
-  })
+  registerAppearanceIPC()
 
   // Prime cached agent paths from disk only. Full binary detection is deferred
   // until setup/manual refresh so startup does not shell out across all agents.
   initializeAgentPathsCache().catch(err => console.error('[AgentPaths] Cache init failed:', err))
-  // registerBrowserTileIPC() — removed, renderer uses <webview> tag directly
 
   // Start local MCP server for agent→kanban callbacks
   startMCPServer().then(port => {
     console.log(`[MCP] Kanban tools available at http://127.0.0.1:${port}`)
   }).catch(err => console.error('[MCP] Failed to start:', err))
-
-  // Expose MCP port + bearer token to renderer (token stays in main; renderer
-  // uses it only for loopback HTTP calls that cannot set EventSource headers).
-  ipcMain.handle('mcp:getPort', () => getMCPPort())
-  ipcMain.handle('mcp:getToken', () => getMCPToken())
-
-  // MCP config read/write
-  const { join: pjoin } = await import('path')
-  const mcpConfigPath = pjoin(CONTEX_HOME, 'mcp-server.json')
-  const getRuntimeContexBase = (): string | undefined => {
-    const port = getMCPPort()
-    return port ? `http://127.0.0.1:${port}/mcp` : undefined
-  }
-
-  const normalizeMcpServer = (entry: unknown, fallbackUrl?: string): Record<string, unknown> => {
-    if (!entry || typeof entry !== 'object') return fallbackUrl ? { type: 'http', url: fallbackUrl } : {}
-
-    const server = { ...(entry as Record<string, unknown>) }
-
-    if (server.url && typeof server.url === 'string') {
-      server.url = server.url.replace(/\/$/, '')
-    }
-
-    // Support legacy "cmd" for command-based servers.
-    if (!server.command && server.cmd && typeof server.cmd === 'string') {
-      const parts = String(server.cmd).trim().split(/\s+/)
-      server.command = parts[0]
-      if (parts.length > 1) server.args = parts.slice(1)
-    }
-
-    if (!server.type) {
-      if (server.command) {
-        server.type = 'stdio'
-      } else if (server.url || fallbackUrl) {
-        server.type = 'http'
-      }
-    }
-
-    if (!server.url && fallbackUrl) {
-      server.url = fallbackUrl
-    }
-
-    return server
-  }
-
-  const normalizeMcpServers = (servers: Record<string, unknown>, fallbackUrlFn?: (name: string) => string | undefined): Record<string, Record<string, unknown>> => {
-    const out: Record<string, Record<string, unknown>> = {}
-    for (const [name, server] of Object.entries(servers ?? {})) {
-      const fallbackUrl = fallbackUrlFn?.(name)
-      const normalized = normalizeMcpServer(server, fallbackUrl)
-      out[name] = normalized
-    }
-    return out
-  }
-
-  ipcMain.handle('mcp:getConfig', async () => {
-    try {
-      const { promises: fsP } = await import('fs')
-      const raw = await fsP.readFile(mcpConfigPath, 'utf8')
-      const cfg = JSON.parse(raw) as { mcpServers?: Record<string, unknown>, url?: string, updatedAt?: string }
-      const contexBase = (typeof cfg.url === 'string' ? `${cfg.url.replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
-      const globalServers = cfg.mcpServers ?? {}
-      const normalizedServers = normalizeMcpServers(globalServers, (name) => {
-        if (name === 'contex' && contexBase) return contexBase
-        return undefined
-      })
-      if (contexBase) {
-        normalizedServers['contex'] = {
-          ...(normalizedServers['contex'] ?? {}),
-          ...buildContexHttpMcpServerEntry(contexBase),
-        }
-      }
-      return { ...cfg, mcpServers: normalizedServers }
-    } catch { return null }
-  })
-
-  ipcMain.handle('mcp:saveServers', async (_, servers: Record<string, unknown>) => {
-    try {
-      const { promises: fsP } = await import('fs')
-      const raw = await fsP.readFile(mcpConfigPath, 'utf8')
-      const cfg = JSON.parse(raw) as { mcpServers?: Record<string, unknown>, url?: string, updatedAt?: string }
-      const contexBase = (typeof cfg.url === 'string' ? `${cfg.url.replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
-      const contexServer = normalizeMcpServer(cfg.mcpServers?.contex ?? { url: contexBase }, contexBase)
-      const customServers = normalizeMcpServers(servers)
-      cfg.mcpServers = {
-        contex: contexServer,
-        ...customServers
-      }
-      cfg.updatedAt = new Date().toISOString()
-      await fsP.writeFile(mcpConfigPath, JSON.stringify(cfg, null, 2), { mode: 0o600 })
-      await fsP.chmod(mcpConfigPath, 0o600).catch(() => {})
-      return cfg
-    } catch (e) { return null }
-  })
-
-  // Per-workspace MCP servers
-  ipcMain.handle('mcp:getWorkspaceServers', async (_, workspaceId: string) => {
-    try {
-      const { promises: fsP } = await import('fs')
-      const p = pjoin(CONTEX_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
-      const raw = await fsP.readFile(p, 'utf8')
-      return JSON.parse(raw)
-    } catch { return {} }
-  })
-
-  ipcMain.handle('mcp:saveWorkspaceServers', async (_, workspaceId: string, servers: Record<string, unknown>) => {
-    try {
-      const { promises: fsP } = await import('fs')
-      const dir = pjoin(CONTEX_HOME, 'workspaces', workspaceId)
-      await fsP.mkdir(dir, { recursive: true })
-      const p = pjoin(dir, 'mcp-servers.json')
-      const normalized = normalizeMcpServers(servers)
-      await fsP.writeFile(p, JSON.stringify(normalized, null, 2))
-      return normalized
-    } catch (e) { return null }
-  })
-
-  // Merged config for a workspace — global + workspace servers combined
-  // This is what you'd point Claude Code / Cursor / any MCP client at
-  ipcMain.handle('mcp:getMergedConfig', async (_, workspaceId: string) => {
-    try {
-      const { promises: fsP } = await import('fs')
-
-      // Global config
-      let globalCfg: Record<string, unknown> = {}
-      try {
-        const raw = await fsP.readFile(mcpConfigPath, 'utf8')
-        globalCfg = JSON.parse(raw)
-      } catch { /**/ }
-
-      // Workspace servers
-      let wsServers: Record<string, unknown> = {}
-      try {
-        const wsPath = pjoin(CONTEX_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
-        const raw = await fsP.readFile(wsPath, 'utf8')
-        wsServers = JSON.parse(raw)
-      } catch { /**/ }
-
-      // Merge: global mcpServers + workspace servers
-      const globalServers = (globalCfg as Record<string, Record<string, unknown>>).mcpServers ?? {}
-      const globalCfgUrl = (globalCfg as { url?: string }).url
-      const contexBase = (typeof globalCfgUrl === 'string' ? `${String(globalCfgUrl).replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
-
-      const normalizedGlobal = normalizeMcpServers(globalServers, (name) => {
-        if (name === 'contex' && contexBase) return contexBase
-        return undefined
-      })
-      if (contexBase) {
-        normalizedGlobal['contex'] = {
-          ...(normalizedGlobal['contex'] ?? {}),
-          ...buildContexHttpMcpServerEntry(contexBase),
-        }
-      }
-      const normalizedWorkspace = normalizeMcpServers(wsServers)
-
-      const merged = {
-        ...(globalCfg as object),
-        mcpServers: {
-          ...normalizedGlobal,
-          ...normalizedWorkspace
-        },
-        workspace: workspaceId,
-        mergedAt: new Date().toISOString()
-      }
-
-      // Also write a merged file inside .contex so it doesn't pollute the workspace root
-      const wsContex = pjoin(CONTEX_HOME, 'workspaces', workspaceId, '.contex')
-      await fsP.mkdir(wsContex, { recursive: true })
-      await fsP.writeFile(
-        pjoin(wsContex, 'mcp-merged.json'),
-        JSON.stringify(merged, null, 2)
-      )
-
-      return merged
-    } catch (e) { return null }
-  })
-
-  autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
-
-  ipcMain.handle('updater:check', async () => {
-    try {
-      const result = await autoUpdater.checkForUpdates()
-      const info = result?.updateInfo
-      const updateAvailable = !!info && info.version !== app.getVersion()
-      return {
-        ok: true,
-        currentVersion: app.getVersion(),
-        status: updateAvailable ? 'update-available' : 'up-to-date',
-        updateAvailable,
-        updateInfo: info ? {
-          version: info.version,
-          releaseName: info.releaseName,
-          releaseDate: info.releaseDate,
-        } : undefined,
-      }
-    } catch (error) {
-      return {
-        ok: false,
-        currentVersion: app.getVersion(),
-        status: error instanceof Error ? error.message : 'update-check-failed',
-        updateAvailable: false,
-      }
-    }
-  })
-
-  ipcMain.handle('updater:download', async () => {
-    try {
-      await autoUpdater.downloadUpdate()
-      return { ok: true, status: 'downloaded' }
-    } catch (error) {
-      return { ok: false, status: error instanceof Error ? error.message : 'download-failed' }
-    }
-  })
-
-  ipcMain.handle('updater:quitAndInstall', async () => {
-    setImmediate(() => autoUpdater.quitAndInstall())
-    return { ok: true }
-  })
-
-  // Window management
-  ipcMain.handle('window:new', () => { createWindow({ fresh: true }); return null })
-  // Dev Sandbox: a fresh, visibly-marked instance for testing plugins in isolation.
-  ipcMain.handle('window:openDevSandbox', () => { createWindow({ fresh: true, devSandbox: true, workspacePicker: true }); return null })
-  ipcMain.handle('window:newTab', (event) => {
-    const owner = BrowserWindow.fromWebContents(event.sender) ?? getFocusedMainWindow()
-    if (process.platform === 'darwin') {
-      createWorkspaceTab(owner, { fresh: true, workspacePicker: true })
-    } else {
-      createWindow({ fresh: true })
-    }
-    return null
-  })
-  ipcMain.handle('window:newWorkspaceTab', (event, workspaceId?: unknown) => {
-    const owner = BrowserWindow.fromWebContents(event.sender) ?? getFocusedMainWindow()
-    const id = typeof workspaceId === 'string' ? workspaceId.trim() : ''
-    const win = process.platform === 'darwin'
-      ? createWorkspaceTab(owner, { fresh: true, workspaceId: id || null, workspacePicker: !id })
-      : createWindow({ fresh: true, workspaceId: id || null, workspacePicker: !id })
-    return { id: win.webContents.id }
-  })
-  ipcMain.handle('window:isFresh', (event) => {
-    const id = event.sender.id
-    const isFresh = freshWindowIds.has(id)
-    if (isFresh) {
-      freshWindowIds.delete(id)
-      return true
-    }
-    return false
-  })
-
-  ipcMain.handle('window:list', () => {
-    const wins = getLiveWindows()
-    const focused = BrowserWindow.getFocusedWindow()
-    const focusedId = focused && !focused.isDestroyed() && !focused.webContents.isDestroyed()
-      ? focused.webContents.id
-      : undefined
-    return wins.map(w => ({
-      id: w.webContents.id,
-      title: windowTitles.get(w.webContents.id) ?? APP_NAME,
-      focused: w.webContents.id === focusedId,
-    }))
-  })
-
-  ipcMain.handle('window:getCurrentId', (event) => event.sender.id)
-
-  ipcMain.handle('window:setTitle', (event, title: string) => {
-    const cleanTitle = typeof title === 'string' && title.trim().length > 0 ? title.trim() : APP_NAME
-    windowTitles.set(event.sender.id, cleanTitle)
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (win && !win.isDestroyed()) win.setTitle(cleanTitle)
-    broadcastWindowList()
-  })
-
-  ipcMain.handle('window:focusById', (_, id: number) => {
-    const win = getLiveWindows().find(w => w.webContents.id === id)
-    win?.focus()
-  })
-
-  ipcMain.handle('window:closeById', (_, id: number) => {
-    const win = getLiveWindows().find(w => w.webContents.id === id)
-    win?.close()
-  })
-
-  ipcMain.handle('window:openMiniChat', (event, request: MiniChatWindowRequest) => {
-    const owner = BrowserWindow.fromWebContents(event.sender)
-    return createMiniChatWindow(owner, request ?? {})
-  })
-
-  ipcMain.handle('window:setSidebarCollapsed', (event, collapsed: boolean) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    return !!win && typeof collapsed === 'boolean'
-  })
-
-  ipcMain.handle('app:relaunch', () => {
-    app.relaunch()
-    app.quit()
-  })
-
-  ipcMain.handle('shell:openExternal', async (_, url: string) => {
-    return await openExternalIfSafe(url, 'ipc')
+  registerUpdaterIPC()
+  registerWindowIPC({
+    createWindow,
+    createWorkspaceTab,
+    createMiniChatWindow,
+    getFocusedMainWindow,
+    getLiveWindows,
+    windowTitles,
+    freshWindowIds,
+    broadcastWindowList,
+    openExternalIfSafe,
   })
 
   // Native app menu with Cmd+N / Cmd+T

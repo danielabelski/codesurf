@@ -538,12 +538,12 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
   }, [canvasRef, screenToWorld])
 
   const worldToScreen = useCallback((point: { x: number; y: number }) => (
-    worldToScreenPoint(point, viewport)
-  ), [viewport])
+    worldToScreenPoint(point, viewportRef.current)
+  ), [viewportRef])
 
   const worldToScreenRectBound = useCallback((tile: TileState) => (
-    worldToScreenRect(tile, viewport)
-  ), [viewport])
+    worldToScreenRect(tile, viewportRef.current)
+  ), [viewportRef])
 
   const findManualConnectionTarget = useCallback((
     sourceTileId: string,
@@ -653,16 +653,17 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
     const onWheel = (e: WheelEvent) => {
       if (!e.metaKey && !e.ctrlKey) return
       e.preventDefault()
+      const vp = viewportRef.current
       const factor = e.deltaY < 0 ? ZOOM_WHEEL_FACTOR_IN : ZOOM_WHEEL_FACTOR_OUT
-      const newZoom = clampCanvasZoom(viewport.zoom * factor)
+      const newZoom = clampCanvasZoom(vp.zoom * factor)
       const rect = el.getBoundingClientRect()
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
-      setViewport(zoomAtPoint(viewport, mx, my, newZoom))
+      setViewport(zoomAtPoint(vp, mx, my, newZoom))
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [canvasRef, viewport])
+  }, [canvasRef, viewportRef])
 
   const applyHistoryEntry = useCallback((
     entry: CanvasHistoryEntry,

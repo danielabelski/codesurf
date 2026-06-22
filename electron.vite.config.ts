@@ -33,7 +33,6 @@ export default defineConfig({
               'broker-child': resolve(__dirname, 'src/main/extensions/broker/child-entry.ts'),
             },
               external: ['node-pty'],
-              treeshake: false
             }
           }
         }
@@ -48,7 +47,6 @@ export default defineConfig({
             minify: false,
             rollupOptions: {
               input: resolve(__dirname, 'src/preload/index.ts'),
-              treeshake: false
             }
           }
         }

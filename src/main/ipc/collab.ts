@@ -260,6 +260,7 @@ async function broadcastMessageChange(payload: {
   message?: CollabMessage | null
 }): Promise<void> {
   for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
     win.webContents.send('collab:messageChanged', payload)
   }
 }
@@ -324,6 +325,7 @@ async function startStateWatcher(workspacePath: string, tileId: string): Promise
   watcher.on('change', async () => {
     const state = await readJsonSafe<CollabState>(statePath, { tasks: [], paused: false })
     for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) continue
       win.webContents.send('collab:stateChanged', { workspacePath, tileId, state })
     }
   })

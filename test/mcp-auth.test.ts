@@ -13,6 +13,12 @@ export async function resolve(specifier, context, nextResolve) {
       url: 'data:text/javascript,' + encodeURIComponent(\`
         export class BrowserWindow {
           static getAllWindows() { return [] }
+          static getFocusedWindow() { return null }
+          isDestroyed() { return false }
+        }
+        export const dialog = {
+          showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+          showMessageBox: async () => ({ response: 0, checkboxChecked: false }),
         }
       \`),
     }

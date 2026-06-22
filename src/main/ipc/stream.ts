@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow, type WebContents } from 'electron'
 import { request as httpRequest } from 'http'
 import { request as httpsRequest } from 'https'
+import { promises as dnsPromises } from 'dns'
 import { getStreamParser } from '../agent-stream'
 import { assertSafeStreamUrl } from '../utils/urlSafety'
 
@@ -59,14 +60,28 @@ export function registerStreamIPC(): void {
     const isHttps = url.protocol === 'https:'
     const reqFn = isHttps ? httpsRequest : httpRequest
 
+    // Resolve DNS before connecting and verify the resolved IP is not private.
+    // This prevents DNS rebinding attacks where an attacker-controlled domain
+    // resolves to 127.0.0.1, cloud metadata (169.254.169.254), or internal IPs.
+    let resolvedAddress: string
+    try {
+      const lookup = await dnsPromises.lookup(url.hostname, { family: 0 })
+      resolvedAddress = lookup.address
+    } catch (err) {
+      throw new Error(`DNS resolution failed for ${url.hostname}: ${(err as Error).message}`)
+    }
+    // Re-validate the resolved IP against the same blocklists used by assertSafeStreamUrl
+    assertSafeStreamUrl(`${url.protocol}//${resolvedAddress}:${url.port || (isHttps ? 443 : 80)}${url.pathname}${url.search}`)
+
     const options = {
-      hostname: url.hostname,
+      hostname: resolvedAddress,
       port: url.port || (isHttps ? 443 : 80),
       path: url.pathname + url.search,
       method: req.method ?? 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
+        'Host': url.host,
         ...(req.headers ?? {})
       }
     }

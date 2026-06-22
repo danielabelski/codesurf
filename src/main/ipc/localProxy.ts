@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import * as http from 'http'
 import * as net from 'net'
+import { randomUUID } from 'crypto'
 import { readSettingsSync } from './workspace'
 import { bus } from '../event-bus'
 
@@ -23,6 +24,7 @@ interface ProxyStats {
 // Module-level singleton
 let proxyServer: http.Server | null = null
 let proxyPort: number | null = null
+let proxyToken: string | null = null
 let stats: ProxyStats = {
   requestsServed: 0,
   requestsFailed: 0,
@@ -262,7 +264,7 @@ function forwardRequest(
   backendReq.end()
 }
 
-function createProxyServer(_port: number): http.Server {
+function createProxyServer(_port: number, token: string): http.Server {
   const server = http.createServer(async (req, clientRes) => {
     // CORS preflight — this server is loopback-only and called from the main
     // process (Node http.request) or via Electron IPC; no browser cross-origin
@@ -274,10 +276,19 @@ function createProxyServer(_port: number): http.Server {
       return
     }
 
-    // Health check
+    // Health check — no auth required (no sensitive data exposed)
     if (req.method === 'GET' && req.url === '/health') {
       clientRes.writeHead(200, { 'Content-Type': 'application/json' })
       clientRes.end(JSON.stringify({ status: 'ok', uptime: stats.startedAt ? Date.now() - stats.startedAt : 0 }))
+      return
+    }
+
+    // Bearer token auth — prevent any local process from using the proxy
+    // without presenting the per-session token.
+    const authHeader = req.headers.authorization
+    if (!authHeader || authHeader !== `Bearer ${token}`) {
+      clientRes.writeHead(401, { 'Content-Type': 'application/json' })
+      clientRes.end(JSON.stringify({ error: { type: 'authentication_error', message: 'Missing or invalid bearer token' } }))
       return
     }
 
@@ -347,11 +358,12 @@ async function isPortFree(port: number): Promise<boolean> {
   })
 }
 
-export function getProxyStatus(): { running: boolean; port: number; stats: ProxyStats } {
+export function getProxyStatus(): { running: boolean; port: number; token: string | null; stats: ProxyStats } {
   const settings = readSettingsSync()
   return {
     running: proxyServer !== null,
     port: proxyPort ?? settings.localProxyPort ?? 1337,
+    token: proxyToken,
     stats: { ...stats, activeConnections: [...stats.activeConnections] },
   }
 }
@@ -369,7 +381,8 @@ async function startProxyServer(port: number): Promise<{ ok: boolean; port?: num
 
   return new Promise(resolve => {
     try {
-      proxyServer = createProxyServer(port)
+      proxyToken = randomUUID()
+      proxyServer = createProxyServer(port, proxyToken)
       proxyServer.listen(port, '127.0.0.1', () => {
         proxyPort = port
         stats = { requestsServed: 0, requestsFailed: 0, startedAt: Date.now(), activeConnections: [] }
@@ -379,6 +392,7 @@ async function startProxyServer(port: number): Promise<{ ok: boolean; port?: num
       proxyServer.on('error', (err: NodeJS.ErrnoException) => {
         proxyServer = null
         proxyPort = null
+        proxyToken = null
         resolve({ ok: false, message: err.message })
       })
     } catch (err: unknown) {
@@ -406,6 +420,7 @@ export function registerLocalProxyIPC(): void {
       proxyServer!.close(() => {
         proxyServer = null
         proxyPort = null
+        proxyToken = null
         stats = { ...stats, startedAt: null, activeConnections: [] }
         bus.publish({ channel: 'localProxy:stats', type: 'data', source: 'localProxy', payload: { action: 'stopped' } })
         resolve({ ok: true })

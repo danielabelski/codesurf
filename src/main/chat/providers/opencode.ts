@@ -7,6 +7,7 @@ import * as net from 'net'
 import { BrowserWindow } from 'electron'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
+import { buildSafeSpawnEnv } from '../../ipc/terminal'
 import {
   persistGrant,
   resolveStoredPermission,
@@ -14,7 +15,7 @@ import {
   type ToolPermissionRequest,
 } from '../../permissions'
 import type { ToolPermissionDecision } from '../../ipc/chat'
-import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import { log, sendStream, getPreparedMessages } from '../runtime'
 
@@ -60,7 +61,7 @@ function resolveOpenCodeBinary(): string | null {
     const shellPath = getShellEnvPath()
     return execFileSync('which', ['opencode'], {
       encoding: 'utf-8',
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+      env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     }).trim() || null
   } catch {
     return null
@@ -106,7 +107,7 @@ class OpenCodeServerManager {
       const shellPath = getShellEnvPath()
       this.server = spawn(binary, ['serve', '--port', String(this.port)], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+        env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
       })
 
       let started = false
@@ -440,7 +441,7 @@ export function chatOpencode(req: ChatRequest): void {
       // Claude/Codex. On subsequent turns the session already carries the
       // convention in its running history.
       const isFirstTurn = !existingSessionId
-      const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
+      const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
       const promptText = isFirstTurn
         ? `${promptConvention}\n\n---\n\n${lastUserMsg.content}`
         : lastUserMsg.content

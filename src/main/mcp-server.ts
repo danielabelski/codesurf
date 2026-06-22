@@ -256,6 +256,7 @@ function pushSSE(cardId: string, event: string, data: unknown): void {
 
 function sendToRenderer(event: string, data: unknown): void {
   BrowserWindow.getAllWindows().forEach(win => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
     win.webContents.send('mcp:kanban', { event, data })
   })
 }
@@ -598,6 +599,7 @@ export async function startMCPServer(): Promise<number> {
             const { card_id, message, append_newline = true } = JSON.parse(body)
             // Tell renderer to write to the terminal
             BrowserWindow.getAllWindows().forEach(win => {
+              if (win.isDestroyed() || win.webContents.isDestroyed()) return
               win.webContents.send('mcp:inject', { cardId: card_id, message, appendNewline: append_newline })
             })
             // Also push SSE so other agents/subscribers know

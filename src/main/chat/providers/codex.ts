@@ -8,6 +8,7 @@ import { tmpdir } from 'os'
 import { dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
+import { buildSafeSpawnEnv } from '../../ipc/terminal'
 import { daemonClient } from '../../daemon/client'
 import { writeMCPConfigToWorkspace } from '../../mcp-server'
 import { CONTEX_HOME } from '../../paths'
@@ -360,7 +361,7 @@ export function chatCodex(req: ChatRequest): void {
     void writeMCPConfigToWorkspace(req.workspaceDir).catch(() => {})
   }
 
-  const spawnEnv: Record<string, string> = { ...process.env, ...(shellPath && { PATH: shellPath }) }
+  const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) })
   spawnEnv.CONTEX_MCP_CONFIG = join(CONTEX_HOME, 'mcp-server.json')
 
   const proc = spawn(codexBin, args, {
@@ -548,6 +549,10 @@ export function chatCodex(req: ChatRequest): void {
 
   proc.on('close', (code) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
+    if (aborted) {
+      activeProcesses.delete(req.cardId)
+      return
+    }
     activeProcesses.delete(req.cardId)
     stdoutChain = stdoutChain.then(async () => {
       if (pendingStdout.trim()) {

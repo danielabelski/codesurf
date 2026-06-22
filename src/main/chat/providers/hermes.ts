@@ -1,5 +1,6 @@
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
+import { buildSafeSpawnEnv } from '../../ipc/terminal'
 import {
   sanitizeAgentCliDiagnostic,
 } from '../../agents/agent-cli-contracts'
@@ -22,7 +23,7 @@ function resolveHermesBinary(): string | null {
     const shellPath = getShellEnvPath()
     return execFileSync('which', ['hermes'], {
       encoding: 'utf-8',
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+      env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     }).trim() || null
   } catch {
     return null
@@ -81,7 +82,7 @@ export function chatHermes(req: ChatRequest): void {
 
   const proc = spawn(hermesBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     ...(req.workspaceDir && { cwd: req.workspaceDir }),
   })
 

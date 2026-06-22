@@ -4,8 +4,9 @@
 
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
+import { buildSafeSpawnEnv } from '../../ipc/terminal'
 import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
-import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import {
   log,
@@ -24,7 +25,7 @@ function resolveOpenClawBinary(): string | null {
     const shellPath = getShellEnvPath()
     return execFileSync('which', ['openclaw'], {
       encoding: 'utf-8',
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+      env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     }).trim() || null
   } catch {
     return null
@@ -39,7 +40,7 @@ function parseOpenClawAgents(openclawBin: string, shellPath?: string | null): Ar
   try {
     const raw = execFileSync(openclawBin, ['agents', 'list', '--json'], {
       encoding: 'utf-8',
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+      env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     }).trim()
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed : []
@@ -163,7 +164,7 @@ export function chatOpenclaw(req: ChatRequest): void {
   // so the CodeSurf output convention rides along with the first user message.
   // Session history carries it forward on subsequent turns.
   const openClawIsFirstTurn = !existingSessionId
-  const openClawConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
+  const openClawConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
   const openClawMessage = openClawIsFirstTurn
     ? `${openClawConvention}\n\n---\n\n${lastUserMsg.content}`
     : lastUserMsg.content
@@ -171,7 +172,7 @@ export function chatOpenclaw(req: ChatRequest): void {
 
   const proc = spawn(openclawBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     ...(req.workspaceDir && { cwd: req.workspaceDir }),
   })
 

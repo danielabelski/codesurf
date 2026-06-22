@@ -86,6 +86,35 @@ function isAllowedBinary(bin: string): boolean {
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pty = require('node-pty')
 
+// Build a sanitized spawn environment — keep essential vars, strip known secrets.
+// This prevents leaking API keys and tokens from the Electron main process to
+// every spawned terminal and agent subprocess.
+const SPAWN_ENV_ALLOWLIST = new Set([
+  'PATH', 'HOME', 'SHELL', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
+  'TERM', 'TMPDIR', 'TEMP', 'TMP', 'DISPLAY', 'EDITOR', 'VISUAL',
+  'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME',
+  'NODE_PATH', 'NVM_DIR', 'NVM_BIN', 'FNM_DIR', 'VOLTA_HOME',
+  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
+  'SSH_AUTH_SOCK', 'GPG_AGENT_INFO',
+  // Platform essentials
+  ...(process.platform === 'win32' ? [
+    'SystemRoot', 'COMSPEC', 'ProgramFiles', 'ProgramFiles(x86)',
+    'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'USERNAME', 'COMPUTERNAME',
+    'HOMEDRIVE', 'HOMEPATH', 'PATHEXT', 'WINDIR',
+  ] : []),
+])
+const SPAWN_ENV_DENYLIST_RE = /(_API_KEY|_SECRET|_TOKEN|_PASSWORD|_PRIVATE_KEY|_CREDENTIALS)$/i
+
+export function buildSafeSpawnEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env as Record<string, string>)) {
+    if (SPAWN_ENV_ALLOWLIST.has(key) && !SPAWN_ENV_DENYLIST_RE.test(key)) {
+      env[key] = value
+    }
+  }
+  return { ...env, ...extra }
+}
+
 function expandHome(arg: string): string {
   if (!arg.startsWith('~')) return arg
   const home = homedir()
@@ -282,6 +311,17 @@ export function registerTerminalIPC(): void {
   })
 
   ipcMain.handle('terminal:create', async (event, tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]) => {
+    // Validate workspaceDir against path traversal — the renderer supplies this
+    // and it controls where the PTY spawns, where .contex dirs are created, and
+    // where the MCP bearer token (.mcp.json) is written.
+    const { validateFsPath } = await import('./fs.ts')
+    try {
+      workspaceDir = validateFsPath(workspaceDir)
+    } catch (err) {
+      console.warn(`[terminal] Blocked workspaceDir outside allowed roots: ${workspaceDir}`, (err as Error).message)
+      return { error: `Access denied: ${(err as Error).message}` }
+    }
+
     const existing = terminals.get(tileId)
     if (existing) {
       existing.listeners.add(event.sender)
@@ -305,7 +345,7 @@ export function registerTerminalIPC(): void {
     // Check if we should inject MCP config for agent CLIs
     const agentBins = ['claude', 'codex', 'aider', 'opencode']
     const isAgent = launchBin && agentBins.some(a => launchBin.includes(a))
-    const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CARD_ID: tileId }
+    const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ CARD_ID: tileId })
 
     // Set CONTEX_DIR so agents know where their per-tile .contex folder is
     const contexDir = workspaceTileDir(workspaceDir, tileId)

@@ -28,6 +28,12 @@ function sendStream(_cardId: string, event: StreamEvent): void {
 
 export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
   let buffer = ''
+  let doneSent = false
+  const sendDone = (): void => {
+    if (doneSent) return
+    doneSent = true
+    sendStream(cardId, { cardId, type: 'done' })
+  }
 
   res.on('data', (chunk: Buffer) => {
     buffer += chunk.toString()
@@ -38,7 +44,7 @@ export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
       if (data === '[DONE]') {
-        sendStream(cardId, { cardId, type: 'done' })
+        sendDone()
         continue
       }
       try {
@@ -55,7 +61,7 @@ export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
             sendStream(cardId, { cardId, type: 'tool_use', toolName: evt.content_block.name })
           }
         } else if (evt.type === 'message_stop') {
-          sendStream(cardId, { cardId, type: 'done' })
+          sendDone()
         } else if (evt.type === 'error') {
           sendStream(cardId, { cardId, type: 'error', error: evt.error?.message ?? 'Unknown error' })
         }
@@ -64,13 +70,19 @@ export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
   })
 
   res.on('error', err => sendStream(cardId, { cardId, type: 'error', error: err.message }))
-  res.on('end', () => sendStream(cardId, { cardId, type: 'done' }))
+  res.on('end', () => sendDone())
 }
 
 // ─── Codex streaming (SSE, OpenAI format) ────────────────────────────────────
 
 export function parseCodexStream(cardId: string, res: IncomingMessage): void {
   let buffer = ''
+  let doneSent = false
+  const sendDone = (): void => {
+    if (doneSent) return
+    doneSent = true
+    sendStream(cardId, { cardId, type: 'done' })
+  }
 
   res.on('data', (chunk: Buffer) => {
     buffer += chunk.toString()
@@ -81,7 +93,7 @@ export function parseCodexStream(cardId: string, res: IncomingMessage): void {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
       if (data === '[DONE]') {
-        sendStream(cardId, { cardId, type: 'done' })
+        sendDone()
         continue
       }
       try {
@@ -96,20 +108,26 @@ export function parseCodexStream(cardId: string, res: IncomingMessage): void {
           sendStream(cardId, { cardId, type: 'tool_use', toolName: delta.tool_calls[0].function.name })
         }
         if (evt.choices?.[0]?.finish_reason === 'stop') {
-          sendStream(cardId, { cardId, type: 'done' })
+          sendDone()
         }
       } catch { /* non-JSON */ }
     }
   })
 
   res.on('error', err => sendStream(cardId, { cardId, type: 'error', error: err.message }))
-  res.on('end', () => sendStream(cardId, { cardId, type: 'done' }))
+  res.on('end', () => sendDone())
 }
 
 // ─── Pi streaming (newline-delimited JSON) ───────────────────────────────────
 
 export function parsePiStream(cardId: string, res: IncomingMessage): void {
   let buffer = ''
+  let doneSent = false
+  const sendDone = (): void => {
+    if (doneSent) return
+    doneSent = true
+    sendStream(cardId, { cardId, type: 'done' })
+  }
 
   res.on('data', (chunk: Buffer) => {
     buffer += chunk.toString()
@@ -126,7 +144,7 @@ export function parsePiStream(cardId: string, res: IncomingMessage): void {
         } else if (evt.type === 'tool_call' || evt.type === 'tool_use') {
           sendStream(cardId, { cardId, type: 'tool_use', toolName: evt.name ?? evt.tool, toolInput: evt.input ?? evt.arguments })
         } else if (evt.type === 'done' || evt.type === 'end') {
-          sendStream(cardId, { cardId, type: 'done' })
+          sendDone()
         } else if (evt.type === 'error') {
           sendStream(cardId, { cardId, type: 'error', error: evt.message ?? evt.error })
         }
@@ -135,7 +153,7 @@ export function parsePiStream(cardId: string, res: IncomingMessage): void {
   })
 
   res.on('error', err => sendStream(cardId, { cardId, type: 'error', error: err.message }))
-  res.on('end', () => sendStream(cardId, { cardId, type: 'done' }))
+  res.on('end', () => sendDone())
 }
 
 // ─── Generic SSE fallback (for unknown agents) ───────────────────────────────

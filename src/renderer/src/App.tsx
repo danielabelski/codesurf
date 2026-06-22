@@ -147,7 +147,10 @@ function App(): JSX.Element {
   const [canvasArrangeMode, setCanvasArrangeMode] = useState<'grid' | 'column' | 'row' | null>(null)
   const [guides, setGuides] = useState<{ x?: number; y?: number }[]>([])
   const [autoConnectionsEnabled] = useState(false)
-  const [canvasPointerWorld, setCanvasPointerWorld] = useState<{ x: number; y: number } | null>(null)
+  const canvasPointerWorldRef = useRef<{ x: number; y: number } | null>(null)
+  const setCanvasPointerWorld = useCallback((value: { x: number; y: number } | null | ((prev: { x: number; y: number } | null) => { x: number; y: number } | null)) => {
+    canvasPointerWorldRef.current = typeof value === 'function' ? value(canvasPointerWorldRef.current) : value
+  }, [])
   const [hoveredConnectionHandle, setHoveredConnectionHandle] = useState<{ tileId: string; side: AnchorPoint['side'] } | null>(null)
   const [showAgentSetup, setShowAgentSetup] = useState(false)
   // .skill install dialog — populated when user drops a .skill file on the
@@ -1834,7 +1837,7 @@ function App(): JSX.Element {
               expandedCanvasMembership={expandedCanvasMembership}
               dragState={dragState}
               viewport={viewport}
-              canvasPointerWorld={canvasPointerWorld}
+              canvasPointerWorld={null}
               theme={theme}
               dsc={dsc}
               workspaceId={workspace?.id}
