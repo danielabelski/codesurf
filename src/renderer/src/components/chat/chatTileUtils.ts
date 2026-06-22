@@ -4,6 +4,7 @@ import type {
 } from '../../../../shared/types'
 import { isImagePath } from '../../utils/dnd'
 import type { ToolBlock, ChatMessage, FileChange } from '../../../../shared/chat-types'
+import { normalizeToolName } from '../../../../shared/tool-normalization.ts'
 import type { SessionEntryHint } from '../../../../shared/session-types'
 import { buildChatMessageHistoryFingerprint } from '../../../../shared/chat-history'
 import { normalizeChatSurfacePayload, type ChatSurfacePayload } from '../chatSurfaceHostRpc'
@@ -204,10 +205,7 @@ export function normalizePersistedChatSurfaces(value: unknown): ActiveChatSurfac
 }
 
 export function getToolDisplayName(name: string): string {
-  if (name === 'exec_command') return 'bash'
-  if (name === 'Workspace File References') return 'files'
-  if (name === 'Workspace Instructions') return 'instructions'
-  return name
+  return normalizeToolName(name).displayName
 }
 
 export function buildOutgoingMessageContent(draftInput: string, draftAttachments: PendingAttachment[]): string {

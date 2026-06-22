@@ -74,7 +74,6 @@ import {
   activeQueries,
   activeProcesses,
   activeHttpRequests,
-  sessionIds,
   persistSessionIds,
   deleteCardSessionIds,
 } from '../chat/runtime'
@@ -825,6 +824,14 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
       sendStream(req.cardId, { type: 'error', error: error.message, jobId: job.id })
       sendStream(req.cardId, { type: 'done', jobId: job.id })
     })
+  } else {
+    sendStream(req.cardId, {
+      type: 'tool_summary',
+      toolName: 'Background job',
+      text: `Started detached ${requestWithProviderSettings.provider} job ${job.id}.`,
+      jobId: job.id,
+    })
+    sendStream(req.cardId, { type: 'done', jobId: job.id })
   }
 
   return { ok: true, jobId: job.id, detached: req.runMode === 'background' }

@@ -605,6 +605,22 @@ function buildCodeSurfInsightConvention() {
   return CODESURF_INSIGHT_CONVENTION
 }
 
+const CODESURF_ACTIVITY_CONVENTION = [
+  '## CodeSurf Activity Convention',
+  '',
+  'Keep your native agent instructions, tools, and strengths. This convention only standardizes what CodeSurf can show to the user.',
+  '',
+  'For non-trivial multi-step work, keep a visible task plan current using your native todo/plan tool when one is available.',
+  'If the native environment does not expose a todo/plan tool, use concise natural-language progress updates instead of inventing unavailable tools.',
+  '',
+  'Use neutral tool/action language. Avoid provider-specific status phrasing when a plain action name is enough.',
+  'Prefer short completion wording unless the task needs a structured handoff.',
+].join('\n')
+
+function buildCodeSurfActivityConvention() {
+  return CODESURF_ACTIVITY_CONVENTION
+}
+
 function summarizeMemoryContext(contextBuckets, instructionPrompt) {
   return describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
 }
@@ -625,13 +641,15 @@ function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skills
   const peerPrompt = buildClaudeSystemPrompt(peers)
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const insightConvention = buildCodeSurfInsightConvention()
-  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention)
+  const activityConvention = buildCodeSurfActivityConvention()
+  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
 }
 
 function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const insightConvention = buildCodeSurfInsightConvention()
-  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention)
+  const activityConvention = buildCodeSurfActivityConvention()
+  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 

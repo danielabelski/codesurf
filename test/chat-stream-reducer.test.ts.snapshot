@@ -9,6 +9,11 @@ exports[`chat stream reducer > done marks any still-running tool blocks as done 
     {
       "id": "t1",
       "name": "Read",
+      "rawName": "Read",
+      "canonicalName": "read_file",
+      "displayName": "Read file",
+      "groupKey": "read_file",
+      "category": "read",
       "input": "",
       "status": "done"
     }
@@ -71,6 +76,11 @@ exports[`chat stream reducer > full assistant turn: thinking, two tools, summari
     {
       "id": "t1",
       "name": "Read",
+      "rawName": "Read",
+      "canonicalName": "read_file",
+      "displayName": "Read file",
+      "groupKey": "read_file",
+      "category": "read",
       "input": "{\\"path\\":\\"a.ts\\"}",
       "status": "done",
       "summary": "Read a.ts",
@@ -84,6 +94,11 @@ exports[`chat stream reducer > full assistant turn: thinking, two tools, summari
     {
       "id": "t2",
       "name": "Grep",
+      "rawName": "Grep",
+      "canonicalName": "search_files",
+      "displayName": "Search files",
+      "groupKey": "search_files",
+      "category": "search",
       "input": "{\\"pattern\\":\\"foo\\"}",
       "status": "done",
       "summary": "Searched for foo",
@@ -142,6 +157,11 @@ exports[`chat stream reducer > interleaved thinking and tool blocks preserve con
     {
       "id": "t1",
       "name": "Read",
+      "rawName": "Read",
+      "canonicalName": "read_file",
+      "displayName": "Read file",
+      "groupKey": "read_file",
+      "category": "read",
       "input": "",
       "status": "done"
     }
@@ -160,6 +180,11 @@ exports[`chat stream reducer > streaming tool input accumulates across deltas 1`
     {
       "id": "t1",
       "name": "Bash",
+      "rawName": "Bash",
+      "canonicalName": "run_command",
+      "displayName": "Run command",
+      "groupKey": "run_command",
+      "category": "command",
       "input": "npm run test",
       "status": "done"
     }

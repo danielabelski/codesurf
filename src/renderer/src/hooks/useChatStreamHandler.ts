@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import type { ChatMessage, ToolBlock } from '../../../shared/chat-types'
+import { normalizeToolName } from '../../../shared/tool-normalization.ts'
 import type { ToolPermissionDecision, ToolPermissionRequest } from '../components/ai-elements/ToolPermission'
 import { applyChatStreamEvent, mergeToolBlockDuplicate } from './chatStreamReducer'
 
@@ -32,6 +33,31 @@ export function useChatStreamHandler({
 }: ChatStreamHandlerArgs): void {
 
   useEffect(() => {
+    const publishActivity = (message: string, details?: Record<string, unknown>) => {
+      window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+        message,
+        role: 'assistant',
+        ...(details ?? {}),
+      })
+    }
+
+    const buildToolBlock = (id: string, rawName: string, status: ToolBlock['status'] = 'running'): ToolBlock => {
+      const normalized = normalizeToolName(rawName)
+      return {
+        id,
+        name: normalized.rawName,
+        rawName: normalized.rawName,
+        canonicalName: normalized.canonicalName,
+        displayName: normalized.displayName,
+        groupKey: normalized.groupKey,
+        category: normalized.category,
+        provider: normalized.provider,
+        namespace: normalized.namespace,
+        input: '',
+        status,
+      }
+    }
+
     const updateLast = (fn: (m: ChatMessage) => ChatMessage) =>
       setMessagesSafe(prev => {
         const last = prev[prev.length - 1]
@@ -72,6 +98,10 @@ export function useChatStreamHandler({
 
         case 'tool_start':
           updateLast(m => applyChatStreamEvent(m, event))
+          publishActivity(`Started ${normalizeToolName(event.toolName).displayName}`, {
+            toolName: event.toolName,
+            toolId: event.toolId,
+          })
           break
 
         case 'tool_input':
@@ -84,6 +114,12 @@ export function useChatStreamHandler({
 
         case 'tool_summary':
           updateLast(m => applyChatStreamEvent(m, event))
+          if (typeof event.text === 'string' && event.text.trim()) {
+            publishActivity(`Finished ${normalizeToolName(event.toolName).displayName}`, {
+              toolName: event.toolName,
+              toolId: event.toolId,
+            })
+          }
           break
 
         case 'ask_user_question': {
@@ -91,12 +127,7 @@ export function useChatStreamHandler({
           if (!pid || !Array.isArray(event.questions) || event.questions.length === 0) break
           const askInput = JSON.stringify({ questions: event.questions })
           updateLast(m => {
-            const nextBlock: ToolBlock = {
-              id: pid,
-              name: 'AskUserQuestion',
-              input: askInput,
-              status: 'running',
-            }
+            const nextBlock: ToolBlock = { ...buildToolBlock(pid, 'AskUserQuestion'), input: askInput }
             const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
             const toolBlocks = existingIndex >= 0
               ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? { ...block, ...nextBlock } : block)
@@ -127,12 +158,7 @@ export function useChatStreamHandler({
             workspaceDir: typeof event.workspaceDir === 'string' ? event.workspaceDir : null,
           }
           updateLast(m => {
-            const nextBlock: ToolBlock = {
-              id: pid,
-              name: toolName,
-              input: '',
-              status: 'running',
-            }
+            const nextBlock: ToolBlock = buildToolBlock(pid, toolName)
             const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
             const toolBlocks = existingIndex >= 0
               ? (m.toolBlocks ?? []).map((block, index) => index === existingIndex ? mergeToolBlockDuplicate(block, nextBlock) : block)
@@ -179,8 +205,8 @@ export function useChatStreamHandler({
               const toolName = typeof event.toolName === 'string' ? event.toolName : 'tool'
               const existingIndex = (m.toolBlocks ?? []).findIndex(block => block.id === pid)
               const toolBlocks = existingIndex >= 0
-                ? (m.toolBlocks ?? []).map(block => block.id === pid ? { ...block, name: toolName, status: 'done' as const } : block)
-                : [...(m.toolBlocks ?? []), { id: pid, name: toolName, input: '', status: 'done' as const }]
+                ? (m.toolBlocks ?? []).map(block => block.id === pid ? { ...block, ...buildToolBlock(pid, toolName, 'done'), input: block.input } : block)
+                : [...(m.toolBlocks ?? []), buildToolBlock(pid, toolName, 'done')]
               const hasContentRef = (m.contentBlocks ?? []).some(block => block.type === 'tool' && block.toolId === pid)
               return {
                 ...m,
@@ -211,14 +237,13 @@ export function useChatStreamHandler({
           if (event.sessionId) setSessionId(event.sessionId)
           updateLast(m => applyChatStreamEvent(m, event))
           setIsStreaming(false)
-          window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
-            message: 'Assistant responded', role: 'assistant',
-          })
+          publishActivity('Assistant responded')
           break
 
         case 'error':
           updateLast(m => applyChatStreamEvent(m, event))
           setIsStreaming(false)
+          publishActivity(`Agent error: ${String(event.error ?? 'unknown error')}`)
           break
       }
     })

@@ -97,8 +97,14 @@ export function useChatTileLifecycleEffects(options: {
         const tb = blocks[j]
         const parsedPlan = parsePlanToolTodos(tb.name, tb.input || '{}')
         if (!parsedPlan) continue
-        latest = parsedPlan.todos.length > 0 ? parsedPlan.todos : null
-        break outer
+        if (parsedPlan.todos.length > 0) {
+          latest = parsedPlan.todos
+          break outer
+        }
+        if (parsedPlan.explicitClear) {
+          latest = null
+          break outer
+        }
       }
     }
     setTileTodos(tileId, latest)

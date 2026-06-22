@@ -1,3 +1,4 @@
 {
-  "model": "omnigent:default"
+  "model": "gpt-5.3-codex-spark",
+  "modelAdapterId": "openai.codex-app-server"
 }

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react'
 import { Brain, Check, ChevronRight, Clock, Cog, History, RotateCcw, Sparkles, Wrench } from 'lucide-react'
 import type { ToolBlock, ThinkingBlock, ChatMessage } from '../../../../shared/chat-types'
+import { normalizeToolName } from '../../../../shared/tool-normalization.ts'
 import type { TileTodoItem } from '../../state/tileTodosStore'
 import { useTheme } from '../../ThemeContext'
 import { ShimmerText } from '../shared/streamdown-utils'
@@ -27,6 +28,10 @@ import {
   hasVisibleFileChangeStats,
   hasRenderableFileChangeDiff,
 } from './chatTileUtils'
+
+function getToolBlockDisplayName(block: ToolBlock): string {
+  return block.displayName ?? getToolDisplayName(block.name)
+}
 
 // --- Rich message sub-components -------------------------------------------------
 
@@ -228,7 +233,7 @@ export const WorkingChipView = React.memo(function WorkingChipView({ message }: 
   if (activeThinking) return null
 
   const label = activeTool
-    ? `Running ${getToolDisplayName(activeTool.name)}`
+    ? `Running ${getToolBlockDisplayName(activeTool)}`
     : 'Working'
 
   const lightLine = `color-mix(in srgb, ${theme.text.primary} 12%, transparent)`
@@ -616,6 +621,8 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
   const theme = useTheme()
   const codePanelFontSize = Math.max(11, fonts.size - 1)
   const isFileChangeBlock = (block.fileChanges?.length ?? 0) > 0
+  const displayName = getToolBlockDisplayName(block)
+  const rawToolName = block.rawName ?? block.name
   const checkpointRestoreCtx = React.useContext(CheckpointRestoreContext)
 
   // Intercept tool-permission requests — when the agent needs user approval for
@@ -628,7 +635,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
     return (
       <ToolPermissionCard
         toolId={block.id}
-        fallbackToolName={block.name}
+        fallbackToolName={rawToolName}
         request={permissionRequest}
         resolvedDecision={resolvedDecision}
         theme={theme}
@@ -641,7 +648,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
   // can actually answer the question instead of seeing a raw JSON chip.
   // Once submitted, the main process emits a tool_summary so `block.summary`
   // is set, at which point we fall through to the normal chip rendering.
-  if (block.name === 'AskUserQuestion' && !block.summary) {
+  if ((block.name === 'AskUserQuestion' || block.canonicalName === 'ask_user') && !block.summary) {
     const askPayload = parseAskUserQuestionInput(block.input)
     if (askPayload && askPayload.questions.length > 0) {
       return (
@@ -695,6 +702,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
   return (
     <div
       data-tool-block-kind={isFileChangeBlock ? 'file-changes' : 'tool'}
+      title={displayName === rawToolName ? undefined : `${displayName} (${rawToolName})`}
       style={{
         background: theme.chat.assistantBubble,
         border: '0.5px solid transparent',
@@ -759,8 +767,8 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
             textTransform: 'uppercase', letterSpacing: 0.3,
-          }}>
-            {getToolDisplayName(block.name)}
+            }}>
+            {displayName}
           </ShimmerText>
         ) : (
           <div style={{
@@ -815,7 +823,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
                 whiteSpace: 'nowrap',
                 textTransform: 'uppercase', letterSpacing: 0.3,
               }}>
-                {getToolDisplayName(block.name)}
+                {displayName}
               </span>
             )}
           </div>
@@ -967,7 +975,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
         }}>
           {block.input && (
             <ToolInputView
-              toolName={getToolDisplayName(block.name)}
+              toolName={rawToolName}
               input={block.input}
               codePanelFontSize={codePanelFontSize}
             />
@@ -1025,7 +1033,7 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
           borderTop: `1px solid ${theme.chat.assistantBubbleBorder}`,
         }}>
           <ToolInputView
-            toolName={getToolDisplayName(block.name)}
+            toolName={rawToolName}
             input={block.input}
             codePanelFontSize={codePanelFontSize}
           />
@@ -1085,37 +1093,39 @@ function getBool(obj: unknown, key: string): boolean | null {
 }
 
 function isPlanToolName(toolName: string): boolean {
-  return toolName === 'TodoWrite' || toolName === 'update_plan'
+  return normalizeToolName(toolName).category === 'plan'
+}
+
+function getArray(obj: unknown, keys: string[]): unknown[] {
+  if (!obj || typeof obj !== 'object') return []
+  for (const key of keys) {
+    const value = (obj as Record<string, unknown>)[key]
+    if (Array.isArray(value)) return value
+  }
+  return []
+}
+
+function normalizeTodoStatus(status: string | null): TileTodoItem['status'] {
+  const value = String(status ?? 'pending').toLowerCase()
+  if (value === 'in_progress' || value === 'in-progress' || value === 'active' || value === 'doing') return 'in_progress'
+  if (value === 'completed' || value === 'complete' || value === 'done') return 'completed'
+  return value || 'pending'
 }
 
 function extractPlanTodosFromParsedInput(toolName: string, parsed: unknown): TileTodoItem[] {
   if (!parsed || typeof parsed !== 'object') return []
 
-  if (toolName === 'TodoWrite') {
-    const todosRaw = Array.isArray((parsed as Record<string, unknown>).todos)
-      ? (parsed as Record<string, unknown>).todos as unknown[]
-      : []
+  const normalizedName = normalizeToolName(toolName).canonicalName
+
+  if (normalizedName === 'update_plan' || normalizedName === 'review_plan') {
+    const todosRaw = getArray(parsed, ['todos', 'todo', 'plan', 'steps', 'items', 'tasks'])
     const normalized: TileTodoItem[] = []
     for (const t of todosRaw) {
-      const content = getStr(t, 'content') ?? ''
+      const content = getStr(t, 'content') ?? getStr(t, 'step') ?? getStr(t, 'title') ?? getStr(t, 'text') ?? ''
       if (!content) continue
-      const status = (getStr(t, 'status') ?? 'pending') as TileTodoItem['status']
-      const activeForm = getStr(t, 'activeForm') ?? undefined
+      const status = normalizeTodoStatus(getStr(t, 'status') ?? getStr(t, 'state'))
+      const activeForm = getStr(t, 'activeForm') ?? getStr(t, 'active_form') ?? undefined
       normalized.push({ content, status, activeForm })
-    }
-    return normalized
-  }
-
-  if (toolName === 'update_plan') {
-    const planRaw = Array.isArray((parsed as Record<string, unknown>).plan)
-      ? (parsed as Record<string, unknown>).plan as unknown[]
-      : []
-    const normalized: TileTodoItem[] = []
-    for (const step of planRaw) {
-      const content = getStr(step, 'step') ?? getStr(step, 'content') ?? ''
-      if (!content) continue
-      const status = (getStr(step, 'status') ?? 'pending') as TileTodoItem['status']
-      normalized.push({ content, status })
     }
     return normalized
   }
@@ -1123,11 +1133,20 @@ function extractPlanTodosFromParsedInput(toolName: string, parsed: unknown): Til
   return []
 }
 
-export function parsePlanToolTodos(toolName: string, input: string): { todos: TileTodoItem[] } | null {
+function isExplicitPlanClear(parsed: unknown): boolean {
+  if (!parsed || typeof parsed !== 'object') return false
+  const action = getStr(parsed, 'action') ?? getStr(parsed, 'operation') ?? getStr(parsed, 'type')
+  return action === 'clear' || action === 'reset'
+}
+
+export function parsePlanToolTodos(toolName: string, input: string): { todos: TileTodoItem[]; explicitClear: boolean } | null {
   if (!isPlanToolName(toolName)) return null
   const parsed = tryParseToolInput(input)
   if (!parsed || typeof parsed !== 'object') return null
-  return { todos: extractPlanTodosFromParsedInput(toolName, parsed) }
+  return {
+    todos: extractPlanTodosFromParsedInput(toolName, parsed),
+    explicitClear: isExplicitPlanClear(parsed),
+  }
 }
 
 export function ToolInputView({ toolName, input, codePanelFontSize }: {

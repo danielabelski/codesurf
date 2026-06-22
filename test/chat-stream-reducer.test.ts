@@ -88,6 +88,30 @@ describe('chat stream reducer', () => {
     t.assert.snapshot(result)
   })
 
+  test('tool events preserve raw name and add canonical metadata', () => {
+    const result = reduce([
+      { type: 'tool_start', toolId: 't1', toolName: 'Codex: Read_file' },
+      { type: 'tool_use', toolId: 't1', toolName: 'mcp__codesurf__read_file', toolInput: '{"path":"a.ts"}' },
+      { type: 'tool_summary', toolId: 't1', text: 'Read a.ts' },
+    ])
+    const block = result.toolBlocks?.[0]
+    expect(block?.name).toBe('mcp__codesurf__read_file')
+    expect(block?.rawName).toBe('mcp__codesurf__read_file')
+    expect(block?.displayName).toBe('Read file')
+    expect(block?.groupKey).toBe('read_file')
+    expect(block?.namespace).toBe('codesurf')
+  })
+
+  test('orphan tool summaries become visible activity chips', () => {
+    const result = reduce([
+      { type: 'tool_summary', toolId: 'bg1', toolName: 'Background job', text: 'Started detached job.' },
+    ])
+    const block = result.toolBlocks?.[0]
+    expect(block?.displayName).toBe('Background job')
+    expect(block?.summary).toBe('Started detached job.')
+    expect(result.contentBlocks?.[0]).toEqual({ type: 'tool', toolId: 'bg1' })
+  })
+
   test('error fills empty content and stops streaming', (t) => {
     const result = reduce([
       { type: 'error', error: 'boom' },

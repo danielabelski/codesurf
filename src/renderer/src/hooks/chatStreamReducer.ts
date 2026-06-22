@@ -21,6 +21,7 @@ import type {
   FileChange,
   CommandEntry,
 } from '../../../shared/chat-types'
+import { normalizeToolName } from '../../../shared/tool-normalization.ts'
 
 /** Fields the reducer reads off a normalised stream event. */
 export interface ChatStreamEvent {
@@ -39,6 +40,28 @@ export interface ChatStreamEvent {
   // Other fields (sessionId, sequence, jobId, provider, title, description,
   // blockedPath, workspaceDir, decision) are handled by the hook, not here.
   [key: string]: unknown
+}
+
+function toolBlockFields(toolName: string | null | undefined, provider?: unknown): Pick<
+  ToolBlock,
+  'name' | 'rawName' | 'canonicalName' | 'displayName' | 'groupKey' | 'category' | 'provider' | 'namespace'
+> {
+  const normalized = normalizeToolName(toolName, typeof provider === 'string' ? provider : undefined)
+  return {
+    name: normalized.rawName,
+    rawName: normalized.rawName,
+    canonicalName: normalized.canonicalName,
+    displayName: normalized.displayName,
+    groupKey: normalized.groupKey,
+    category: normalized.category,
+    provider: normalized.provider,
+    namespace: normalized.namespace,
+  }
+}
+
+function mergeToolName(block: ToolBlock, toolName: string | null | undefined, provider?: unknown): ToolBlock {
+  if (!toolName) return block
+  return { ...block, ...toolBlockFields(toolName, provider) }
 }
 
 /** Event types whose message-block mutation lives in this pure reducer. */
@@ -74,6 +97,13 @@ export function mergeToolBlockDuplicate(existing: ToolBlock, incoming: ToolBlock
     elapsed: incoming.elapsed ?? existing.elapsed,
     fileChanges: incoming.fileChanges ?? existing.fileChanges,
     commandEntries: incoming.commandEntries ?? existing.commandEntries,
+    rawName: incoming.rawName ?? existing.rawName,
+    canonicalName: incoming.canonicalName ?? existing.canonicalName,
+    displayName: incoming.displayName ?? existing.displayName,
+    groupKey: incoming.groupKey ?? existing.groupKey,
+    category: incoming.category ?? existing.category,
+    provider: incoming.provider ?? existing.provider,
+    namespace: incoming.namespace ?? existing.namespace,
   }
 }
 
@@ -125,7 +155,7 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
       const toolId = (typeof event.toolId === 'string' && event.toolId) || `tool-${Date.now()}`
       const nextBlock: ToolBlock = {
         id: toolId,
-        name: event.toolName ?? 'tool',
+        ...toolBlockFields(event.toolName ?? 'tool', event.provider),
         input: '',
         status: 'running',
       }
@@ -156,13 +186,13 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
 
     case 'tool_use': {
       const blocks = [...(m.toolBlocks ?? [])]
+      const normalized = normalizeToolName(event.toolName)
       const idx = event.toolId
         ? blocks.findIndex(b => b.id === event.toolId)
-        : blocks.findIndex(b => b.name === event.toolName && b.status === 'running')
+        : blocks.findIndex(b => (b.name === event.toolName || b.groupKey === normalized.groupKey) && b.status === 'running')
       if (idx >= 0) {
         blocks[idx] = {
-          ...blocks[idx],
-          name: event.toolName ?? blocks[idx].name,
+          ...mergeToolName(blocks[idx], event.toolName, event.provider),
           input: event.toolInput ?? blocks[idx].input,
           status: 'done',
         }
@@ -180,12 +210,27 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
           })()
       if (target >= 0) {
         blocks[target] = {
-          ...blocks[target],
-          name: event.toolName ?? blocks[target].name,
+          ...mergeToolName(blocks[target], event.toolName, event.provider),
           summary: typeof event.text === 'string' ? event.text : blocks[target].summary,
           status: 'done',
           fileChanges: Array.isArray(event.fileChanges) ? event.fileChanges : blocks[target].fileChanges,
           commandEntries: Array.isArray(event.commandEntries) ? event.commandEntries : blocks[target].commandEntries,
+        }
+      } else if (typeof event.text === 'string' && event.text.trim()) {
+        const toolId = (typeof event.toolId === 'string' && event.toolId) || `tool-${Date.now()}`
+        blocks.push({
+          id: toolId,
+          ...toolBlockFields(event.toolName ?? 'Activity', event.provider),
+          input: '',
+          summary: event.text,
+          status: 'done',
+          fileChanges: Array.isArray(event.fileChanges) ? event.fileChanges : undefined,
+          commandEntries: Array.isArray(event.commandEntries) ? event.commandEntries : undefined,
+        })
+        return {
+          ...m,
+          toolBlocks: blocks,
+          contentBlocks: [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId }],
         }
       }
       return { ...m, toolBlocks: blocks }
@@ -193,7 +238,8 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
 
     case 'tool_progress': {
       const blocks = [...(m.toolBlocks ?? [])]
-      const idx = blocks.findIndex(b => b.name === event.toolName && b.status === 'running')
+      const normalized = normalizeToolName(event.toolName)
+      const idx = blocks.findIndex(b => (b.name === event.toolName || b.groupKey === normalized.groupKey) && b.status === 'running')
       if (idx >= 0) blocks[idx] = { ...blocks[idx], elapsed: event.elapsed }
       return { ...m, toolBlocks: blocks }
     }

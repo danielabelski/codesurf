@@ -11,7 +11,7 @@ import { getAgentPath } from '../../agent-paths'
 import { getMCPPort, getMCPToken, getContexMcpToolNames } from '../../mcp-server'
 import { formatClaudeSdkError } from '../output-sanitizers'
 import { buildAsyncExecutionPrompt, buildPeerSystemPrompt } from '../prompt-builders'
-import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import { buildClaudeAgentModeOptions } from './agent-mode-payloads'
 import { daemonClient } from '../../daemon/client'
 import { getDisconnectedPeerBridgeMcpToolNames } from '../../../shared/nodeTools'
@@ -351,9 +351,10 @@ function buildClaudeAgentPrompt(
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const outputConvention = buildCodeSurfOutputConvention()
   const insightConvention = buildCodeSurfInsightConvention()
+  const activityConvention = buildCodeSurfActivityConvention()
   // Persona (AgentMode.systemPrompt) leads ahead of memory/skills, matching the
   // daemon Claude path so the agent definition frames the turn the same way.
-  return joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention)
+  return joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention)
 }
 
 // --- Anthropic file-change summaries -----------------------------------------

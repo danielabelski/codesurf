@@ -33,7 +33,8 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { CONTEX_HOME } from '../paths'
-import { buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
+import { buildAsyncExecutionPrompt, type AsyncExecutionContext } from './prompt-builders'
+import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
 
 /** Internal provider id (neutral). Never surface 'pi'/'earendil' to users. */
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
@@ -63,6 +64,10 @@ export interface CsagentRunRequest {
   thinking?: string
   /** Last user text to send. If omitted, derived by the caller. */
   prompt: string
+  agentPersona?: string
+  memoryPrompt?: string
+  skillsPrompt?: string
+  asyncExecution?: AsyncExecutionContext
   imageAttachments?: CsagentImageAttachment[]
 }
 
@@ -196,6 +201,7 @@ let _csagentModels: any = null // ModelRegistry singleton
 const csagentSessions = new Map<string, PiAgentSession>() // cardId -> live session
 const csagentUnsubs = new Map<string, () => void>() // cardId -> subscribe disposer
 const csagentSessionIds = new Map<string, string>() // cardId -> runtime sessionId (DEDICATED — never the shared sessionIds map)
+const csagentContextKeys = new Map<string, string>() // cardId -> last injected CodeSurf context overlay
 
 /** Package name of the user's installed pi runtime (never bundled by this app). */
 const PI_PKG = '@mariozechner/pi-coding-agent'
@@ -330,6 +336,18 @@ function mapThinking(thinking: string | undefined): string {
     default:
       return 'medium'
   }
+}
+
+function buildCsagentContextPreamble(req: CsagentRunRequest): string | undefined {
+  return joinPromptSections(
+    req.agentPersona,
+    req.memoryPrompt,
+    req.skillsPrompt,
+    buildAsyncExecutionPrompt(req.asyncExecution),
+    buildCodeSurfOutputConvention(),
+    buildCodeSurfInsightConvention(),
+    buildCodeSurfActivityConvention(),
+  )
 }
 
 /** Read + base64-encode image attachments into the runtime's image shape. */
@@ -474,7 +492,12 @@ function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessio
         }
         break
       case 'compaction_start':
-        enqueue({ type: 'tool_summary', text: 'Compacting context…' })
+        enqueue({
+          type: 'tool_summary',
+          toolId: `csagent-compaction-${Date.now()}`,
+          toolName: 'Compacting context',
+          text: 'Compacting context...',
+        })
         break
       case 'agent_end':
         emitDone()
@@ -586,8 +609,13 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
 
     // First/idle prompt: NO streamingBehavior (only required while streaming).
     const images = await buildCsagentImages(req.imageAttachments)
-    const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention())
-    const promptText = storedId ? req.prompt : `${promptConvention}\n\n---\n\n${req.prompt}`
+    const contextPreamble = buildCsagentContextPreamble(req)
+    const contextKey = String(contextPreamble ?? '').trim()
+    const shouldInjectContext = Boolean(contextKey) && (!storedId || csagentContextKeys.get(req.cardId) !== contextKey)
+    const promptText = shouldInjectContext
+      ? `${contextPreamble}\n\n---\n\n${req.prompt}`
+      : req.prompt
+    if (shouldInjectContext) csagentContextKeys.set(req.cardId, contextKey)
     await session.prompt(promptText, {
       ...(images.length > 0 ? { images } : {}),
       source: 'interactive',
@@ -661,6 +689,7 @@ export function disposeCsagent(cardId: string): void {
   csagentUnsubs.delete(cardId)
   csagentSessions.delete(cardId)
   csagentSessionIds.delete(cardId)
+  csagentContextKeys.delete(cardId)
 }
 
 /**
@@ -671,6 +700,7 @@ export function clearCsagentSession(cardId: string): void {
   csagentUnsubs.delete(cardId)
   csagentSessions.delete(cardId)
   csagentSessionIds.delete(cardId)
+  csagentContextKeys.delete(cardId)
 }
 
 /** True if a live CodeSurf Agent session exists for the card (for dispatch). */

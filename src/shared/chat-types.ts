@@ -18,7 +18,15 @@ export interface CommandEntry {
 
 export interface ToolBlock {
   id: string
+  /** Provider-native tool name, kept for debugging, permissions, and expanded detail. */
   name: string
+  rawName?: string
+  canonicalName?: string
+  displayName?: string
+  groupKey?: string
+  category?: string
+  provider?: string
+  namespace?: string
   input: string
   summary?: string
   elapsed?: number

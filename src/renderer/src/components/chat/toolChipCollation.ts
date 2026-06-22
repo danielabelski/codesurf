@@ -25,6 +25,7 @@
 // thought chips.
 
 import type { ToolBlock, ThinkingBlock } from '../../../../shared/chat-types'
+import { normalizeToolName } from '../../../../shared/tool-normalization.ts'
 
 export const CHIP_GROUP_THRESHOLD = 3
 export const CHIP_MEGA_THRESHOLD = 3
@@ -99,21 +100,28 @@ export function collateClusterChips(
     else done.push(c)
   }
 
-  // Bucket done chips by tool name — Map insertion order preserves
-  // first-seen-tool-name order for deterministic group placement.
+  // Bucket done chips by canonical group key — Map insertion order preserves
+  // first-seen-tool order for deterministic group placement while letting
+  // provider-native variants collapse together.
   const doneByTool = new Map<string, Extract<ClusterChip, { kind: 'tool' }>[]>()
   for (const c of done) {
-    const list = doneByTool.get(c.block.name)
+    const key = c.block.groupKey ?? normalizeToolName(c.block.name).groupKey
+    const list = doneByTool.get(key)
     if (list) list.push(c)
-    else doneByTool.set(c.block.name, [c])
+    else doneByTool.set(key, [c])
   }
 
   // Split into "groupable" (>= per-tool threshold) and "loose" (below).
-  const groupable: { toolName: string; chips: Extract<ClusterChip, { kind: 'tool' }>[] }[] = []
+  const groupable: { groupKey: string; toolName: string; chips: Extract<ClusterChip, { kind: 'tool' }>[] }[] = []
   const looseIds = new Set<string>()
-  for (const [toolName, list] of doneByTool) {
+  for (const [groupKey, list] of doneByTool) {
     if (list.length >= CHIP_GROUP_THRESHOLD) {
-      groupable.push({ toolName, chips: list })
+      const first = list[0].block
+      groupable.push({
+        groupKey,
+        toolName: first.displayName ?? normalizeToolName(first.name).displayName,
+        chips: list,
+      })
     } else {
       for (const c of list) looseIds.add(c.block.id)
     }
@@ -158,12 +166,12 @@ export function collateClusterChips(
 
   if (!megaActive || megaExploded) {
     for (const g of groupable) {
-      const groupId = `${GROUP_ID_PREFIX}${g.toolName}`
+      const groupId = `${GROUP_ID_PREFIX}${g.groupKey}`
       const groupExploded = explodedGroups.has(groupId)
       items.push({
         kind: 'tool-group',
         id: groupId,
-        key: `group-${g.toolName}-${g.chips[0].key}`,
+        key: `group-${g.groupKey}-${g.chips[0].key}`,
         toolName: g.toolName,
         blocks: g.chips.map(c => c.block),
         expanded: groupExploded,

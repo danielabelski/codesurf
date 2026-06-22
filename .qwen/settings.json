@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(xargs *)",
+      "Bash(timeout *)",
+      "Bash(grep *)",
+      "Bash(wc *)",
+      "Bash(ls *)",
+      "Bash(cat *)"
+    ]
+  },
+  "$version": 4
+}
