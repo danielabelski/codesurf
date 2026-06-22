@@ -2,6 +2,7 @@ import { homedir } from 'os'
 import { basename, extname, join } from 'path'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import {
+  type ChatRole,
   type ImportedChatMessage,
   type ImportedChatState,
   CODEX_SESSION_LISTING_HEAD_BYTES,
@@ -261,7 +262,7 @@ export async function listCodexSessions(workspacePath: string | null): Promise<A
             role: roleFromUnknown(item?.role),
             text: truncate(firstMeaningfulSessionTitleLine(stripCodexSystemMarkers(extractTextParts(item?.content))) ?? stripCodexSystemMarkers(extractTextParts(item?.content)), 400),
           }))
-          .filter(item => item.role && item.role !== 'system' && item.text) as Array<{ role: import('./shared').ChatRole; text: string }>
+          .filter(item => item.role && item.role !== 'system' && item.text) as Array<{ role: ChatRole; text: string }>
         const firstUserPrompt = meaningfulMessages.find(item => item.role === 'user')?.text ?? null
         const lastAssistantText = [...meaningfulMessages].reverse().find(item => item.role === 'assistant')?.text ?? null
         const lastConversationText = meaningfulMessages[meaningfulMessages.length - 1]?.text ?? null

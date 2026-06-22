@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import {
+  type ImportedChatMessage,
   type ImportedChatState,
   fileExists,
   readJsonSafe,
@@ -139,7 +140,7 @@ export async function parseOpenClawChatState(filePath: string, entry: Aggregated
         return null
       }
     })
-    .filter(Boolean) as import('./shared').ImportedChatMessage[]
+    .filter(Boolean) as ImportedChatMessage[]
 
   return {
     provider: 'openclaw',

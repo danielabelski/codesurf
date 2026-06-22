@@ -2,6 +2,7 @@ import { homedir } from 'os'
 import { basename, extname, join } from 'path'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import {
+  type ImportedChatMessage,
   type ImportedChatState,
   MAX_SESSION_LISTING_JSON_BYTES,
   fileExists,
@@ -78,7 +79,7 @@ export async function parseOpenCodeChatState(filePath: string, entry: Aggregated
       if (!role) return null
       return makeImportedMessage(`opencode-${index}`, role, extractTextParts(message?.content), Number(message?.timestamp) || Date.now() + index)
     })
-    .filter(Boolean) as import('./shared').ImportedChatMessage[]
+    .filter(Boolean) as ImportedChatMessage[]
 
   return {
     provider: 'opencode',

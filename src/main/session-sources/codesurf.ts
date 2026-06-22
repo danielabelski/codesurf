@@ -1,6 +1,7 @@
 import { basename, extname, join } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types'
 import {
+  type ImportedChatMessage,
   type ImportedChatState,
   MAX_SESSION_LISTING_JSON_BYTES,
   fileExists,
@@ -20,7 +21,7 @@ import {
 import { CONTEX_HOME } from '../paths.ts'
 
 export async function listCodeSurfSessionFiles(workspacePath: string | null): Promise<AggregatedSessionEntry[]> {
-  const roots: Array<{ dir: string; scope: import('../../shared/session-types').SessionScope }> = []
+  const roots: Array<{ dir: string; scope: SessionScope }> = []
   if (workspacePath) roots.push({ dir: join(getProjectCodeSurfDir(workspacePath), 'sessions'), scope: 'project' })
   roots.push({ dir: join(CONTEX_HOME, 'sessions'), scope: 'user' })
 
@@ -106,7 +107,7 @@ export async function parseCodeSurfChatState(filePath: string): Promise<Imported
           toolBlocks: Array.isArray(message?.toolBlocks) ? message.toolBlocks : undefined,
         })
       })
-      .filter(Boolean) as import('./shared').ImportedChatMessage[]
+      .filter(Boolean) as ImportedChatMessage[]
 
     return {
       provider: typeof parsed.provider === 'string' ? parsed.provider : 'claude',

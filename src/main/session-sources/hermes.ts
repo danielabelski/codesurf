@@ -3,8 +3,8 @@ import { join } from 'path'
 import Database from 'better-sqlite3'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import {
+  type ImportedChatMessage,
   type ImportedChatState,
-  fileExists,
   statSafe,
   truncate,
   epochMsFromUnknown,
@@ -158,7 +158,7 @@ export async function parseHermesChatState(filePath: string, entry: AggregatedSe
           thinking: thinkingContent ? { content: thinkingContent, done: true } : undefined,
         })
       })
-      .filter(Boolean) as import('./shared').ImportedChatMessage[]
+      .filter(Boolean) as ImportedChatMessage[]
 
     return {
       provider: 'hermes',
