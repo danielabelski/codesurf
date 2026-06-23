@@ -4,7 +4,13 @@ import { describe, test } from 'node:test'
 import { expect } from './node-expect.ts'
 
 const ROOT_DIR = process.cwd()
-const BROWSER_TILE_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/components/BrowserTile.tsx'), 'utf8')
+// The bus-bridge script + URL guards were extracted into browser/webviewManager;
+// the component still owns the message handler. Concatenate both so the
+// hardening assertions cover the whole surface.
+const BROWSER_TILE_SOURCE = [
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/BrowserTile.tsx'), 'utf8'),
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/webviewManager.ts'), 'utf8'),
+].join('\n')
 
 describe('BrowserTile bus bridge hardening', () => {
   test('loads cluso assets from bundled renderer assets', () => {
