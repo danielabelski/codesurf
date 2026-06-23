@@ -59,8 +59,8 @@ export function useChatTilePeerContext(options: {
     for (const peer of connectedPeers) {
       const channel = `ctx:${peer.peerId}`
       const subscriberId = `chat:${tileId}:peer-ctx:${peer.peerId}`
-      const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (event: any) => {
-        const p = event?.payload ?? event
+      const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (event) => {
+        const p = (event?.payload ?? event) as { action?: string; key?: string; value?: unknown }
         if (p?.action === 'context_changed' && p.key) {
           const existing = peerContextRef.current.get(peer.peerId) ?? {}
           peerContextRef.current.set(peer.peerId, { ...existing, [p.key]: p.value })

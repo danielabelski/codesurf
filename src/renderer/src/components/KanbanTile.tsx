@@ -584,7 +584,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
     if (!tileId || !window.electron?.bus) return
     const channel = `tile:${tileId}`
     const subscriberId = `kanban:${tileId}:mcp`
-    const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (evt: any) => {
+    const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (evt) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
       const command = typeof payload.command === 'string' ? payload.command : ''
