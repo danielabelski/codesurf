@@ -13,9 +13,9 @@ import { bus } from './event-bus'
 import { createServer, type Server, IncomingMessage, ServerResponse } from 'http'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { ExtensionRegistry } from './extensions/registry'
+import { broadcastToRenderer } from './utils/broadcast'
 import { getAllNodeTools } from '../shared/nodeTools'
 import { CONTEX_HOME } from './paths'
 import { assertSafePathSegment } from './security/pathSegments'
@@ -279,10 +279,7 @@ function pushSSE(cardId: string, event: string, data: unknown): void {
 }
 
 function sendToRenderer(event: string, data: unknown): void {
-  BrowserWindow.getAllWindows().forEach(win => {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) return
-    win.webContents.send('mcp:kanban', { event, data })
-  })
+  broadcastToRenderer('mcp:kanban', { event, data })
 }
 
 function buildMcpToolContext(): McpToolContext {
@@ -628,10 +625,7 @@ export async function startMCPServer(): Promise<number> {
           try {
             const { card_id, message, append_newline = true } = JSON.parse(body)
             // Tell renderer to write to the terminal
-            BrowserWindow.getAllWindows().forEach(win => {
-              if (win.isDestroyed() || win.webContents.isDestroyed()) return
-              win.webContents.send('mcp:inject', { cardId: card_id, message, appendNewline: append_newline })
-            })
+            broadcastToRenderer('mcp:inject', { cardId: card_id, message, appendNewline: append_newline })
             // Also push SSE so other agents/subscribers know
             pushSSE(card_id, 'canvas_message', { message })
             setCorsHeaders(res, req)
@@ -762,8 +756,16 @@ export function getMCPPort(): number | null {
 export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<void> {
   if (!serverPort) return
 
+  // Ensure .mcp.json (which embeds the bearer token) is gitignored BEFORE we
+  // write it. If the gitignore append fails we bail out: a leaked token in a
+  // committed .mcp.json is worse than missing auto-discovery (L3).
   const { ensureWorkspaceSecretsGitignored } = await import('./security/workspaceSecrets.ts')
-  await ensureWorkspaceSecretsGitignored(workspacePath).catch(() => {})
+  try {
+    await ensureWorkspaceSecretsGitignored(workspacePath)
+  } catch (err) {
+    console.warn(`[MCP] Skipping .mcp.json write to ${workspacePath}: could not update .gitignore — ${(err as Error).message}`)
+    return
+  }
 
   const mcpJsonPath = join(workspacePath, '.mcp.json')
   const contexUrl = `http://127.0.0.1:${serverPort}/mcp`
@@ -801,22 +803,57 @@ export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<
 }
 
 /**
- * Write a .claude/CLAUDE.md to the workspace so Claude Code sessions
- * automatically follow peer collaboration protocols.
+ * Drop the CodeSurf peer-collaboration instructions into a workspace so Claude
+ * Code sessions pick them up automatically.
+ *
+ * Data-safety: NEVER overwrite a hand-written CLAUDE.md. Three cases:
+ *  1. File absent                → write the managed file.
+ *  2. File present, has marker   → already ours, no-op.
+ *  3. File present, no marker    → user-owned. Write a sidecar
+ *                                 `.claude/contex.md` instead and append a
+ *                                 single one-line `@contex.md` import to their
+ *                                 CLAUDE.md (Claude Code's native include syntax).
+ *                                 The import line is idempotent and reversible.
  */
 async function writeContexClaudeMd(workspacePath: string): Promise<void> {
   const claudeDir = join(workspacePath, '.claude')
   const claudeMdPath = join(claudeDir, 'CLAUDE.md')
+  const sidecarPath = join(claudeDir, 'contex.md')
+  const IMPORT_LINE = '@contex.md'
 
-  // Don't overwrite if it already has the contex marker
+  let existing = ''
+  let exists = false
   try {
-    const existing = await fs.readFile(claudeMdPath, 'utf8')
-    if (existing.includes('<!-- contex-managed -->')) return
+    existing = await fs.readFile(claudeMdPath, 'utf8')
+    exists = true
   } catch { /* doesn't exist yet */ }
+
+  // Case 2: already managed by us.
+  if (exists && existing.includes('<!-- contex-managed -->')) return
 
   await fs.mkdir(claudeDir, { recursive: true })
 
-  const content = `<!-- contex-managed -->
+  // Case 3: user-owned file — don't touch it beyond a single reversible import line.
+  if (exists) {
+    if (existing.split(/\r?\n/).includes(IMPORT_LINE)) {
+      // Import already wired; make sure the sidecar body is current.
+      await fs.writeFile(sidecarPath, buildContexClaudeMdContent(), 'utf8')
+      return
+    }
+    const next = `${existing.replace(/\s*$/, '')}\n\n${IMPORT_LINE}\n`
+    await fs.writeFile(claudeMdPath, next, 'utf8')
+    await fs.writeFile(sidecarPath, buildContexClaudeMdContent(), 'utf8')
+    console.log(`[MCP] Added @contex.md import to existing ${claudeMdPath}`)
+    return
+  }
+
+  // Case 1: no file — write the full managed document.
+  await fs.writeFile(claudeMdPath, buildContexClaudeMdContent(), 'utf8')
+  console.log(`[MCP] Wrote .claude/CLAUDE.md to ${workspacePath}`)
+}
+
+function buildContexClaudeMdContent(): string {
+  return `<!-- contex-managed -->
 # CodeSurf Canvas Agent
 
 You are running inside CodeSurf, an infinite canvas workspace where multiple AI agents collaborate.
@@ -865,7 +902,4 @@ All contex tools use the prefix \`mcp__contex__\`. Examples:
 - \`mcp__contex__terminal_send_input\` — type into a peer terminal block
 - \`mcp__contex__chat_send_message\` — message a peer chat block
 `
-
-  await fs.writeFile(claudeMdPath, content)
-  console.log(`[MCP] Wrote .claude/CLAUDE.md to ${workspacePath}`)
 }

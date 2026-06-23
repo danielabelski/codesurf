@@ -314,20 +314,8 @@ export function registerFsIPC(): void {
     await fs.mkdir(await validateFsPathForHandler(dirPath, workspaceId), { recursive: true })
   })
 
-  ipcMain.handle('fs:delete', async (_, fspath: string, workspaceId?: string) => {
-    await fs.rm(await validateFsPathForHandler(fspath, workspaceId), { recursive: true, force: true })
-  })
-
-  // Aliases used by renderer
   ipcMain.handle('fs:deleteFile', async (_, fspath: string, workspaceId?: string) => {
     await fs.rm(await validateFsPathForHandler(fspath, workspaceId), { recursive: true, force: true })
-  })
-
-  ipcMain.handle('fs:rename', async (_, oldPath: string, newPath: string, workspaceId?: string) => {
-    await fs.rename(
-      await validateFsPathForHandler(oldPath, workspaceId),
-      await validateFsPathForHandler(newPath, workspaceId),
-    )
   })
 
   ipcMain.handle('fs:renameFile', async (_, oldPath: string, newPath: string, workspaceId?: string) => {
@@ -335,10 +323,6 @@ export function registerFsIPC(): void {
       await validateFsPathForHandler(oldPath, workspaceId),
       await validateFsPathForHandler(newPath, workspaceId),
     )
-  })
-
-  ipcMain.handle('fs:basename', async (_, filePath: string) => {
-    return basename(filePath)
   })
 
   ipcMain.handle('fs:revealInFinder', async (_, filePath: string, workspaceId?: string) => {

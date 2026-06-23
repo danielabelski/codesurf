@@ -288,6 +288,141 @@ useEffect(() => {
 }, [canvasRef, viewportRef])
 ```
 
+### 10. Per-Entity Token Registries
+
+**Problem**: A single global bearer token is shared across all clients (terminals, agents, renderer). If one client's token leaks, all operations are compromised.
+
+**Detection**:
+- Search for `randomUUID()` or token generation in server modules
+- Check if the same token is used for auth validation across all clients
+- Look for token written to disk files (`.mcp.json`, `mcp-server.json`)
+
+**Fix Pattern**:
+```typescript
+import { randomUUID } from 'crypto'
+
+const GLOBAL_TOKEN = randomUUID()
+const entityTokens = new Map<string, string>()
+
+export function generateEntityToken(entityId: string): string {
+  const existing = entityTokens.get(entityId)
+  if (existing) return existing
+  const token = randomUUID()
+  entityTokens.set(entityId, token)
+  return token
+}
+
+export function revokeEntityToken(entityId: string): void {
+  entityTokens.delete(entityId)
+}
+
+// Auth validation checks both global and per-entity tokens
+function requireAuth(token: string): boolean {
+  if (token === GLOBAL_TOKEN) return true
+  if (token && entityTokens.has(token)) return true
+  return false
+}
+
+// Wire into entity lifecycle
+ipcMain.handle('terminal:destroy', (_, tileId) => {
+  // ... cleanup terminal
+  revokeEntityToken(tileId)
+})
+```
+
+### 11. CORS Origin Allowlist
+
+**Problem**: MCP/HTTP servers reflect any `Origin` header as `Access-Control-Allow-Origin`, allowing any website to make credentialed cross-origin requests.
+
+**Detection**:
+- Search for `setHeader('Access-Control-Allow-Origin'` in server code
+- Check if origin is reflected verbatim from `req.headers.origin`
+- Look for wildcard `*` fallback when no origin is present
+
+**Fix Pattern**:
+```typescript
+function setCorsHeaders(res: ServerResponse, req?: IncomingMessage): void {
+  const origin = req?.headers.origin
+  const isAllowedOrigin = !origin ||
+    origin === 'null' ||                          // file:// in production
+    origin.startsWith('http://localhost:') ||      // dev server
+    origin === 'http://localhost' ||
+    origin.startsWith('app://') ||                 // custom Electron schemes
+    origin === 'app://codesurf'
+  if (isAllowedOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*')
+    if (origin) res.setHeader('Vary', 'Origin')
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+}
+```
+
+### 12. Silent Catch Audit
+
+**Problem**: Empty `catch {}` or `catch { /**/ }` blocks swallow errors silently, making debugging impossible when critical operations fail.
+
+**Detection**:
+- Search for `catch \{[\s]*\}` and `catch \{[\s]*/\*\*/[\s]*\}` patterns
+- Categorize by severity: config writes, data operations, cleanup, file-existence checks
+- Priority: MCP server config writes > data persistence > terminal spawn > cleanup
+
+**Fix Pattern** (ENOENT-tolerant logging):
+```typescript
+// Before: silent failure on config read
+try {
+  const raw = await fs.readFile(configPath, 'utf8')
+  config = JSON.parse(raw)
+} catch { /**/ }
+
+// After: log non-ENOENT errors, silently skip missing files
+try {
+  const raw = await fs.readFile(configPath, 'utf8')
+  config = JSON.parse(raw)
+} catch (err) {
+  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+    console.warn('[mcp] Failed to read existing config:', err)
+  }
+}
+```
+
+**Acceptable silent catches** (no change needed):
+- Temp file cleanup: `try { unlinkSync(tempDb) } catch {}`
+- File existence checks: `try { await fs.access(path) } catch { return false }`
+- Process teardown: `try { proc.kill() } catch {}`
+
+### 13. O(n²) Computation Gating During Interaction
+
+**Problem**: Expensive O(n²) computations (discovery graphs, connection candidates) run on every render frame during tile drags, causing frame drops with many tiles.
+
+**Detection**:
+- Search for nested loops over `tiles` array in `useMemo` hooks
+- Check if the `useMemo` depends on `tiles` (changes on every drag frame)
+- Look for `findDiscoveryMatch` or similar O(n) functions called in a loop
+
+**Fix Pattern**:
+```typescript
+const negotiatedDiscoveryState = useMemo(() => {
+  // ... build connection graph from worker results ...
+
+  // Skip O(n²) auto-discovery during active drags — connections
+  // don't need to be recomputed while tiles are moving
+  const isActiveDrag = dragState.type === 'tile' ||
+    dragState.type === 'group' ||
+    dragState.type === 'resize' ||
+    dragState.type === 'connection'
+
+  if (autoConnectionsEnabled && !isActiveDrag) {
+    for (const tile of tiles) {
+      const discovery = findDiscoveryMatch(tile.id, tiles, ...)
+      // ... process discovery match
+    }
+  }
+
+  return { connectedTileIds, byTileConnections, ambientRoutes }
+}, [autoConnectionsEnabled, tiles, dragState, ...])
+```
+
 ## Audit Workflow
 
 1. **Recon**: Read package.json, AGENTS.md, check `src/main/ipc/` directory structure

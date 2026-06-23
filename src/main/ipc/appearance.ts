@@ -1,11 +1,8 @@
-import { BrowserWindow, ipcMain, nativeTheme } from 'electron'
+import { ipcMain, nativeTheme } from 'electron'
+import { broadcastToRenderer } from '../utils/broadcast'
 
 function broadcastAppearanceToRenderers(): void {
-  const payload = { shouldUseDark: nativeTheme.shouldUseDarkColors }
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-    win.webContents.send('appearance:updated', payload)
-  }
+  broadcastToRenderer('appearance:updated', { shouldUseDark: nativeTheme.shouldUseDarkColors })
 }
 
 export function registerAppearanceIPC(): void {

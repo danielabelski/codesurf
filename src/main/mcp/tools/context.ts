@@ -1,10 +1,10 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { BrowserWindow } from 'electron'
 import { bus } from '../../event-bus'
 import { CONTEX_HOME } from '../../paths'
 import { loadWorkspaceTileState, saveWorkspaceTileState } from '../../storage/workspaceArtifacts'
 import * as peerState from '../../peer-state'
+import { broadcastToRenderer } from '../../utils/broadcast'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
 
 type UserConfigWorkspaceRef = {
@@ -294,12 +294,10 @@ export async function handleContextTool(
     if (!tileId || !action) return 'Missing tile_id or action'
     if (!peerState.getState(tileId)) return `Block '${tileId}' is not registered — action refused`
     const params = typeof args.params === 'object' && args.params ? args.params as Record<string, unknown> : {}
-    BrowserWindow.getAllWindows().forEach(win => {
-      win.webContents.send('tileContext:changed', {
-        tileId,
-        key: '_action',
-        value: { action, params, ts: Date.now() },
-      })
+    broadcastToRenderer('tileContext:changed', {
+      tileId,
+      key: '_action',
+      value: { action, params, ts: Date.now() },
     })
     return `Action '${action}' dispatched to extension block ${tileId}`
   }

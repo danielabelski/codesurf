@@ -1,4 +1,3 @@
-import { BrowserWindow } from 'electron'
 import type { Query } from '@anthropic-ai/claude-agent-sdk'
 import type { ChildProcess } from 'child_process'
 import * as http from 'http'
@@ -6,6 +5,7 @@ import { promises as fs, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { CONTEX_HOME } from '../paths'
 import { daemonClient } from '../daemon/client'
+import { broadcastToRenderer } from '../utils/broadcast'
 import type { ChatMessage, ChatRequest, RuntimeChatSessionState } from './types'
 
 export type { RuntimeChatSessionState } from './types'
@@ -17,11 +17,7 @@ export function log(...args: unknown[]): void {
 
 export function sendStream(cardId: string, event: Record<string, unknown>): void {
   log('sendStream', event.type, event.text ? `"${String(event.text).slice(0, 50)}"` : '', event.error ?? '')
-  BrowserWindow.getAllWindows().forEach(win => {
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.send('agent:stream', { cardId, ...event })
-    }
-  })
+  broadcastToRenderer('agent:stream', { cardId, ...event })
 }
 
 export function cloneChatMessages(messages: ChatMessage[]): ChatMessage[] {

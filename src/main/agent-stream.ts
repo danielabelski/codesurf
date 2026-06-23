@@ -5,7 +5,7 @@
  */
 
 import { IncomingMessage } from 'http'
-import { BrowserWindow } from 'electron'
+import { broadcastToRenderer } from './utils/broadcast'
 
 export interface StreamEvent {
   cardId: string
@@ -17,11 +17,7 @@ export interface StreamEvent {
 }
 
 function sendStream(_cardId: string, event: StreamEvent): void {
-  BrowserWindow.getAllWindows().forEach(win => {
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.send('agent:stream', event)
-    }
-  })
+  broadcastToRenderer('agent:stream', event)
 }
 
 // ─── Claude streaming (SSE, Anthropic format) ────────────────────────────────

@@ -196,6 +196,22 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
           input: event.toolInput ?? blocks[idx].input,
           status: 'done',
         }
+      } else {
+        // No matching block (missing/out-of-order tool_start). Don't drop the
+        // event — synthesize a completed block so the tool call shows up in the
+        // transcript, mirroring tool_summary's fallback behaviour.
+        const toolId = (typeof event.toolId === 'string' && event.toolId) || `tool-${Date.now()}`
+        blocks.push({
+          id: toolId,
+          ...toolBlockFields(event.toolName ?? 'tool', event.provider),
+          input: typeof event.toolInput === 'string' ? event.toolInput : '',
+          status: 'done',
+        })
+        return {
+          ...m,
+          toolBlocks: blocks,
+          contentBlocks: [...(m.contentBlocks ?? []), { type: 'tool' as const, toolId }],
+        }
       }
       return { ...m, toolBlocks: blocks }
     }

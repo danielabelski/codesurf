@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
 import { getHeapStatistics } from 'v8'
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -8,6 +8,7 @@ import { getDaemonStatus, restartDaemon } from '../daemon/manager'
 import { daemonClient } from '../daemon/client'
 import { CONTEX_HOME } from '../paths'
 import { getDb, getDbStatus, resetDatabase } from '../db'
+import { broadcastToRenderer } from '../utils/broadcast'
 
 // Debounce GC — if cleanupTile is called many times in quick succession we don't
 // want to hammer global.gc(). Runs ~1s after the last cleanup.
@@ -32,12 +33,7 @@ function runGC(): void {
     }
   }
   // Renderers — request they run gc too (window.gc requires --expose-gc on renderer)
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-    try {
-      win.webContents.send('system:gc-requested')
-    } catch { /* sender dead */ }
-  }
+  broadcastToRenderer('system:gc-requested')
 }
 
 function sanitizeDaemonState(result: { running: boolean; info: Awaited<ReturnType<typeof getDaemonStatus>>['info'] }): {

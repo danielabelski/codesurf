@@ -1,6 +1,7 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain } from 'electron'
 import type { TileContextEntry } from '../../shared/types'
 import { bus } from '../event-bus'
+import { broadcastToRenderer } from '../utils/broadcast'
 import { loadWorkspaceTileState, saveWorkspaceTileState } from '../storage/workspaceArtifacts'
 
 interface TileContextState {
@@ -24,9 +25,7 @@ function publishContextChanged(tileId: string, key: string, value: unknown): voi
     payload: { action: 'context_changed', key, value, tileId },
   })
   // Forward to renderer
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('tileContext:changed', { tileId, key, value })
-  })
+  broadcastToRenderer('tileContext:changed', { tileId, key, value })
 }
 
 export function registerTileContextIPC(): void {

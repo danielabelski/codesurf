@@ -1,5 +1,3 @@
-import { BrowserWindow } from 'electron'
-
 import type {
   ContexRelay,
   RelayChannelMessageDraft,
@@ -11,6 +9,7 @@ import type {
 import { ContexRelay as RelayCore, RelayRuntime } from '../../../packages/contex-relay/src'
 import type { TileState } from '../../shared/types'
 import { bus } from '../event-bus'
+import { broadcastToRenderer } from '../utils/broadcast'
 import { loadWorkspaceTileState } from '../storage/workspaceArtifacts'
 import { createMainProcessRelayExecutor } from './provider-executor'
 
@@ -36,11 +35,7 @@ function broadcast(event: RelayEvent, workspacePath: string): void {
     payload: { workspacePath, event },
   })
 
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.send('relay:event', { workspacePath, event })
-    }
-  }
+  broadcastToRenderer('relay:event', { workspacePath, event })
 }
 
 async function readTileState(workspaceId: string, tileId: string): Promise<any | null> {

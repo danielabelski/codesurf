@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto'
-import { ipcMain, BrowserWindow, type WebContents } from 'electron'
+import { ipcMain, type WebContents } from 'electron'
 import { promises as fs } from 'fs'
 import { join, basename } from 'path'
 import type {
@@ -26,6 +26,7 @@ import {
   assertSafeWorkspacePath,
   resolveInside,
 } from '../security/pathSegments.ts'
+import { broadcastToRenderer } from '../utils/broadcast'
 
 const MESSAGE_PROTOCOL = 'contex-message/v1' as const
 const MESSAGE_MAILBOXES: CollabMailbox[] = ['inbox', 'sent', 'memory', 'bin']
@@ -259,10 +260,7 @@ async function broadcastMessageChange(payload: {
   event: 'add' | 'change' | 'unlink'
   message?: CollabMessage | null
 }): Promise<void> {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-    win.webContents.send('collab:messageChanged', payload)
-  }
+  broadcastToRenderer('collab:messageChanged', payload)
 }
 
 function parseMailboxAndFilename(rootDir: string, changedPath: string): { mailbox: CollabMailbox; filename: string } | null {
@@ -324,10 +322,7 @@ async function startStateWatcher(workspacePath: string, tileId: string): Promise
 
   watcher.on('change', async () => {
     const state = await readJsonSafe<CollabState>(statePath, { tasks: [], paused: false })
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-      win.webContents.send('collab:stateChanged', { workspacePath, tileId, state })
-    }
+    broadcastToRenderer('collab:stateChanged', { workspacePath, tileId, state })
   })
 
   stateWatchers.set(key, { close: () => watcher.close() })

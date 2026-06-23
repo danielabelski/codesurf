@@ -9,7 +9,7 @@ import { CONTEX_HOME, workspaceTileDir, legacyWorkspaceTileDir } from '../paths'
 import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
 import { readSettingsSync } from './workspace'
-import { isAllowedBinary, expandHome, buildSafeSpawnEnv } from './terminal-helpers'
+import { isAllowedBinary, expandHome, buildSafeSpawnEnv, ALLOWED_AGENT_BINS } from './terminal-helpers'
 
 function ensureNodePtySpawnHelperExecutable(): void {
   // On Windows, node-pty uses conpty (no spawn-helper needed)
@@ -256,9 +256,10 @@ export function registerTerminalIPC(): void {
     const bin = launchBin || defaultShell
     const args = launchBin ? (launchArgs ?? []).map(expandHome) : []
 
-    // Check if we should inject MCP config for agent CLIs
-    const agentBins = ['claude', 'codex', 'aider', 'opencode']
-    const isAgent = launchBin && agentBins.some(a => launchBin.includes(a))
+    // Check if we should inject MCP config for agent CLIs. Derive the set
+    // from the spawn allowlist so the two never drift (SEC-04 + M3).
+    const launchBase = (bin.split(/[/\\]/).pop() || '').replace(/\.(exe|cmd|bat|ps1)$/i, '')
+    const isAgent = ALLOWED_AGENT_BINS.includes(launchBase)
     const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ CARD_ID: tileId })
 
     // Set CONTEX_DIR so agents know where their per-tile .contex folder is
@@ -321,7 +322,7 @@ export function registerTerminalIPC(): void {
       } catch { /* no skills config */ }
 
       // Auto-allow contex MCP tools for Claude Code CLI launches
-      const isClaude = launchBin?.includes('claude') ?? false
+      const isClaude = launchBase === 'claude'
       if (isClaude) {
         const mcpToolNames = [
           'mcp__contex__canvas_create_tile', 'mcp__contex__canvas_open_file',
@@ -477,7 +478,13 @@ export function registerTerminalIPC(): void {
   })
 
   // terminal:cd — change the working directory of a terminal
-  // Clears the current input line first to avoid corrupting in-progress input
+  // Clears the current input line first to avoid corrupting in-progress input.
+  //
+  // Security note: `dirPath` is NOT workspace-scoped by design. The terminal is
+  // a user-owned shell; cd-ing anywhere the user could cd from a real shell is
+  // expected behaviour. The per-shell escaping below (single-quote doubling for
+  // POSIX, double-quote doubling for cmd, LiteralPath for PowerShell) prevents
+  // argument injection, which is the only injection vector that matters here.
   ipcMain.handle('terminal:cd', (_, tileId: string, dirPath: string) => {
     const session = terminals.get(tileId)
     if (!session) return

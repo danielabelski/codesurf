@@ -1,9 +1,10 @@
-import { ipcMain, BrowserWindow, type WebContents } from 'electron'
+import { ipcMain, type WebContents } from 'electron'
 import { request as httpRequest } from 'http'
 import { request as httpsRequest } from 'https'
 import { promises as dnsPromises } from 'dns'
 import { getStreamParser } from '../agent-stream'
 import { assertSafeStreamUrl } from '../utils/urlSafety'
+import { broadcastToRenderer } from '../utils/broadcast'
 
 interface StreamRequest {
   cardId: string
@@ -88,6 +89,22 @@ export function registerStreamIPC(): void {
 
     return new Promise<{ ok: boolean }>((resolve, reject) => {
       const httpReq = reqFn(options, res => {
+        // Non-2xx responses (401/403/500/etc.) carry an error body, not SSE.
+        // Feeding them to the stream parser produces an empty/garbled transcript;
+        // surface a real error instead (M4).
+        const status = res.statusCode ?? 0
+        if (status >= 400) {
+          let body = ''
+          res.on('data', (chunk: Buffer | string) => { body += chunk; if (body.length > 4096) res.destroy() })
+          res.on('end', () => {
+            const message = `Upstream returned ${status}${body.trim() ? `: ${body.trim().slice(0, 500)}` : ''}`
+            broadcastToRenderer('agent:stream', {
+              cardId: req.cardId, type: 'error', error: message
+            })
+            reject(new Error(message))
+          })
+          return
+        }
         const parse = getStreamParser(req.agentId)
         parse(req.cardId, res)
         resolve({ ok: true })
@@ -95,12 +112,8 @@ export function registerStreamIPC(): void {
 
       httpReq.on('error', err => {
         // Send error to renderer
-        BrowserWindow.getAllWindows().forEach(win => {
-          if (!win.webContents.isDestroyed()) {
-            win.webContents.send('agent:stream', {
-              cardId: req.cardId, type: 'error', error: err.message
-            })
-          }
+        broadcastToRenderer('agent:stream', {
+          cardId: req.cardId, type: 'error', error: err.message
         })
         reject(err)
       })

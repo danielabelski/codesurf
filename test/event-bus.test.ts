@@ -264,3 +264,36 @@ describe('EventBus — read cursor tracking', () => {
     assert.equal(bus.getUnreadCount('ch', 'sub-b'), 3) // never marked read
   })
 })
+
+describe('EventBus — channel eviction', () => {
+  it('caps total channels, evicting the oldest when over the limit', async () => {
+    const bus = new EventBus()
+    // Publish to well over MAX_CHANNELS distinct channels.
+    for (let i = 0; i < 1100; i++) {
+      bus.publish(makeEvent({ channel: `burst:${i}` }))
+    }
+
+    // scheduleEviction runs on a microtask; drain it.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const stats = bus.getStats()
+    assert.ok(stats.channels <= 1000, `expected <= 1000 channels, got ${stats.channels}`)
+  })
+
+  it('never evicts a channel with a live subscriber', async () => {
+    const bus = new EventBus()
+    bus.subscribe('keep:me', 'sub-1', () => {})
+    bus.publish(makeEvent({ channel: 'keep:me' }))
+
+    for (let i = 0; i < 1100; i++) {
+      bus.publish(makeEvent({ channel: `noise:${i}` }))
+    }
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The subscribed channel must still be present with its history.
+    assert.equal(bus.getHistory('keep:me').length, 1)
+  })
+})

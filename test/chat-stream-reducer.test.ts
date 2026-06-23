@@ -112,6 +112,19 @@ describe('chat stream reducer', () => {
     expect(result.contentBlocks?.[0]).toEqual({ type: 'tool', toolId: 'bg1' })
   })
 
+  test('orphan tool_use (no preceding tool_start) still appears in transcript', () => {
+    // Out-of-order or provider-without-tool_start streams must not drop the call.
+    const result = reduce([
+      { type: 'tool_use', toolId: 'orphan1', toolName: 'Read', toolInput: '{"path":"a.ts"}' },
+    ])
+    const block = result.toolBlocks?.[0]
+    expect(block?.id).toBe('orphan1')
+    expect(block?.status).toBe('done')
+    expect(block?.input).toBe('{"path":"a.ts"}')
+    expect(block?.displayName).toBe('Read file')
+    expect(result.contentBlocks?.[0]).toEqual({ type: 'tool', toolId: 'orphan1' })
+  })
+
   test('error fills empty content and stops streaming', (t) => {
     const result = reduce([
       { type: 'error', error: 'boom' },

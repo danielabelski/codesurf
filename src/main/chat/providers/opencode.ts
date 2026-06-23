@@ -4,10 +4,10 @@
 
 import { spawn, ChildProcess, execFileSync } from 'child_process'
 import * as net from 'net'
-import { BrowserWindow } from 'electron'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
+import { broadcastToRenderer } from '../../utils/broadcast'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
@@ -185,10 +185,7 @@ function getOpenCodeFallbackModels(): Array<{ id: string; label: string; descrip
 }
 
 function broadcastOpenCodeModelsUpdated(payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-    win.webContents.send('chat:opencodeModelsUpdated', payload)
-  }
+  broadcastToRenderer('chat:opencodeModelsUpdated', payload)
 }
 
 function refreshOpenCodeModelsInBackground(force = false): Promise<void> {
