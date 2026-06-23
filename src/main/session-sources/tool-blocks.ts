@@ -10,7 +10,7 @@ export function truncateToolPreview(text: string | null | undefined, length = 80
 export function extractReasoningSummary(payload: any): string {
   if (!Array.isArray(payload?.summary)) return ''
   return payload.summary
-    .map((entry: any) => typeof entry?.text === 'string' ? entry.text.trim() : '')
+    .map((entry: { text?: string }) => typeof entry?.text === 'string' ? entry.text.trim() : '')
     .filter(Boolean)
     .join('\n\n')
 }

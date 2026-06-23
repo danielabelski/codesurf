@@ -173,8 +173,8 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
       if (msg.type === 'assistant') {
         const blocks = (msg as any).message?.content ?? []
         const blockText = blocks
-          .filter((block: any) => block.type === 'text' && typeof block.text === 'string')
-          .map((block: any) => block.text)
+          .filter((block: { type?: string; text?: string }) => block.type === 'text' && typeof block.text === 'string')
+          .map((block: { text?: string }) => block.text)
           .join('')
         if (blockText) text += blockText
       }

@@ -183,8 +183,8 @@ export function normalizePersistedChatSurfaces(value: unknown): ActiveChatSurfac
       : {}
     const registeredActions = Array.isArray(surface.registeredActions)
       ? surface.registeredActions
-        .filter((action: any) => action && typeof action.name === 'string')
-        .map((action: any) => ({ name: String(action.name), description: typeof action.description === 'string' ? action.description : '' }))
+        .filter((action: { name?: unknown; description?: unknown }) => action && typeof action.name === 'string')
+        .map((action: { name: unknown; description?: unknown }) => ({ name: String(action.name), description: typeof action.description === 'string' ? action.description : '' }))
       : []
     return {
       extId,

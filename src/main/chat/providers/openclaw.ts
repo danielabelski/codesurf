@@ -83,7 +83,7 @@ function extractOpenClawTextPayload(payload: any): string {
   if (typeof payload.summary === 'string') return payload.summary
   if (Array.isArray(payload.parts)) {
     return payload.parts
-      .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+      .map((part: { text?: string }) => typeof part?.text === 'string' ? part.text : '')
       .filter(Boolean)
       .join('')
   }

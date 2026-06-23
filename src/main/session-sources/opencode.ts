@@ -39,7 +39,7 @@ export async function listOpenCodeSessions(workspacePath: string | null): Promis
     const parsed = await readJsonSafe(filePath, { maxBytes: MAX_SESSION_LISTING_JSON_BYTES })
     const projectPath = typeof parsed?.projectPath === 'string' ? parsed.projectPath : null
     const meaningfulMessages = Array.isArray(parsed?.messages)
-      ? parsed.messages.filter((m: any) => typeof m?.content === 'string' && m.role !== 'system' && m.content.trim())
+      ? parsed.messages.filter((m: { content?: string; role?: string }) => typeof m?.content === 'string' && m.role !== 'system' && m.content.trim())
       : []
     const lastMessage = truncate(meaningfulMessages.slice(-1)[0]?.content)
     const sessionId = typeof parsed?.id === 'string' ? parsed.id : basename(filePath, '.json')

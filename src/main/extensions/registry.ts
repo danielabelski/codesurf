@@ -495,7 +495,7 @@ export class ExtensionRegistry {
       const contributes = ext.manifest.contributes as any
       const actions = contributes?.actions
       if (Array.isArray(actions) && actions.length > 0) {
-        result.set(ext.manifest.id, actions.map((a: any) => ({ name: String(a.name ?? ''), description: String(a.description ?? '') })))
+        result.set(ext.manifest.id, actions.map((a: { name?: unknown; description?: unknown }) => ({ name: String(a.name ?? ''), description: String(a.description ?? '') })))
       }
     }
     return result

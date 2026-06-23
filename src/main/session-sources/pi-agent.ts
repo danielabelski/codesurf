@@ -236,8 +236,8 @@ export async function parsePiAgentChatState(filePath: string, entry: AggregatedS
 
       const content = Array.isArray(evt.message?.content) ? evt.message.content : []
       const thinking = content
-        .filter((part: any) => part?.type === 'thinking' && typeof part.thinking === 'string')
-        .map((part: any) => part.thinking)
+        .filter((part: { type?: string; thinking?: string }) => part?.type === 'thinking' && typeof part.thinking === 'string')
+        .map((part: { thinking?: string }) => part.thinking)
         .filter(Boolean)
         .join('\n\n')
       const text = role === 'user'

@@ -278,7 +278,7 @@ export async function handleContextTool(
         const entries = Object.values(ctx)
 
         if (tagPrefix) {
-          return JSON.stringify(entries.filter((e: any) => e.key?.startsWith(tagPrefix)), null, 2)
+          return JSON.stringify(entries.filter((e: { key?: string }) => e.key?.startsWith(tagPrefix)), null, 2)
         }
         return JSON.stringify(entries, null, 2)
       } catch {
