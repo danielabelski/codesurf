@@ -1,5 +1,8 @@
 import { promises as fs } from 'fs'
 import { dirname, join, resolve } from 'path'
+import { log } from './utils/logger'
+
+const migrationLog = log.scope('Migration')
 import {
   APP_NAME,
   CONTEX_HOME,
@@ -72,12 +75,12 @@ async function migrateHomeDirectory(): Promise<void> {
   if (!(await exists(CONTEX_HOME))) {
     // Clean case: just rename
     await fs.rename(LEGACY_HOME, CONTEX_HOME)
-    console.log(`[Migration] Renamed ${LEGACY_HOME} -> ${CONTEX_HOME}`)
+    migrationLog.info(`Renamed ${LEGACY_HOME} -> ${CONTEX_HOME}`)
   } else {
     // Both exist: merge legacy into new (new wins on conflict)
-    console.log(`[Migration] Merging ${LEGACY_HOME} into ${CONTEX_HOME}`)
+    migrationLog.info(`Merging ${LEGACY_HOME} into ${CONTEX_HOME}`)
     await mergeDir(LEGACY_HOME, CONTEX_HOME)
-    console.log(`[Migration] Merge complete, removing ${LEGACY_HOME}`)
+    migrationLog.info(`Merge complete, removing ${LEGACY_HOME}`)
     await fs.rm(LEGACY_HOME, { recursive: true, force: true })
   }
 }
@@ -92,7 +95,7 @@ async function migrateConfigPaths(): Promise<void> {
     const updated = raw.replaceAll(LEGACY_HOME, CONTEX_HOME)
     if (updated !== raw) {
       await fs.writeFile(configPath, updated)
-      console.log(`[Migration] Updated paths in config.json`)
+      migrationLog.info('Updated paths in config.json')
     }
   } catch (error) {
     console.warn(`[Migration] Failed to update config paths:`, error)
@@ -111,7 +114,7 @@ async function migrateWorkspaceTileDirs(): Promise<void> {
     if (!(await exists(legacyDir)) || await exists(newDir)) continue
 
     await fs.rename(legacyDir, newDir)
-    console.log(`[Migration] Renamed ${legacyDir} -> ${newDir}`)
+    migrationLog.info(`Renamed ${legacyDir} -> ${newDir}`)
   }
 }
 

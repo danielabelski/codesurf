@@ -12,6 +12,9 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { CONTEX_HOME } from './paths'
+import { log } from './utils/logger'
+
+const agentPathsLog = log.scope('AgentPaths')
 
 const PATHS_FILE = join(CONTEX_HOME, 'agent-paths.json')
 
@@ -343,7 +346,7 @@ async function savePaths(config: AgentPathsConfig): Promise<void> {
 
 /** Run full detection for all agents */
 export async function detectAllAgents(): Promise<AgentPathsConfig> {
-  console.log('[AgentPaths] Detecting agent binaries...')
+  agentPathsLog.info("Detecting agent binaries...")
   const shellPath = getShellPath()
 
   const detectedPairs = await Promise.all(AGENT_KEYS.map(async key => [key, await detectBinary(key)] as const))
@@ -373,7 +376,7 @@ export async function detectAllAgents(): Promise<AgentPathsConfig> {
     if (entry.path && entry.confirmed) {
       const resolved = await resolveExecutablePath(entry.path)
       if (!resolved) {
-        console.log(`[AgentPaths] Previously confirmed ${key} at ${entry.path} no longer exists, re-detecting`)
+        agentPathsLog.info(`Previously confirmed ${key} at ${entry.path} no longer exists, re-detecting`)
         config[key] = await detectBinary(key)
       } else if (resolved !== entry.path) {
         // Update path if it resolved to a different name (e.g. added .exe)
@@ -388,7 +391,7 @@ export async function detectAllAgents(): Promise<AgentPathsConfig> {
     .map(key => config[key].path ? `${key}=${config[key].path}` : null)
     .filter(Boolean)
     .join(', ')
-  console.log(`[AgentPaths] Detection complete: ${found || 'none found'}`)
+  agentPathsLog.info(`Detection complete: ${found || 'none found'}`)
 
   return config
 }

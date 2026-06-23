@@ -16,6 +16,9 @@ import { join } from 'path'
 import { randomUUID } from 'node:crypto'
 import type { ExtensionRegistry } from './extensions/registry'
 import { broadcastToRenderer } from './utils/broadcast'
+import { log } from './utils/logger'
+
+const mcpLog = log.scope('MCP')
 import { getAllNodeTools } from '../shared/nodeTools'
 import { CONTEX_HOME } from './paths'
 import { assertSafePathSegment } from './security/pathSegments'
@@ -736,7 +739,7 @@ export async function startMCPServer(): Promise<number> {
         }
       } catch { /* no workspaces yet */ }
 
-      console.log(`[MCP] Kanban server running on port ${serverPort}`)
+      mcpLog.info(`Kanban server running on port ${serverPort}`)
       resolve(serverPort)
     })
 
@@ -795,7 +798,7 @@ export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<
 
   await fs.writeFile(mcpJsonPath, JSON.stringify(config, null, 2), { mode: 0o600 })
   await fs.chmod(mcpJsonPath, 0o600).catch(() => {})
-  console.log(`[MCP] Wrote .mcp.json to ${workspacePath}`)
+  mcpLog.info(`Wrote .mcp.json to ${workspacePath}`)
 
   // Write .claude/CLAUDE.md with peer collaboration instructions
   // Claude Code reads this automatically on every session
@@ -843,13 +846,13 @@ async function writeContexClaudeMd(workspacePath: string): Promise<void> {
     const next = `${existing.replace(/\s*$/, '')}\n\n${IMPORT_LINE}\n`
     await fs.writeFile(claudeMdPath, next, 'utf8')
     await fs.writeFile(sidecarPath, buildContexClaudeMdContent(), 'utf8')
-    console.log(`[MCP] Added @contex.md import to existing ${claudeMdPath}`)
+    mcpLog.info(`Added @contex.md import to existing ${claudeMdPath}`)
     return
   }
 
   // Case 1: no file — write the full managed document.
   await fs.writeFile(claudeMdPath, buildContexClaudeMdContent(), 'utf8')
-  console.log(`[MCP] Wrote .claude/CLAUDE.md to ${workspacePath}`)
+  mcpLog.info(`Wrote .claude/CLAUDE.md to ${workspacePath}`)
 }
 
 function buildContexClaudeMdContent(): string {
