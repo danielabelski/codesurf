@@ -4,9 +4,8 @@ import { withDefaultSettings } from '../../../shared/types'
 import { Settings, Type, Monitor, Puzzle, Star, Wrench, Users, FileText, Globe, Shield, KeyRound, Mic } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
-import { DEFAULT_THEME_ID, THEME_OPTIONS, getThemeCanvasDefaults, resolveEffectiveThemeId, getThemeById, type AppearanceMode } from '../theme'
+import { DEFAULT_THEME_ID, getThemeCanvasDefaults, getThemeById, type AppearanceMode } from '../theme'
 import { ChromeSyncSection } from './settings/ChromeSyncSection'
-import { DisplaySettingsEditor } from './settings/DisplaySettingsEditor'
 import { VoiceSettingsEditor } from './settings/VoiceSettingsEditor'
 import { ColorSwatch, NumInput, RangeInput, SectionLabel, SettingRow, Toggle } from './settings/controls'
 import { DaemonSection, type DaemonStatus, type ExecutionResolution } from './settings/DaemonSection'
@@ -14,6 +13,7 @@ import { ProvidersSection, type ProviderValidationResult } from './settings/Prov
 import { McpSection, type MCPConfig, type MCPServerEntry } from './settings/McpSection'
 import { ExtensionsSection, type ExtensionListEntry } from './settings/ExtensionsSection'
 import { PermissionsSection, type PermissionListResult } from './settings/PermissionsSection'
+import { GeneralSection } from './settings/GeneralSection'
 
 
 const LazyPromptsSection = lazy(() => import('./CustomisationTile').then(m => ({ default: m.PromptsSection })))
@@ -578,132 +578,20 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
 
   const renderContent = () => {
     switch (section) {
-      case 'general': {
-        const resolvedThemeId = resolveEffectiveThemeId(settings.appearance ?? 'dark', settings.themeId, systemPrefersDark)
-        const resolvedUiMode = getThemeById(resolvedThemeId).mode
-        const presetOptions = THEME_OPTIONS.filter(o => o.mode === resolvedUiMode)
-        const appearanceMode = settings.appearance ?? 'dark'
+      case 'general':
         return (
-          <>
-            <SectionLabel label="Theme" />
-            <SettingRow label="Mode" description="Dark uses the palette below. Light uses the Paper Light theme. System follows your OS dark/light setting.">
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {(['dark', 'light', 'system'] as const).map(mode => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => applyAppearanceMode(mode)}
-                    style={{
-                      padding: '6px 14px',
-                      borderRadius: 8,
-                      fontSize: fonts.secondarySize,
-                      fontWeight: 600,
-                      border: `1px solid ${appearanceMode === mode ? theme.accent.base : theme.border.default}`,
-                      background: appearanceMode === mode ? theme.accent.soft : theme.surface.input,
-                      color: appearanceMode === mode ? theme.accent.hover : theme.text.secondary,
-                      cursor: 'pointer',
-                      textTransform: 'capitalize',
-                    }}
-                  >
-                    {mode === 'system' ? 'System' : mode}
-                  </button>
-                ))}
-              </div>
-            </SettingRow>
-            <SettingRow label="Preset" description="Changes block chrome, terminal colours, shell surfaces, and resets the canvas palette to the preset defaults. Presets match the current light or dark mode.">
-              <select
-                value={resolvedThemeId}
-                onChange={e => applyThemePreset(e.target.value)}
-                style={{
-                  minWidth: 220,
-                  padding: '6px 10px',
-                  fontSize: fonts.secondarySize,
-                  background: theme.surface.input,
-                  color: theme.text.secondary,
-                  border: `1px solid ${theme.border.default}`,
-                  borderRadius: 8,
-                  outline: 'none',
-                }}
-              >
-                {presetOptions.map(option => (
-                  <option key={option.id} value={option.id}>
-                    {option.label} · {option.mode}
-                  </option>
-                ))}
-              </select>
-            </SettingRow>
-            <SettingRow
-              label="Contrast"
-              description="Push surfaces and text apart (positive) or compress them toward mid-grey (negative). 0 keeps the preset's natural contrast."
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 240 }}>
-                <input
-                  type="range"
-                  min={-1}
-                  max={1}
-                  step={0.05}
-                  value={settings.themeContrast ?? 0}
-                  onChange={e => updateSettingsPatch({ themeContrast: Number(e.target.value) })}
-                  style={{ flex: 1, accentColor: theme.accent.base, cursor: 'pointer' }}
-                  aria-label="Theme contrast"
-                />
-                <button
-                  type="button"
-                  onClick={() => updateSettingsPatch({ themeContrast: 0 })}
-                  title="Reset contrast to preset default"
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: fonts.secondarySize,
-                    background: theme.surface.input,
-                    color: theme.text.secondary,
-                    border: `1px solid ${theme.border.default}`,
-                    borderRadius: 6,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Reset
-                </button>
-                <span
-                  style={{
-                    minWidth: 44,
-                    textAlign: 'right',
-                    fontVariantNumeric: 'tabular-nums',
-                    fontSize: fonts.secondarySize,
-                    color: theme.text.muted,
-                  }}
-                >
-                  {((settings.themeContrast ?? 0) >= 0 ? '+' : '') + (settings.themeContrast ?? 0).toFixed(2)}
-                </span>
-              </div>
-            </SettingRow>
-            <DisplaySettingsEditor
-              settings={settings}
-              onApply={updateSettingsPatch}
-              updateState={updateState}
-              onCheckForUpdates={checkForUpdates}
-              onDownloadUpdate={downloadUpdate}
-            />
-            <SettingRow
-              label="Welcome screen"
-              description="Replay the first-run welcome and feature tour."
-            >
-              <button
-                onClick={() => { updateSettingsPatch({ onboardingComplete: false }); onClose() }}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  padding: '6px 12px', borderRadius: 8,
-                  border: `1px solid ${theme.border.default}`,
-                  background: theme.surface.panelMuted,
-                  color: theme.text.primary, cursor: 'pointer',
-                  fontSize: fonts.size, fontWeight: 600,
-                }}
-              >
-                Show welcome
-              </button>
-            </SettingRow>
-          </>
+          <GeneralSection
+            settings={settings}
+            updateSettingsPatch={updateSettingsPatch}
+            applyAppearanceMode={applyAppearanceMode}
+            applyThemePreset={applyThemePreset}
+            systemPrefersDark={systemPrefersDark}
+            updateState={updateState}
+            checkForUpdates={checkForUpdates}
+            downloadUpdate={downloadUpdate}
+            onClose={onClose}
+          />
         )
-      }
       case 'daemon':
         return (
           <DaemonSection
