@@ -6,13 +6,18 @@ import { dirname, join } from 'path'
 import { CONTEX_HOME } from '../paths'
 import { daemonClient } from '../daemon/client'
 import { broadcastToRenderer } from '../utils/broadcast'
+import { log as scopedLog } from '../utils/logger.ts'
 import type { ChatMessage, ChatRequest, RuntimeChatSessionState } from './types'
 
 export type { RuntimeChatSessionState } from './types'
 
+const chatLog = scopedLog.scope('Chat')
+
 export function log(...args: unknown[]): void {
+  // Preserve the legacy CODESURF_CHAT_DEBUG gate so existing usage is unchanged,
+  // but route through the central logger so output format stays consistent.
   if (process.env.CODESURF_CHAT_DEBUG !== '1') return
-  console.log('[Chat]', ...args)
+  chatLog.debug(...args)
 }
 
 export function sendStream(cardId: string, event: Record<string, unknown>): void {

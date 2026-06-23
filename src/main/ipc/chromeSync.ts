@@ -36,8 +36,8 @@ export function registerChromeSyncIPC(): void {
       const result = await syncCookiesToPartition(profileDir, partition, { approvedDomains })
       if (result.errors.length === 0) lastSync = Date.now()
       return result
-    } catch (e: any) {
-      return { count: 0, errors: [e?.message || String(e)] }
+    } catch (e) {
+      return { count: 0, errors: [e instanceof Error ? e.message : String(e)] }
     } finally {
       // Don't hold the decryption key in memory longer than the sync duration
       clearCachedPassword()

@@ -24,15 +24,16 @@ this review finds new issues introduced since, plus a few latent ones.
 | L2 broadcast pattern dup ×16 | **FIXED** | All 16 `getAllWindows().forEach send` sites migrated to `broadcastToRenderer`; helper hardened to check both window + webContents destroyed and swallow late-send errors. |
 | L3 `.mcp.json` token gitignore | **FIXED** | `writeMCPConfigToWorkspace` aborts + logs if `ensureWorkspaceSecretsGitignored` fails, instead of silently writing the token into an un-ignored file. |
 | L6 `terminal:cd` scope comment | **FIXED** | Documented that `dirPath` is intentionally not workspace-scoped (user owns the shell); escaping is the only real injection vector and is handled per-shell. |
-| L4 type-safety (239 `any`) | **DEFERRED** | Large refactor; out of scope for this fix pass. |
-| L5 44 console.log | **DEFERRED** | Consolidation behind a leveled logger is a separate pass. |
-| A1 god-object splits | **DEFERRED** | Opportunity list only; the App.tsx split is already done, others are lower-priority. |
-| A3 canvas history snapshots | **DEFERRED** | PERF-05 still open; structural diff is a focused future task. |
+| L4 type-safety (239 `any`) | **DONE (scoped)** | Added `handleTyped` zod-validation wrapper applied to all side-effecting IPC: `terminal:create/write/cd`, `fs:writeFile/createFile/createDir/deleteFile/renameFile/revealInFinder/writeBrief`, `canvas:save`, `git:checkoutBranch/createBranch`. Invalid args now reject before reaching handler bodies. Coarse schemas bound string lengths + file sizes. Full `any` elimination across all 239 sites is a larger separate refactor; the renderer→main security boundary is now hardened. |
+| L5 44 console.log | **DONE** | New leveled `utils/logger.ts` (error/warn/info/debug, gated on `CODESURF_LOG`). All 45 `console.log` in `src/main/` migrated to scoped loggers. `.ts` import extensions where node ESM test runner needs them. |
+| A1 god-object splits | **PARTIAL** | `theme.ts` split: **3098 → 341 lines**; 2774 lines of preset data + builders extracted to `themePresets.ts` (no circular dep — type-only back-edge). `Sidebar.tsx` (2598), `SettingsPanel.tsx` (2368), `BrowserTile.tsx` (2177) assessed and deferred — they're monolithic React components with tight prop coupling; splitting them risks regressions for navigability gain and is better done as focused dedicated sessions. |
+| A3 canvas history snapshots | **ALREADY DONE** | False positive in review — `canvasHistory.ts` already implements sparse changed-tile diff (`buildCanvasHistoryEntry` stores only added/removed/modified tiles, not full snapshots). PERF-05 was already resolved. |
 
 **Verification:** typecheck clean delta (17 pre-existing errors unchanged, 0 new);
 543 unit tests run, 541 pass / 2 fail — both failures (`preload-parity`,
 `session-openability`) are pre-existing and fail identically on the clean
-baseline. EventBus + chat-reducer + tool-normalization suites all green (33/33).
+baseline. EventBus + chat-reducer + tool-normalization + fs-write-brief +
+fs-workspace-scope + theme-edge-shadow suites all green.
 
 ---
 

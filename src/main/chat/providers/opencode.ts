@@ -8,6 +8,7 @@ import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissio
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import { broadcastToRenderer } from '../../utils/broadcast'
+import { errorMessage } from '../../../shared/errors.ts'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
@@ -202,13 +203,13 @@ function refreshOpenCodeModelsInBackground(force = false): Promise<void> {
         models: nextModels,
         source: models.length > 0 ? 'opencode' : 'fallback',
       })
-    } catch (err: any) {
-      log('refreshOpenCodeModelsInBackground error:', err.message ?? String(err))
+    } catch (err) {
+      log('refreshOpenCodeModelsInBackground error:', errorMessage(err))
       const nextModels = cachedOpenCodeModels.length > 0 ? cachedOpenCodeModels : getOpenCodeFallbackModels()
       broadcastOpenCodeModelsUpdated({
         models: nextModels,
         source: cachedOpenCodeModels.length > 0 ? 'cache' : 'fallback',
-        error: err.message ?? String(err),
+        error: errorMessage(err),
       })
     } finally {
       openCodeModelsRefreshPromise = null
@@ -325,8 +326,8 @@ export async function abortOpenCodeSession(cardId: string): Promise<void> {
       await client.session.abort({ sessionID: ocSessionId })
       log('opencode session aborted:', ocSessionId)
     }
-  } catch (err: any) {
-    log('opencode abort error (non-fatal):', err.message)
+  } catch (err) {
+    log('opencode abort error (non-fatal):', errorMessage(err))
   }
 }
 
@@ -659,8 +660,8 @@ export function chatOpencode(req: ChatRequest): void {
                     : 'Tool permission denied by the user.' }),
                 })
                 log('opencode permission decision:', permReq.id, reply, `(scope=${decision})`)
-              } catch (permErr: any) {
-                log('opencode permission reply error:', permErr.message)
+              } catch (permErr) {
+                log('opencode permission reply error:', errorMessage(permErr))
               }
               break
             }
@@ -680,8 +681,8 @@ export function chatOpencode(req: ChatRequest): void {
                   answers,
                 })
                 log('opencode question auto-answered:', qReq.id)
-              } catch (qErr: any) {
-                log('opencode question reply error:', qErr.message)
+              } catch (qErr) {
+                log('opencode question reply error:', errorMessage(qErr))
               }
               break
             }
@@ -696,13 +697,14 @@ export function chatOpencode(req: ChatRequest): void {
       if (!isDone) {
         sendStream(req.cardId, { type: 'done', sessionId: sessionID })
       }
-    } catch (err: any) {
-      log('chatOpencode error:', err.message ?? String(err))
-      const errorMsg = err.message?.includes('opencode CLI not found')
+    } catch (err) {
+      const msg = errorMessage(err)
+      log('chatOpencode error:', msg)
+      const errorMsg = msg.includes('opencode CLI not found')
         ? 'OpenCode CLI not found. Install: go install github.com/opencodeco/opencode@latest'
-        : err.message?.includes('ESM/CJS')
+        : msg.includes('ESM/CJS')
           ? 'OpenCode SDK could not be loaded. Check @opencode-ai/sdk compatibility.'
-          : err.message ?? String(err)
+          : msg
       sendStream(req.cardId, { type: 'error', error: errorMsg })
       sendStream(req.cardId, { type: 'done' })
     }

@@ -13,7 +13,6 @@ import { useEffect } from 'react'
 
 const TOOLTIP_ID = '__global-title-tooltip'
 const SHOW_DELAY = 400
-const HIDE_DELAY = 0
 
 let timer: ReturnType<typeof setTimeout> | null = null
 let currentTarget: HTMLElement | null = null

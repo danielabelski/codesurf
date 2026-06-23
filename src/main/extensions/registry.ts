@@ -17,6 +17,9 @@ import { bus } from '../event-bus'
 import { adapters, tryAdaptExtension } from './adapters'
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
 import { resolveExtensionEnabled } from './activation-policy'
+import { log } from '../utils/logger.ts'
+
+const extLog = log.scope('Extensions')
 
 /** A v2 contribution tagged with its owning plugin id. */
 export type OwnedContribution<T> = T & { extId: string }
@@ -390,7 +393,7 @@ export class ExtensionRegistry {
     }
 
     this.extensions.set(manifest.id, loaded)
-    console.log(`[Extensions] Loaded: ${manifest.name} v${manifest.version} (${manifest.tier})`)
+    extLog.info(`Loaded: ${manifest.name} v${manifest.version} (${manifest.tier})`)
   }
 
   /** Load an already-parsed manifest (used by adapters) */
@@ -429,7 +432,7 @@ export class ExtensionRegistry {
     }
 
     this.extensions.set(manifest.id, loaded)
-    console.log(`[Extensions] Loaded (adapted): ${manifest.name} v${manifest.version}`)
+    extLog.info(`Loaded (adapted): ${manifest.name} v${manifest.version}`)
   }
 
   // ── Queries ──────────────────────────────────────────────────────────────

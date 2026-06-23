@@ -190,9 +190,11 @@ async function buildSnapshotDiff(before: CodexFileSnapshot, currentPath: string)
     try {
       const result = await execFileAsync('git', args, { maxBuffer: 1024 * 1024 * 4 })
       diff = result.stdout || result.stderr || ''
-    } catch (error: any) {
-      if (error?.code === 1) {
-        diff = error.stdout || error.stderr || ''
+    } catch (error) {
+      // execFile rejects with an Error augmented with code/stdout/stderr.
+      const execErr = error as { code?: number; stdout?: string; stderr?: string }
+      if (execErr?.code === 1) {
+        diff = execErr.stdout || execErr.stderr || ''
       } else {
         throw error
       }

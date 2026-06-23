@@ -13,7 +13,7 @@
  *   debug  → stdout, gated on CODESURF_LOG=debug. Verbose diagnostics.
  *
  * Usage:
- *   import { log } from './utils/logger'
+ *   import { log } from './utils/logger.ts'
  *   const mcp = log.scope('MCP')
  *   mcp.info('server running on port', port)
  *   mcp.warn('could not update gitignore')

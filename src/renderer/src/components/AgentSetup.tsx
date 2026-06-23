@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
+import { errorMessage } from '../../../shared/errors'
 
 interface AgentPathEntry {
   path: string | null
@@ -123,8 +124,8 @@ export function AgentSetup({ onComplete, onDismiss }: AgentSetupProps) {
     try {
       const paths = await (window as any).electron.agentPaths.get()
       setConfig(paths)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e) {
+      setError(errorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -147,8 +148,8 @@ export function AgentSetup({ onComplete, onDismiss }: AgentSetupProps) {
     try {
       const paths = await (window as any).electron.agentPaths.detect()
       setConfig(paths)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e) {
+      setError(errorMessage(e))
     } finally {
       setDetecting(false)
     }
@@ -164,8 +165,8 @@ export function AgentSetup({ onComplete, onDismiss }: AgentSetupProps) {
         setConfig(result)
         setEditingAgent(null)
       }
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e) {
+      setError(errorMessage(e))
     }
   }
 
@@ -173,8 +174,8 @@ export function AgentSetup({ onComplete, onDismiss }: AgentSetupProps) {
     try {
       await (window as any).electron.agentPaths.confirmAll()
       onComplete()
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e) {
+      setError(errorMessage(e))
     }
   }
 

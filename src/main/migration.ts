@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { dirname, join, resolve } from 'path'
-import { log } from './utils/logger'
+import { log } from './utils/logger.ts'
 
 const migrationLog = log.scope('Migration')
 import {

@@ -16,7 +16,7 @@ import { join } from 'path'
 import { randomUUID } from 'node:crypto'
 import type { ExtensionRegistry } from './extensions/registry'
 import { broadcastToRenderer } from './utils/broadcast'
-import { log } from './utils/logger'
+import { log } from './utils/logger.ts'
 
 const mcpLog = log.scope('MCP')
 import { getAllNodeTools } from '../shared/nodeTools'

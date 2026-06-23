@@ -78,7 +78,6 @@ export function useAppSessionOrchestration(params: UseAppSessionOrchestrationPar
     rememberChatTileSessionMatch,
     tilesRef,
     panelLayoutRef,
-    activePanelIdRef,
     expandedTileIdRef,
     setSidebarSelectedPath,
     setPanelLayout,

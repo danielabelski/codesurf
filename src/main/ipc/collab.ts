@@ -76,8 +76,13 @@ function messageFilePath(workspacePath: string, tileId: string, mailbox: CollabM
 }
 
 async function ensureTileProtocolDirs(workspacePath: string, tileId: string): Promise<void> {
-  await fs.mkdir(contextDir(workspacePath, tileId), { recursive: true })
-  await Promise.all(MESSAGE_MAILBOXES.map(mailbox => fs.mkdir(mailboxDir(workspacePath, tileId, mailbox), { recursive: true })))
+  const safeWorkspacePath = assertSafeWorkspacePath(workspacePath)
+  const safeTileId = assertSafePathSegment(tileId, 'tileId')
+  const tileDir = collabDir(safeWorkspacePath, safeTileId)
+
+  await fs.mkdir(tileDir, { recursive: true })
+  await fs.mkdir(contextDir(safeWorkspacePath, safeTileId), { recursive: true })
+  await Promise.all(MESSAGE_MAILBOXES.map(mailbox => fs.mkdir(mailboxDir(safeWorkspacePath, safeTileId, mailbox), { recursive: true })))
 }
 
 async function readJsonSafe<T>(path: string, fallback: T): Promise<T> {

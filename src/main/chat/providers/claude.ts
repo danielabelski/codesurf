@@ -859,9 +859,9 @@ export function chatClaude(req: ChatRequest): void {
           sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
           clearActiveQuery(req.cardId, q)
         }
-      } catch (err: any) {
+      } catch (err) {
         if (wasClaudeQueryIntentionallyClosed(q) || !isActiveQuery(req.cardId, q)) {
-          log('generator closed for inactive Claude query:', err?.message ?? String(err))
+          log('generator closed for inactive Claude query:', err instanceof Error ? err.message : String(err))
           clearActiveQuery(req.cardId, q)
           return
         }
@@ -879,7 +879,7 @@ export function chatClaude(req: ChatRequest): void {
         clearActiveQuery(req.cardId, q)
       }
     })()
-  } catch (err: any) {
+  } catch (err) {
     const errorMessage = formatClaudeSdkError(err, claudeStderr)
     log('query() threw:', errorMessage)
     sendStream(req.cardId, { type: 'error', error: errorMessage })

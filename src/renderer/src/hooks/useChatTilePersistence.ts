@@ -313,7 +313,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       return
     }
 
-    window.electron.canvas.loadTileState(workspaceId, tileId).then((saved: Partial<ChatTilePersistedState> | null) => {
+    window.electron.canvas.loadTileState<Partial<ChatTilePersistedState> | null>(workspaceId, tileId).then(saved => {
       applySavedState(saved)
     }).catch(() => {}).finally(() => {
       stateLoadedRef.current = true
@@ -331,7 +331,8 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       entryHint: linkedSessionHint ?? null,
       tailLimit: usePagedHistory ? LINKED_SESSION_HISTORY_PAGE_SIZE : undefined,
     })
-      .then((saved: Partial<ChatTilePersistedState> | null) => {
+      .then((raw: unknown) => {
+        const saved = raw as Partial<ChatTilePersistedState> | null
         if (cancelled || !saved) return
         const savedProvider = typeof saved.provider === 'string'
           ? saved.provider

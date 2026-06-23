@@ -1,5 +1,5 @@
 import { basename, extname, join } from 'path'
-import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types.ts'
 import {
   type ImportedChatMessage,
   type ImportedChatState,
@@ -11,13 +11,12 @@ import {
   statSafe,
   truncate,
   sessionTitleFromText,
-  pathScope,
   extractTextParts,
   makeImportedRichMessage,
   roleFromUnknown,
   listFilesRecursive,
   getProjectCodeSurfDir,
-} from './shared'
+} from './shared.ts'
 import { CONTEX_HOME } from '../paths.ts'
 
 export async function listCodeSurfSessionFiles(workspacePath: string | null): Promise<AggregatedSessionEntry[]> {

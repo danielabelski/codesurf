@@ -1,9 +1,9 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo, Suspense } from 'react'
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { CanvasGroupFrames } from './components/canvas/CanvasGroupFrames'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
 import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType } from '../../shared/types'
 
-import { withDefaultSettings, DEFAULT_SETTINGS } from '../../shared/types'
+import { withDefaultSettings } from '../../shared/types'
 import type { MenuItem } from './components/ContextMenu'
 import { useExtensions } from './hooks/useExtensions'
 import { useLayoutTemplates } from './hooks/useLayoutTemplates'

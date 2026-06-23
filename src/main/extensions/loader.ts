@@ -25,6 +25,7 @@ import { join, resolve, sep } from 'path'
 import type { ExtensionManifest } from '../../shared/types'
 import type { ExtensionContext } from './context'
 import type { ExtensionRegistry } from './registry'
+import { log } from '../utils/logger.ts'
 
 /**
  * Scope categories used for activation gate decisions.  Keep in sync with the
@@ -117,7 +118,7 @@ export async function loadPowerExtension(
       return null
     }
 
-    console.log(`${prefix} Activating power extension...`)
+    log.debug(`${prefix} Activating power extension...`)
     const result = await mod.activate(ctx)
 
     // activate() can return a cleanup function

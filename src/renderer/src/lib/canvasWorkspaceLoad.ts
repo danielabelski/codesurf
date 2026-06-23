@@ -18,7 +18,10 @@ export type CanvasWorkspaceLoadAppliers = {
   savedLayoutRef: { current: PanelNode | null }
   expandedCanvasGroupIdRef: { current: string | null }
   expandedCanvasPriorViewportRef: { current: CanvasState['viewport'] | null }
-  setLockedConnections?: (connections: CanvasState['lockedConnections']) => void
+  // Always invoked with `saved.lockedConnections ?? []`, so the param is never
+  // undefined — keep it non-nullable so a `Dispatch<SetStateAction<...>>` from
+  // the caller is assignable (Dispatch can't accept `undefined`).
+  setLockedConnections?: (connections: NonNullable<CanvasState['lockedConnections']>) => void
 }
 
 export function applySavedCanvasState(

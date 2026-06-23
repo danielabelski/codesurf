@@ -21,6 +21,7 @@ import { registerRelayIPC, unregisterRelayIPC } from '../ipc/relay'
 import { stopAllRelayServices } from '../relay/service'
 import { CONTEX_HOME } from '../paths'
 import { getPluginState, setPluginState, replacePluginState, stateChannel } from './plugin-store'
+import { log } from '../utils/logger.ts'
 
 interface RegisteredTool extends ExtensionMCPToolContrib {
   handler?: (args: Record<string, unknown>) => Promise<string>
@@ -129,7 +130,7 @@ export class ExtensionContext {
         }
         this.registeredTools.push(registered)
         this.registry.registerMCPTool(extId, registered)
-        console.log(`${prefix} Registered MCP tool: ${registered.name}`)
+        log.debug(`${prefix} Registered MCP tool: ${registered.name}`)
       },
     }
 
@@ -141,7 +142,7 @@ export class ExtensionContext {
           return handler(...args)
         })
         this.ipcHandlers.push(fullChannel)
-        console.log(`${prefix} Registered IPC: ${fullChannel}`)
+        log.debug(`${prefix} Registered IPC: ${fullChannel}`)
       },
     }
 
@@ -237,7 +238,7 @@ export class ExtensionContext {
     }
 
     // ── Logger ──
-    this.log = (msg) => console.log(`${prefix} ${msg}`)
+    this.log = (msg) => log.debug(`${prefix} ${msg}`)
   }
 
   /** Get tools registered by this extension's activate() */

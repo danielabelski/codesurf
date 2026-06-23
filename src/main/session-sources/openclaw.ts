@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   type ImportedChatMessage,
   type ImportedChatState,
@@ -14,7 +14,7 @@ import {
   compareSessions,
   humanizeSlug,
   roleFromUnknown,
-} from './shared'
+} from './shared.ts'
 
 const GENERIC_OPENCLAW_LABELS = new Set(['openclaw studio', 'openclawstudio', 'openclaw-tui', 'vibeclaw', 'heartbeat'])
 

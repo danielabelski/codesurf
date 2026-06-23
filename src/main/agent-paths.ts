@@ -12,7 +12,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { CONTEX_HOME } from './paths'
-import { log } from './utils/logger'
+import { log } from './utils/logger.ts'
 
 const agentPathsLog = log.scope('AgentPaths')
 

@@ -1,7 +1,7 @@
 import { createReadStream, promises as fs } from 'fs'
 import { join } from 'path'
 import { createInterface } from 'readline'
-import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types.ts'
 import { CONTEX_HOME } from '../paths.ts'
 
 export type ChatRole = 'user' | 'assistant' | 'system'

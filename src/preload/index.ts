@@ -9,7 +9,11 @@ function channelMatches(pattern: string, channel: string): boolean {
   return pattern === channel
 }
 
-type BusListener = (event: any) => void
+/** Shape of a bus event as it crosses the IPC boundary into the renderer.
+ *  Channel is always present; the rest is opaque to the bridge and narrowed
+ *  by consumers. */
+type RendererBusEvent = { channel: string; type?: string; source?: string; payload?: unknown; [key: string]: unknown }
+type BusListener = (event: RendererBusEvent) => void
 
 interface RendererBusSubscription {
   channel: string
@@ -21,7 +25,7 @@ const rendererBusSubscriptions = new Map<string, RendererBusSubscription>()
 const rendererBusGlobalListeners = new Set<BusListener>()
 let rendererBusIpcAttached = false
 
-function dispatchRendererBusEvent(evt: any): void {
+function dispatchRendererBusEvent(evt: RendererBusEvent): void {
   for (const sub of rendererBusSubscriptions.values()) {
     if (evt.channel === sub.channel || channelMatches(sub.channel, evt.channel)) {
       sub.callback(evt)
@@ -126,7 +130,7 @@ contextBridge.exposeInMainWorld('electron', {
     set: (workspaceId: string, tileId: string, key: string, value: unknown) => ipcRenderer.invoke('tileContext:set', workspaceId, tileId, key, value),
     delete: (workspaceId: string, tileId: string, key: string) => ipcRenderer.invoke('tileContext:delete', workspaceId, tileId, key),
     onChanged: (tileId: string, callback: (data: { tileId: string; key: string; value: unknown }) => void) => {
-      const handler = (_: any, data: any) => { if (data.tileId === tileId) callback(data) }
+      const handler = (_: unknown, data: { tileId: string; key: string; value: unknown }) => { if (data.tileId === tileId) callback(data) }
       ipcRenderer.on('tileContext:changed', handler)
       return () => ipcRenderer.removeListener('tileContext:changed', handler)
     },
@@ -140,7 +144,7 @@ contextBridge.exposeInMainWorld('electron', {
   // Extension action IPC
   extActions: {
     onAction: (callback: (data: { tileId: string; action: string; params: Record<string, unknown> }) => void) => {
-      const handler = (_: any, data: any) => callback(data)
+      const handler = (_: unknown, data: { tileId: string; action: string; params: Record<string, unknown> }) => callback(data)
       ipcRenderer.on('ext:action', handler)
       return () => ipcRenderer.removeListener('ext:action', handler)
     },
@@ -149,9 +153,9 @@ contextBridge.exposeInMainWorld('electron', {
   // Canvas state persistence
   canvas: {
     load: (workspaceId: string) => ipcRenderer.invoke('canvas:load', workspaceId),
-    save: (workspaceId: string, state: any) => ipcRenderer.invoke('canvas:save', workspaceId, state),
+    save: (workspaceId: string, state: unknown) => ipcRenderer.invoke('canvas:save', workspaceId, state),
     loadTileState: (workspaceId: string, tileId: string) => ipcRenderer.invoke('canvas:loadTileState', workspaceId, tileId),
-    saveTileState: (workspaceId: string, tileId: string, state: any) => ipcRenderer.invoke('canvas:saveTileState', workspaceId, tileId, state),
+    saveTileState: (workspaceId: string, tileId: string, state: unknown) => ipcRenderer.invoke('canvas:saveTileState', workspaceId, tileId, state),
     clearTileState: (workspaceId: string, tileId: string) => ipcRenderer.invoke('canvas:clearTileState', workspaceId, tileId),
     deleteTileArtifacts: (workspaceId: string, tileId: string) => ipcRenderer.invoke('canvas:deleteTileArtifacts', workspaceId, tileId),
     listSessions: (workspaceId: string, forceRefresh?: boolean) => ipcRenderer.invoke('canvas:listSessions', workspaceId, forceRefresh === true) as Promise<AggregatedSessionEntry[]>,
@@ -194,7 +198,7 @@ contextBridge.exposeInMainWorld('electron', {
   // Kanban board state persistence
   kanban: {
     load: (workspaceId: string, tileId: string) => ipcRenderer.invoke('kanban:load', workspaceId, tileId),
-    save: (workspaceId: string, tileId: string, state: any) => ipcRenderer.invoke('kanban:save', workspaceId, tileId, state)
+    save: (workspaceId: string, tileId: string, state: unknown) => ipcRenderer.invoke('kanban:save', workspaceId, tileId, state)
   },
 
   // Terminal operations (stub for now)
@@ -208,7 +212,7 @@ contextBridge.exposeInMainWorld('electron', {
     updatePeers: (tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>) => ipcRenderer.invoke('terminal:update-peers', tileId, workspaceDir, peers),
     onData: (tileId: string, callback: (data: string) => void) => {
       const channel = `terminal:data:${tileId}`
-      const handler = (_: any, data: string) => callback(data)
+      const handler = (_: unknown, data: string) => callback(data)
       ipcRenderer.on(channel, handler)
       return () => { ipcRenderer.removeListener(channel, handler) }
     },
@@ -316,7 +320,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('stream:start', req),
     stop: (cardId: string) => ipcRenderer.invoke('stream:stop', cardId),
     onChunk: (cb: (event: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => void) => {
-      const handler = (_: any, evt: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => cb(evt)
+      const handler = (_: unknown, evt: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => cb(evt)
       ipcRenderer.on('agent:stream', handler)
       return () => { ipcRenderer.removeListener('agent:stream', handler) }
     }
@@ -385,7 +389,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('browserTile:command', payload),
     destroy: (tileId: string) => ipcRenderer.invoke('browserTile:destroy', tileId),
     onEvent: (cb: (event: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => void) => {
-      const handler = (_: any, evt: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => cb(evt)
+      const handler = (_: unknown, evt: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => cb(evt)
       ipcRenderer.on('browserTile:event', handler)
       return () => { ipcRenderer.removeListener('browserTile:event', handler) }
     },
@@ -393,7 +397,7 @@ contextBridge.exposeInMainWorld('electron', {
     // or follows a target=_blank link. The `new-window` DOM event was removed in
     // Electron 22; this IPC path replaces it.
     onNewWindow: (cb: (event: { url: string }) => void) => {
-      const handler = (_: any, evt: { url: string }) => cb(evt)
+      const handler = (_: unknown, evt: { url: string }) => cb(evt)
       ipcRenderer.on('webview:new-window', handler)
       return () => { ipcRenderer.removeListener('webview:new-window', handler) }
     },
@@ -443,7 +447,7 @@ contextBridge.exposeInMainWorld('electron', {
   // App settings
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
-    set: (settings: any) => ipcRenderer.invoke('settings:set', settings),
+    set: (settings: unknown) => ipcRenderer.invoke('settings:set', settings),
     getRawJson: () => ipcRenderer.invoke('settings:getRawJson'),
     setRawJson: (json: string) => ipcRenderer.invoke('settings:setRawJson', json),
     validateGenerationProvider: (providerId: string, providerPatch?: Record<string, unknown>) =>
@@ -478,12 +482,12 @@ contextBridge.exposeInMainWorld('electron', {
     saveWorkspaceServers: (workspaceId: string, servers: Record<string, unknown>) => ipcRenderer.invoke('mcp:saveWorkspaceServers', workspaceId, servers),
     getMergedConfig: (workspaceId: string) => ipcRenderer.invoke('mcp:getMergedConfig', workspaceId),
     onKanban: (cb: (event: string, data: unknown) => void) => {
-      const handler = (_: any, payload: any) => cb(payload.event, payload.data)
+      const handler = (_: unknown, payload: { event: string; data: unknown }) => cb(payload.event, payload.data)
       ipcRenderer.on('mcp:kanban', handler)
       return () => { ipcRenderer.removeListener('mcp:kanban', handler) }
     },
     onInject: (cb: (cardId: string, message: string, appendNewline: boolean) => void) => {
-      const handler = (_: any, payload: any) => cb(payload.cardId, payload.message, payload.appendNewline)
+      const handler = (_: unknown, payload: { cardId: string; message: string; appendNewline: boolean }) => cb(payload.cardId, payload.message, payload.appendNewline)
       ipcRenderer.on('mcp:inject', handler)
       return () => { ipcRenderer.removeListener('mcp:inject', handler) }
     },
@@ -523,7 +527,7 @@ contextBridge.exposeInMainWorld('electron', {
     readObjective: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:readObjective', workspacePath, tileId),
     writeSkills: (workspacePath: string, tileId: string, skills: { enabled: string[], disabled: string[] }) => ipcRenderer.invoke('collab:writeSkills', workspacePath, tileId, skills),
     readSkills: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:readSkills', workspacePath, tileId),
-    writeState: (workspacePath: string, tileId: string, state: any) => ipcRenderer.invoke('collab:writeState', workspacePath, tileId, state),
+    writeState: (workspacePath: string, tileId: string, state: unknown) => ipcRenderer.invoke('collab:writeState', workspacePath, tileId, state),
     readState: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:readState', workspacePath, tileId),
     addContext: (workspacePath: string, tileId: string, filename: string, content: string) => ipcRenderer.invoke('collab:addContext', workspacePath, tileId, filename, content),
     removeContext: (workspacePath: string, tileId: string, filename: string) => ipcRenderer.invoke('collab:removeContext', workspacePath, tileId, filename),
@@ -540,13 +544,13 @@ contextBridge.exposeInMainWorld('electron', {
     unwatchMessages: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:unwatchMessages', workspacePath, tileId),
     removeTileDir: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:removeTileDir', workspacePath, tileId),
     pruneOrphanedTileDirs: (workspacePath: string, tileIds: string[]) => ipcRenderer.invoke('collab:pruneOrphanedTileDirs', workspacePath, tileIds),
-    onStateChanged: (callback: (data: { workspacePath: string, tileId: string, state: any }) => void) => {
-      const handler = (_: any, data: { workspacePath: string, tileId: string, state: any }) => callback(data)
+    onStateChanged: (callback: (data: { workspacePath: string, tileId: string, state: unknown }) => void) => {
+      const handler = (_: unknown, data: { workspacePath: string, tileId: string, state: unknown }) => callback(data)
       ipcRenderer.on('collab:stateChanged', handler)
       return () => { ipcRenderer.removeListener('collab:stateChanged', handler) }
     },
     onMessageChanged: (callback: (data: { workspacePath: string; tileId: string; mailbox: 'inbox' | 'sent' | 'memory' | 'bin'; filename: string; event: 'add' | 'change' | 'unlink'; message?: unknown }) => void) => {
-      const handler = (_: any, data: { workspacePath: string; tileId: string; mailbox: 'inbox' | 'sent' | 'memory' | 'bin'; filename: string; event: 'add' | 'change' | 'unlink'; message?: unknown }) => callback(data)
+      const handler = (_: unknown, data: { workspacePath: string; tileId: string; mailbox: 'inbox' | 'sent' | 'memory' | 'bin'; filename: string; event: 'add' | 'change' | 'unlink'; message?: unknown }) => callback(data)
       ipcRenderer.on('collab:messageChanged', handler)
       return () => { ipcRenderer.removeListener('collab:messageChanged', handler) }
     },
@@ -555,24 +559,24 @@ contextBridge.exposeInMainWorld('electron', {
   // ContexRelay mailbox IPC — handlers exist only while Relay Suite power extension is active
   relay: {
     init: (workspacePath: string) => ipcRenderer.invoke('relay:init', workspacePath),
-    syncWorkspace: (workspaceId: string, workspacePath: string, tiles: any[]) => ipcRenderer.invoke('relay:syncWorkspace', workspaceId, workspacePath, tiles),
+    syncWorkspace: (workspaceId: string, workspacePath: string, tiles: unknown[]) => ipcRenderer.invoke('relay:syncWorkspace', workspaceId, workspacePath, tiles),
     listParticipants: (workspacePath: string) => ipcRenderer.invoke('relay:listParticipants', workspacePath),
     listChannels: (workspacePath: string) => ipcRenderer.invoke('relay:listChannels', workspacePath),
     listCentralFeed: (workspacePath: string, limit?: number) => ipcRenderer.invoke('relay:listCentralFeed', workspacePath, limit),
     listMessages: (workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', limit?: number) => ipcRenderer.invoke('relay:listMessages', workspacePath, participantId, mailbox, limit),
     readMessage: (workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string) => ipcRenderer.invoke('relay:readMessage', workspacePath, participantId, mailbox, filename),
-    sendDirectMessage: (workspacePath: string, from: string, draft: any) => ipcRenderer.invoke('relay:sendDirectMessage', workspacePath, from, draft),
-    sendChannelMessage: (workspacePath: string, from: string, draft: any) => ipcRenderer.invoke('relay:sendChannelMessage', workspacePath, from, draft),
+    sendDirectMessage: (workspacePath: string, from: string, draft: unknown) => ipcRenderer.invoke('relay:sendDirectMessage', workspacePath, from, draft),
+    sendChannelMessage: (workspacePath: string, from: string, draft: unknown) => ipcRenderer.invoke('relay:sendChannelMessage', workspacePath, from, draft),
     updateMessageStatus: (workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string, status: 'unread' | 'read' | 'sent' | 'archived') => ipcRenderer.invoke('relay:updateMessageStatus', workspacePath, participantId, mailbox, filename, status),
     moveMessage: (workspacePath: string, participantId: string, fromMailbox: 'inbox' | 'sent' | 'memory' | 'bin', toMailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string) => ipcRenderer.invoke('relay:moveMessage', workspacePath, participantId, fromMailbox, toMailbox, filename),
-    setWorkContext: (workspacePath: string, participantId: string, work: any) => ipcRenderer.invoke('relay:setWorkContext', workspacePath, participantId, work),
+    setWorkContext: (workspacePath: string, participantId: string, work: unknown) => ipcRenderer.invoke('relay:setWorkContext', workspacePath, participantId, work),
     analyzeRelationships: (workspacePath: string) => ipcRenderer.invoke('relay:analyzeRelationships', workspacePath),
-    spawnAgent: (workspacePath: string, request: any) => ipcRenderer.invoke('relay:spawnAgent', workspacePath, request),
+    spawnAgent: (workspacePath: string, request: unknown) => ipcRenderer.invoke('relay:spawnAgent', workspacePath, request),
     stopAgent: (workspacePath: string, participantId: string) => ipcRenderer.invoke('relay:stopAgent', workspacePath, participantId),
     waitForReady: (workspacePath: string, ids: string[], timeoutMs?: number) => ipcRenderer.invoke('relay:waitForReady', workspacePath, ids, timeoutMs),
     waitForAny: (workspacePath: string, ids: string[], timeoutMs?: number) => ipcRenderer.invoke('relay:waitForAny', workspacePath, ids, timeoutMs),
     onEvent: (callback: (data: { workspacePath: string; event: unknown }) => void) => {
-      const handler = (_: any, data: { workspacePath: string; event: unknown }) => callback(data)
+      const handler = (_: unknown, data: { workspacePath: string; event: unknown }) => callback(data)
       ipcRenderer.on('relay:event', handler)
       return () => { ipcRenderer.removeListener('relay:event', handler) }
     },
@@ -610,7 +614,7 @@ contextBridge.exposeInMainWorld('electron', {
   bus: {
     publish: (channel: string, type: string, source: string, payload: Record<string, unknown>) =>
       ipcRenderer.invoke('bus:publish', channel, type, source, payload),
-    subscribe: (channel: string, subscriberId: string, callback: (event: any) => void) => {
+    subscribe: (channel: string, subscriberId: string, callback: (event: RendererBusEvent) => void) => {
       ensureRendererBusIpcListener()
       rendererBusSubscriptions.set(subscriberId, { channel, subscriberId, callback })
       void ipcRenderer.invoke('bus:subscribe', channel, subscriberId)
@@ -627,7 +631,7 @@ contextBridge.exposeInMainWorld('electron', {
     channelInfo: (channel: string) => ipcRenderer.invoke('bus:channelInfo', channel),
     unreadCount: (channel: string, subscriberId: string) => ipcRenderer.invoke('bus:unreadCount', channel, subscriberId),
     markRead: (channel: string, subscriberId: string) => ipcRenderer.invoke('bus:markRead', channel, subscriberId),
-    onEvent: (callback: (event: any) => void) => {
+    onEvent: (callback: (event: RendererBusEvent) => void) => {
       ensureRendererBusIpcListener()
       rendererBusGlobalListeners.add(callback)
       return () => { rendererBusGlobalListeners.delete(callback) }

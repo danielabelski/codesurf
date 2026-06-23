@@ -1,6 +1,6 @@
 import { homedir } from 'os'
 import { basename, extname, join } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   type ImportedChatMessage,
   type ImportedChatState,
@@ -15,7 +15,7 @@ import {
   isExternalSessionImportableInChat,
   roleFromUnknown,
   listFilesRecursive,
-} from './shared'
+} from './shared.ts'
 
 function parseOpenCodeTimestamp(filePath: string): number {
   const base = basename(filePath)

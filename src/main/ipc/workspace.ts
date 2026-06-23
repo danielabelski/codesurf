@@ -11,6 +11,9 @@ import {
 } from '../../shared/types'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { daemonClient } from '../daemon/client'
+import { log } from '../utils/logger.ts'
+
+const wsLog = log.scope('workspace')
 import { writeMCPConfigToWorkspace } from '../mcp-server'
 import { applyWindowAppearance } from '../windowAppearance'
 import { CONTEX_HOME } from '../paths'
@@ -153,7 +156,7 @@ export async function migrateFsScopingIfNeeded(): Promise<void> {
     ) {
       await daemonClient.setSettings(migrated)
       // eslint-disable-next-line no-console
-      console.log('[SEC-03] migrated legacy install to workspace filesystem scoping')
+      wsLog.info('[SEC-03] migrated legacy install to workspace filesystem scoping')
     }
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -173,7 +176,7 @@ export async function migrateGenerationKeysToKeychain(): Promise<void> {
     if (migrated > 0) {
       await daemonClient.setSettings(sanitized)
       // eslint-disable-next-line no-console
-      console.log(`[gap-03] migrated ${migrated} generation key(s) from settings.json into the keychain`)
+      wsLog.info(`[gap-03] migrated ${migrated} generation key(s) from settings.json into the keychain`)
     }
   } catch (err) {
     // eslint-disable-next-line no-console

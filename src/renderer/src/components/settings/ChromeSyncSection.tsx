@@ -47,8 +47,8 @@ export function ChromeSyncSection({
       } else {
         setSyncStatus(`Synced ${result?.count ?? 0} cookies`)
       }
-    } catch (e: any) {
-      setSyncStatus(`Error: ${e.message || 'Failed'}`)
+    } catch (e) {
+      setSyncStatus(`Error: ${e instanceof Error ? e.message : 'Failed'}`)
     } finally {
       setSyncing(false)
     }

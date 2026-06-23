@@ -92,14 +92,13 @@ export function shouldShowConnectionGlow(props: Pick<
     || props.discoveryPulses.length > 0
 }
 
-function resolveGridStep(gridSize: number, gridSpacingSmall: number | undefined): number {
+function resolveGridStep(gridSize: number | undefined, gridSpacingSmall: number | undefined): number {
   return Math.max(8, gridSize || gridSpacingSmall || DEFAULT_GRID)
 }
 
 export function AppCanvasConnections(props: AppCanvasConnectionsProps): JSX.Element | null {
   const {
     layer,
-    panelLayout,
     manualConnectionRenderRoutes,
     ambientDiscoveryRenderRoutes,
     discoveryPreview,
@@ -115,7 +114,6 @@ export function AppCanvasConnections(props: AppCanvasConnectionsProps): JSX.Elem
     discoveryPillZIndex,
     discoveryHighlightZIndex,
     discoveryGlowZIndex,
-    canvasGlowEnabled,
     discoveryGlowRef,
     worldToScreenPoint,
     isConnectionLocked,

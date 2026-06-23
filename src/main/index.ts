@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -49,6 +49,9 @@ import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
 import { stopAllRelayServices } from './relay/service'
 import { normalizeSafeExternalUrl } from './utils/externalUrl'
+import { log } from './utils/logger.ts'
+
+const indexLog = log.scope('boot')
 import {
   attachGuestWebviewSecurityHandlers,
   createMainWindowWebPreferences,
@@ -223,7 +226,7 @@ function installRenderPerfProbe(win: BrowserWindow): void {
 
   const startedAt = performance.now()
   const log = (name: string): void => {
-    console.log(`[perf:render] ${name}=${(performance.now() - startedAt).toFixed(1)}ms`)
+    indexLog.info(`[perf:render] ${name}=${(performance.now() - startedAt).toFixed(1)}ms`)
   }
 
   win.webContents.once('dom-ready', () => log('domReady'))
@@ -246,7 +249,7 @@ function installRenderPerfProbe(win: BrowserWindow): void {
           }))
         })
       `, true)
-      console.log(`[perf:render] rendererMetrics=${JSON.stringify(metrics)}`)
+      indexLog.info(`[perf:render] rendererMetrics=${JSON.stringify(metrics)}`)
     } catch (error) {
       console.warn('[perf:render] rendererMetrics failed:', error)
     }
@@ -693,7 +696,7 @@ app.whenReady().then(async () => {
     getDb()
     const status = getDbStatus()
     // eslint-disable-next-line no-console
-    console.log(`[db] Ready at ${status.path} (schema v${status.schemaVersion}, tables: ${status.tables.join(', ') || '—'})`)
+    indexLog.info(`[db] Ready at ${status.path} (schema v${status.schemaVersion}, tables: ${status.tables.join(', ') || '—'})`)
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[db] Failed to initialise local database:', err)
@@ -769,7 +772,7 @@ app.whenReady().then(async () => {
 
   // Start local MCP server for agent→kanban callbacks
   startMCPServer().then(port => {
-    console.log(`[MCP] Kanban tools available at http://127.0.0.1:${port}`)
+    indexLog.info(`[MCP] Kanban tools available at http://127.0.0.1:${port}`)
   }).catch(err => console.error('[MCP] Failed to start:', err))
   registerUpdaterIPC()
   registerWindowIPC({

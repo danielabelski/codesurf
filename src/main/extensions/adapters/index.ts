@@ -6,6 +6,9 @@ import type { ExtensionAdapter } from './types'
 import { raycastAdapter } from './raycast'
 import { piAdapter } from './pi'
 import { openclawAdapter } from './openclaw'
+import { log } from '../../utils/logger.ts'
+
+const extLog = log.scope('Extensions')
 
 export type { ExtensionAdapter }
 
@@ -29,7 +32,7 @@ export async function tryAdaptExtension(dir: string) {
         if (adapter.wrapEntry) {
           await adapter.wrapEntry(dir, manifest)
         }
-        console.log(`[Extensions] Adapted ${dir} via ${adapter.name} adapter`)
+        extLog.info(`Adapted ${dir} via ${adapter.name} adapter`)
         return manifest
       }
     } catch (err) {

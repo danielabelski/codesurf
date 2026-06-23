@@ -15,6 +15,9 @@ import { CONTEX_HOME } from '../paths'
 import { readSettingsSync } from './workspace'
 import { getPluginState, setPluginState, replacePluginState } from '../extensions/plugin-store'
 import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
+import { log } from '../utils/logger.ts'
+
+const extLog = log.scope('Extensions')
 
 const execFileAsync = promisify(execFile)
 const EXTENSIONS_DIR = join(CONTEX_HOME, 'extensions')
@@ -383,7 +386,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
 
   ipcMain.handle('ext:refresh', async (_, workspacePath?: string | null) => {
     if (readSettingsSync().extensionsDisabled) {
-      console.log('[Extensions] Refresh skipped — extensions globally disabled')
+      extLog.info('Refresh skipped — extensions globally disabled')
       lastScannedWorkspacePath = null
       hasScanned = false
       return []

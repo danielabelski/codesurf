@@ -27,6 +27,7 @@ import { JsonRpcPeer, type JsonValue, type JsonObject } from './json-rpc'
 import { BROKER_ERROR_CODES } from './protocol'
 import { registerRelayIPC, unregisterRelayIPC } from '../../ipc/relay'
 import { stopAllRelayServices } from '../../relay/service'
+import { log } from '../../utils/logger.ts'
 
 export class ExtensionBrokerHost {
   private child: UtilityProcess | null = null
@@ -92,7 +93,7 @@ export class ExtensionBrokerHost {
       child.stdout.setEncoding('utf8')
       child.stdout.on('data', (chunk: string) => {
         for (const line of chunk.split('\n')) {
-          if (line.trim()) console.log(`${prefix} ${line}`)
+          if (line.trim()) log.debug(`${prefix} ${line}`)
         }
       })
     }
@@ -162,7 +163,7 @@ export class ExtensionBrokerHost {
       }, 30_000)
 
       this.active = !!result.activated
-      console.log(`${prefix} Brokered activation ${this.active ? 'succeeded' : 'failed'}`)
+      log.debug(`${prefix} Brokered activation ${this.active ? 'succeeded' : 'failed'}`)
       return this.active
     } catch (err) {
       console.error(`${prefix} Broker activate failed:`, err)

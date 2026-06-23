@@ -1,5 +1,5 @@
-import type { ImportedToolBlock, ImportedToolFileChange, ImportedToolCommandEntry } from './shared'
-import { parseJsonObject } from './shared'
+import type { ImportedToolBlock, ImportedToolFileChange, ImportedToolCommandEntry } from './shared.ts'
+import { parseJsonObject } from './shared.ts'
 import { sanitizeToolOutputText } from '../chat/output-sanitizers.ts'
 
 export function truncateToolPreview(text: string | null | undefined, length = 800): string {

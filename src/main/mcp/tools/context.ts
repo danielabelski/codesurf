@@ -6,6 +6,7 @@ import { loadWorkspaceTileState, saveWorkspaceTileState } from '../../storage/wo
 import * as peerState from '../../peer-state'
 import { broadcastToRenderer } from '../../utils/broadcast'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
+import { errorMessage } from '../../../shared/errors.ts'
 
 type UserConfigWorkspaceRef = {
   id: string
@@ -238,8 +239,8 @@ export async function handleContextTool(
     try {
       const todo = peerState.addTodo(tileId, text)
       return `Todo added: "${text}" (id: ${todo.id})`
-    } catch (err: any) {
-      return err.message
+    } catch (err) {
+      return errorMessage(err)
     }
   }
 
@@ -283,8 +284,8 @@ export async function handleContextTool(
       } catch {
         return '[]'
       }
-    } catch (err: any) {
-      return `Error reading context: ${err.message}`
+    } catch (err) {
+      return `Error reading context: ${errorMessage(err)}`
     }
   }
 
@@ -338,8 +339,8 @@ export async function handleContextTool(
       })
 
       return `Context ${key} set to: ${JSON.stringify(value)}`
-    } catch (err: any) {
-      return `Error writing context: ${err.message}`
+    } catch (err) {
+      return `Error writing context: ${errorMessage(err)}`
     }
   }
 

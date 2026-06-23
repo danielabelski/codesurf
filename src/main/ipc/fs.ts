@@ -5,6 +5,7 @@ import path from 'node:path'
 import { basename, extname, join, parse } from 'path'
 import { homedir } from 'os'
 import { CONTEX_HOME, CONTEX_HOME_DIRNAME } from '../paths.ts'
+import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
 const requireElectron = createRequire(import.meta.url)
 
@@ -302,41 +303,62 @@ export function registerFsIPC(): void {
     }
   })
 
-  ipcMain.handle('fs:writeFile', async (_, filePath: string, content: string, workspaceId?: string) => {
-    await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), content, 'utf8')
+  handleTyped('fs:writeFile', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.fileContent, ipcSchemas.optionalString] as const,
+    handler: async (_evt, filePath, content, workspaceId) => {
+      await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), content, 'utf8')
+    },
   })
 
-  ipcMain.handle('fs:createFile', async (_, filePath: string, workspaceId?: string) => {
-    await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), '', 'utf8')
+  handleTyped('fs:createFile', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
+    handler: async (_evt, filePath, workspaceId) => {
+      await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), '', 'utf8')
+    },
   })
 
-  ipcMain.handle('fs:createDir', async (_, dirPath: string, workspaceId?: string) => {
-    await fs.mkdir(await validateFsPathForHandler(dirPath, workspaceId), { recursive: true })
+  handleTyped('fs:createDir', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
+    handler: async (_evt, dirPath, workspaceId) => {
+      await fs.mkdir(await validateFsPathForHandler(dirPath, workspaceId), { recursive: true })
+    },
   })
 
-  ipcMain.handle('fs:deleteFile', async (_, fspath: string, workspaceId?: string) => {
-    await fs.rm(await validateFsPathForHandler(fspath, workspaceId), { recursive: true, force: true })
+  handleTyped('fs:deleteFile', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
+    handler: async (_evt, fspath, workspaceId) => {
+      await fs.rm(await validateFsPathForHandler(fspath, workspaceId), { recursive: true, force: true })
+    },
   })
 
-  ipcMain.handle('fs:renameFile', async (_, oldPath: string, newPath: string, workspaceId?: string) => {
-    await fs.rename(
-      await validateFsPathForHandler(oldPath, workspaceId),
-      await validateFsPathForHandler(newPath, workspaceId),
-    )
+  handleTyped('fs:renameFile', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
+    handler: async (_evt, oldPath, newPath, workspaceId) => {
+      await fs.rename(
+        await validateFsPathForHandler(oldPath, workspaceId),
+        await validateFsPathForHandler(newPath, workspaceId),
+      )
+    },
   })
 
-  ipcMain.handle('fs:revealInFinder', async (_, filePath: string, workspaceId?: string) => {
-    shell.showItemInFolder(await validateFsPathForHandler(filePath, workspaceId))
+  handleTyped('fs:revealInFinder', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
+    handler: async (_evt, filePath, workspaceId) => {
+      shell.showItemInFolder(await validateFsPathForHandler(filePath, workspaceId))
+    },
   })
 
-  ipcMain.handle('fs:writeBrief', async (_, cardId: string, content: string) => {
-    assertSafeCardId(cardId)
-    const { join } = await import('path')
-    const briefDir = join(CONTEX_HOME, 'briefs')
-    await fs.mkdir(briefDir, { recursive: true })
-    const briefPath = join(briefDir, `${cardId}.md`)
-    await fs.writeFile(briefPath, content, 'utf8')
-    return briefPath
+  handleTyped('fs:writeBrief', {
+    args: [ipcSchemas.boundedString().max(128), ipcSchemas.fileContent] as const,
+    handler: async (_evt, cardId, content) => {
+      assertSafeCardId(cardId)
+      const { join } = await import('path')
+      const briefDir = join(CONTEX_HOME, 'briefs')
+      await fs.mkdir(briefDir, { recursive: true })
+      const briefPath = join(briefDir, `${cardId}.md`)
+      await fs.writeFile(briefPath, content, 'utf8')
+      return briefPath
+    },
   })
 
   ipcMain.handle('fs:probeDir', async (_, dirPath: string, workspaceId?: string) => {

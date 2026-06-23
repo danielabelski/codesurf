@@ -4,7 +4,7 @@ import { describe, test } from 'node:test'
 import { expect } from './node-expect.ts'
 
 const ROOT_DIR = process.cwd()
-const THEME_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/theme.ts'), 'utf8')
+const THEME_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/themePresets.ts'), 'utf8')
 const INDEX_CSS = readFileSync(join(ROOT_DIR, 'src/renderer/src/index.css'), 'utf8')
 
 describe('theme edge shadow hierarchy', () => {

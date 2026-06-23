@@ -1,12 +1,12 @@
 import { homedir } from 'os'
 import { basename, join } from 'path'
 import Database from 'better-sqlite3'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   fileExists,
   statSafe,
   listFilesRecursive,
-} from './shared'
+} from './shared.ts'
 
 function decodeCursorMeta(hex: string): Record<string, any> | null {
   try {

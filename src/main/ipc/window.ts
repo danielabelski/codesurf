@@ -1,6 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import { APP_NAME } from '../paths'
-import { normalizeSafeExternalUrl } from '../utils/externalUrl'
 
 export interface WindowIPCContext {
   createWindow: (opts?: {

@@ -327,8 +327,8 @@ export async function executeImageEditTool(
       }),
     ]).catch(() => {})
     return `Image updated via ${selection.provider.label} (${model}): ${result.outputPath}`
-  } catch (err: any) {
-    const message = err?.message ? String(err.message) : 'Image edit failed'
+  } catch (err) {
+    const message = err instanceof Error && err.message ? err.message : 'Image edit failed'
     await setTileContextFromMcp(source.workspaceId, tileId, 'ctx:image:edit:last', {
       sourcePath: source.filePath,
       status: 'error',

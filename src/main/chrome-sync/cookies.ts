@@ -165,7 +165,7 @@ export async function syncCookiesToPartition(
             sameSite: sameSiteMap(row.samesite),
           })
           count++
-        } catch (e: any) {
+        } catch {
           // Some cookies fail (invalid domain, etc.) — skip silently
         }
       })
@@ -173,8 +173,8 @@ export async function syncCookiesToPartition(
     }
 
     return { count, errors }
-  } catch (e: any) {
-    errors.push(e.message || String(e))
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e))
     return { count: 0, errors }
   } finally {
     try { unlinkSync(tempDb) } catch {}

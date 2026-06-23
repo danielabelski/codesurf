@@ -3,7 +3,7 @@ import { promises as fs } from 'fs'
 import { dirname } from 'path'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
-import type { TileState } from '../../shared/types'
+import { handleTyped, ipcSchemas } from './handleTyped.ts'
 import {
   assertSafeWorkspaceArtifactId,
   canvasStatePath,
@@ -31,6 +31,9 @@ import { getIndexerStatus, indexAllSources, listThreadsFromDb, renameIndexedThre
 import { getExternalSessionChatState } from '../session-sources'
 import { mutateArchivedSessionIds, readArchivedSessionIds } from '../storage/sessionArchives'
 import { getAgentPath } from '../agent-paths'
+import { log } from '../utils/logger.ts'
+
+const sessionsLog = log.scope('sessions')
 import {
   GENERATED_TITLE_MAX_CHARS,
   GENERATED_TITLE_MODEL,
@@ -127,10 +130,14 @@ function isLocalSessionEntry(sessionEntryId: string): boolean {
 }
 
 async function generateTitleWithClaude(prompt: string, model = GENERATED_TITLE_MODEL): Promise<string> {
+  // `permissionMode: 'plan'` and `thinking.disabled` are valid SDK runtime
+  // values whose literal types the published Options type doesn't expose; the
+  // casts bridge that gap. pathToClaudeCodeExecutable is likewise an
+  // undocumented-but-supported option field.
   const options: Options = {
     model,
-    permissionMode: 'plan' as any,
-    thinking: { type: 'disabled' } as any,
+    permissionMode: 'plan' as Options['permissionMode'],
+    thinking: { type: 'disabled' } as Options['thinking'],
     tools: [],
     maxTurns: 1,
     includePartialMessages: false,
@@ -138,7 +145,7 @@ async function generateTitleWithClaude(prompt: string, model = GENERATED_TITLE_M
   }
   const claudePath = getAgentPath('claude')
   if (claudePath) {
-    ;(options as any).pathToClaudeCodeExecutable = claudePath
+    ;(options as { pathToClaudeCodeExecutable?: string }).pathToClaudeCodeExecutable = claudePath
   }
 
   const q = query({ prompt, options })
@@ -146,40 +153,44 @@ async function generateTitleWithClaude(prompt: string, model = GENERATED_TITLE_M
 
   for await (const msg of q) {
     if (msg.type === 'assistant') {
-      const blocks = (msg as any).message?.content ?? []
+      const blocks: Array<{ type?: string; text?: string }> =
+        (msg as { message?: { content?: Array<{ type?: string; text?: string }> } }).message?.content ?? []
       text += blocks
-        .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
-        .map((block: any) => block.text)
+        .filter(block => block?.type === 'text' && typeof block.text === 'string')
+        .map(block => block.text)
         .join('')
-    } else if (msg.type === 'result' && typeof (msg as any).result === 'string' && (msg as any).result.trim()) {
-      text = (msg as any).result
+    } else if (msg.type === 'result') {
+      const result = (msg as { result?: unknown }).result
+      if (typeof result === 'string' && result.trim()) text = result
     }
   }
 
   return text.trim()
 }
 
-function extractOpenAiCompatibleTitleText(payload: any): string {
-  const choices = Array.isArray(payload?.choices) ? payload.choices : []
-  for (const choice of choices) {
-    const messageContent = choice?.message?.content
+// Parses provider title responses across OpenAI-compatible shapes. Input is
+// untrusted JSON, so it's typed `unknown` and every field access is guarded.
+function extractOpenAiCompatibleTitleText(payload: unknown): string {
+  const root = (payload ?? {}) as Record<string, unknown>
+  const pickText = (part: unknown): string =>
+    typeof (part as { text?: unknown })?.text === 'string' ? (part as { text: string }).text : ''
+
+  const choices = Array.isArray(root.choices) ? root.choices : []
+  for (const choice of choices as Array<Record<string, unknown>>) {
+    const messageContent = (choice?.message as Record<string, unknown> | undefined)?.content
     if (typeof messageContent === 'string' && messageContent.trim()) return messageContent.trim()
     if (Array.isArray(messageContent)) {
-      const text = messageContent
-        .map((part: any) => typeof part?.text === 'string' ? part.text : '')
-        .filter(Boolean)
-        .join('')
-        .trim()
+      const text = messageContent.map(pickText).filter(Boolean).join('').trim()
       if (text) return text
     }
     if (typeof choice?.text === 'string' && choice.text.trim()) return choice.text.trim()
   }
 
-  if (typeof payload?.output_text === 'string' && payload.output_text.trim()) return payload.output_text.trim()
-  if (Array.isArray(payload?.output)) {
-    const text = payload.output
-      .flatMap((item: any) => Array.isArray(item?.content) ? item.content : [])
-      .map((part: any) => typeof part?.text === 'string' ? part.text : '')
+  if (typeof root.output_text === 'string' && root.output_text.trim()) return root.output_text.trim()
+  if (Array.isArray(root.output)) {
+    const text = root.output
+      .flatMap((item: unknown) => Array.isArray((item as { content?: unknown })?.content) ? (item as { content: unknown[] }).content : [])
+      .map(pickText)
       .filter(Boolean)
       .join('')
       .trim()
@@ -189,11 +200,13 @@ function extractOpenAiCompatibleTitleText(payload: any): string {
   return ''
 }
 
-function providerErrorMessage(payload: any, raw: string, fallback: string): string {
-  const value = payload?.error?.message
-    ?? payload?.error?.details
-    ?? payload?.error
-    ?? payload?.message
+function providerErrorMessage(payload: unknown, raw: string, fallback: string): string {
+  const root = (payload ?? {}) as { error?: { message?: unknown; details?: unknown } | unknown; message?: unknown }
+  const err = root.error as { message?: unknown; details?: unknown } | undefined
+  const value = err?.message
+    ?? err?.details
+    ?? root.error
+    ?? root.message
     ?? raw
     ?? fallback
   return redactTitleGenerationError(String(value || fallback)).slice(0, 500)
@@ -242,7 +255,7 @@ async function generateTitleWithOpenAiCompatible(prompt: string, candidate: Extr
   })
 
   const raw = await response.text()
-  let payload: any = null
+  let payload: unknown = null
   try {
     payload = raw.trim() ? JSON.parse(raw) : null
   } catch {
@@ -314,11 +327,12 @@ async function loadSessionStateForTitleGeneration(
 
   if (isLocalSessionEntry(sessionEntryId)) {
     const local = await daemonClient.getLocalSessionState(workspaceId, sessionEntryId).catch(() => null)
-    if (local && Array.isArray((local as Record<string, unknown>).messages)) {
+    const localRec = local as Record<string, unknown> | null
+    if (localRec && Array.isArray(localRec.messages)) {
       return {
-        provider: typeof (local as any).provider === 'string' ? (local as any).provider : (entryHint?.provider ?? 'claude'),
-        model: typeof (local as any).model === 'string' ? (local as any).model : (entryHint?.model ?? ''),
-        messages: (local as any).messages as Record<string, unknown>[],
+        provider: typeof localRec.provider === 'string' ? localRec.provider : (entryHint?.provider ?? 'claude'),
+        model: typeof localRec.model === 'string' ? localRec.model : (entryHint?.model ?? ''),
+        messages: localRec.messages as Record<string, unknown>[],
       }
     }
 
@@ -347,11 +361,12 @@ async function loadSessionStateForTitleGeneration(
   }
 
   const fallback = await daemonClient.getExternalSessionState(workspacePath, sessionEntryId).catch(() => null)
-  if (fallback && Array.isArray((fallback as Record<string, unknown>).messages)) {
+  const fallbackRec = fallback as Record<string, unknown> | null
+  if (fallbackRec && Array.isArray(fallbackRec.messages)) {
     return {
-      provider: typeof (fallback as any).provider === 'string' ? (fallback as any).provider : (entryHint?.provider ?? 'unknown'),
-      model: typeof (fallback as any).model === 'string' ? (fallback as any).model : (entryHint?.model ?? ''),
-      messages: (fallback as any).messages as Record<string, unknown>[],
+      provider: typeof fallbackRec.provider === 'string' ? fallbackRec.provider : (entryHint?.provider ?? 'unknown'),
+      model: typeof fallbackRec.model === 'string' ? fallbackRec.model : (entryHint?.model ?? ''),
+      messages: fallbackRec.messages as Record<string, unknown>[],
     }
   }
 
@@ -522,7 +537,7 @@ function broadcastSessionsChanged(workspaceId: string, reason: string = 'unknown
     const count = sessionsChangedCallCounts.get(key) ?? 1
     sessionsChangedCallCounts.delete(key)
     // eslint-disable-next-line no-console
-    console.log(`[sessions] broadcast workspaceId=${workspaceId || '(empty)'} reason=${reason} coalesced=${count}`)
+    sessionsLog.info(`broadcast workspaceId=${workspaceId || '(empty)'} reason=${reason} coalesced=${count}`)
     broadcastToRenderer('canvas:sessionsChanged', { workspaceId })
   }, SESSIONS_CHANGED_DEBOUNCE_MS)
   if (typeof timer.unref === 'function') timer.unref()
@@ -539,7 +554,7 @@ function broadcastSessionsChangedNow(workspaceId: string, reason: string = 'expl
   }
   sessionsChangedCallCounts.delete(workspaceId || '*')
   // eslint-disable-next-line no-console
-  console.log(`[sessions] broadcast(now) workspaceId=${workspaceId || '(empty)'} reason=${reason}`)
+  sessionsLog.info(`broadcast(now) workspaceId=${workspaceId || '(empty)'} reason=${reason}`)
   broadcastToRenderer('canvas:sessionsChanged', { workspaceId })
 }
 
@@ -736,15 +751,17 @@ export function registerCanvasIPC(): void {
     return null
   })
 
-  ipcMain.handle('canvas:save', async (_, workspaceId: string, state: unknown) => {
+  handleTyped('canvas:save', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.passthroughObject] as const,
+    handler: async (_evt, workspaceId, state) => {
     const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
     const storageId = storageIds[0] ?? workspaceId
     const path = canvasStatePath(storageId)
     await fs.mkdir(dirname(path), { recursive: true })
     await writeJsonArtifactAtomic(path, state)
 
-    if (isRelayHostActive() && state && typeof state === 'object' && Array.isArray((state as { tiles?: unknown }).tiles)) {
-      const tiles = (state as { tiles: TileState[] }).tiles
+    if (isRelayHostActive() && state && typeof state === 'object' && Array.isArray(state.tiles)) {
+      const tiles = state.tiles
       const wsPath = await getWorkspacePathById(workspaceId)
       if (wsPath) {
         void syncWorkspaceRelayParticipants(workspaceId, wsPath, tiles).catch(err => {
@@ -752,6 +769,7 @@ export function registerCanvasIPC(): void {
         })
       }
     }
+    },
   })
 
   ipcMain.handle('kanban:load', async (_, workspaceId: string, tileId: string) => {

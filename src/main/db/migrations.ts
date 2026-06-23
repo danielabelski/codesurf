@@ -9,6 +9,9 @@
 import type Database from 'better-sqlite3'
 import { copyFileSync, existsSync, mkdirSync } from 'fs'
 import { DB_BACKUPS_DIR, DB_PATH, dbBackupPath } from './paths'
+import { log } from '../utils/logger.ts'
+
+const dbLog = log.scope('db')
 
 export interface Migration {
   version: number
@@ -68,7 +71,7 @@ export function runMigrations(
     const backup = backupDatabase(currentVersion)
     if (backup) {
       // eslint-disable-next-line no-console
-      console.log(`[db] Backup taken before migrating v${currentVersion} -> v${pending[pending.length - 1].version}: ${backup}`)
+      dbLog.info(`Backup taken before migrating v${currentVersion} -> v${pending[pending.length - 1].version}: ${backup}`)
     }
   }
 

@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs'
 import { homedir } from 'os'
 import { basename, extname, join } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   type ChatRole,
   type ImportedChatMessage,
@@ -31,7 +31,7 @@ import {
   listFilesRecursive,
   isExternalSessionImportableInChat,
   roleFromUnknown,
-} from './shared'
+} from './shared.ts'
 
 function getClaudeProjectPathCandidate(evt: Record<string, any> | null): string | null {
   if (!evt) return null

@@ -1,7 +1,7 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import Database from 'better-sqlite3'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   type ImportedChatMessage,
   type ImportedChatState,
@@ -14,7 +14,7 @@ import {
   isExternalSessionImportableInChat,
   makeImportedRichMessage,
   roleFromUnknown,
-} from './shared'
+} from './shared.ts'
 
 type HermesSessionRow = {
   id: string

@@ -256,8 +256,8 @@ interface ElectronAPI {
   canvas: {
     load(workspaceId: string): Promise<import('../../shared/types').CanvasState | null>
     save(workspaceId: string, state: import('../../shared/types').CanvasState): Promise<void>
-    loadTileState(workspaceId: string, tileId: string): Promise<any>
-    saveTileState(workspaceId: string, tileId: string, state: any): Promise<void>
+    loadTileState<T = unknown>(workspaceId: string, tileId: string): Promise<T>
+    saveTileState(workspaceId: string, tileId: string, state: unknown): Promise<void>
     clearTileState(workspaceId: string, tileId: string): Promise<void>
     deleteTileArtifacts(workspaceId: string, tileId: string): Promise<void>
     listSessions(workspaceId: string, forceRefresh?: boolean): Promise<AggregatedSessionEntry[]>
@@ -269,7 +269,7 @@ interface ElectronAPI {
         tailLimit?: number
         entryHint?: SessionEntryHint | null
       },
-    ): Promise<any>
+    ): Promise<unknown>
     deleteSession(workspaceId: string, sessionEntryId: string): Promise<{ ok: boolean; error?: string }>
     setSessionArchived(workspaceId: string, sessionEntryId: string, archived: boolean, identityKey?: string | null): Promise<{ ok: boolean; changed?: boolean; archived?: boolean; error?: string }>
     renameSession(workspaceId: string, sessionEntryId: string, title: string): Promise<{ ok: boolean; error?: string; title?: string }>
@@ -314,9 +314,9 @@ interface ElectronAPI {
   agents: {
     detect(): Promise<Array<{ id: string; label: string; cmd: string; path?: string; version?: string; available: boolean }>>
   }
-  agentPaths?: {
-    get(): Promise<Record<string, string | null>>
-    detect(): Promise<Record<string, string | null>>
+  agentPaths: {
+    get(): Promise<Record<string, { path: string | null; version: string | null; detectedAt: string; confirmed: boolean }>>
+    detect(): Promise<Record<string, { path: string | null; version: string | null; detectedAt: string; confirmed: boolean }>>
     set(agentId: string, path: string | null): Promise<{ ok: boolean; error?: string }>
     needsSetup(): Promise<boolean>
     confirmAll(): Promise<void>
@@ -376,8 +376,8 @@ interface ElectronAPI {
     readObjective(workspacePath: string, tileId: string): Promise<string | null>
     writeSkills(workspacePath: string, tileId: string, skills: { enabled: string[]; disabled: string[] }): Promise<boolean>
     readSkills(workspacePath: string, tileId: string): Promise<{ enabled: string[]; disabled: string[] }>
-    writeState(workspacePath: string, tileId: string, state: any): Promise<boolean>
-    readState(workspacePath: string, tileId: string): Promise<any>
+    writeState(workspacePath: string, tileId: string, state: unknown): Promise<boolean>
+    readState<T = unknown>(workspacePath: string, tileId: string): Promise<T>
     addContext(workspacePath: string, tileId: string, filename: string, content: string): Promise<boolean>
     removeContext(workspacePath: string, tileId: string, filename: string): Promise<boolean>
     listContext(workspacePath: string, tileId: string): Promise<string[]>
@@ -393,7 +393,7 @@ interface ElectronAPI {
     unwatchMessages(workspacePath: string, tileId: string): Promise<boolean>
     removeTileDir(workspacePath: string, tileId: string): Promise<boolean>
     pruneOrphanedTileDirs(workspacePath: string, tileIds: string[]): Promise<{ removed: string[] }>
-    onStateChanged(callback: (data: { workspacePath: string; tileId: string; state: any }) => void): () => void
+    onStateChanged(callback: (data: { workspacePath: string; tileId: string; state: unknown }) => void): () => void
     onMessageChanged(callback: (data: { workspacePath: string; tileId: string; mailbox: import('../../shared/types').CollabMailbox; filename: string; event: 'add' | 'change' | 'unlink'; message?: import('../../shared/types').CollabMessage | null }) => void): () => void
   }
   relay: {

@@ -23,6 +23,9 @@ import type { AggregatedSessionEntry } from '../../shared/session-types'
 import { getDb, getDeviceId } from './index'
 import { listExternalSessionEntries, invalidateExternalSessionCache } from '../session-sources'
 import { broadcastToRenderer } from '../utils/broadcast'
+import { log } from '../utils/logger.ts'
+
+const threadsLog = log.scope('threads')
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -377,7 +380,7 @@ async function runScan(): Promise<void> {
     status.scanningInFlight = false
 
     // eslint-disable-next-line no-console
-    console.log(`[threads] scan: inserts=${inserts} updates=${updates} tombstoned=${tombstoned} skipped=${skipped} in ${status.lastScanDurationMs}ms`)
+    threadsLog.info(`scan: inserts=${inserts} updates=${updates} tombstoned=${tombstoned} skipped=${skipped} in ${status.lastScanDurationMs}ms`)
 
     // Only broadcast when the SIDEBAR would actually render something
     // different. Pure-skip scans (nothing changed) fire no event.
@@ -403,12 +406,12 @@ export async function ensureInitialIndex(): Promise<void> {
     if (countThreadsInDb() > 0) {
       status.initialIndexDone = true
       // eslint-disable-next-line no-console
-      console.log('[threads] index already populated, skipping initial scan')
+      threadsLog.info('index already populated, skipping initial scan')
       return
     }
   } catch { /* ignore */ }
   // eslint-disable-next-line no-console
-  console.log('[threads] index empty, running one-time initial scan')
+  threadsLog.info('index empty, running one-time initial scan')
   await indexAllSources()
 }
 

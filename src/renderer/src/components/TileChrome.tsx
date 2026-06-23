@@ -1162,6 +1162,7 @@ function TileChromeComponent({
   // ── Collab: listen for external state.json changes ─────────────────────
   useEffect(() => {
     if (!hasDrawer) return
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- collab state crosses IPC as `unknown`; the drawer reads a known-but-loose task shape
     const unsub = window.electron?.collab?.onStateChanged((change: any) => {
       if (change.tileId !== tile.id) return
       const state = change.state
@@ -1273,7 +1274,7 @@ function TileChromeComponent({
     const interval = setInterval(() => { loadMessages() }, 15000)
 
     window.electron?.collab?.watchMessages(workspaceDir, tile.id)
-    const unsubscribeMessageChanges = window.electron?.collab?.onMessageChanged((change: any) => {
+    const unsubscribeMessageChanges = window.electron?.collab?.onMessageChanged((change: { workspacePath: string; tileId: string; mailbox: string; filename: string; event: string; message?: unknown }) => {
       if (change?.workspacePath && change.workspacePath !== workspaceDir) return
       if (change.tileId !== tile.id) return
       if (change.mailbox === 'inbox' || change.mailbox === 'sent') {
@@ -1291,11 +1292,12 @@ function TileChromeComponent({
   // ── Load skills from MCP config on mount ───────────────────────────────
   useEffect(() => {
     if (!hasDrawer || !workspaceId) return
-    window.electron?.mcp?.getMergedConfig(workspaceId).then((cfg: any) => {
+    window.electron?.mcp?.getMergedConfig(workspaceId).then((raw: unknown) => {
+      const cfg = raw as { mcpServers?: Record<string, unknown> } | null
       if (!cfg?.mcpServers) return
       const skills: SkillConfig[] = []
       for (const [server, conf] of Object.entries(cfg.mcpServers)) {
-        const c = conf as any
+        const c = (conf ?? {}) as { url?: string; command?: string }
         // Each MCP server is listed as a toggleable skill
         skills.push({
           id: `mcp:${server}`,
@@ -1314,10 +1316,10 @@ function TileChromeComponent({
   useEffect(() => {
     if (!hasDrawer) return
     const channel = `tile:${tile.id}`
-    const unsub = window.electron?.bus?.subscribe(channel, `drawer:${tile.id}`, (event: any) => {
+    const unsub = window.electron?.bus?.subscribe(channel, `drawer:${tile.id}`, (event: { type?: string; payload?: Record<string, unknown>; id?: string; timestamp?: number }) => {
       if (!event?.type) return
-      processEvent(event, setData)
-      persistToActivityStore(workspaceId, tile.id, event)
+      processEvent(event as { type: string; payload: Record<string, unknown>; id: string; timestamp: number }, setData)
+      persistToActivityStore(workspaceId, tile.id, event as { type: string; payload: Record<string, unknown>; id: string })
     })
     return () => {
       if (typeof unsub === 'function') unsub()

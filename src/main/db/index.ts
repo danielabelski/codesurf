@@ -24,6 +24,9 @@ import { migration002Threads } from './migrations/002_threads'
 import { migration003ThreadIndex } from './migrations/003_thread_index'
 import { migration004JobIndex } from './migrations/004_job_index'
 import { migration005ProviderRateLimits } from './migrations/005_provider_rate_limits'
+import { log } from '../utils/logger.ts'
+
+const dbLog = log.scope('db')
 
 type DBHandle = ReturnType<typeof DatabaseCtor>
 
@@ -77,7 +80,7 @@ function openAndMigrate(): DBHandle {
   const { applied, currentVersion } = runMigrations(db, ALL_MIGRATIONS)
   if (applied.length > 0) {
     // eslint-disable-next-line no-console
-    console.log(`[db] Applied ${applied.length} migration(s); now at v${currentVersion}: ${applied.map(m => `${m.version}:${m.name}`).join(', ')}`)
+    dbLog.info(`Applied ${applied.length} migration(s); now at v${currentVersion}: ${applied.map(m => `${m.version}:${m.name}`).join(', ')}`)
   }
 
   cachedDeviceId = seedDeviceId(db)

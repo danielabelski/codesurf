@@ -10,6 +10,10 @@ import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
 import { readSettingsSync } from './workspace'
 import { isAllowedBinary, expandHome, buildSafeSpawnEnv, ALLOWED_AGENT_BINS } from './terminal-helpers'
+import { log } from '../utils/logger.ts'
+import { handleTyped, ipcSchemas } from './handleTyped.ts'
+
+const terminalLog = log.scope('terminal')
 
 function ensureNodePtySpawnHelperExecutable(): void {
   // On Windows, node-pty uses conpty (no spawn-helper needed)
@@ -224,7 +228,14 @@ export function registerTerminalIPC(): void {
     updateTmuxStatus(session.tmuxSession, tileId)
   })
 
-  ipcMain.handle('terminal:create', async (event, tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]) => {
+  handleTyped('terminal:create', {
+    args: [
+      ipcSchemas.boundedString(),
+      ipcSchemas.boundedString(),
+      ipcSchemas.optionalString,
+      ipcSchemas.stringArray.optional(),
+    ] as const,
+    handler: async (event, tileId, workspaceDir, launchBin, launchArgs) => {
     // Validate workspaceDir against path traversal — the renderer supplies this
     // and it controls where the PTY spawns, where .contex dirs are created, and
     // where the MCP bearer token (.mcp.json) is written.
@@ -393,7 +404,7 @@ export function registerTerminalIPC(): void {
         }
       } else {
         useTmux = true
-        console.log(`[terminal] Reattaching to existing tmux session: ${sessName}`)
+        terminalLog.info(`Reattaching to existing tmux session: ${sessName}`)
       }
     }
 
@@ -471,10 +482,14 @@ export function registerTerminalIPC(): void {
     })
 
     return { cols: 80, rows: 24, buffer: '' }
+    },
   })
 
-  ipcMain.handle('terminal:write', (_, tileId: string, data: string) => {
-    terminals.get(tileId)?.pty.write(data)
+  handleTyped('terminal:write', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.terminalData] as const,
+    handler: (_evt, tileId, data) => {
+      terminals.get(tileId)?.pty.write(data)
+    },
   })
 
   // terminal:cd — change the working directory of a terminal
@@ -485,7 +500,9 @@ export function registerTerminalIPC(): void {
   // expected behaviour. The per-shell escaping below (single-quote doubling for
   // POSIX, double-quote doubling for cmd, LiteralPath for PowerShell) prevents
   // argument injection, which is the only injection vector that matters here.
-  ipcMain.handle('terminal:cd', (_, tileId: string, dirPath: string) => {
+  handleTyped('terminal:cd', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.boundedString()] as const,
+    handler: (_evt, tileId, dirPath) => {
     const session = terminals.get(tileId)
     if (!session) return
     const shellBase = (session.shell.split(/[/\\]/).pop() || '').toLowerCase()
@@ -505,6 +522,7 @@ export function registerTerminalIPC(): void {
       cdLine = `cd '${dirPath.replace(/'/g, "'\\''")}'`
     }
     session.pty.write(`\x15${cdLine}\r`)
+    },
   })
 
   ipcMain.handle('terminal:resize', (_, tileId: string, cols: number, rows: number) => {

@@ -25,6 +25,9 @@ import { readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { JOBS_DIR, TIMELINES_DIR } from '../paths'
 import { getDb, getDeviceId } from './index'
+import { log } from '../utils/logger.ts'
+
+const jobsLog = log.scope('jobs')
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -531,9 +534,8 @@ async function runScan(): Promise<void> {
     status.initialIndexDone = true
     status.scanningInFlight = false
 
-    // eslint-disable-next-line no-console
-    console.log(
-      `[jobs] scan: inserts=${inserts} updates=${updates} `
+    jobsLog.info(
+      `scan: inserts=${inserts} updates=${updates} `
       + `tombstoned=${tombstoned} skipped=${skipped} `
       + `timeline_events=${timelineEvents} in ${status.lastScanDurationMs}ms`,
     )
@@ -552,12 +554,12 @@ export async function ensureInitialJobIndex(): Promise<void> {
     if (countJobsInDb() > 0) {
       status.initialIndexDone = true
       // eslint-disable-next-line no-console
-      console.log('[jobs] index already populated, skipping initial scan')
+      jobsLog.info('index already populated, skipping initial scan')
       return
     }
   } catch { /* ignore */ }
   // eslint-disable-next-line no-console
-  console.log('[jobs] index empty, running one-time initial scan')
+  jobsLog.info('index empty, running one-time initial scan')
   await indexAllJobs()
 }
 

@@ -1,6 +1,6 @@
 import { homedir } from 'os'
 import { basename, extname, join } from 'path'
-import type { AggregatedSessionEntry } from '../../shared/session-types'
+import type { AggregatedSessionEntry } from '../../shared/session-types.ts'
 import {
   type ChatRole,
   type ImportedChatMessage,
@@ -33,7 +33,7 @@ import {
   listFilesRecursive,
   isExternalSessionImportableInChat,
   roleFromUnknown,
-} from './shared'
+} from './shared.ts'
 import {
   type PendingImportedToolCall,
   extractCommandFromToolCall,
@@ -43,7 +43,7 @@ import {
   buildImportedToolBlocks,
   extractReasoningSummary,
   isImportedPlanToolName,
-} from './tool-blocks'
+} from './tool-blocks.ts'
 import { sanitizeToolOutputText } from '../chat/output-sanitizers.ts'
 
 /**

@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'util'
 import { existsSync, statSync } from 'fs'
 import path from 'node:path'
+import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -114,7 +115,9 @@ export function registerGitIPC(): void {
     }
   })
 
-  ipcMain.handle('git:checkoutBranch', async (_, dirPath: string, branchName: string): Promise<{ ok: boolean; error?: string }> => {
+  handleTyped('git:checkoutBranch', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.boundedString(512)] as const,
+    handler: async (_evt, dirPath, branchName): Promise<{ ok: boolean; error?: string }> => {
     try {
       const resolvedDir = path.resolve(dirPath)
       if (!existsSync(resolvedDir) || !statSync(resolvedDir).isDirectory()) {
@@ -128,9 +131,12 @@ export function registerGitIPC(): void {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'checkout-failed' }
     }
+    },
   })
 
-  ipcMain.handle('git:createBranch', async (_, dirPath: string, branchName: string): Promise<{ ok: boolean; error?: string }> => {
+  handleTyped('git:createBranch', {
+    args: [ipcSchemas.boundedString(), ipcSchemas.boundedString(512)] as const,
+    handler: async (_evt, dirPath, branchName): Promise<{ ok: boolean; error?: string }> => {
     try {
       const resolvedDir = path.resolve(dirPath)
       if (!existsSync(resolvedDir) || !statSync(resolvedDir).isDirectory()) {
@@ -144,5 +150,6 @@ export function registerGitIPC(): void {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : 'create-branch-failed' }
     }
+    },
   })
 }

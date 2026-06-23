@@ -1,4 +1,5 @@
 import { bus } from '../../event-bus'
+import { errorMessage } from '../../../shared/errors.ts'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { CONTEX_HOME } from '../../paths'
@@ -553,8 +554,8 @@ export async function handleKanbanTool(
         sendToRenderer('kanban_column_deleted', { boardTileId: target.boardTileId, workspaceId: target.workspaceId, columnId })
         return `Deleted column ${columnId}`
       }
-    } catch (err: any) {
-      return `Kanban tool error: ${err.message}`
+    } catch (err) {
+      return `Kanban tool error: ${errorMessage(err)}`
     }
   }
 

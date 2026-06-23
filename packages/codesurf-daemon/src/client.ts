@@ -5,7 +5,6 @@ import type {
   DaemonChatJobRequest,
   DaemonChatJobState,
   DaemonChatPermissionAnswer,
-  DaemonPersona,
   DaemonPersonaListResult,
   DaemonAppSettings,
   DaemonSkillEntry,

@@ -68,7 +68,6 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     panelLayoutRef,
     activePanelIdRef,
     viewportRef,
-    nextZIndexRef,
     lockedConnectionsRef,
     savedLayoutRef,
     expandedCanvasGroupIdRef,

@@ -1,4 +1,4 @@
-import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
+import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types.ts'
 import { buildChatMessageHistoryFingerprint } from '../../shared/chat-history.ts'
 import {
   type ChatRole,
@@ -18,7 +18,6 @@ import {
   externalSessionCache,
   externalSessionStateCache,
   externalSessionFullStateCache,
-  isExternalSessionImportableInChat,
   ensureCodeSurfStructure,
   statSafe,
   readTextTailSafe,
@@ -28,15 +27,15 @@ import {
   compareSessions,
   dedupeImportedMessages,
   parseJsonlLines,
-} from './shared'
-import { listCodeSurfSessionFiles, parseCodeSurfChatState } from './codesurf'
-import { listClaudeSessions, parseClaudeChatState, parseClaudeMessagesFromLines } from './claude'
-import { listCodexSessions, parseCodexChatState, parseCodexChatStateFromLines } from './codex'
-import { listHermesSessions, parseHermesChatState } from './hermes'
-import { listPiAgentSessions, parsePiAgentChatState } from './pi-agent'
-import { listCursorSessions } from './cursor'
-import { listOpenClawSessions, parseOpenClawChatState } from './openclaw'
-import { listOpenCodeSessions, parseOpenCodeChatState } from './opencode'
+} from './shared.ts'
+import { listCodeSurfSessionFiles, parseCodeSurfChatState } from './codesurf.ts'
+import { listClaudeSessions, parseClaudeChatState, parseClaudeMessagesFromLines } from './claude.ts'
+import { listCodexSessions, parseCodexChatState, parseCodexChatStateFromLines } from './codex.ts'
+import { listHermesSessions, parseHermesChatState } from './hermes.ts'
+import { listPiAgentSessions, parsePiAgentChatState } from './pi-agent.ts'
+import { listCursorSessions } from './cursor.ts'
+import { listOpenClawSessions, parseOpenClawChatState } from './openclaw.ts'
+import { listOpenCodeSessions, parseOpenCodeChatState } from './opencode.ts'
 
 // Re-export all types and simple functions from shared
 export type {
@@ -50,7 +49,7 @@ export type {
   ImportedToolBlock,
   ImportedContentBlock,
 }
-export { isExternalSessionImportableInChat, ensureCodeSurfStructure } from './shared'
+export { isExternalSessionImportableInChat, ensureCodeSurfStructure } from './shared.ts'
 
 export async function listExternalSessionEntries(
   workspacePath: string | null,
