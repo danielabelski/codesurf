@@ -702,6 +702,7 @@ export function chatClaude(req: ChatRequest): void {
     ;(async () => {
       let capturedSessionId = false
       let assistantText = ''
+      let sawAssistantOutput = false
       // Track streamed text per content_block index so we can fall back to the
       // assembled `assistant` message for any text the partial stream missed.
       // Key format: `${turn}:${index}` — we bump `turn` on each assistant message.
@@ -735,14 +736,17 @@ export function chatClaude(req: ChatRequest): void {
                 const key = `${streamTurn}:${evt.index ?? 0}`
                 streamedTextByIndex.set(key, (streamedTextByIndex.get(key) ?? '') + evt.delta.text)
                 assistantText += evt.delta.text
+                sawAssistantOutput = true
                 sendStream(req.cardId, { type: 'text', text: evt.delta.text })
               } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
+                sawAssistantOutput = true
                 sendStream(req.cardId, { type: 'thinking', text: evt.delta.thinking, thinkingId: currentThinkingId })
               } else if (evt.delta?.type === 'input_json_delta' && evt.delta.partial_json) {
                 sendStream(req.cardId, { type: 'tool_input', text: evt.delta.partial_json })
               }
             } else if (evt.type === 'content_block_start') {
               if (evt.content_block?.type === 'tool_use') {
+                sawAssistantOutput = true
                 sendStream(req.cardId, {
                   type: 'tool_start',
                   toolName: evt.content_block.name,
@@ -766,6 +770,7 @@ export function chatClaude(req: ChatRequest): void {
               for (let idx = 0; idx < message.content.length; idx++) {
                 const block = message.content[idx]
                 if (block.type === 'tool_use') {
+                  sawAssistantOutput = true
                   const toolInputStr = JSON.stringify(block.input, null, 2)
                   sendStream(req.cardId, {
                     type: 'tool_use',
@@ -795,6 +800,7 @@ export function chatClaude(req: ChatRequest): void {
                     : block.text
                   if (tail.length > 0) {
                     assistantText += tail
+                    sawAssistantOutput = true
                     sendStream(req.cardId, { type: 'text', text: tail })
                     streamedTextByIndex.set(key, block.text)
                   }
@@ -808,7 +814,9 @@ export function chatClaude(req: ChatRequest): void {
               type: 'tool_summary',
               text: (msg as any).summary,
             })
+            if (typeof (msg as any).summary === 'string' && (msg as any).summary.trim()) sawAssistantOutput = true
           } else if (msg.type === 'tool_progress') {
+            sawAssistantOutput = true
             sendStream(req.cardId, {
               type: 'tool_progress',
               toolName: (msg as any).tool_name,
@@ -819,8 +827,22 @@ export function chatClaude(req: ChatRequest): void {
               return
             }
             const result = msg as any
-            if (!assistantText && typeof result.result === 'string' && result.result.trim()) {
-              assistantText = result.result
+            const resultText = typeof result.result === 'string' ? result.result.trim() : ''
+            if (!assistantText.trim() && resultText) {
+              assistantText = resultText
+              sawAssistantOutput = true
+              sendStream(req.cardId, { type: 'text', text: resultText })
+            }
+            if (!sawAssistantOutput && !resultText) {
+              runtimeSession.sessionId = result.session_id ?? runtimeSession.sessionId
+              runtimeSession.isStreaming = false
+              void upsertRuntimeSessionState(req, runtimeSession)
+              sendStream(req.cardId, {
+                type: 'error',
+                error: 'Claude finished without assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
+              })
+              clearActiveClaudeQuery(req.cardId, q)
+              return
             }
             if (assistantText.trim()) {
               runtimeSession.messages = [
@@ -848,6 +870,16 @@ export function chatClaude(req: ChatRequest): void {
 
         // Generator finished -- ensure done is sent
         if (isActiveQuery(req.cardId, q)) {
+          if (!sawAssistantOutput && !assistantText.trim()) {
+            runtimeSession.isStreaming = false
+            void upsertRuntimeSessionState(req, runtimeSession)
+            sendStream(req.cardId, {
+              type: 'error',
+              error: 'Claude stream ended before producing assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
+            })
+            clearActiveQuery(req.cardId, q)
+            return
+          }
           if (assistantText.trim()) {
             runtimeSession.messages = [
               ...runtimeMessages,

@@ -41,6 +41,7 @@ import { registerOwlIPC } from './ipc/owl'
 import { registerWindowIPC } from './ipc/window'
 import { registerUpdaterIPC } from './ipc/updater'
 import { registerAppearanceIPC } from './ipc/appearance'
+import { registerPetsIPC } from './ipc/pets'
 import { applyWindowAppearance, getWindowAppearanceOptions } from './windowAppearance'
 import { migrateLegacyStorage } from './migration'
 import { APP_ID, APP_NAME } from './paths'
@@ -765,6 +766,7 @@ app.whenReady().then(async () => {
   setExtensionRegistryProvider(() => extensionRegistry)
 
   registerAppearanceIPC()
+  registerPetsIPC()
 
   // Prime cached agent paths from disk only. Full binary detection is deferred
   // until setup/manual refresh so startup does not shell out across all agents.

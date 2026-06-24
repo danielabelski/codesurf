@@ -3,6 +3,10 @@ Running notes from the autonomous development loop. Most recent entries at top.
 The agent reads this each heartbeat for context, and writes to it after doing work.
 <!-- Agent writes entries here. Format: ## YYYY-MM-DD HH:MM — one paragraph or bullet list -->
 
+## 2026-06-23 14:02 — Fixed collab protocol directory bootstrap to avoid ENOENT on first open
+
+Investigated startup errors where `collab:ensureDir` / `collab:watchMessages` failed to create `/.contex/<tileId>/context` for missing tiles. I updated `src/main/ipc/collab.ts` so the helper now explicitly validates and creates the tile root first (`.../.contex/<tileId>`), then creates `context` + mailbox folders in one pass. This prevents the race/path edge where context creation was attempted before parent dirs were guaranteed. Verified `npm run build:main` succeeds after the change.
+
 ## 2026-04-12 11:08 — Tightened chat memory compaction and removed obvious WebContents destroyed-listener buildup
 
 Investigated the current Electron V8 OOM path instead of hand-waving. The biggest concrete renderer-side issue was that `src/renderer/src/components/ChatTile.tsx` still kept rich interleaved chat structures (`contentBlocks`, full tool inputs/summaries, thinking text) around for too much history, so assistant output could be duplicated in memory long after it was needed. I made the guard more aggressive: fewer rendered/live messages, lower char caps, truncation for tool/thinking/content-block payloads, and automatic flattening of older finished messages back to simpler `content` + trimmed tool blocks. I also fixed a separate main-process retention issue that matched the earlier `MaxListenersExceededWarning`: `src/main/ipc/bus.ts`, `src/main/ipc/terminal.ts`, and `src/main/ipc/fs.ts` were attaching a fresh `event.sender.once('destroyed', ...)` listener on the same `WebContents` for repeated subscribes/creates/watches. Those now use one tracked cleanup listener per sender instead of stacking destroyed handlers forever. `npm run build:main` and `npm run build:renderer` both pass.

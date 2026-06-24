@@ -9,6 +9,12 @@
 !dist-electron/**
 !packages/contex-relay/dist/
 !packages/contex-relay/dist/**
+!packages/codesurf-daemon/
+!packages/codesurf-daemon/bin/**
+!packages/codesurf-daemon/src/**
+!packages/codesurf-daemon/vendor/**
+!packages/codesurf-daemon/README.md
+!packages/codesurf-daemon/package.json
 !resources/
 !resources/**
 !README.md

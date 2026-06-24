@@ -90,6 +90,79 @@ test('daemon-07: debounced metadata stays consistent with the timeline after a m
   assert.equal(timeline.some(e => e.type === 'done'), true)
 })
 
+test('daemon: empty Claude result after context preflight fails instead of completing a blank assistant turn', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-empty-claude-result-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  await writeFile(join(workspaceDir, 'AGENTS.md'), 'Workspace preflight instructions', 'utf8')
+  t.after(async () => { await rm(homeDir, { recursive: true, force: true }) })
+
+  const manager = createChatJobManager({
+    homeDir,
+    claudeQuery: () => (async function* () {
+      yield { type: 'result', result: '', session_id: 'empty-result', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+
+  const job = await manager.startJob({
+    cardId: 'card-empty-result',
+    workspaceId: 'ws-empty-result',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'please continue' }],
+  })
+
+  const completed = await waitForCompletedJob(manager, job.id)
+  assert.equal(completed.status, 'failed')
+  assert.match(completed.error, /Claude finished without assistant output/)
+
+  const timeline = await readTimeline(homeDir, job.id)
+  assert.equal(timeline.some(event => event.type === 'tool_start' && event.toolId === 'codesurf-memory-context'), true)
+  const errorIndex = timeline.findIndex(event => event.type === 'error')
+  const doneIndex = timeline.findIndex(event => event.type === 'done')
+  assert.notEqual(errorIndex, -1)
+  assert.notEqual(doneIndex, -1)
+  assert.ok(errorIndex < doneIndex)
+  assert.match(timeline[errorIndex].error, /Claude finished without assistant output/)
+})
+
+test('daemon: Claude final result text is emitted when partial text deltas are missing', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-result-text-fallback-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => { await rm(homeDir, { recursive: true, force: true }) })
+
+  const manager = createChatJobManager({
+    homeDir,
+    claudeQuery: () => (async function* () {
+      yield { type: 'result', result: 'fallback answer', session_id: 'result-text', total_cost_usd: 0.001, num_turns: 1 }
+    })(),
+  })
+
+  const job = await manager.startJob({
+    cardId: 'card-result-text',
+    workspaceId: 'ws-result-text',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'answer from result only' }],
+  })
+
+  const completed = await waitForCompletedJob(manager, job.id)
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.error, null)
+
+  const timeline = await readTimeline(homeDir, job.id)
+  const textIndex = timeline.findIndex(event => event.type === 'text' && event.text === 'fallback answer')
+  const doneIndex = timeline.findIndex(event => event.type === 'done')
+  assert.notEqual(textIndex, -1)
+  assert.notEqual(doneIndex, -1)
+  assert.ok(textIndex < doneIndex)
+})
+
 // daemon-01: the manager caps how many jobs execute concurrently; the overflow
 // sits in status 'queued' and drains FIFO as slots free. This test holds every
 // in-flight query open on a gate, proves only `maxConcurrentJobs` run at once

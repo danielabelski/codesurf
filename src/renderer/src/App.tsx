@@ -121,6 +121,7 @@ function App(): JSX.Element {
   const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [showMinimap] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [showPetPicker, setShowPetPicker] = useState(false)
   const { addTemplate: addLayoutTemplate } = useLayoutTemplates()
   const [expandedTileId, setExpandedTileId] = useState<string | null>(null)
   const [panelLayout, setPanelLayout] = useState<PanelNode | null>(null)
@@ -1248,6 +1249,22 @@ function App(): JSX.Element {
     return () => window.removeEventListener('codesurf:save-layout', onSave as EventListener)
   }, [addLayoutTemplate])
 
+  // Pet picker + toggle events from the command palette
+  useEffect(() => {
+    const onOpenPicker = () => setShowPetPicker(true)
+    const onTogglePet = () => {
+      updateAppSettings((current) => ({
+        pet: { ...current.pet, enabled: !current.pet.enabled },
+      }))
+    }
+    window.addEventListener('codesurf:open-pet-picker', onOpenPicker)
+    window.addEventListener('codesurf:toggle-pet', onTogglePet)
+    return () => {
+      window.removeEventListener('codesurf:open-pet-picker', onOpenPicker)
+      window.removeEventListener('codesurf:toggle-pet', onTogglePet)
+    }
+  }, [updateAppSettings])
+
   const handleTileContextMenu = useTileContextMenu({
     viewport,
     nextZIndex,
@@ -1911,6 +1928,8 @@ function App(): JSX.Element {
         setSkillInstallPath={setSkillInstallPath}
         commandPaletteOpen={commandPaletteOpen}
         setCommandPaletteOpen={setCommandPaletteOpen}
+        showPetPicker={showPetPicker}
+        setShowPetPicker={setShowPetPicker}
       />
     </div>
     </FontProvider>

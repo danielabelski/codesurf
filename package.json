@@ -38,6 +38,7 @@
     "build:renderer": "cross-env EV_BUILD_TARGET=renderer electron-vite build",
     "build": "cross-env EV_BUILD_TARGET=main electron-vite build && cross-env EV_BUILD_TARGET=preload electron-vite build && cross-env EV_BUILD_TARGET=renderer electron-vite build",
     "build:npm": "bun run scripts/build-npm-package.mjs",
+    "dist:npm": "npm run build:npm --",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "release:mac": "node scripts/verify-mac-release-env.mjs && npm run build && electron-builder --mac dmg zip",
     "dist:windows": "npm run build && electron-builder --win nsis portable",

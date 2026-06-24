@@ -52,6 +52,7 @@ Platform packaging:
 npm run dist:mac
 npm run dist:windows   # NSIS installer + portable .exe
 npm run dist:linux     # AppImage + .deb
+npm run dist:npm       # npm/npx package tarball
 ```
 
 ## npm distribution
@@ -60,10 +61,10 @@ CodeSurf can also be shipped as a thin npm package. The npm package contains the
 
 On first launch, the `codesurf` launcher downloads Electron into `~/.codesurf/electron` and reuses that cached runtime after that.
 
-Build the publishable npm package directory and tarball with Bun:
+Build the publishable npm package directory and tarball:
 
 ```bash
-bun run build:npm
+npm run dist:npm
 ```
 
 That command writes:

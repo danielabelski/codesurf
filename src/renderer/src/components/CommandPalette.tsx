@@ -46,6 +46,14 @@ const BUILTIN_COMMANDS: BuiltinCommand[] = [
     category: 'Layouts', _run: () => { window.dispatchEvent(new CustomEvent('codesurf:save-layout')) },
   },
   {
+    extId: 'codesurf', id: 'pets.open', title: 'Pets: Choose Pet',
+    category: 'Customise', _run: () => { window.dispatchEvent(new CustomEvent('codesurf:open-pet-picker')) },
+  },
+  {
+    extId: 'codesurf', id: 'pets.toggle', title: 'Pets: Toggle Pet On/Off',
+    category: 'Customise', _run: () => { window.dispatchEvent(new CustomEvent('codesurf:toggle-pet')) },
+  },
+  {
     extId: 'codesurf', id: 'devSandbox.open', title: 'Developer: Open Dev Sandbox',
     category: 'Developer', _run: () => { void el?.window?.openDevSandbox?.() },
   },

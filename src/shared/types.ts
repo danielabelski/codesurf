@@ -9,6 +9,7 @@ export * from './dreaming-types.ts'
 export * from './event-bus-types.ts'
 export * from './execution-types.ts'
 export * from './extension-types.ts'
+export * from './pet-types.ts'
 export * from './settings-runtime.ts'
 export * from './workspace-types.ts'
 

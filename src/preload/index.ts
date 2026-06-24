@@ -742,4 +742,33 @@ contextBridge.exposeInMainWorld('electron', {
     has: (name: string): Promise<{ ok: boolean; has: boolean }> =>
       ipcRenderer.invoke('secrets:has', name),
   },
+
+  // Pets: discover, install, select, and remove animated mascot bundles.
+  // Shares the codex-rs / grok-cli / hermes pet format (pet.json + spritesheet.webp).
+  pets: {
+    list: () => ipcRenderer.invoke('pets:list') as Promise<
+      import('../shared/pet-types').PetListResponse
+    >,
+    gallery: () => ipcRenderer.invoke('pets:gallery') as Promise<
+      import('../shared/pet-types').PetGalleryResponse
+    >,
+    galleryLocal: () => ipcRenderer.invoke('pets:gallery-local') as Promise<
+      import('../shared/pet-types').PetGalleryResponse
+    >,
+    install: (slug: string) => ipcRenderer.invoke('pets:install', slug) as Promise<
+      import('../shared/pet-types').PetInstallResponse
+    >,
+    remove: (slug: string) => ipcRenderer.invoke('pets:remove', slug) as Promise<
+      import('../shared/pet-types').PetRemoveResponse
+    >,
+    thumbnail: (slug: string) => ipcRenderer.invoke('pets:thumbnail', slug) as Promise<string | null>,
+    getManifest: (slug: string) => ipcRenderer.invoke('pets:getManifest', slug) as Promise<
+      import('../shared/pet-types').PetManifest | null
+    >,
+    onGalleryChanged: (callback: () => void) => {
+      const handler = () => callback()
+      ipcRenderer.on('pets:gallery-changed', handler)
+      return () => { ipcRenderer.removeListener('pets:gallery-changed', handler) }
+    },
+  },
 })

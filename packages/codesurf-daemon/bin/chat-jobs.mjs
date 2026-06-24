@@ -1458,6 +1458,10 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       const q = claudeQuery({ prompt: lastUserMsg.content, options })
       job.query = q
       let emittedDone = false
+      let assistantText = ''
+      let sawAssistantOutput = false
+      const streamedTextByIndex = new Map()
+      let streamTurn = 0
 
       for await (const msg of q) {
         const sid = msg?.session_id
@@ -1469,14 +1473,20 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           const evt = msg.event
           if (evt?.type === 'content_block_delta') {
             if (evt.delta?.type === 'text_delta' && evt.delta.text) {
+              const key = `${streamTurn}:${evt.index ?? 0}`
+              streamedTextByIndex.set(key, (streamedTextByIndex.get(key) ?? '') + evt.delta.text)
+              assistantText += evt.delta.text
+              sawAssistantOutput = true
               await appendEvent(job.id, { type: 'text', text: evt.delta.text })
             } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
+              sawAssistantOutput = true
               await appendEvent(job.id, { type: 'thinking', text: evt.delta.thinking })
             } else if (evt.delta?.type === 'input_json_delta' && evt.delta.partial_json) {
               await appendEvent(job.id, { type: 'tool_input', text: evt.delta.partial_json })
             }
           } else if (evt?.type === 'content_block_start') {
             if (evt.content_block?.type === 'tool_use') {
+              sawAssistantOutput = true
               await appendEvent(job.id, {
                 type: 'tool_start',
                 toolName: evt.content_block.name,
@@ -1491,23 +1501,42 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         } else if (msg.type === 'assistant') {
           const message = msg.message
           if (message?.content) {
-            for (const block of message.content) {
+            for (let idx = 0; idx < message.content.length; idx += 1) {
+              const block = message.content[idx]
               if (block.type === 'tool_use') {
+                sawAssistantOutput = true
                 await appendEvent(job.id, {
                   type: 'tool_use',
                   toolName: block.name,
                   toolId: block.id,
                   toolInput: JSON.stringify(block.input, null, 2),
                 })
+              } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
+                const key = `${streamTurn}:${idx}`
+                const alreadyStreamed = streamedTextByIndex.get(key) ?? ''
+                if (block.text !== alreadyStreamed) {
+                  const tail = block.text.startsWith(alreadyStreamed)
+                    ? block.text.slice(alreadyStreamed.length)
+                    : block.text
+                  if (tail.length > 0) {
+                    assistantText += tail
+                    sawAssistantOutput = true
+                    await appendEvent(job.id, { type: 'text', text: tail })
+                    streamedTextByIndex.set(key, block.text)
+                  }
+                }
               }
             }
           }
+          streamTurn += 1
         } else if (msg.type === 'tool_use_summary') {
+          if (typeof msg.summary === 'string' && msg.summary.trim()) sawAssistantOutput = true
           await appendEvent(job.id, {
             type: 'tool_summary',
             text: msg.summary,
           })
         } else if (msg.type === 'tool_progress') {
+          sawAssistantOutput = true
           await appendEvent(job.id, {
             type: 'tool_progress',
             toolName: msg.tool_name,
@@ -1515,6 +1544,25 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           })
         } else if (msg.type === 'result') {
           emittedDone = true
+          const resultText = typeof msg.result === 'string' ? msg.result.trim() : ''
+          if (!assistantText.trim() && resultText) {
+            assistantText = resultText
+            sawAssistantOutput = true
+            await appendEvent(job.id, { type: 'text', text: resultText })
+          }
+          if (!sawAssistantOutput && !resultText) {
+            await appendEvent(job.id, {
+              type: 'error',
+              error: 'Claude finished without assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
+            })
+            await appendEvent(job.id, {
+              type: 'done',
+              cost: msg.total_cost_usd,
+              turns: msg.num_turns,
+              sessionId: msg.session_id,
+            })
+            continue
+          }
           await appendEvent(job.id, {
             type: 'done',
             cost: msg.total_cost_usd,
@@ -1526,7 +1574,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       }
 
       if (!emittedDone) {
-        await appendEvent(job.id, { type: 'done' })
+        if (!sawAssistantOutput && !assistantText.trim()) {
+          await appendEvent(job.id, {
+            type: 'error',
+            error: 'Claude stream ended before producing assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
+          })
+          await appendEvent(job.id, { type: 'done' })
+        } else {
+          await appendEvent(job.id, { type: 'done' })
+        }
       }
     } catch (error) {
       await appendEvent(job.id, {

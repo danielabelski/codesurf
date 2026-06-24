@@ -539,6 +539,16 @@ interface ElectronAPI {
     list(): Promise<{ ok: boolean; names: string[] }>
     has(name: string): Promise<{ ok: boolean; has: boolean }>
   }
+  pets: {
+    list(): Promise<import('../../shared/pet-types').PetListResponse>
+    gallery(): Promise<import('../../shared/pet-types').PetGalleryResponse>
+    galleryLocal(): Promise<import('../../shared/pet-types').PetGalleryResponse>
+    install(slug: string): Promise<import('../../shared/pet-types').PetInstallResponse>
+    remove(slug: string): Promise<import('../../shared/pet-types').PetRemoveResponse>
+    thumbnail(slug: string): Promise<string | null>
+    getManifest(slug: string): Promise<import('../../shared/pet-types').PetManifest | null>
+    onGalleryChanged(callback: () => void): () => void
+  }
   getPathForFile(file: File): string
   /** Local SQLite diagnostics. */
   db: {

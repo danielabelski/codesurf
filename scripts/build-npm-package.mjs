@@ -55,6 +55,20 @@ function copyResources() {
   })
 }
 
+function copyDaemonPackage() {
+  const source = join(ROOT, 'packages', 'codesurf-daemon')
+  if (!existsSync(source)) return
+
+  const destination = join(PACKAGE_DIR, 'packages', 'codesurf-daemon')
+  mkdirSync(destination, { recursive: true })
+
+  for (const entry of ['bin', 'src', 'vendor', 'README.md', 'package.json']) {
+    const entrySource = join(source, entry)
+    if (!existsSync(entrySource)) continue
+    cpSync(entrySource, join(destination, entry), { recursive: true, force: true })
+  }
+}
+
 function assertExists(relativePath) {
   const fullPath = join(ROOT, relativePath)
   if (!existsSync(fullPath)) {
@@ -113,6 +127,7 @@ function main() {
   copyIfExists('bin')
   copyIfExists('dist-electron')
   copyResources()
+  copyDaemonPackage()
   copyIfExists('packages/contex-relay/dist')
   copyIfExists('README.md')
   copyIfExists('LICENSE')

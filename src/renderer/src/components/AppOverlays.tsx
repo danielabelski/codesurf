@@ -17,6 +17,8 @@ const LazyClusoWidgetMount = React.lazy(() =>
 const LazyAgentSetup = React.lazy(() => import('./AgentSetup').then(m => ({ default: m.AgentSetup })))
 const LazySkillInstallModal = React.lazy(() => import('./SkillInstallModal').then(m => ({ default: m.SkillInstallModal })))
 const LazyCommandPalette = React.lazy(() => import('./CommandPalette').then(m => ({ default: m.CommandPalette })))
+const LazyPetOverlay = React.lazy(() => import('./PetOverlay').then(m => ({ default: m.PetOverlay })))
+const LazyPetPicker = React.lazy(() => import('./PetPicker').then(m => ({ default: m.PetPicker })))
 
 export type AppOverlaysProps = {
   showMCP: boolean
@@ -40,6 +42,8 @@ export type AppOverlaysProps = {
   setSkillInstallPath: (path: string | null) => void
   commandPaletteOpen: boolean
   setCommandPaletteOpen: (open: boolean) => void
+  showPetPicker: boolean
+  setShowPetPicker: (open: boolean) => void
 }
 
 export function AppOverlays(props: AppOverlaysProps): JSX.Element {
@@ -65,6 +69,8 @@ export function AppOverlays(props: AppOverlaysProps): JSX.Element {
     setSkillInstallPath,
     commandPaletteOpen,
     setCommandPaletteOpen,
+    showPetPicker,
+    setShowPetPicker,
   } = props
 
   return (
@@ -133,6 +139,35 @@ export function AppOverlays(props: AppOverlaysProps): JSX.Element {
           <LazyCommandPalette
             open={commandPaletteOpen}
             onOpenChange={setCommandPaletteOpen}
+          />
+        </Suspense>
+      )}
+      {/* Ambient pet mascot — floats above the canvas when enabled */}
+      {settingsLoaded && settings.pet?.enabled && settings.pet?.slug && (
+        <Suspense fallback={null}>
+          <LazyPetOverlay
+            slug={settings.pet.slug}
+            scale={settings.pet.scale}
+            onOpenPicker={() => setShowPetPicker(true)}
+          />
+        </Suspense>
+      )}
+      {showPetPicker && (
+        <Suspense fallback={null}>
+          <LazyPetPicker
+            onClose={() => setShowPetPicker(false)}
+            currentSlug={settings.pet?.slug ?? ''}
+            scale={settings.pet?.scale ?? 0.33}
+            onSelect={(slug) => {
+              updateAppSettings((current) => ({
+                pet: { ...current.pet, enabled: true, slug },
+              }))
+            }}
+            onScaleChange={(newScale) => {
+              updateAppSettings((current) => ({
+                pet: { ...current.pet, scale: newScale },
+              }))
+            }}
           />
         </Suspense>
       )}

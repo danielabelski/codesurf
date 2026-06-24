@@ -233,6 +233,14 @@ export interface AppSettings {
   // separately in the encrypted secrets store; this struct holds only the
   // non-secret configuration (provider choice, voice id, lang, etc.).
   voice?: VoiceSettings
+  // Ambient pet mascot — shares the codex-rs / grok-cli / hermes pet bundle
+  // format. `enabled` is the master on/off; `slug` selects the active pet;
+  // `scale` resizes the floating sprite (0.1–3.0, default 0.33).
+  pet: {
+    enabled: boolean
+    slug: string
+    scale: number
+  }
   security: {
     /** When true, fs IPC paths must fall under a workspace project root or CONTEX_HOME. */
     restrictFsToWorkspaceRoots: boolean
@@ -426,6 +434,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
     autoSpeak: 'off',
     bargeIn: true,
   },
+  pet: {
+    enabled: false,
+    slug: '',
+    scale: 0.33,
+  },
   security: {
     restrictFsToWorkspaceRoots: false,
   },
@@ -529,6 +542,10 @@ export function withDefaultSettings(input: Partial<AppSettings> | null | undefin
     storage: {
       ...DEFAULT_SETTINGS.storage,
       ...(settings.storage ?? {}),
+    },
+    pet: {
+      ...DEFAULT_SETTINGS.pet,
+      ...(settings.pet ?? {}),
     },
     security: {
       ...DEFAULT_SETTINGS.security,
