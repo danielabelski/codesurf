@@ -312,6 +312,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       updatePeers: makeInvoker(invoke, 'terminal:update-peers'),
       onData: (tileId: string, callback: (data: string) => void) => eventHub.on(`terminal:data:${tileId}`, payload => callback(String(payload ?? ''))),
       onActive: (tileId: string, callback: () => void) => eventHub.on(`terminal:active:${tileId}`, () => callback()),
+      onExit: (tileId: string, callback: (exitCode: number) => void) => eventHub.on(`terminal:exit:${tileId}`, payload => callback(Number(payload ?? 0))),
     },
     agents: {
       detect: makeInvoker(invoke, 'agents:detect'),

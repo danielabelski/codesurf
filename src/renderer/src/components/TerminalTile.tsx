@@ -123,6 +123,10 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
 
       // Track PTY readiness so key handler can write safely
       let ptyReady = false
+      // True once the PTY process has exited; typed input is swallowed until
+      // Enter is pressed to respawn a fresh session.
+      let exited = false
+      let respawning = false
 
       // Shift+Enter → send escaped newline so shells continue on next line
       // and TUI apps (Claude CLI) treat it as multi-line input.
@@ -137,23 +141,48 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
         return true
       })
 
-      window.electron.terminal.create(tileId, workspaceDir, launchBin, launchArgs).then(({ buffer }) => {
-        ptyReady = true
-        if (buffer) term.write(buffer)
-        const cleanup = window.electron.terminal.onData(tileId, (data: string) => {
-          term.write(data)
-        })
-        cleanupRef.current = cleanup
+      const startPty = () => {
+        window.electron.terminal.create(tileId, workspaceDir, launchBin, launchArgs).then(({ buffer }) => {
+          if (cancelled) return
+          ptyReady = true
+          exited = false
+          respawning = false
+          if (buffer) term.write(buffer)
+          const dataCleanup = window.electron.terminal.onData(tileId, (data: string) => {
+            term.write(data)
+          })
+          const exitCleanup = window.electron.terminal.onExit(tileId, (exitCode: number) => {
+            ptyReady = false
+            exited = true
+            term.write(`\r\n\x1b[33m[process exited (code ${exitCode})] — press Enter to restart\x1b[0m\r\n`)
+          })
+          cleanupRef.current = () => {
+            dataCleanup()
+            exitCleanup()
+          }
 
-        term.onData((data: string) => {
-          window.electron.terminal.write(tileId, data)
+          // Fit once more after pty is ready
+          doFit()
+        }).catch(err => {
+          respawning = false
+          term.write(`\r\n\x1b[31mFailed to start terminal: ${err?.message ?? err}\x1b[0m\r\n`)
         })
+      }
 
-        // Fit once more after pty is ready
-        doFit()
-      }).catch(err => {
-        term.write(`\r\n\x1b[31mFailed to start terminal: ${err?.message ?? err}\x1b[0m\r\n`)
+      term.onData((data: string) => {
+        if (exited) {
+          if (!respawning && (data === '\r' || data === '\n')) {
+            respawning = true
+            cleanupRef.current?.()
+            cleanupRef.current = null
+            startPty()
+          }
+          return
+        }
+        window.electron.terminal.write(tileId, data)
       })
+
+      startPty()
     })
 
     return () => {

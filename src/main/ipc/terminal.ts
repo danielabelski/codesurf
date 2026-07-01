@@ -10,6 +10,7 @@ import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
 import { readSettingsSync } from './workspace'
 import { isAllowedBinary, expandHome, buildSafeSpawnEnv, ALLOWED_AGENT_BINS } from './terminal-helpers'
+import { handlePtyExit } from './terminal-exit.ts'
 import { log } from '../utils/logger.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
@@ -168,6 +169,7 @@ interface PtyInstance {
   resize: (cols: number, rows: number) => void
   kill: () => void
   onData: (cb: (data: string) => void) => void
+  onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => void
 }
 
 interface TerminalSession {
@@ -479,6 +481,14 @@ export function registerTerminalIPC(): void {
       buf.data += data
       if (buf.timer) clearTimeout(buf.timer)
       buf.timer = setTimeout(() => flushTerminalToBus(tileId), TERMINAL_BUS_DEBOUNCE)
+    })
+
+    term.onExit(({ exitCode }) => {
+      handlePtyExit(tileId, exitCode, term, {
+        terminals,
+        terminalBuffers,
+        publish: (event) => bus.publish(event),
+      })
     })
 
     return { cols: 80, rows: 24, buffer: '' }
