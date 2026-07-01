@@ -290,6 +290,7 @@ interface ElectronAPI {
     updatePeers(tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>): Promise<void>
     onData(tileId: string, cb: (data: string) => void): () => void
     onActive(tileId: string, cb: () => void): () => void
+    onExit(tileId: string, cb: (exitCode: number) => void): () => void
     cd?(tileId: string, dir: string): Promise<void>
   }
   browserTile: {

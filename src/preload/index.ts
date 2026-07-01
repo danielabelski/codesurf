@@ -221,6 +221,12 @@ contextBridge.exposeInMainWorld('electron', {
       const handler = () => callback()
       ipcRenderer.on(channel, handler)
       return () => { ipcRenderer.removeListener(channel, handler) }
+    },
+    onExit: (tileId: string, callback: (exitCode: number) => void) => {
+      const channel = `terminal:exit:${tileId}`
+      const handler = (_: unknown, exitCode: number) => callback(exitCode)
+      ipcRenderer.on(channel, handler)
+      return () => { ipcRenderer.removeListener(channel, handler) }
     }
   },
 
