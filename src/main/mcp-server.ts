@@ -25,6 +25,7 @@ import { assertSafePathSegment } from './security/pathSegments'
 import { dispatchTool, getAllStaticTools } from './mcp/registry'
 import { executeImageEditTool as executeImageEditToolImpl } from './mcp/tools/generation'
 import type { McpToolContext, McpToolSchema } from './mcp/types'
+import { resolvePrincipal, assertTileScope, type McpPrincipal } from './mcp/auth'
 
 const MCP_TOKEN = randomUUID()
 const MAX_BODY = 1024 * 1024 // 1MB
@@ -285,11 +286,12 @@ function sendToRenderer(event: string, data: unknown): void {
   broadcastToRenderer('mcp:kanban', { event, data })
 }
 
-function buildMcpToolContext(): McpToolContext {
+function buildMcpToolContext(principal: McpPrincipal): McpToolContext {
   return {
     sendToRenderer,
     pushSSE,
     getExtensionRegistry: () => extensionRegistryProvider?.() ?? null,
+    principal,
   }
 }
 
@@ -298,10 +300,12 @@ export async function executeImageEditTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
-  return executeImageEditToolImpl(tileId, name, args, buildMcpToolContext())
+  // Called from ipc/image.ts — a direct main-process call triggered by the
+  // renderer UI, not an external MCP client. Treat as fully trusted.
+  return executeImageEditToolImpl(tileId, name, args, buildMcpToolContext({ kind: 'global' }))
 }
 
-async function handleLocalTool(name: string, args: Record<string, unknown>): Promise<string | null> {
+async function handleLocalTool(name: string, args: Record<string, unknown>, principal: McpPrincipal): Promise<string | null> {
   if (name === 'ask') {
     const evt = bus.publish({
       channel: args.channel as string,
@@ -317,6 +321,8 @@ async function handleLocalTool(name: string, args: Record<string, unknown>): Pro
     let tileId: string
     try { tileId = assertSafePathSegment(args.tile_id as string, 'tile_id') }
     catch { return 'Invalid tile_id' }
+    const scopeError = assertTileScope(principal, tileId)
+    if (scopeError) return scopeError
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
       for (const ws of workspaces) {
@@ -344,6 +350,8 @@ async function handleLocalTool(name: string, args: Record<string, unknown>): Pro
     let tileId: string
     try { tileId = assertSafePathSegment(args.tile_id as string, 'tile_id') }
     catch { return 'Invalid tile_id' }
+    const scopeError = assertTileScope(principal, tileId)
+    if (scopeError) return scopeError
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
       for (const ws of workspaces) {
@@ -368,12 +376,12 @@ async function handleLocalTool(name: string, args: Record<string, unknown>): Pro
   return null
 }
 
-async function handleTool(name: string, args: Record<string, unknown>): Promise<string> {
-  const ctx = buildMcpToolContext()
+async function handleTool(name: string, args: Record<string, unknown>, principal: McpPrincipal): Promise<string> {
+  const ctx = buildMcpToolContext(principal)
   const dispatched = await dispatchTool(name, args, ctx)
   if (dispatched !== null) return dispatched
 
-  const local = await handleLocalTool(name, args)
+  const local = await handleLocalTool(name, args, principal)
   if (local !== null) return local
 
   const extensionTool = getExtensionTools().find(tool => tool.name === name)
@@ -387,7 +395,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
   return 'Unknown tool'
 }
 
-async function handleMCP(req: MCPRequest): Promise<unknown> {
+async function handleMCP(req: MCPRequest, principal: McpPrincipal): Promise<unknown> {
   if (req.method === 'initialize') {
     return {
       jsonrpc: '2.0', id: req.id,
@@ -417,7 +425,7 @@ async function handleMCP(req: MCPRequest): Promise<unknown> {
   if (req.method === 'tools/call') {
     const name = req.params?.name ?? ''
     const args = (req.params?.arguments ?? {}) as Record<string, unknown>
-    const result = await handleTool(name, args)
+    const result = await handleTool(name, args, principal)
     return {
       jsonrpc: '2.0', id: req.id,
       result: { content: [{ type: 'text', text: result }] }
@@ -480,25 +488,28 @@ function readQueryToken(url: URL): string | null {
   return url.searchParams.get('token') ?? url.searchParams.get('access_token')
 }
 
+/**
+ * Authenticate a request and return the principal that authenticated it.
+ * Returns null when auth fails — the 401 response has already been written.
+ */
 export function requireMcpAuth(
   req: IncomingMessage,
   res: ServerResponse,
   options?: { allowQueryToken?: boolean, url?: URL },
-): boolean {
+): McpPrincipal | null {
   const bearer = readBearerToken(req)
   const queryToken = options?.allowQueryToken && options.url
     ? readQueryToken(options.url)
     : null
   const token = bearer ?? queryToken
 
-  // Check against global token first, then per-tile tokens
-  if (token === MCP_TOKEN) return true
-  if (token && tileTokens.has(token)) return true
+  const principal = resolvePrincipal(token, MCP_TOKEN, tileTokens)
+  if (principal) return principal
 
   setCorsHeaders(res, req)
   res.writeHead(401, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({ error: 'Unauthorized' }))
-  return false
+  return null
 }
 
 export function stopMCPServer(): Promise<void> {
@@ -541,16 +552,32 @@ export async function startMCPServer(): Promise<number> {
         return
       }
 
-      if (
-        isSensitiveMcpRoute(req.method, isEvents)
-        && !requireMcpAuth(req, res, { allowQueryToken: isEvents, url })
-      ) {
-        return
+      // isSensitiveMcpRoute is a blanket fail-closed policy — it always
+      // returns true today, so every route below goes through requireMcpAuth
+      // and `principal` is always populated. The { kind: 'global' } fallback
+      // only matters if a future route is ever marked non-sensitive.
+      // `principal` is assigned once (const) below so its non-null type is
+      // preserved inside the request-body closures further down.
+      let resolvedPrincipal: McpPrincipal = { kind: 'global' }
+      if (isSensitiveMcpRoute(req.method, isEvents)) {
+        const authedPrincipal = requireMcpAuth(req, res, { allowQueryToken: isEvents, url })
+        if (!authedPrincipal) return
+        resolvedPrincipal = authedPrincipal
       }
+      const principal = resolvedPrincipal
 
       // SSE: GET /events?card_id=xxx  — agent streams status to canvas
       if (isEvents) {
         const cardId = url.searchParams.get('card_id') ?? 'global'
+        // A tile-scoped token may only subscribe to its own card's stream;
+        // 'global'/absent card subscriptions require the global token.
+        const scopeError = assertTileScope(principal, cardId)
+        if (scopeError) {
+          setCorsHeaders(res, req)
+          res.writeHead(403, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: scopeError }))
+          return
+        }
         setCorsHeaders(res, req)
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
@@ -596,6 +623,13 @@ export async function startMCPServer(): Promise<number> {
         req.on('end', () => {
           try {
             const { card_id, event, data } = JSON.parse(body)
+            const scopeError = assertTileScope(principal, card_id)
+            if (scopeError) {
+              setCorsHeaders(res, req)
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: scopeError }))
+              return
+            }
             pushSSE(card_id, event, data)
             sendToRenderer(event, { cardId: card_id, ...data })
             setCorsHeaders(res, req)
@@ -627,6 +661,13 @@ export async function startMCPServer(): Promise<number> {
         req.on('end', () => {
           try {
             const { card_id, message, append_newline = true } = JSON.parse(body)
+            const scopeError = assertTileScope(principal, card_id)
+            if (scopeError) {
+              setCorsHeaders(res, req)
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: scopeError }))
+              return
+            }
             // Tell renderer to write to the terminal
             broadcastToRenderer('mcp:inject', { cardId: card_id, message, appendNewline: append_newline })
             // Also push SSE so other agents/subscribers know
@@ -664,7 +705,7 @@ export async function startMCPServer(): Promise<number> {
       req.on('end', async () => {
         try {
           const mcpReq: MCPRequest = JSON.parse(body)
-          const response = await handleMCP(mcpReq)
+          const response = await handleMCP(mcpReq, principal)
           setCorsHeaders(res, req)
           res.writeHead(200, {
             'Content-Type': 'application/json'

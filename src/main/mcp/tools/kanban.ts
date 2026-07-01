@@ -4,6 +4,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { CONTEX_HOME } from '../../paths'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
+import { assertTileScope } from '../auth'
 
 export interface MCPKanbanColumn {
   id: string
@@ -356,6 +357,17 @@ export async function handleKanbanTool(
 
   const cardId = args.card_id as string
   const { pushSSE, sendToRenderer } = ctx
+
+  // card_complete/card_update/card_error/canvas_event/request_input all take
+  // card_id == $CARD_ID, i.e. the caller's own tile. A tile-scoped token must
+  // not be able to act on another tile's card.
+  if (
+    name === 'card_complete' || name === 'card_update' || name === 'card_error' ||
+    name === 'canvas_event' || name === 'request_input'
+  ) {
+    const scopeError = assertTileScope(ctx.principal, cardId)
+    if (scopeError) return scopeError
+  }
 
   if (name === 'card_complete') {
     const payload = { cardId, summary: args.summary, nextCol: args.next_col }
