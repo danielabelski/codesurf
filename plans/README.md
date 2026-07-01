@@ -16,11 +16,11 @@ Execute in the order below unless dependencies say otherwise. Each executor: rea
 | [004](004-broker-ipc-channel-validation.md) | Validate IPC channel names received from extension child process | P1 | S | — | DONE |
 | [005](005-loader-security-guard-tests.md) | Add unit tests for isPowerActivationPermitted | P1 | S | 003 | TODO |
 | [006](006-quick-cleanups.md) | Quick cleanups — tile-type normalization + test glob + LiveKit credentials | P2 | S | — | TODO |
-| [007](007-codex-abort-isstreaming-persist.md) | Persist isStreaming=false on Codex aborted/failed turns | P1 | S | — | TODO |
-| [008](008-terminal-pty-onexit-lifecycle.md) | Handle PTY exit — clean up dead terminal sessions, notify renderer | P1 | M | — | TODO |
-| [009](009-pets-sharp-dep-and-hardening.md) | Pets: declare sharp dep, fix suffixed-id lookup, statSync-in-try | P1 | S | — | TODO |
-| [010](010-mcp-tile-token-scoping.md) | Enforce per-tile scope for tile MCP tokens | P1 | M | — | TODO |
-| [011](011-fs-denylist-unification-and-mcp-json-untrack.md) | Unify sensitive-dir denylist across fs IPC + file protocol; untrack .mcp.json | P2 | S | — | TODO |
+| [007](007-codex-abort-isstreaming-persist.md) | Persist isStreaming=false on Codex aborted/failed turns | P1 | S | — | DONE (approved; branch `fix/codex-abort-isstreaming` @ 873d2d9, unmerged) |
+| [008](008-terminal-pty-onexit-lifecycle.md) | Handle PTY exit — clean up dead terminal sessions, notify renderer | P1 | M | — | DONE (approved; branch `fix/terminal-pty-exit` @ 68ba2f6, unmerged. Known caveat: tmux Ctrl-b d detach shows the exit message; reattach works. Follow-up: electrobun bun host not wired to terminal:exit; pets.* facade parity gap pre-existing) |
+| [009](009-pets-sharp-dep-and-hardening.md) | Pets: declare sharp dep, fix suffixed-id lookup, statSync-in-try | P1 | S | — | DONE (approved; branch `fix/pets-hardening` @ c70cf73, unmerged) |
+| [010](010-mcp-tile-token-scoping.md) | Enforce per-tile scope for tile MCP tokens | P1 | M | — | DONE (approved; branch `security/mcp-tile-token-scope` @ 13d91d9, unmerged. NOTE: guards are dormant until tile tokens are actually issued — see SEC-05 in Backlog) |
+| [011](011-fs-denylist-unification-and-mcp-json-untrack.md) | Unify sensitive-dir denylist across fs IPC + file protocol; untrack .mcp.json | P2 | S | — | DONE (approved; branch `security/shared-sensitive-denylist` @ dc8b037, unmerged) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
@@ -35,6 +35,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
 Ordered by leverage. Ask `/improve plan <slug>` to turn any into a full plan.
 
+- **SEC-05** (found during plan 010 execution) `CONTEX_MCP_TILE_TOKEN` is exported to spawned agents (`terminal.ts:287`, `codex.ts:368`) but never read; every MCP config written to disk (`buildContexHttpMcpServerEntry` call sites in `mcp-server.ts:750/:833`, `ipc/mcp-config.ts:75/:159`) omits `tileId` and bakes in the GLOBAL token. So per-tile tokens are never presented by real callers and the plan-010 scope guards are dormant. Fix: pass `tileId` through config generation so spawned agents get their tile token instead of the global one. (S-M, HIGH)
 - **PERF-02** `ipc/chat.ts:701-715` — `buildProjectContext` runs 3 synchronous `git` subprocesses on the main thread on EVERY chat send, uncached; plus sync settings reads at :632/:797. Fix: async `execFile` in parallel + per-workspace memo. (S-M, HIGH confidence)
 - **TEST-01** No fast test lane — `npm test` requires full native install + electron; pure-logic tests can't run in isolation. Add `test:unit` glob over electron-free specs. (M, HIGH)
 - **PERF-01** `activity-store.ts:112/:53/:127` — records array unbounded; every save rewrites the whole pretty-printed JSON; every query re-sorts all records. Cap + presorted or indexed store. (M, HIGH)
