@@ -16,11 +16,11 @@ Execute in the order below unless dependencies say otherwise. Each executor: rea
 | [004](004-broker-ipc-channel-validation.md) | Validate IPC channel names received from extension child process | P1 | S | — | DONE |
 | [005](005-loader-security-guard-tests.md) | Add unit tests for isPowerActivationPermitted | P1 | S | 003 | TODO |
 | [006](006-quick-cleanups.md) | Quick cleanups — tile-type normalization + test glob + LiveKit credentials | P2 | S | — | TODO |
-| [007](007-codex-abort-isstreaming-persist.md) | Persist isStreaming=false on Codex aborted/failed turns | P1 | S | — | DONE (approved; branch `fix/codex-abort-isstreaming` @ 873d2d9, unmerged) |
-| [008](008-terminal-pty-onexit-lifecycle.md) | Handle PTY exit — clean up dead terminal sessions, notify renderer | P1 | M | — | DONE (approved; branch `fix/terminal-pty-exit` @ 68ba2f6, unmerged. Known caveat: tmux Ctrl-b d detach shows the exit message; reattach works. Follow-up: electrobun bun host not wired to terminal:exit; pets.* facade parity gap pre-existing) |
-| [009](009-pets-sharp-dep-and-hardening.md) | Pets: declare sharp dep, fix suffixed-id lookup, statSync-in-try | P1 | S | — | DONE (approved; branch `fix/pets-hardening` @ c70cf73, unmerged) |
-| [010](010-mcp-tile-token-scoping.md) | Enforce per-tile scope for tile MCP tokens | P1 | M | — | DONE (approved; branch `security/mcp-tile-token-scope` @ 13d91d9, unmerged. NOTE: guards are dormant until tile tokens are actually issued — see SEC-05 in Backlog) |
-| [011](011-fs-denylist-unification-and-mcp-json-untrack.md) | Unify sensitive-dir denylist across fs IPC + file protocol; untrack .mcp.json | P2 | S | — | DONE (approved; branch `security/shared-sensitive-denylist` @ dc8b037, unmerged) |
+| [007](007-codex-abort-isstreaming-persist.md) | Persist isStreaming=false on Codex aborted/failed turns | P1 | S | — | DONE (merged to main @ 6660f9d) |
+| [008](008-terminal-pty-onexit-lifecycle.md) | Handle PTY exit — clean up dead terminal sessions, notify renderer | P1 | M | — | DONE (merged to main @ 67f5ba8. Caveat: tmux Ctrl-b d detach shows the exit message; reattach works. Follow-ups: electrobun bun host not wired to terminal:exit; pets.* facade parity gap pre-existing) |
+| [009](009-pets-sharp-dep-and-hardening.md) | Pets: declare sharp dep, fix suffixed-id lookup, statSync-in-try | P1 | S | — | DONE (merged to main @ 6841a2f) |
+| [010](010-mcp-tile-token-scoping.md) | Enforce per-tile scope for tile MCP tokens | P1 | M | — | DONE (merged to main @ 8ba3119. NOTE: guards are dormant until tile tokens are actually issued — see SEC-05 in Backlog) |
+| [011](011-fs-denylist-unification-and-mcp-json-untrack.md) | Unify sensitive-dir denylist across fs IPC + file protocol; untrack .mcp.json | P2 | S | — | DONE (merged to main @ 8397448) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
