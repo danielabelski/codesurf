@@ -25,6 +25,7 @@ import type {
   PetRemoveResponse,
 } from '../../shared/pet-types'
 import { broadcastToRenderer } from '../utils/broadcast'
+import { parseSuffixedPetId } from './pets-id'
 
 // ── Scan dirs ───────────────────────────────────────────────────────────────────
 
@@ -184,15 +185,13 @@ function loadPetManifest(id: string): PetManifest | null {
   }
   // Handle suffixed ids: `originalId__dirName` — look up the dirName
   // segment and return the manifest with the suffixed id patched in.
-  if (id.includes('__')) {
-    const suffix = id.split('__')[1]
-    if (suffix) {
-      for (const dir of petsDirs()) {
-        const candidate = join(dir, suffix)
-        if (!existsSync(candidate)) continue
-        const m = loadBundleMetadata(candidate, installedDirs)
-        if (m) return { ...m, id }
-      }
+  const suffix = parseSuffixedPetId(id)
+  if (suffix) {
+    for (const dir of petsDirs()) {
+      const candidate = join(dir, suffix)
+      if (!existsSync(candidate)) continue
+      const m = loadBundleMetadata(candidate, installedDirs)
+      if (m) return { ...m, id }
     }
   }
   return null
@@ -318,16 +317,16 @@ async function ensureThumbnail(manifest: PetManifest): Promise<string | null> {
   // spritesheet. They're displayed in the picker at small size.
   const thumbPath = join(THUMBS_DIR, `${manifest.id}.png`)
 
-  if (existsSync(thumbPath)) {
-    // Check freshness — re-extract if source changed
-    const thumbStat = statSync(thumbPath)
-    const srcStat = statSync(manifest.spritesheetPath)
-    if (thumbStat.mtimeMs > srcStat.mtimeMs) {
-      return thumbPath
-    }
-  }
-
   try {
+    if (existsSync(thumbPath) && existsSync(manifest.spritesheetPath)) {
+      // Check freshness — re-extract if source changed
+      const thumbStat = statSync(thumbPath)
+      const srcStat = statSync(manifest.spritesheetPath)
+      if (thumbStat.mtimeMs > srcStat.mtimeMs) {
+        return thumbPath
+      }
+    }
+
     if (!existsSync(THUMBS_DIR)) {
       mkdirSync(THUMBS_DIR, { recursive: true })
     }
