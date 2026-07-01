@@ -5,6 +5,7 @@ import path from 'node:path'
 import { basename, extname, join, parse } from 'path'
 import { homedir } from 'os'
 import { CONTEX_HOME, CONTEX_HOME_DIRNAME } from '../paths.ts'
+import { SENSITIVE_HOME_DIRS } from '../security/sensitivePaths.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
 const requireElectron = createRequire(import.meta.url)
@@ -54,7 +55,9 @@ function trackWatchSender(sender: WebContents, resolvedPath: string): void {
 }
 
 // --- Security: path validation (SEC-03) ---
-const SENSITIVE_DIRS = ['.ssh', '.gnupg', '.aws', '.config']
+// Denylist shared with the `contex-file://` media protocol boundary via
+// `security/sensitivePaths.ts` so the two boundaries guarding the home
+// directory can't drift apart.
 
 export interface FsPathScopeOptions {
   restrictToWorkspaceRoots?: boolean
@@ -124,7 +127,7 @@ export function validateFsPath(filePath: string, options?: FsPathScopeOptions): 
   }
 
   // Reject paths to sensitive directories
-  for (const dir of SENSITIVE_DIRS) {
+  for (const dir of SENSITIVE_HOME_DIRS) {
     const sensitive = path.join(home, dir)
     if (resolved.startsWith(sensitive + path.sep) || resolved === sensitive) {
       throw new Error(`Access denied: path "${filePath}" targets a sensitive directory (~/${dir})`)
