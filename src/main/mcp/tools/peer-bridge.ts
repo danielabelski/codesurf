@@ -120,6 +120,11 @@ async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
   return null
 }
 
+// Every tool here takes tile_id as a TARGET peer block, not the caller's own
+// block — cross-tile by design (this is the peer bridge: terminal_send_input,
+// chat_send_message, browser_navigate, kanban_*, image_*, note_* etc. all
+// act on a connected peer). No assertTileScope guard applies. None of these
+// tools carries a separate sender-identity field to stamp.
 export async function handlePeerBridgeTool(
   name: string,
   args: Record<string, unknown>,

@@ -7,6 +7,7 @@ import * as peerState from '../../peer-state'
 import { broadcastToRenderer } from '../../utils/broadcast'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
 import { errorMessage } from '../../../shared/errors.ts'
+import { assertTileScope } from '../auth'
 
 type UserConfigWorkspaceRef = {
   id: string
@@ -187,13 +188,17 @@ const CONTEXT_TOOL_NAMES = new Set(CONTEXT_TOOLS.map(tool => tool.name))
 export async function handleContextTool(
   name: string,
   args: Record<string, unknown>,
-  _ctx: McpToolContext,
+  ctx: McpToolContext,
 ): Promise<string | null> {
   if (!CONTEXT_TOOL_NAMES.has(name)) return null
 
   if (name === 'peer_set_state') {
     const tileId = asString(args.tile_id)
     if (!tileId) return 'Missing tile_id'
+    // tile_id is the caller's own block ("Your block ID" per schema) — a
+    // tile-scoped token must not be able to declare state for another tile.
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
     const state = peerState.setState(tileId, {
       tileType: asString(args.tile_type) ?? undefined,
       status: (() => {
@@ -210,13 +215,21 @@ export async function handleContextTool(
   if (name === 'peer_get_state') {
     const tileId = asString(args.tile_id)
     if (!tileId) return 'Missing tile_id'
+    // Read-only, but scoped to consistency with peer_set_state — a
+    // tile-scoped token only queries its own peer graph.
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
     const peerStates = peerState.getLinkedPeerStates(tileId)
     if (peerStates.length === 0) return 'No linked peers with registered state. Peers must call peer_set_state first.'
     return JSON.stringify(peerStates, null, 2)
   }
 
   if (name === 'peer_send_message') {
-    const from = asString(args.from_tile_id)
+    // to_tile_id is intentionally cross-tile (the whole point is messaging a
+    // peer). from_tile_id is a sender-identity claim: a tile-scoped
+    // principal can't lie about who sent it, so stamp it from the token
+    // rather than trusting the caller-supplied value.
+    const from = ctx.principal.kind === 'tile' ? ctx.principal.tileId : asString(args.from_tile_id)
     const to = asString(args.to_tile_id)
     const message = asString(args.message)
     if (!from || !to || !message) return 'Missing from_tile_id, to_tile_id, or message'
@@ -227,6 +240,10 @@ export async function handleContextTool(
   if (name === 'peer_read_messages') {
     const tileId = asString(args.tile_id)
     if (!tileId) return 'Missing tile_id'
+    // Reads and marks-as-read another tile's inbox — a tile-scoped token
+    // must not be able to read messages addressed to a different tile.
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
     const msgs = peerState.readMessages(tileId)
     if (msgs.length === 0) return 'No messages.'
     return JSON.stringify(msgs, null, 2)
@@ -236,6 +253,9 @@ export async function handleContextTool(
     const tileId = asString(args.tile_id)
     const text = asString(args.text)
     if (!tileId || !text) return 'Missing tile_id or text'
+    // Mutates tileId's shared todo list — self-scoped like peer_set_state.
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
     try {
       const todo = peerState.addTodo(tileId, text)
       return `Todo added: "${text}" (id: ${todo.id})`
@@ -248,11 +268,16 @@ export async function handleContextTool(
     const tileId = asString(args.tile_id)
     const todoId = asString(args.todo_id)
     if (!tileId || !todoId) return 'Missing tile_id or todo_id'
+    // Mutates tileId's shared todo list — self-scoped like peer_set_state.
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
     const ok = peerState.completeTodo(tileId, todoId)
     return ok ? `Todo ${todoId} marked done` : `Todo ${todoId} not found or already done`
   }
 
   if (name === 'tile_context_get') {
+    // Cross-tile by design ("Agents can read/write any block context across
+    // workspaces" per the tool's own schema description) — no scope guard.
     const tileId = asString(args.tile_id)
     const workspaceId = asString(args.workspace_id)
     const tagPrefix = asString(args.tag)
@@ -290,6 +315,8 @@ export async function handleContextTool(
   }
 
   if (name === 'ext_invoke_action') {
+    // Cross-tile by design — invoking actions on another block (e.g. an
+    // extension tile) is the documented purpose of this tool.
     const tileId = asString(args.tile_id)
     const action = asString(args.action)
     if (!tileId || !action) return 'Missing tile_id or action'
@@ -304,6 +331,7 @@ export async function handleContextTool(
   }
 
   if (name === 'tile_context_set') {
+    // Cross-tile by design, same as tile_context_get.
     const tileId = asString(args.tile_id)
     const workspaceId = asString(args.workspace_id)
     const key = asString(args.key)

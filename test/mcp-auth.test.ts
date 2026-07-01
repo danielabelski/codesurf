@@ -102,7 +102,7 @@ describe('requireMcpAuth', () => {
   test('rejects missing Authorization with 401 JSON', () => {
     const req = { headers: {} } as IncomingMessage
     const res = mockResponse()
-    assert.equal(requireMcpAuth(req, res), false)
+    assert.equal(requireMcpAuth(req, res), null)
     assert.equal(res.status, 401)
     assert.deepEqual(JSON.parse(res.body ?? ''), { error: 'Unauthorized' })
   })
@@ -110,15 +110,15 @@ describe('requireMcpAuth', () => {
   test('rejects invalid Bearer token', () => {
     const req = { headers: { authorization: 'Bearer wrong-token' } } as IncomingMessage
     const res = mockResponse()
-    assert.equal(requireMcpAuth(req, res), false)
+    assert.equal(requireMcpAuth(req, res), null)
     assert.equal(res.status, 401)
   })
 
-  test('accepts valid Bearer token', () => {
+  test('accepts valid Bearer token and returns a global principal', () => {
     const token = getMCPToken()
     const req = { headers: { authorization: `Bearer ${token}` } } as IncomingMessage
     const res = mockResponse()
-    assert.equal(requireMcpAuth(req, res), true)
+    assert.deepEqual(requireMcpAuth(req, res), { kind: 'global' })
     assert.equal(res.status, undefined)
   })
 })

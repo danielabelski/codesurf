@@ -1,4 +1,7 @@
 import type { ExtensionRegistry } from '../extensions/registry'
+import type { McpPrincipal } from './auth'
+
+export type { McpPrincipal }
 
 export interface McpToolSchema {
   name: string
@@ -10,6 +13,8 @@ export interface McpToolContext {
   sendToRenderer: (event: string, data: unknown) => void
   getExtensionRegistry: () => ExtensionRegistry | null
   pushSSE: (cardId: string, event: string, data: unknown) => void
+  /** Who authenticated this call — used by tile-targeted tools to enforce scope. */
+  principal: McpPrincipal
 }
 
 export function asString(value: unknown): string | undefined {

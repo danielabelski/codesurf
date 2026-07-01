@@ -76,6 +76,9 @@ export const BUS_TOOLS: McpToolSchema[] = [
 
 const BUS_TOOL_NAMES = new Set(BUS_TOOLS.map(tool => tool.name))
 
+// Tools here address a pub/sub `channel` string, not a tile_id/card_id — the
+// event bus is a universal cross-tile broadcast mechanism by design (see
+// CLAUDE.md), so there is no tile identity to scope against.
 export async function handleBusTool(
   name: string,
   args: Record<string, unknown>,
