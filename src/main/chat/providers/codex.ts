@@ -554,6 +554,8 @@ export function chatCodex(req: ChatRequest): void {
     if (!isCurrent()) return // superseded — new turn owns the slot
     if (aborted) {
       activeProcesses.delete(req.cardId)
+      runtimeSession.isStreaming = false
+      void upsertRuntimeSessionState(req, runtimeSession)
       return
     }
     activeProcesses.delete(req.cardId)
