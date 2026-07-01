@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import {
@@ -7,6 +8,10 @@ import {
   validateFsPath,
 } from '../src/main/ipc/fs.ts'
 import { CONTEX_HOME } from '../src/main/paths.ts'
+
+// `validateFsPath`'s `resolveHome()` falls back to `process.env.HOME` /
+// `os.homedir()` outside of Electron, which is the case here.
+const HOME = process.env.HOME || process.env.USERPROFILE || homedir()
 
 describe('isPathUnderRoot', () => {
   test('matches exact root path', () => {
@@ -97,5 +102,52 @@ describe('validateFsPath workspace scoping', () => {
       }),
       /outside allowed workspace roots/,
     )
+  })
+})
+
+describe('validateFsPath sensitive-dir denylist (shared with file-protocol-auth)', () => {
+  test('rejects ~/.git-credentials', () => {
+    assert.throws(
+      () => validateFsPath(join(HOME, '.git-credentials')),
+      /sensitive directory/,
+    )
+  })
+
+  test('rejects ~/.npmrc', () => {
+    assert.throws(
+      () => validateFsPath(join(HOME, '.npmrc')),
+      /sensitive directory/,
+    )
+  })
+
+  test('rejects ~/.kube/config', () => {
+    assert.throws(
+      () => validateFsPath(join(HOME, '.kube', 'config')),
+      /sensitive directory/,
+    )
+  })
+
+  test('allows ~/.config/opencode/skills/x.md with allowReadOnlyOpenCodeConfig', () => {
+    const resolved = validateFsPath(join(HOME, '.config', 'opencode', 'skills', 'x.md'), {
+      allowReadOnlyOpenCodeConfig: true,
+    })
+    assert.equal(resolved, join(HOME, '.config', 'opencode', 'skills', 'x.md'))
+  })
+
+  test('rejects ~/.config/other/x (as before)', () => {
+    assert.throws(
+      () => validateFsPath(join(HOME, '.config', 'other', 'x'), {
+        allowReadOnlyOpenCodeConfig: true,
+      }),
+      /sensitive directory/,
+    )
+  })
+
+  test('still allows a workspace-root path', () => {
+    const resolved = validateFsPath('/tmp/workspace/readme.md', {
+      restrictToWorkspaceRoots: true,
+      allowedRoots: ['/tmp/workspace'],
+    })
+    assert.equal(resolved, join('/tmp/workspace/readme.md'))
   })
 })

@@ -14,31 +14,16 @@
  */
 
 import { extname, resolve, sep } from 'path'
+import { SENSITIVE_HOME_DIRS } from './security/sensitivePaths.ts'
 
 // First-home-segment denylist. Expanded past the original 4 (`.ssh`/`.gnupg`/
 // `.aws`/`.config`) to cover credential/config trees that can hold
 // media-extension files (`~/.config/**/*.png`, browser caches, etc.). Files
 // with no media extension are already rejected by the extension filter, so this
 // set matters mainly for media-typed files nested inside sensitive trees.
-export const SENSITIVE_HOME_DIRS = new Set([
-  '.ssh',
-  '.gnupg',
-  '.aws',
-  '.config',
-  '.kube',
-  '.docker',
-  '.netrc',
-  '.npmrc',
-  '.pypirc',
-  '.git-credentials',
-  '.gem',
-  '.cargo',
-  '.password-store',
-  '.mozilla',
-  '.thunderbird',
-  '.local',
-  '.cache',
-])
+// Shared with the fs IPC surface (`ipc/fs.ts`) via `security/sensitivePaths.ts`
+// so both boundaries guarding the home directory stay in sync.
+export { SENSITIVE_HOME_DIRS }
 
 export const MIME_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
