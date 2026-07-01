@@ -53,6 +53,9 @@ export const CANVAS_TOOLS: McpToolSchema[] = [
 
 const CANVAS_TOOL_NAMES = new Set(CANVAS_TOOLS.map(tool => tool.name))
 
+// No tile-scope guard here: these tools address the canvas as a whole
+// (create a new block, pan the viewport, list blocks/extensions) rather than
+// mutating an existing tile_id/card_id the caller must own.
 export async function handleCanvasTool(
   name: string,
   args: Record<string, unknown>,
