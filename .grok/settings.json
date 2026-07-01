@@ -1,4 +1,4 @@
 {
-  "model": "gpt-5.3-codex-spark",
-  "modelAdapterId": "openai.codex-app-server"
+  "model": "claude-fable-5",
+  "modelAdapterId": "anthropic.agent-sdk"
 }

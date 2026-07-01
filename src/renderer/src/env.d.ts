@@ -546,6 +546,8 @@ interface ElectronAPI {
     install(slug: string): Promise<import('../../shared/pet-types').PetInstallResponse>
     remove(slug: string): Promise<import('../../shared/pet-types').PetRemoveResponse>
     thumbnail(slug: string): Promise<string | null>
+    thumbnailData(slug: string): Promise<string | null>
+    spritesheetData(slug: string): Promise<string | null>
     getManifest(slug: string): Promise<import('../../shared/pet-types').PetManifest | null>
     onGalleryChanged(callback: () => void): () => void
   }

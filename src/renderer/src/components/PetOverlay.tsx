@@ -19,16 +19,7 @@ import {
   FRAME_DURATIONS,
   ROW_INDEX,
   type AnimationRow,
-  type PetManifest,
 } from '../../../shared/pet-types'
-
-const SCHEME = 'contex-file'
-
-/** Convert an absolute path to a contex-file:// URL the renderer can load. */
-function toFileUrl(absPath: string): string {
-  // contex-file:///absolute/path — three slashes, empty host, path starts at /
-  return `${SCHEME}://${absPath}`
-}
 
 interface PetOverlayProps {
   slug: string
@@ -51,7 +42,7 @@ const DEFAULT_BOTTOM = 36
 const TRANSIENT_MS = 2000
 
 export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.Element | null {
-  const [manifest, setManifest] = useState<PetManifest | null>(null)
+  const [spritesheetUrl, setSpritesheetUrl] = useState<string | null>(null)
   const [row, setRow] = useState<AnimationRow>('idle')
   const [frameIndex, setFrameIndex] = useState(0)
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null)
@@ -60,15 +51,15 @@ export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.
   const transientTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const baseRowRef = useRef<AnimationRow>('idle')
 
-  // Load manifest when slug changes
+  // Load spritesheet as base64 data URL when slug changes
   useEffect(() => {
     if (!slug) {
-      setManifest(null)
+      setSpritesheetUrl(null)
       return
     }
     let cancelled = false
-    window.electron.pets.getManifest(slug).then((m) => {
-      if (!cancelled) setManifest(m)
+    window.electron.pets.spritesheetData(slug).then((dataUrl) => {
+      if (!cancelled) setSpritesheetUrl(dataUrl)
     })
     return () => {
       cancelled = true
@@ -78,7 +69,7 @@ export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.
   // Animation frame cycling — uses requestAnimationFrame to advance frames
   // at the per-row cadence defined in FRAME_DURATIONS.
   useEffect(() => {
-    if (!manifest) return
+    if (!spritesheetUrl) return
     const durations = FRAME_DURATIONS[row]
     if (!durations || durations.length === 0) return
 
@@ -98,7 +89,7 @@ export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
-  }, [manifest, row])
+  }, [spritesheetUrl, row])
 
   // Agent activity → animation row mapping via event bus.
   // Subscribes to chat tile events to drive pet state transitions.
@@ -217,15 +208,11 @@ export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.
   }, [dragging])
 
   // Compute sprite dimensions from scale
-  const cellW = ATLAS.cellWidth
-  const cellH = ATLAS.cellHeight
-  const displayW = Math.round(cellW * scale)
-  const displayH = Math.round(cellH * scale)
+  const displayW = Math.round(ATLAS.cellWidth * scale)
+  const displayH = Math.round(ATLAS.cellHeight * scale)
 
-  // Background position: negative offset into the spritesheet
+  // Row index for animation
   const rowIndex = ROW_INDEX[row] ?? 0
-  const bgX = -(frameIndex * cellW)
-  const bgY = -(rowIndex * cellH)
 
   // Position: default bottom-right, or user-dragged position
   const style: React.CSSProperties = useMemo(() => {
@@ -255,27 +242,30 @@ export function PetOverlay({ slug, scale, onOpenPicker }: PetOverlayProps): JSX.
     }
   }, [position, displayW, displayH, dragging])
 
-  if (!manifest) return null
+  if (!spritesheetUrl) return null
 
-  const spritesheetUrl = toFileUrl(manifest.spritesheetPath)
+  const sheetDisplayW = displayW * ATLAS.columns
+  const sheetDisplayH = displayH * ATLAS.rows
+  const bgXScaled = -(frameIndex * displayW)
+  const bgYScaled = -(rowIndex * displayH)
 
   return (
     <div
       style={style}
       onMouseDown={handleMouseDown}
       onDoubleClick={onOpenPicker}
-      title={`${manifest.displayName} — double-click to change pet`}
+      title={`${slug} — double-click to change pet`}
     >
       <div
         style={{
           width: '100%',
           height: '100%',
+          overflow: 'hidden',
           backgroundImage: `url(${spritesheetUrl})`,
           backgroundRepeat: 'no-repeat',
-          backgroundPosition: `${bgX}px ${bgY}px`,
-          backgroundSize: `${cellW * ATLAS.columns}px ${cellH * ATLAS.rows}px`,
+          backgroundPosition: `${bgXScaled}px ${bgYScaled}px`,
+          backgroundSize: `${sheetDisplayW}px ${sheetDisplayH}px`,
           imageRendering: 'pixelated',
-          // Subtle drop shadow for depth
           filter: 'drop-shadow(2px 4px 6px rgba(0,0,0,0.4))',
         }}
       />

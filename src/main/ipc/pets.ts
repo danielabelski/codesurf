@@ -171,7 +171,9 @@ function listPetManifests(): PetManifest[] {
   return out
 }
 
-/** Load a specific pet by id. Honours scan order. */
+/** Load a specific pet by id. Honours scan order.
+ *  Handles suffixed ids (e.g. `id__dirname`) produced by listPetManifests
+ *  when the same pet id appears in multiple scan dirs. */
 function loadPetManifest(id: string): PetManifest | null {
   const installedDirs = loadInstalledIds()
   for (const dir of petsDirs()) {
@@ -179,6 +181,19 @@ function loadPetManifest(id: string): PetManifest | null {
     if (!existsSync(candidate)) continue
     const m = loadBundleMetadata(candidate, installedDirs)
     if (m && m.id === id) return m
+  }
+  // Handle suffixed ids: `originalId__dirName` — look up the dirName
+  // segment and return the manifest with the suffixed id patched in.
+  if (id.includes('__')) {
+    const suffix = id.split('__')[1]
+    if (suffix) {
+      for (const dir of petsDirs()) {
+        const candidate = join(dir, suffix)
+        if (!existsSync(candidate)) continue
+        const m = loadBundleMetadata(candidate, installedDirs)
+        if (m) return { ...m, id }
+      }
+    }
   }
   return null
 }
@@ -316,7 +331,10 @@ async function ensureThumbnail(manifest: PetManifest): Promise<string | null> {
     if (!existsSync(THUMBS_DIR)) {
       mkdirSync(THUMBS_DIR, { recursive: true })
     }
-    const { default: sharp } = await import('sharp')
+    // Use require() directly — the main process is CommonJS and the bundler
+    // chunks dynamic import() in a way that can fail to resolve sharp's
+    // default export at runtime.
+    const sharp = require('sharp')
     const meta = await sharp(manifest.spritesheetPath).metadata()
 
     // Extract top-left cell (192×208) if canonical spritesheet; otherwise
@@ -333,7 +351,8 @@ async function ensureThumbnail(manifest: PetManifest): Promise<string | null> {
         .toFile(thumbPath)
     }
     return thumbPath
-  } catch {
+  } catch (err) {
+    console.error('[pets] thumbnail failed for', manifest.id, ':', err instanceof Error ? err.message : String(err))
     return null
   }
 }
@@ -377,8 +396,47 @@ export function registerPetsIPC(): void {
   ipcMain.handle('pets:thumbnail', async (_evt, slug: string): Promise<string | null> => {
     if (typeof slug !== 'string') return null
     const manifest = loadPetManifest(slug)
+    if (!manifest) {
+      console.warn('[pets] thumbnail: manifest not found for', slug)
+      return null
+    }
+    const thumb = await ensureThumbnail(manifest)
+    if (!thumb) {
+      console.warn('[pets] thumbnail: ensureThumbnail returned null for', slug)
+    }
+    return thumb
+  })
+
+  // Return the full spritesheet as a base64 data URL so the renderer can use
+  // it directly as a CSS background-image without any custom protocol scheme.
+  // Avoids contex-file:// path-encoding issues entirely.
+  ipcMain.handle('pets:spritesheetData', async (_evt, slug: string): Promise<string | null> => {
+    if (typeof slug !== 'string') return null
+    const manifest = loadPetManifest(slug)
     if (!manifest) return null
-    return ensureThumbnail(manifest)
+    try {
+      const buf = readFileSync(manifest.spritesheetPath)
+      const mime = manifest.spritesheetMime === 'image/png' ? 'image/png' : 'image/webp'
+      return `data:${mime};base64,${buf.toString('base64')}`
+    } catch (err) {
+      console.error('[pets] spritesheetData failed for', slug, ':', err instanceof Error ? err.message : String(err))
+      return null
+    }
+  })
+
+  // Return a thumbnail as base64 data URL (for the picker list).
+  ipcMain.handle('pets:thumbnailData', async (_evt, slug: string): Promise<string | null> => {
+    if (typeof slug !== 'string') return null
+    const manifest = loadPetManifest(slug)
+    if (!manifest) return null
+    try {
+      const thumbPath = await ensureThumbnail(manifest)
+      if (!thumbPath) return null
+      const buf = readFileSync(thumbPath)
+      return `data:image/png;base64,${buf.toString('base64')}`
+    } catch {
+      return null
+    }
   })
 
   ipcMain.handle('pets:getManifest', (_evt, slug: string): PetManifest | null => {

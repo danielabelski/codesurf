@@ -762,6 +762,8 @@ contextBridge.exposeInMainWorld('electron', {
       import('../shared/pet-types').PetRemoveResponse
     >,
     thumbnail: (slug: string) => ipcRenderer.invoke('pets:thumbnail', slug) as Promise<string | null>,
+    thumbnailData: (slug: string) => ipcRenderer.invoke('pets:thumbnailData', slug) as Promise<string | null>,
+    spritesheetData: (slug: string) => ipcRenderer.invoke('pets:spritesheetData', slug) as Promise<string | null>,
     getManifest: (slug: string) => ipcRenderer.invoke('pets:getManifest', slug) as Promise<
       import('../shared/pet-types').PetManifest | null
     >,
