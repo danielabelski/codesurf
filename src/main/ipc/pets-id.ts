@@ -1,7 +1,7 @@
 // Pure helpers for pet id parsing — split out of pets.ts so this logic can
 // be unit-tested without importing electron (pets.ts pulls in ipcMain).
 
-import { assertSafePathSegment } from '../security/pathSegments'
+import { assertSafePathSegment } from '../security/pathSegments.ts'
 
 /** Extract and validate the suffix segment from a suffixed pet id
  *  (`originalId__dirName`, produced by listPetManifests when the same pet
