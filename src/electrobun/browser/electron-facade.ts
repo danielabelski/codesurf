@@ -592,6 +592,18 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       list: makeInvoker(invoke, 'secrets:list'),
       has: makeInvoker(invoke, 'secrets:has'),
     },
+    pets: {
+      list: makeInvoker(invoke, 'pets:list'),
+      gallery: makeInvoker(invoke, 'pets:gallery'),
+      galleryLocal: makeInvoker(invoke, 'pets:gallery-local'),
+      install: makeInvoker(invoke, 'pets:install'),
+      remove: makeInvoker(invoke, 'pets:remove'),
+      thumbnail: makeInvoker(invoke, 'pets:thumbnail'),
+      thumbnailData: makeInvoker(invoke, 'pets:thumbnailData'),
+      spritesheetData: makeInvoker(invoke, 'pets:spritesheetData'),
+      getManifest: makeInvoker(invoke, 'pets:getManifest'),
+      onGalleryChanged: makeEventListener(eventHub, 'pets:gallery-changed'),
+    },
   }
 }
 

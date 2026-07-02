@@ -13,13 +13,13 @@ src/
   main/          — Electron main process
     index.ts     — Window management, IPC registration, app init
     event-bus.ts — In-memory pub/sub with wildcard patterns + ring-buffer history
-    mcp-server.ts — Local HTTP MCP 2.0 server (random port, 17 tools)
+    mcp-server.ts — Local HTTP MCP 2.0 server (random port, 34 tools)
     ipc/         — IPC handler modules (one file per feature domain)
   preload/
     index.ts     — Context bridge exposures (workspace, fs, canvas, terminal, chat, bus, mcp...)
   renderer/
     src/
-      App.tsx    — React SPA; contains the entire canvas engine (~1700 LOC)
+      App.tsx    — React SPA; contains the entire canvas engine (~1944 LOC)
       components/— Tile components (lazy-loaded)
       hooks/     — useDetectedAgents, useMCPServers
   shared/
@@ -30,7 +30,7 @@ src/
 
 | | |
 |---|---|
-| Electron | 40.8.2 |
+| Electron | ^41.3.0 |
 | React | 19.2.4 |
 | TypeScript | 5.9.3 |
 | Vite / electron-vite | 7.3.1 / 5.0.0 |
@@ -87,14 +87,9 @@ npm run rebuild      # native rebuild (node-pty)
 - Strict TypeScript; `any` avoided except in older chat.ts sections
 - 2-space indent, trailing commas, no semicolons
 
-## Current Branch: `feature/event-bus-mcp`
-
-Recent changes: universal event bus, MCP upgrade, chat tile, bus bridges (see git log).
-New untracked file: `src/main/ipc/chat.ts`
-
 ## Watch Out For
 
-- App.tsx is ~1700 LOC — be surgical; changes ripple widely
+- App.tsx is ~1944 LOC — be surgical; changes ripple widely
 - node-pty requires native rebuild after dependency changes (`npm run rebuild`)
 - MCP server port is random — always read from config file, never hardcode
 - Canvas undo state holds full snapshots — don't accidentally push to undo stack in hot paths

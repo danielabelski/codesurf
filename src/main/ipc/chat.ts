@@ -8,7 +8,7 @@
 
 import { ipcMain, BrowserWindow, dialog } from 'electron'
 
-import { execFileSync, execFile } from 'child_process'
+import { execFile } from 'child_process'
 import { promises as fs } from 'fs'
 import { basename, join } from 'path'
 import { promisify } from 'util'
@@ -680,49 +680,53 @@ async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostR
   return null
 }
 
-async function buildProjectContext(workspaceDir: string | undefined): Promise<{
+type ProjectContextResult = {
   workspaceDir: string | null
   gitRemoteUrl: string | null
   gitBranch: string | null
   repoName: string | null
-}> {
+}
+
+const PROJECT_CONTEXT_TTL_MS = 5000
+const projectContextCache = new Map<string, { value: ProjectContextResult; expires: number }>()
+
+async function buildProjectContext(workspaceDir: string | undefined): Promise<ProjectContextResult> {
   const normalizedWorkspace = String(workspaceDir ?? '').trim()
   if (!normalizedWorkspace) {
     return { workspaceDir: null, gitRemoteUrl: null, gitBranch: null, repoName: null }
   }
 
+  const now = Date.now()
+  const cached = projectContextCache.get(normalizedWorkspace)
+  if (cached && cached.expires > now) return cached.value
+
   const shellPath = getShellEnvPath()
   const env = { ...process.env, ...(shellPath && { PATH: shellPath }) }
-  let repoRoot = normalizedWorkspace
-  let gitRemoteUrl: string | null = null
-  let gitBranch: string | null = null
 
-  try {
-    repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      cwd: normalizedWorkspace,
-      encoding: 'utf8',
-      env,
-    }).trim() || normalizedWorkspace
-    gitRemoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      env,
-    }).trim() || null
-    gitBranch = execFileSync('git', ['branch', '--show-current'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      env,
-    }).trim() || null
-  } catch {
-    repoRoot = normalizedWorkspace
+  const runGit = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileAsync('git', args, { cwd: normalizedWorkspace, encoding: 'utf8', env })
+      return stdout.trim() || null
+    } catch {
+      return null
+    }
   }
 
-  return {
+  const [toplevel, gitRemoteUrl, gitBranch] = await Promise.all([
+    runGit(['rev-parse', '--show-toplevel']),
+    runGit(['remote', 'get-url', 'origin']),
+    runGit(['branch', '--show-current']),
+  ])
+
+  const repoRoot = toplevel || normalizedWorkspace
+  const value: ProjectContextResult = {
     workspaceDir: repoRoot,
     gitRemoteUrl,
     gitBranch,
     repoName: basename(repoRoot) || null,
   }
+  projectContextCache.set(normalizedWorkspace, { value, expires: now + PROJECT_CONTEXT_TTL_MS })
+  return value
 }
 
 async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, jobId: string, sinceSequence = 0): Promise<void> {

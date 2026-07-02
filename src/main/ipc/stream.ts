@@ -95,14 +95,22 @@ export function registerStreamIPC(): void {
         const status = res.statusCode ?? 0
         if (status >= 400) {
           let body = ''
-          res.on('data', (chunk: Buffer | string) => { body += chunk; if (body.length > 4096) res.destroy() })
-          res.on('end', () => {
+          let settled = false
+          const finish = () => {
+            if (settled) return
+            settled = true
             const message = `Upstream returned ${status}${body.trim() ? `: ${body.trim().slice(0, 500)}` : ''}`
             broadcastToRenderer('agent:stream', {
               cardId: req.cardId, type: 'error', error: message
             })
             reject(new Error(message))
+          }
+          res.on('data', (chunk: Buffer | string) => {
+            body += chunk
+            if (body.length > 4096) { finish(); res.destroy() }
           })
+          res.on('end', finish)
+          res.on('error', finish)
           return
         }
         const parse = getStreamParser(req.agentId)

@@ -1,5 +1,5 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
-import { readFileSync } from 'fs'
+import { readFileSync, statSync } from 'fs'
 import path, { join } from 'path'
 import type { AppSettings, Workspace } from '../../shared/types'
 import {
@@ -132,10 +132,20 @@ export async function initWorkspaces(): Promise<void> {
   }
 }
 
+let cachedSettings: AppSettings | null = null
+let cachedSettingsMtimeMs = -1
+
 export function readSettingsSync(): AppSettings {
   try {
-    return normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(SETTINGS_PATH, 'utf8')))
+    const mtimeMs = statSync(SETTINGS_PATH).mtimeMs
+    if (cachedSettings && mtimeMs === cachedSettingsMtimeMs) return cachedSettings
+    const parsed = normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(SETTINGS_PATH, 'utf8')))
+    cachedSettings = parsed
+    cachedSettingsMtimeMs = mtimeMs
+    return parsed
   } catch {
+    cachedSettings = null
+    cachedSettingsMtimeMs = -1
     try {
       return normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(LEGACY_CONFIG_PATH, 'utf8')))
     } catch {

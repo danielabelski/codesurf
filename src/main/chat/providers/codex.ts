@@ -506,13 +506,16 @@ export function chatCodex(req: ChatRequest): void {
   }
 
   const BACKPRESSURE_THRESHOLD = 1024 * 1024 // 1 MB of buffered unprocessed stdout
+  let queuedBytes = 0
   proc.stdout?.on('data', (chunk: Buffer) => {
     pendingStdout += chunk.toString()
     const lines = pendingStdout.split(/\r?\n/)
     pendingStdout = lines.pop() ?? ''
 
-    // Backpressure: pause stdout when the async chain has a large backlog
-    if (pendingStdout.length > BACKPRESSURE_THRESHOLD) {
+    // Backpressure: pause stdout when the async processing chain falls behind.
+    const batchBytes = lines.reduce((sum, line) => sum + line.length + 1, 0)
+    queuedBytes += batchBytes
+    if (queuedBytes > BACKPRESSURE_THRESHOLD) {
       proc.stdout?.pause()
     }
 
@@ -529,8 +532,9 @@ export function chatCodex(req: ChatRequest): void {
         }
       }
     }).catch(() => {}).finally(() => {
-      // Resume reading after the chain drains below threshold
-      if (pendingStdout.length <= BACKPRESSURE_THRESHOLD) {
+      queuedBytes -= batchBytes
+      // Resume reading once the chain has drained below the threshold.
+      if (queuedBytes <= BACKPRESSURE_THRESHOLD) {
         proc.stdout?.resume()
       }
     })

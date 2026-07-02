@@ -1,0 +1,8 @@
+HUMAN: All 6 plan items applied and verified; 1 adapt (dropped unused execFileSync import).
+CHG C1<-P1 st=adapt ver=pass t="grep ipc/chat.ts:empty" drift=0 note=dropped-unused-execFileSync-import-noUnusedLocals
+CHG C2<-P2 st=ok ver=pass t="grep ipc/stream.ts:empty" drift=0
+CHG C3<-P3 st=ok ver=pass t="grep providers/codex.ts:empty" drift=0
+CHG C4<-P4 st=ok ver=pass t="grep ipc/workspace.ts:empty" drift=0
+CHG C5<-P5 st=ok ver=pass t="node --test electrobun-parity.test.ts:5/5" drift=0
+CHG C6<-P6 st=ok ver=pass t="sentinel-grep:clean 34-tools-count=1,1" drift=0
+DONE stage=S ok=5 adapt=1 blk=0 deleg=0 esc=0 tok~=950

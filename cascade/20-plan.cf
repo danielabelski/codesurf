@@ -1,0 +1,162 @@
+HUMAN: 6 change specs planned; F1-F5 carry payloads, F6 mechanical doc fixes delegable to Haiku.
+PLAN P1<-F1 op=replace at=src/main/ipc/chat.ts:683-726#"async function buildProjectContext(workspaceDir: string | undefined): Promise<{" why=async-execfile-parallel-plus-5s-workspace-memo ref=src/main/ipc/chat.ts:269#"const execFileAsync = promisify(execFile)",src/main/ipc/chat.ts:779#"const rawProjectContext = await buildProjectContext(req.workspaceDir)" test="npm run typecheck 2>&1 | grep 'ipc/chat.ts'" order=1 fill=-
+<<<P1
+type ProjectContextResult = {
+  workspaceDir: string | null
+  gitRemoteUrl: string | null
+  gitBranch: string | null
+  repoName: string | null
+}
+
+const PROJECT_CONTEXT_TTL_MS = 5000
+const projectContextCache = new Map<string, { value: ProjectContextResult; expires: number }>()
+
+async function buildProjectContext(workspaceDir: string | undefined): Promise<ProjectContextResult> {
+  const normalizedWorkspace = String(workspaceDir ?? '').trim()
+  if (!normalizedWorkspace) {
+    return { workspaceDir: null, gitRemoteUrl: null, gitBranch: null, repoName: null }
+  }
+
+  const now = Date.now()
+  const cached = projectContextCache.get(normalizedWorkspace)
+  if (cached && cached.expires > now) return cached.value
+
+  const shellPath = getShellEnvPath()
+  const env = { ...process.env, ...(shellPath && { PATH: shellPath }) }
+
+  const runGit = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileAsync('git', args, { cwd: normalizedWorkspace, encoding: 'utf8', env })
+      return stdout.trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  const [toplevel, gitRemoteUrl, gitBranch] = await Promise.all([
+    runGit(['rev-parse', '--show-toplevel']),
+    runGit(['remote', 'get-url', 'origin']),
+    runGit(['branch', '--show-current']),
+  ])
+
+  const repoRoot = toplevel || normalizedWorkspace
+  const value: ProjectContextResult = {
+    workspaceDir: repoRoot,
+    gitRemoteUrl,
+    gitBranch,
+    repoName: basename(repoRoot) || null,
+  }
+  projectContextCache.set(normalizedWorkspace, { value, expires: now + PROJECT_CONTEXT_TTL_MS })
+  return value
+}
+>>>
+PLAN P2<-F2 op=replace at=src/main/ipc/stream.ts:96-107#"if (status >= 400) {" why=settle-once-before-destroy-so-error-surfaces ref=src/main/ipc/stream.ts:99#"res.on('end', () => {" test="npm run typecheck 2>&1 | grep 'ipc/stream.ts'" order=1 fill=-
+<<<P2
+        if (status >= 400) {
+          let body = ''
+          let settled = false
+          const finish = () => {
+            if (settled) return
+            settled = true
+            const message = `Upstream returned ${status}${body.trim() ? `: ${body.trim().slice(0, 500)}` : ''}`
+            broadcastToRenderer('agent:stream', {
+              cardId: req.cardId, type: 'error', error: message
+            })
+            reject(new Error(message))
+          }
+          res.on('data', (chunk: Buffer | string) => {
+            body += chunk
+            if (body.length > 4096) { finish(); res.destroy() }
+          })
+          res.on('end', finish)
+          res.on('error', finish)
+          return
+        }
+>>>
+PLAN P3<-F3 op=replace at=src/main/chat/providers/codex.ts:508-537#"const BACKPRESSURE_THRESHOLD = 1024 * 1024 // 1 MB of buffered unprocessed stdout" why=count-queued-backlog-bytes-not-partial-line ref=src/main/chat/providers/codex.ts:383#"let pendingStdout = ''",src/main/chat/providers/codex.ts:519#"stdoutChain = stdoutChain.then(async () => {" test="npm run typecheck 2>&1 | grep 'providers/codex.ts'" order=1 fill=-
+<<<P3
+  const BACKPRESSURE_THRESHOLD = 1024 * 1024 // 1 MB of buffered unprocessed stdout
+  let queuedBytes = 0
+  proc.stdout?.on('data', (chunk: Buffer) => {
+    pendingStdout += chunk.toString()
+    const lines = pendingStdout.split(/\r?\n/)
+    pendingStdout = lines.pop() ?? ''
+
+    // Backpressure: pause stdout when the async processing chain falls behind.
+    const batchBytes = lines.reduce((sum, line) => sum + line.length + 1, 0)
+    queuedBytes += batchBytes
+    if (queuedBytes > BACKPRESSURE_THRESHOLD) {
+      proc.stdout?.pause()
+    }
+
+    stdoutChain = stdoutChain.then(async () => {
+      for (const line of lines) {
+        if (aborted) break
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const evt = JSON.parse(trimmed)
+          await handleCodexJsonEvent(evt)
+        } catch {
+          if (!aborted) sendStream(req.cardId, { type: 'text', text: `${line}\n` })
+        }
+      }
+    }).catch(() => {}).finally(() => {
+      queuedBytes -= batchBytes
+      // Resume reading once the chain has drained below the threshold.
+      if (queuedBytes <= BACKPRESSURE_THRESHOLD) {
+        proc.stdout?.resume()
+      }
+    })
+  })
+>>>
+PLAN P4<-F4 op=diff at=src/main/ipc/workspace.ts:135-145#"export function readSettingsSync(): AppSettings {" why=mtime-gated-memo-no-inprocess-writer-daemonClient.setSettings-owns-writes ref=src/main/ipc/workspace.ts:2#"import { readFileSync } from 'fs'",src/main/daemon/client.ts:25#"setSettings(settings: AppSettings): Promise<AppSettings> {" test="npm run typecheck 2>&1 | grep 'ipc/workspace.ts'" order=1 fill=-
+<<<P4
+@@
+-import { readFileSync } from 'fs'
++import { readFileSync, statSync } from 'fs'
+@@
++let cachedSettings: AppSettings | null = null
++let cachedSettingsMtimeMs = -1
++
+ export function readSettingsSync(): AppSettings {
+   try {
+-    return normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(SETTINGS_PATH, 'utf8')))
++    const mtimeMs = statSync(SETTINGS_PATH).mtimeMs
++    if (cachedSettings && mtimeMs === cachedSettingsMtimeMs) return cachedSettings
++    const parsed = normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(SETTINGS_PATH, 'utf8')))
++    cachedSettings = parsed
++    cachedSettingsMtimeMs = mtimeMs
++    return parsed
+   } catch {
++    cachedSettings = null
++    cachedSettingsMtimeMs = -1
+     try {
+       return normalizeLoadedSettings(normalizeSettingsDocument(readFileSync(LEGACY_CONFIG_PATH, 'utf8')))
+     } catch {
+       return withFreshInstallDefaults()
+     }
+   }
+ }
+>>>
+PLAN P5<-F5 op=diff at=src/electrobun/browser/electron-facade.ts:589-595#"      has: makeInvoker(invoke, 'secrets:has')," why=mirror-all-10-preload-pets-leaves-exact-hyphenated-channels ref=src/preload/index.ts:765-792#"pets: {",test/electrobun-parity.test.ts:42#"test('facade exposes every preload callable', () => {" test="node --test test/electrobun-parity.test.ts" order=1 fill=-
+<<<P5
+@@
+       has: makeInvoker(invoke, 'secrets:has'),
+     },
++    pets: {
++      list: makeInvoker(invoke, 'pets:list'),
++      gallery: makeInvoker(invoke, 'pets:gallery'),
++      galleryLocal: makeInvoker(invoke, 'pets:gallery-local'),
++      install: makeInvoker(invoke, 'pets:install'),
++      remove: makeInvoker(invoke, 'pets:remove'),
++      thumbnail: makeInvoker(invoke, 'pets:thumbnail'),
++      thumbnailData: makeInvoker(invoke, 'pets:thumbnailData'),
++      spritesheetData: makeInvoker(invoke, 'pets:spritesheetData'),
++      getManifest: makeInvoker(invoke, 'pets:getManifest'),
++      onGalleryChanged: makeEventListener(eventHub, 'pets:gallery-changed'),
++    },
+   }
+>>>
+PLAN P6<-F6 op=edit at=CLAUDE.md+AGENTS.md why=apply-same-4-fact-fixes-in-BOTH-files:(a)'17 tools'->'34 tools'@~L16 (b)'~1700 LOC'->'~1944 LOC'@both-occurrences(Architecture-block+WatchOutFor) (c)'| Electron | 40.8.2 |'->'| Electron | ^41.3.0 |'@~L33 (d)delete-heading'## Current Branch: `feature/event-bus-mcp`'-plus-its-2-body-lines-plus-adjacent-blank ref=AGENTS.md:16#"    mcp-server.ts — Local HTTP MCP 2.0 server (random port, 17 tools)",CLAUDE.md:90#"## Current Branch: `feature/event-bus-mcp`" test="! grep -lE '17 tools|~1700 LOC|40\\.8\\.2|feature/event-bus-mcp' CLAUDE.md AGENTS.md && grep -c '34 tools' CLAUDE.md AGENTS.md" order=1 fill=S
+DONE stage=O plan=6 tok~=1150
