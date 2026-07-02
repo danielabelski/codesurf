@@ -6,6 +6,7 @@ import type { AppTheme } from '../../theme'
 import type { RenderTileBodyOptions } from '../../hooks/useRenderTileBody'
 import type { AnchorPoint } from '../../lib/discoveryRuntime'
 import { getConnectionHandlePoint } from '../../lib/connectionRoutes'
+import { perfFlags } from '../../perfFlags'
 
 const LazyTileChrome = React.lazy(() => import('../TileChrome').then(m => ({ default: m.TileChrome })))
 const LazyStickyColorPicker = React.lazy(() => import('../NoteTile').then(m => ({ default: m.StickyColorPicker })))
@@ -16,6 +17,10 @@ type Side = AnchorPoint['side']
 export type CanvasTileItemProps = {
   tile: TileState
   zoom: number
+  /** Perf: tile is fully outside the viewport — body stops painting (state kept). */
+  bodyCulled: boolean
+  /** Perf: zoomed out past the LOD threshold — body hidden behind a light card. */
+  lodPlaceholder: boolean
   workspaceId?: string
   workspaceDir?: string
   isActiveDrag: boolean
@@ -52,6 +57,8 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
   const {
     tile,
     zoom,
+    bodyCulled,
+    lodPlaceholder,
     workspaceId,
     workspaceDir,
     isActiveDrag,
@@ -84,6 +91,10 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
   } = props
 
   const z = Math.max(0.25, zoom)
+  // Startup-constant: flags come from env, so the wrapper structure never
+  // toggles at runtime (a structure change would remount the body).
+  const perfEnabled = perfFlags.viewportCulling || perfFlags.zoomLod
+  const hideBody = bodyCulled || lodPlaceholder
   const chromeTile = isActiveDrag ? { ...tile, zIndex: 99990 } : tile
   const handlePoint = getConnectionHandlePoint(tile, activeHandleSide)
   const handleSize = 22 / z
@@ -116,7 +127,46 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
             titlebarExtra={isUntitledNote ? <Suspense fallback={null}><LazyStickyColorPicker /></Suspense> : undefined}
           >
             <Suspense fallback={<div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: 12, background: theme.surface.panelMuted }}>Loading block…</div>}>
-              {renderTileBody(tile, { isInteracting: isActiveDrag, isSelected })}
+              {perfEnabled ? (
+                // Stable wrapper (present whenever culling/LOD flags are on) so
+                // toggling hidden/LOD only flips styles — the body subtree is
+                // never remounted and terminals/webviews keep their state.
+                <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      ...(hideBody ? { visibility: 'hidden' as const, pointerEvents: 'none' as const } : null),
+                    }}
+                  >
+                    {renderTileBody(tile, { isInteracting: isActiveDrag, isSelected })}
+                  </div>
+                  {lodPlaceholder && !bodyCulled && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        inset: 0,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 6 / z,
+                        background: theme.surface.panelMuted,
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      <div style={{ fontSize: Math.min(64, 14 / z), fontWeight: 600, color: theme.text.muted, maxWidth: '85%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {tile.label || tile.type}
+                      </div>
+                      <div style={{ fontSize: Math.min(44, 10 / z), color: theme.text.muted, opacity: 0.7, textTransform: 'uppercase', letterSpacing: 1 }}>
+                        {tile.type.startsWith('ext:') ? tile.type.slice(4) : tile.type}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                renderTileBody(tile, { isInteracting: isActiveDrag, isSelected })
+              )}
             </Suspense>
           </LazyTileChrome>
         </TileColorProvider>

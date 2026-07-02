@@ -13,6 +13,7 @@ import {
   filterTilesForAlignmentGuides,
   type AlignmentGuide,
 } from './canvasAlignment.ts'
+import { perfFlags } from '../perfFlags.ts'
 
 export type { AlignmentGuide } from './canvasAlignment.ts'
 export { ALIGN_GUIDE_THRESH, computeAlignmentGuides, filterTilesForAlignmentGuides } from './canvasAlignment.ts'
@@ -38,6 +39,7 @@ type CanvasDragEngine = {
   screenToWorld: (sx: number, sy: number) => { x: number, y: number }
   saveCanvas: (tileList: TileState[], vp: CanvasViewport, nz: number, grps?: GroupState[], beforeTiles?: TileState[]) => void
   nextZIndex: number
+  applyViewportGesture: (next: CanvasViewport) => void
 }
 
 export type CanvasDragState =
@@ -64,6 +66,7 @@ export type UseCanvasDragSyncOptions = {
     | 'screenToWorld'
     | 'saveCanvas'
     | 'nextZIndex'
+    | 'applyViewportGesture'
   >
   tilesRef: MutableRefObject<TileState[]>
   groupsRef: MutableRefObject<GroupState[]>
@@ -111,9 +114,17 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
     getMinTileHeight,
   } = options
 
-  const { viewport, setViewport, panVelocityRef, panLastPos, startPanInertia, screenToWorld, saveCanvas, nextZIndex } = engine
+  const { viewport, setViewport, panVelocityRef, panLastPos, startPanInertia, screenToWorld, saveCanvas, nextZIndex, applyViewportGesture } = engine
 
   const snapGuideRafRef = useRef<number | null>(null)
+  /**
+   * RAF coalescing for the non-tile drag branches (resize / group / group-resize
+   * / connection / select). Mirrors the pendingTileDragRef pattern below: raw
+   * mousemove events can fire far above frame rate, so only the LATEST update
+   * closure runs, once per animation frame. Gated on perfFlags.dragRafCoalesce.
+   */
+  const pendingDragFrameRef = useRef<number | null>(null)
+  const pendingDragUpdateRef = useRef<(() => void) | null>(null)
   const pendingTileDragRef = useRef<{
     tileId: string
     groupSnapshots: { id: string; x: number; y: number }[]
@@ -142,14 +153,39 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
       preDragSnapshotRef.current = null
     }
 
+    // Latest-wins, once-per-frame execution for non-tile drag branches.
+    // Falls back to immediate execution when the perf flag is off.
+    const scheduleDragUpdate = (fn: () => void) => {
+      if (!perfFlags.dragRafCoalesce) { fn(); return }
+      pendingDragUpdateRef.current = fn
+      if (pendingDragFrameRef.current !== null) return
+      pendingDragFrameRef.current = requestAnimationFrame(() => {
+        pendingDragFrameRef.current = null
+        const pending = pendingDragUpdateRef.current
+        pendingDragUpdateRef.current = null
+        pending?.()
+      })
+    }
+    const flushPendingDragUpdate = () => {
+      if (pendingDragFrameRef.current !== null) {
+        cancelAnimationFrame(pendingDragFrameRef.current)
+        pendingDragFrameRef.current = null
+      }
+      const pending = pendingDragUpdateRef.current
+      pendingDragUpdateRef.current = null
+      pending?.()
+    }
+
     const onMove = (e: MouseEvent) => {
       if (dragState.type === null) return
       if (dragState.type === 'select') {
-        const rect = canvasRef.current?.getBoundingClientRect()
-        if (!rect) return
-        const curWx = (e.clientX - rect.left - viewport.tx) / viewport.zoom
-        const curWy = (e.clientY - rect.top - viewport.ty) / viewport.zoom
-        setDragState(prev => prev.type === 'select' ? { ...prev, curWx, curWy } : prev)
+        scheduleDragUpdate(() => {
+          const rect = canvasRef.current?.getBoundingClientRect()
+          if (!rect) return
+          const curWx = (e.clientX - rect.left - viewport.tx) / viewport.zoom
+          const curWy = (e.clientY - rect.top - viewport.ty) / viewport.zoom
+          setDragState(prev => prev.type === 'select' ? { ...prev, curWx, curWy } : prev)
+        })
         return
       }
       const dx = e.clientX - dragState.startX
@@ -166,63 +202,71 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           }
         }
         panLastPos.current = { x: e.clientX, y: e.clientY, t: now }
-        setViewport(prev => ({ ...prev, tx: dragState.initTx + dx, ty: dragState.initTy + dy }))
+        // With the imperative-pan flag on this writes the world transform
+        // directly and commits state on a throttle; off, it's a plain set.
+        applyViewportGesture({ ...viewport, tx: dragState.initTx + dx, ty: dragState.initTy + dy })
       } else if (dragState.type === 'group-resize') {
-        const wdx = dx / viewport.zoom
-        const wdy = dy / viewport.zoom
-        const { dir, initBounds: ib, snapshots: snaps } = dragState
+        scheduleDragUpdate(() => {
+          const wdx = dx / viewport.zoom
+          const wdy = dy / viewport.zoom
+          const { dir, initBounds: ib, snapshots: snaps } = dragState
 
-        let nx = ib.x, ny = ib.y, nw = ib.w, nh = ib.h
-        if (dir.includes('e')) nw = Math.max(100, ib.w + wdx)
-        if (dir.includes('s')) nh = Math.max(100, ib.h + wdy)
-        if (dir.includes('w')) { nw = Math.max(100, ib.w - wdx); nx = ib.x + ib.w - nw }
-        if (dir.includes('n')) { nh = Math.max(100, ib.h - wdy); ny = ib.y + ib.h - nh }
+          let nx = ib.x, ny = ib.y, nw = ib.w, nh = ib.h
+          if (dir.includes('e')) nw = Math.max(100, ib.w + wdx)
+          if (dir.includes('s')) nh = Math.max(100, ib.h + wdy)
+          if (dir.includes('w')) { nw = Math.max(100, ib.w - wdx); nx = ib.x + ib.w - nw }
+          if (dir.includes('n')) { nh = Math.max(100, ib.h - wdy); ny = ib.y + ib.h - nh }
 
-        const resizingGroup = groupsRef.current.find(g => g.id === dragState.groupId)
-        if (resizingGroup?.layoutMode) {
-          setGroups(prev => prev.map(g => g.id === dragState.groupId
-            ? { ...g, layoutBounds: { x: snapValue(nx), y: snapValue(ny), w: snapValue(nw), h: snapValue(nh) } }
-            : g))
-        } else {
-          const scaleX = nw / ib.w
-          const scaleY = nh / ib.h
-          setTiles(prev => prev.map(t => {
-            const s = snaps.find(s2 => s2.id === t.id)
-            if (!s) return t
-            const minW = getMinTileWidth(t)
-            const minH = getMinTileHeight(t)
-            const relX = s.x - ib.x
-            const relY = s.y - ib.y
-            return {
-              ...t,
-              x: snapValue(nx + relX * scaleX),
-              y: snapValue(ny + relY * scaleY),
-              width: Math.max(minW, snapValue(s.width * scaleX)),
-              height: Math.max(minH, snapValue(s.height * scaleY)),
-            }
-          }))
-        }
+          const resizingGroup = groupsRef.current.find(g => g.id === dragState.groupId)
+          if (resizingGroup?.layoutMode) {
+            setGroups(prev => prev.map(g => g.id === dragState.groupId
+              ? { ...g, layoutBounds: { x: snapValue(nx), y: snapValue(ny), w: snapValue(nw), h: snapValue(nh) } }
+              : g))
+          } else {
+            const scaleX = nw / ib.w
+            const scaleY = nh / ib.h
+            setTiles(prev => prev.map(t => {
+              const s = snaps.find(s2 => s2.id === t.id)
+              if (!s) return t
+              const minW = getMinTileWidth(t)
+              const minH = getMinTileHeight(t)
+              const relX = s.x - ib.x
+              const relY = s.y - ib.y
+              return {
+                ...t,
+                x: snapValue(nx + relX * scaleX),
+                y: snapValue(ny + relY * scaleY),
+                width: Math.max(minW, snapValue(s.width * scaleX)),
+                height: Math.max(minH, snapValue(s.height * scaleY)),
+              }
+            }))
+          }
+        })
       } else if (dragState.type === 'group') {
-        const wdx = dx / viewport.zoom
-        const wdy = dy / viewport.zoom
-        if (dragState.initLayoutBounds) {
-          const lb = dragState.initLayoutBounds
-          setGroups(prev => prev.map(g => g.id === dragState.groupId ? {
-            ...g,
-            layoutBounds: { ...lb, x: snapValue(lb.x + wdx), y: snapValue(lb.y + wdy) },
-          } : g))
-        } else {
-          setTiles(prev => prev.map(t => {
-            const snap2 = dragState.snapshots.find(s => s.id === t.id)
-            if (!snap2) return t
-            return { ...t, x: snapValue(snap2.x + wdx), y: snapValue(snap2.y + wdy) }
-          }))
-        }
+        scheduleDragUpdate(() => {
+          const wdx = dx / viewport.zoom
+          const wdy = dy / viewport.zoom
+          if (dragState.initLayoutBounds) {
+            const lb = dragState.initLayoutBounds
+            setGroups(prev => prev.map(g => g.id === dragState.groupId ? {
+              ...g,
+              layoutBounds: { ...lb, x: snapValue(lb.x + wdx), y: snapValue(lb.y + wdy) },
+            } : g))
+          } else {
+            setTiles(prev => prev.map(t => {
+              const snap2 = dragState.snapshots.find(s => s.id === t.id)
+              if (!snap2) return t
+              return { ...t, x: snapValue(snap2.x + wdx), y: snapValue(snap2.y + wdy) }
+            }))
+          }
+        })
       } else if (dragState.type === 'connection') {
-        const current = screenToWorld(e.clientX, e.clientY)
-        const targetTileId = resolveManualConnectionTarget(dragState.sourceTileId, current)
-        setCanvasPointerWorld(current)
-        setDragState(prev => prev.type === 'connection' ? { ...prev, current, targetTileId } : prev)
+        scheduleDragUpdate(() => {
+          const current = screenToWorld(e.clientX, e.clientY)
+          const targetTileId = resolveManualConnectionTarget(dragState.sourceTileId, current)
+          setCanvasPointerWorld(current)
+          setDragState(prev => prev.type === 'connection' ? { ...prev, current, targetTileId } : prev)
+        })
       } else if (dragState.type === 'tile') {
         const wdx = dx / viewport.zoom
         const wdy = dy / viewport.zoom
@@ -282,20 +326,22 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           }))
         })
       } else if (dragState.type === 'resize') {
-        const wdx = dx / viewport.zoom
-        const wdy = dy / viewport.zoom
-        const dir = dragState.dir
-        setTiles(prev => prev.map(t => {
-          if (t.id !== dragState.tileId) return t
-          const minW = getMinTileWidth(t)
-          const minH = getMinTileHeight(t)
-          let { x, y, width: w, height: h } = t
-          if (dir.includes('e')) w = Math.max(minW, snapValue(dragState.initW + wdx))
-          if (dir.includes('s')) h = Math.max(minH, snapValue(dragState.initH + wdy))
-          if (dir.includes('w')) { w = Math.max(minW, snapValue(dragState.initW - wdx)); x = snapValue(dragState.initX + wdx) }
-          if (dir.includes('n')) { h = Math.max(minH, snapValue(dragState.initH - wdy)); y = snapValue(dragState.initY + wdy) }
-          return { ...t, x, y, width: w, height: h }
-        }))
+        scheduleDragUpdate(() => {
+          const wdx = dx / viewport.zoom
+          const wdy = dy / viewport.zoom
+          const dir = dragState.dir
+          setTiles(prev => prev.map(t => {
+            if (t.id !== dragState.tileId) return t
+            const minW = getMinTileWidth(t)
+            const minH = getMinTileHeight(t)
+            let { x, y, width: w, height: h } = t
+            if (dir.includes('e')) w = Math.max(minW, snapValue(dragState.initW + wdx))
+            if (dir.includes('s')) h = Math.max(minH, snapValue(dragState.initH + wdy))
+            if (dir.includes('w')) { w = Math.max(minW, snapValue(dragState.initW - wdx)); x = snapValue(dragState.initX + wdx) }
+            if (dir.includes('n')) { h = Math.max(minH, snapValue(dragState.initH - wdy)); y = snapValue(dragState.initY + wdy) }
+            return { ...t, x, y, width: w, height: h }
+          }))
+        })
       }
     }
 
@@ -325,6 +371,8 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
       // Grab the pre-drag snapshot before any async state setters fire (H-11 fix).
       const beforeTiles = preDragSnapshotRef.current ?? undefined
 
+      // Land the final coalesced move before the release logic reads state.
+      flushPendingDragUpdate()
       if (dragState.type === 'tile') flushPendingTileDrag()
       if (dragState.type === 'connection') {
         if (dragState.targetTileId) {
@@ -405,6 +453,11 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
         snapGuideRafRef.current = null
       }
       pendingTileDragRef.current = null
+      if (pendingDragFrameRef.current !== null) {
+        cancelAnimationFrame(pendingDragFrameRef.current)
+        pendingDragFrameRef.current = null
+      }
+      pendingDragUpdateRef.current = null
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
@@ -414,6 +467,7 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
     setDragState,
     viewport,
     setViewport,
+    applyViewportGesture,
     panVelocityRef,
     panLastPos,
     startPanInertia,

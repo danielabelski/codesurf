@@ -10,6 +10,7 @@ import {
   useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
   type RefObject,
   type Dispatch,
   type SetStateAction,
@@ -27,6 +28,7 @@ import {
   isEmptyCanvasHistoryEntry,
   type CanvasHistoryEntry,
 } from './canvasHistory.ts'
+import { perfFlags } from '../perfFlags.ts'
 
 // ─── Canvas constants ───────────────────────────────────────────────────────
 
@@ -280,6 +282,17 @@ export type UseCanvasEngineReturn = {
   resetViewportState: () => void
   handleWheel: (e: React.WheelEvent) => void
   scheduleViewportUpdate: (nextViewport: CanvasViewport) => void
+  /** Attach to the world-transform div — imperative gesture writes target it. */
+  worldElRef: MutableRefObject<HTMLDivElement | null>
+  /**
+   * Apply a viewport change during a continuous gesture (pan / wheel zoom /
+   * inertia). With the imperative-pan perf flag on, this writes the transform
+   * straight to the world div every event and commits React state only on a
+   * throttle; without the flag it falls back to a plain setViewport.
+   */
+  applyViewportGesture: (next: CanvasViewport) => void
+  /** Commit the final gesture viewport to React state. Safe to call when idle. */
+  endViewportGesture: () => void
   undoCanvas: () => void
   redoCanvas: () => void
   flushDeferredCanvasPersist: () => void
@@ -361,9 +374,18 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
    */
   const canvasLoadedForWorkspaceIdRef = useRef<string | null>(workspace?.id ?? null)
 
-  // Keep viewport / z-index refs in sync with state
-  viewportRef.current = viewport
-  pendingViewportRef.current = viewport
+  const worldElRef = useRef<HTMLDivElement | null>(null)
+  const viewportGestureActiveRef = useRef(false)
+  const lastGestureCommitRef = useRef(0)
+  const wheelGestureEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Keep viewport / z-index refs in sync with state. During an imperative
+  // gesture the refs hold the LIVE gesture viewport (ahead of React state) —
+  // don't clobber them with the throttled committed value.
+  if (!viewportGestureActiveRef.current) {
+    viewportRef.current = viewport
+    pendingViewportRef.current = viewport
+  }
   nextZIndexRef.current = nextZIndex
 
   const scheduleViewportUpdate = useCallback((nextVp: CanvasViewport) => {
@@ -375,6 +397,47 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
     })
   }, [])
 
+  /** Throttle for React state commits while an imperative gesture is live. */
+  const GESTURE_COMMIT_INTERVAL_MS = 150
+
+  const writeWorldTransform = useCallback((vp: CanvasViewport) => {
+    const el = worldElRef.current
+    if (el) el.style.transform = `translate(${vp.tx}px, ${vp.ty}px) scale(${vp.zoom})`
+  }, [])
+
+  const applyViewportGesture = useCallback((next: CanvasViewport) => {
+    if (!perfFlags.imperativePan) {
+      setViewport(next)
+      return
+    }
+    viewportGestureActiveRef.current = true
+    viewportRef.current = next
+    pendingViewportRef.current = next
+    writeWorldTransform(next)
+    // Periodic state commits keep culling / minimap / overlays roughly in sync
+    // during long gestures without paying a React render per pointer event.
+    const now = performance.now()
+    if (now - lastGestureCommitRef.current > GESTURE_COMMIT_INTERVAL_MS) {
+      lastGestureCommitRef.current = now
+      setViewport(next)
+    }
+  }, [writeWorldTransform])
+
+  const endViewportGesture = useCallback(() => {
+    if (!viewportGestureActiveRef.current) return
+    viewportGestureActiveRef.current = false
+    lastGestureCommitRef.current = 0
+    setViewport(pendingViewportRef.current)
+  }, [])
+
+  // A throttled commit re-renders the world div with a viewport that may be a
+  // few pointer events behind the last imperative write — re-apply the live
+  // transform after every render while a gesture is active so the frame never
+  // jumps backwards.
+  useLayoutEffect(() => {
+    if (viewportGestureActiveRef.current) writeWorldTransform(pendingViewportRef.current)
+  })
+
   useEffect(() => () => {
     if (viewportAnimationFrameRef.current !== null) {
       cancelAnimationFrame(viewportAnimationFrameRef.current)
@@ -382,26 +445,40 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
     }
     if (saveTimer.current) clearTimeout(saveTimer.current)
     if (skipHistoryResetTimer.current) clearTimeout(skipHistoryResetTimer.current)
+    if (wheelGestureEndTimerRef.current) clearTimeout(wheelGestureEndTimerRef.current)
   }, [])
 
   const cancelPanInertia = useCallback(() => {
     cancelAnimationFrame(panInertiaRaf.current)
     panVelocityRef.current = { vx: 0, vy: 0 }
-  }, [])
+    // If inertia was cancelled mid-flight, commit whatever the gesture reached.
+    endViewportGesture()
+  }, [endViewportGesture])
 
   const startPanInertia = useCallback(() => {
     const { vx, vy } = panVelocityRef.current
-    if (Math.abs(vx) <= 0.5 && Math.abs(vy) <= 0.5) return
+    if (Math.abs(vx) <= 0.5 && Math.abs(vy) <= 0.5) {
+      endViewportGesture()
+      return
+    }
     const friction = 0.92
     const animate = () => {
       const v = panVelocityRef.current
-      if (Math.abs(v.vx) < 0.5 && Math.abs(v.vy) < 0.5) return
-      setViewport(prev => ({ ...prev, tx: prev.tx + v.vx, ty: prev.ty + v.vy }))
+      if (Math.abs(v.vx) < 0.5 && Math.abs(v.vy) < 0.5) {
+        endViewportGesture()
+        return
+      }
+      if (perfFlags.imperativePan) {
+        const cur = pendingViewportRef.current
+        applyViewportGesture({ ...cur, tx: cur.tx + v.vx, ty: cur.ty + v.vy })
+      } else {
+        setViewport(prev => ({ ...prev, tx: prev.tx + v.vx, ty: prev.ty + v.vy }))
+      }
       panVelocityRef.current = { vx: v.vx * friction, vy: v.vy * friction }
       panInertiaRaf.current = requestAnimationFrame(animate)
     }
     panInertiaRaf.current = requestAnimationFrame(animate)
-  }, [])
+  }, [applyViewportGesture, endViewportGesture])
 
   const schedulePersistWrite = useCallback((
     tileList: TileState[],
@@ -659,11 +736,23 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
       const rect = el.getBoundingClientRect()
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
-      setViewport(zoomAtPoint(vp, mx, my, newZoom))
+      const next = zoomAtPoint(vp, mx, my, newZoom)
+      if (perfFlags.imperativePan) {
+        // Wheel zoom is a continuous gesture with no natural end event — treat
+        // a 160ms wheel-idle gap as the gesture end and commit then.
+        applyViewportGesture(next)
+        if (wheelGestureEndTimerRef.current) clearTimeout(wheelGestureEndTimerRef.current)
+        wheelGestureEndTimerRef.current = setTimeout(() => {
+          wheelGestureEndTimerRef.current = null
+          endViewportGesture()
+        }, 160)
+      } else {
+        setViewport(next)
+      }
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
-  }, [canvasRef, viewportRef])
+  }, [canvasRef, viewportRef, applyViewportGesture, endViewportGesture])
 
   const applyHistoryEntry = useCallback((
     entry: CanvasHistoryEntry,
@@ -762,6 +851,9 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
     resetViewportState,
     handleWheel,
     scheduleViewportUpdate,
+    worldElRef,
+    applyViewportGesture,
+    endViewportGesture,
     undoCanvas,
     redoCanvas,
     flushDeferredCanvasPersist,

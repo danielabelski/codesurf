@@ -505,6 +505,10 @@ interface ElectronAPI {
     getLevel(): number
     setLevel(level: number): Promise<void>
   }
+  /** Canvas perf feature flags — CODESURF_PERF_* env vars, read once at startup. */
+  perf: {
+    getEnv(): Record<string, string>
+  }
   /** Speech-to-text (dictation) — pluggable provider, audio captured renderer-side. */
   transcribe: {
     run(args: {

@@ -6,6 +6,8 @@ import type { NegotiatedDiscoveryState } from '../hooks/useNegotiatedDiscovery'
 import type { RenderTileBodyOptions } from '../hooks/useRenderTileBody'
 import type { AnchorPoint } from '../lib/discoveryRuntime'
 import { CanvasTileItem } from './canvas/CanvasTileItem'
+import { perfFlags, CANVAS_LOD_ZOOM } from '../perfFlags'
+import { isTileOffscreen, isHeavyTileType } from '../lib/canvasCulling'
 
 type ResizeDir = 'e' | 's' | 'se' | 'w' | 'n' | 'nw' | 'ne' | 'sw'
 type Side = AnchorPoint['side']
@@ -89,6 +91,12 @@ export function AppCanvasTiles(props: AppCanvasTilesProps): JSX.Element {
 
   const visibleTiles = filterVisibleCanvasTiles(tiles, panelTileIds, expandedCanvasMembership)
   const connectionDragActive = dragState.type === 'connection'
+  // Perf: viewport culling + zoom LOD are computed per commit (not per pointer
+  // event — imperative gestures throttle commits), so this stays cheap.
+  const cullingOn = perfFlags.viewportCulling
+  const lodActive = perfFlags.zoomLod && viewport.zoom < CANVAS_LOD_ZOOM
+  const screenW = typeof window !== 'undefined' ? window.innerWidth : 1920
+  const screenH = typeof window !== 'undefined' ? window.innerHeight : 1080
 
   // Only cheap, per-tile *scalars* are computed here. The expensive part — the tile
   // chrome, body (Monaco/terminal/browser), link sensors and handle — lives in the
@@ -113,12 +121,20 @@ export function AppCanvasTiles(props: AppCanvasTilesProps): JSX.Element {
           ? dragState.side
           : hoveredSide ?? 'right'
         const isSelected = tile.id === selectedTileId || selectedTileIds.has(tile.id)
+        // Never cull/LOD a tile mid-interaction or when it's the focused panel
+        // member — a hidden body under the cursor would read as a glitch.
+        const interacting = isActiveDrag || isSelected || panelTileIds.has(tile.id)
+        const bodyCulled = cullingOn && !interacting &&
+          isTileOffscreen(tile, viewport, screenW, screenH)
+        const lodPlaceholder = lodActive && !interacting && !bodyCulled && isHeavyTileType(tile.type)
 
         return (
           <CanvasTileItem
             key={tile.id}
             tile={tile}
             zoom={viewport.zoom}
+            bodyCulled={bodyCulled}
+            lodPlaceholder={lodPlaceholder}
             workspaceId={workspaceId}
             workspaceDir={workspaceDir}
             isActiveDrag={isActiveDrag}

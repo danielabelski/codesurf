@@ -698,6 +698,17 @@ contextBridge.exposeInMainWorld('electron', {
     },
   },
 
+  // ─── Canvas perf feature flags (CODESURF_PERF_*) — read once at startup ─
+  perf: {
+    getEnv: (): Record<string, string> => {
+      const out: Record<string, string> = {}
+      for (const [key, value] of Object.entries(process.env)) {
+        if (key.startsWith('CODESURF_PERF_') && typeof value === 'string') out[key] = value
+      }
+      return out
+    },
+  },
+
   // ─── Voice: STT, TTS, spokify, secrets ────────────────────────────────
   // STT: capture audio in renderer (MediaRecorder), send bytes to main,
   // main routes to provider (OpenAI Whisper / Deepgram / AssemblyAI / local).

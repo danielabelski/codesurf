@@ -574,6 +574,9 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
         await invoke('ui:setZoomLevel', [zoomLevel])
       },
     },
+    perf: {
+      getEnv: (): Record<string, string> => ({}),
+    },
     transcribe: {
       run: makeInvoker(invoke, 'transcribe:run'),
     },

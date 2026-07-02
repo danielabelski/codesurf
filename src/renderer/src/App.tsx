@@ -345,6 +345,7 @@ function App(): JSX.Element {
     restoreViewport,
     resetViewportState,
     handleWheel,
+    worldElRef,
     undoCanvas,
     redoCanvas,
     flushDeferredCanvasPersist,
@@ -1798,8 +1799,10 @@ function App(): JSX.Element {
             </>
           )}
         >
-          {/* World container */}
+          {/* World container — worldElRef lets pan/zoom gestures write the
+              transform imperatively between throttled state commits. */}
           <div
+            ref={worldElRef}
             className="absolute"
             style={{
               transform: `translate(${viewport.tx}px, ${viewport.ty}px) scale(${viewport.zoom})`,
