@@ -49,7 +49,7 @@ const SENSITIVE_DIRS = ['.ssh', '.gnupg', '.aws', '.config']
 
   Used in `validateFsPath` (fs.ts:126-132) to reject `~/<dir>/**`. Directly
   above the loop, two carve-outs run FIRST and must keep working:
-  - `CONTEX_HOME` paths always allowed (fs.ts:120)
+  - `CODESURF_HOME` paths always allowed (fs.ts:120)
   - `allowReadOnlyOpenCodeConfig` allows `~/.config/opencode/{skills,prompts,agents}`
     (fs.ts:95-102, 122-124) — note this lives UNDER `.config`, which is on both
     denylists; the carve-out must stay evaluated before the denylist.
@@ -130,7 +130,7 @@ importers still resolve.
 In `fs.ts`, delete the local `SENSITIVE_DIRS` and iterate the shared set. Keep
 the existing match expression (`startsWith(sensitive + path.sep) || resolved === sensitive`)
 — it covers both directory-prefix and exact-file cases. Preserve carve-out
-order: CONTEX_HOME check, then OpenCode carve-out, THEN the denylist.
+order: CODESURF_HOME check, then OpenCode carve-out, THEN the denylist.
 
 **Verify**: `grep -n "SENSITIVE_DIRS" src/main/ipc/fs.ts` → no matches;
 `node --test test/fs-workspace-scope.test.ts` → passes (extend it per Test plan).

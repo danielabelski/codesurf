@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Contex Extension Harness</title>
+  <title>CodeSurf Extension Harness</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -368,23 +368,23 @@ window.addEventListener('message', async (event) => {
   const msg = event.data
   if (!msg || typeof msg !== 'object') return
 
-  if (msg.type === 'contex-bridge-ready') {
+  if (msg.type === 'codesurf-bridge-ready') {
     tileReady = true
     const badge = document.getElementById('status-badge')
     badge.textContent = 'Ready'
     badge.style.color = 'var(--ok)'
-    logEntry('event', 'contex-bridge-ready')
-    postToTile({ type: 'contex-event', event: 'tile.resize', data: getSize() })
+    logEntry('event', 'codesurf-bridge-ready')
+    postToTile({ type: 'codesurf-event', event: 'tile.resize', data: getSize() })
     return
   }
 
-  if (msg.type === 'contex-action-result') {
+  if (msg.type === 'codesurf-action-result') {
     const suffix = msg.error ? '(error: ' + msg.error + ')' : JSON.stringify(msg.result ?? null)
     logEntry('event', 'action-result ' + msg.requestId + ' ' + suffix)
     return
   }
 
-  if (msg.type !== 'contex-rpc') return
+  if (msg.type !== 'codesurf-rpc') return
 
   const { id, method, params } = msg
   const paramsStr = params != null ? JSON.stringify(params) : ''
@@ -398,7 +398,7 @@ window.addEventListener('message', async (event) => {
     logEntry('error', 'RPC error in ' + method + ': ' + err.message)
   }
 
-  postToTile({ type: 'contex-rpc-response', id, ...(error ? { error } : { result: result ?? null }) })
+  postToTile({ type: 'codesurf-rpc-response', id, ...(error ? { error } : { result: result ?? null }) })
 })
 
 function postToTile(msg) {
@@ -569,7 +569,7 @@ document.getElementById('btn-ctx-peer').addEventListener('click', () => {
   if (!key) return
   let val
   try { val = JSON.parse(rawVal) } catch { val = rawVal }
-  postToTile({ type: 'contex-event', event: 'context.peerChanged', data: { peerId: 'peer-sim', key, value: val } })
+  postToTile({ type: 'codesurf-event', event: 'context.peerChanged', data: { peerId: 'peer-sim', key, value: val } })
   logEntry('event', 'context.peerChanged: ' + key + ' = ' + JSON.stringify(val))
 })
 
@@ -607,7 +607,7 @@ document.getElementById('btn-bus-send').addEventListener('click', () => {
   if (!channel) return
   let payload
   try { payload = JSON.parse(rawPayload) } catch { payload = rawPayload || {} }
-  postToTile({ type: 'contex-event', event: 'bus.event.' + channel, data: { type, payload } })
+  postToTile({ type: 'codesurf-event', event: 'bus.event.' + channel, data: { type, payload } })
   logEntry('event', 'bus send "' + channel + '" ' + JSON.stringify(payload))
 })
 
@@ -632,12 +632,12 @@ function renderBusSubsList() {
 
 // ── Surface panel ─────────────────────────────────────────────────────────────
 document.getElementById('btn-surface-flush').addEventListener('click', () => {
-  postToTile({ type: 'contex-event', event: 'surface.requestFlush', data: {} })
+  postToTile({ type: 'codesurf-event', event: 'surface.requestFlush', data: {} })
   logEntry('event', 'surface.requestFlush')
 })
 
 document.getElementById('btn-surface-clear').addEventListener('click', () => {
-  postToTile({ type: 'contex-event', event: 'surface.clear', data: {} })
+  postToTile({ type: 'codesurf-event', event: 'surface.clear', data: {} })
   logEntry('event', 'surface.clear')
 })
 
@@ -666,7 +666,7 @@ document.getElementById('btn-action-invoke').addEventListener('click', () => {
   let params
   try { params = JSON.parse(rawParams) } catch { params = {} }
   const requestId = 'harness-' + Date.now()
-  postToTile({ type: 'contex-action-invoke', action: name, params, requestId })
+  postToTile({ type: 'codesurf-action-invoke', action: name, params, requestId })
   logEntry('event', 'action "' + name + '" ' + JSON.stringify(params))
 })
 

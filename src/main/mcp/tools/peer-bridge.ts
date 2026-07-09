@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../../paths'
+import { CODESURF_HOME } from '../../paths'
 import { canvasStatePath, ensureWorkspaceStorageMigrated } from '../../storage/workspaceArtifacts'
 import { getNodeToolSchemaByName, getPeerBridgeNodeTools } from '../../../shared/nodeTools'
 import type { TileState } from '../../../shared/types'
@@ -36,7 +36,7 @@ type UserConfigWorkspaceRef = {
 
 async function readWorkspaceRefsFromUserConfig(): Promise<UserConfigWorkspaceRef[]> {
   try {
-    const userConfigPath = join(CONTEX_HOME, 'config.json')
+    const userConfigPath = join(CODESURF_HOME, 'config.json')
     const raw = await fs.readFile(userConfigPath, 'utf8')
     const parsed = JSON.parse(raw) as {
       projects?: Array<{ id?: string; path?: string }>
@@ -101,7 +101,7 @@ async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
   const workspaces = await readWorkspaceRefsFromUserConfig()
   for (const ws of workspaces) {
     try {
-      const notePath = join(ws.path, '.contex', tileId, 'context', 'note.txt')
+      const notePath = join(ws.path, '.codesurf', tileId, 'context', 'note.txt')
       const stat = await fs.stat(notePath).catch(() => null)
       if (stat?.isFile()) return notePath
     } catch {

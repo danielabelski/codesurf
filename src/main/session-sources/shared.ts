@@ -2,7 +2,7 @@ import { createReadStream, promises as fs } from 'fs'
 import { join } from 'path'
 import { createInterface } from 'readline'
 import type { AggregatedSessionEntry, SessionScope } from '../../shared/session-types.ts'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 
 export type ChatRole = 'user' | 'assistant' | 'system'
 
@@ -101,8 +101,8 @@ export async function ensureDir(path: string): Promise<void> {
 }
 
 export async function ensureCodeSurfStructure(workspacePath?: string | null): Promise<void> {
-  await ensureDir(CONTEX_HOME)
-  await Promise.all(STANDARD_CODESURF_SUBDIRS.map(dir => ensureDir(join(CONTEX_HOME, dir))))
+  await ensureDir(CODESURF_HOME)
+  await Promise.all(STANDARD_CODESURF_SUBDIRS.map(dir => ensureDir(join(CODESURF_HOME, dir))))
 
   if (!workspacePath) return
   const projectDir = getProjectCodeSurfDir(workspacePath)

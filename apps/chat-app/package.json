@@ -1,5 +1,5 @@
 {
-  "name": "@contex/chat-app",
+  "name": "@codesurf/chat-app",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
   "dependencies": {
     "@assistant-ui/react": "^0.12.28",
     "@assistant-ui/react-markdown": "^0.12.11",
-    "@contex/chat-bridge": "file:../../packages/contex-chat-bridge",
+    "@codesurf/chat-bridge": "file:../../packages/codesurf-chat-bridge",
     "ai": "^6.0.174",
     "lucide-react": "^0.468.0",
     "react": "^19.2.4",

@@ -28,7 +28,7 @@ import {
 } from '../security/pathSegments.ts'
 import { broadcastToRenderer } from '../utils/broadcast'
 
-const MESSAGE_PROTOCOL = 'contex-message/v1' as const
+const MESSAGE_PROTOCOL = 'codesurf-message/v1' as const
 const MESSAGE_MAILBOXES: CollabMailbox[] = ['inbox', 'sent', 'memory', 'bin']
 const MESSAGE_MAILBOX_SET = new Set<string>(MESSAGE_MAILBOXES)
 
@@ -163,7 +163,7 @@ function parseFrontmatterValue(raw: string): string | number | null {
 }
 
 function extractPayload(body: string): { body: string; data?: Record<string, unknown> } {
-  const match = body.match(/\n```(?:json\s+)?contex-data\n([\s\S]*?)\n```\s*$/)
+  const match = body.match(/\n```(?:json\s+)?codesurf-data\n([\s\S]*?)\n```\s*$/)
   if (!match) return { body: body.trim() }
 
   try {
@@ -198,7 +198,7 @@ function renderMessageMarkdown(meta: CollabMessageMeta, body: string, data?: Rec
   ]
 
   if (data && Object.keys(data).length > 0) {
-    lines.push('', '```contex-data', JSON.stringify(data, null, 2), '```')
+    lines.push('', '```codesurf-data', JSON.stringify(data, null, 2), '```')
   }
 
   lines.push('')
@@ -651,7 +651,7 @@ export function registerCollabIPC(): void {
       try { return assertSafePathSegment(id, 'tileId') } catch { return '' }
     }).filter(Boolean))
     const removed = await Promise.all([
-      pruneOrphanedTileDirs(join(workspaceRoot, '.contex'), validTileIds),
+      pruneOrphanedTileDirs(join(workspaceRoot, '.codesurf'), validTileIds),
       pruneOrphanedTileDirs(join(workspaceRoot, '.collab'), validTileIds),
     ])
     return {

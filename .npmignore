@@ -7,8 +7,8 @@
 !bin/**
 !dist-electron/
 !dist-electron/**
-!packages/contex-relay/dist/
-!packages/contex-relay/dist/**
+!packages/codesurf-relay/dist/
+!packages/codesurf-relay/dist/**
 !packages/codesurf-daemon/
 !packages/codesurf-daemon/bin/**
 !packages/codesurf-daemon/src/**

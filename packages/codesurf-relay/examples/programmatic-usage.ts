@@ -1,7 +1,7 @@
-import { ContexRelay } from '../src'
+import { CodesurfRelay } from '../src'
 
 async function main() {
-  const relay = new ContexRelay({ workspacePath: process.cwd() })
+  const relay = new CodesurfRelay({ workspacePath: process.cwd() })
   await relay.init()
 
   await relay.upsertParticipant({

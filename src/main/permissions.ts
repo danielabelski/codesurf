@@ -3,9 +3,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join, resolve } from 'path'
 import { randomUUID } from 'node:crypto'
 import type { ToolPermissionDecisionScope, ToolPermissionGrant, ToolPermissionStore } from '../shared/types'
-import { CONTEX_HOME } from './paths'
+import { CODESURF_HOME } from './paths'
 
-const PERMISSIONS_PATH = join(CONTEX_HOME, 'permissions.json')
+const PERMISSIONS_PATH = join(CODESURF_HOME, 'permissions.json')
 const PERMISSIONS_VERSION = 1
 
 const sessionGrants = new Map<string, ToolPermissionGrant>()

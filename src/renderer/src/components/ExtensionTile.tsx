@@ -1,7 +1,7 @@
 /**
  * ExtensionTile — renders extension tile content inside a sandboxed iframe.
  *
- * Extension HTML is served through the custom contex-ext:// protocol so dev
+ * Extension HTML is served through the custom codesurf-ext:// protocol so dev
  * renderer pages can load it safely, and a postMessage RPC bridge lets the
  * iframe talk back to the host renderer.
  */
@@ -148,8 +148,8 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   themeCssVarsRef.current = themeCssVars
   useEffect(() => {
     if (!bridgeReadyRef.current) return
-    iframeRef.current?.contentWindow?.postMessage({ type: 'contex-theme-vars', vars: themeCssVars }, '*')
-    iframeRef.current?.contentWindow?.postMessage({ type: 'contex-event', event: 'theme.change', data: themeColors }, '*')
+    iframeRef.current?.contentWindow?.postMessage({ type: 'codesurf-theme-vars', vars: themeCssVars }, '*')
+    iframeRef.current?.contentWindow?.postMessage({ type: 'codesurf-event', event: 'theme.change', data: themeColors }, '*')
   }, [themeCssVars, themeColors])
 
   const postToIframe = useCallback((message: Record<string, unknown>) => {
@@ -163,7 +163,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   const forwardContextEvent = useCallback((peerId: string, data: any) => {
     postToIframe({
-      type: 'contex-event',
+      type: 'codesurf-event',
       event: 'context.peerChanged',
       data: { peerId, ...data },
     })
@@ -180,7 +180,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     const subscriberId = `exttile:${tileId}:${channel}`
     const unsubscribe = el.bus?.subscribe?.(channel, subscriberId, (event: any) => {
       postToIframe({
-        type: 'contex-event',
+        type: 'codesurf-event',
         event: `bus.event.${channel}`,
         data: event,
       })
@@ -529,7 +529,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         setRenderMode(match.render ?? 'iframe')
 
         // render:'mcp-ui' tiles paint via PluginSurface (AppRenderer) instead of a
-        // raw iframe — fetch the guest HTML and skip the contex-ext:// url path.
+        // raw iframe — fetch the guest HTML and skip the codesurf-ext:// url path.
         if (match.render === 'mcp-ui') {
           const h = await el.extensions?.surfaceHtml?.(match.extId, 'tile', extType)
           setMcpHtml(typeof h === 'string' ? h : '')
@@ -578,11 +578,11 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       const iframeWindow = iframeRef.current?.contentWindow
       if (!iframeWindow || event.source !== iframeWindow) return
 
-      if (message.type === 'contex-bridge-ready' && message.tileId === tileId) {
+      if (message.type === 'codesurf-bridge-ready' && message.tileId === tileId) {
         bridgeReadyRef.current = true
-        iframeWindow.postMessage({ type: 'contex-theme-vars', vars: themeCssVarsRef.current }, '*')
+        iframeWindow.postMessage({ type: 'codesurf-theme-vars', vars: themeCssVarsRef.current }, '*')
         iframeWindow.postMessage({
-          type: 'contex-event',
+          type: 'codesurf-event',
           event: 'tile.resize',
           data: { width: contentWidth, height: contentHeight },
         }, '*')
@@ -590,7 +590,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       }
 
       // Action result from iframe
-      if (message.type === 'contex-action-result' && message.tileId === tileId) {
+      if (message.type === 'codesurf-action-result' && message.tileId === tileId) {
         const pending = pendingActionResultsRef.current.get(message.requestId)
         if (pending) {
           pendingActionResultsRef.current.delete(message.requestId)
@@ -600,17 +600,17 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         return
       }
 
-      if (message.type !== 'contex-rpc' || message.tileId !== tileId) return
+      if (message.type !== 'codesurf-rpc' || message.tileId !== tileId) return
 
       const rpcHandler = handleRpcRef.current
       if (!rpcHandler) return
 
       try {
         const result = await rpcHandler(String(message.method ?? ''), message.params)
-        iframeWindow.postMessage({ type: 'contex-rpc-response', id: message.id, result }, '*')
+        iframeWindow.postMessage({ type: 'codesurf-rpc-response', id: message.id, result }, '*')
       } catch (err) {
         iframeWindow.postMessage({
-          type: 'contex-rpc-response',
+          type: 'codesurf-rpc-response',
           id: message.id,
           error: err instanceof Error ? err.message : String(err),
         }, '*')
@@ -625,7 +625,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     if (!bridgeReadyRef.current) return
 
     postToIframe({
-      type: 'contex-event',
+      type: 'codesurf-event',
       event: 'tile.resize',
       data: { width: contentWidth, height: contentHeight },
     })
@@ -638,7 +638,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     const unsubscribe = el.relay?.onEvent?.((data: { workspacePath: string; event: unknown }) => {
       if (data?.workspacePath !== workspacePath) return
       postToIframe({
-        type: 'contex-event',
+        type: 'codesurf-event',
         event: 'relay.event',
         data: data.event,
       })
@@ -657,7 +657,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       if (!cardId || !extensionChatCardsRef.current.has(cardId)) return
 
       postToIframe({
-        type: 'contex-event',
+        type: 'codesurf-event',
         event: 'chat.stream',
         data: event,
       })
@@ -676,7 +676,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   useEffect(() => {
     if (!bridgeReadyRef.current) return
     postToIframe({
-      type: 'contex-event',
+      type: 'codesurf-event',
       event: 'discovery.peersChanged',
       data: connectedPeers,
     })
@@ -721,7 +721,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       if (!registeredActionsRef.current.has(cmd.action)) return
       const requestId = `action-${++actionReqId}-${Date.now()}`
       postToIframe({
-        type: 'contex-action-invoke',
+        type: 'codesurf-action-invoke',
         action: cmd.action,
         params: cmd.params || {},
         requestId,

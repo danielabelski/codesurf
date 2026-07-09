@@ -314,8 +314,8 @@
   }
 
   window.addEventListener('message', e => {
-    if (e.data?.type === 'contex-bridge-ready') initBridge(e.data.bridge || window.contex)
-    if (e.data?.type === 'contex-action-invoke') handleAction(e.data)
+    if (e.data?.type === 'codesurf-bridge-ready') initBridge(e.data.bridge || window.contex)
+    if (e.data?.type === 'codesurf-action-invoke') handleAction(e.data)
   })
   if (window.contex) initBridge(window.contex)
 
@@ -331,7 +331,7 @@
       doSearch()
     }
     const resultEl = msg.requestId
-      ? { type: 'contex-action-result', tileId: TILE_ID, requestId: msg.requestId, result: 'ok' }
+      ? { type: 'codesurf-action-result', tileId: TILE_ID, requestId: msg.requestId, result: 'ok' }
       : null
     if (resultEl) window.parent.postMessage(resultEl, '*')
   }

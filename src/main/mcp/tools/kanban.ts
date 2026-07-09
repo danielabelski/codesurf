@@ -2,7 +2,7 @@ import { bus } from '../../event-bus'
 import { errorMessage } from '../../../shared/errors.ts'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../../paths'
+import { CODESURF_HOME } from '../../paths'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
 import { assertTileScope } from '../auth'
 
@@ -53,14 +53,14 @@ export interface ResolvedKanbanTarget {
 
 async function listWorkspaceIds(): Promise<string[]> {
   try {
-    const raw = await fs.readFile(join(CONTEX_HOME, 'config.json'), 'utf8')
+    const raw = await fs.readFile(join(CODESURF_HOME, 'config.json'), 'utf8')
     const cfg = JSON.parse(raw) as { workspaces?: Array<{ id: string }> }
     const ids = (cfg.workspaces ?? []).map(ws => ws.id).filter(Boolean)
     if (ids.length > 0) return ids
   } catch { /**/ }
 
   try {
-    const entries = await fs.readdir(join(CONTEX_HOME, 'workspaces'), { withFileTypes: true })
+    const entries = await fs.readdir(join(CODESURF_HOME, 'workspaces'), { withFileTypes: true })
     return entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
   } catch {
     return []
@@ -68,7 +68,7 @@ async function listWorkspaceIds(): Promise<string[]> {
 }
 
 export function kanbanStateFile(workspaceId: string, boardTileId: string): string {
-  return join(CONTEX_HOME, 'workspaces', workspaceId, '.contex', `kanban-${boardTileId}.json`)
+  return join(CODESURF_HOME, 'workspaces', workspaceId, '.codesurf', `kanban-${boardTileId}.json`)
 }
 
 export async function resolveKanbanTarget(boardTileId?: string, workspaceId?: string): Promise<ResolvedKanbanTarget> {
@@ -86,7 +86,7 @@ export async function resolveKanbanTarget(boardTileId?: string, workspaceId?: st
     }
 
     try {
-      const dir = join(CONTEX_HOME, 'workspaces', wsId, '.contex')
+      const dir = join(CODESURF_HOME, 'workspaces', wsId, '.codesurf')
       const entries = await fs.readdir(dir)
       for (const name of entries) {
         const match = /^kanban-(.+)\.json$/.exec(name)
@@ -116,7 +116,7 @@ export async function resolveKanbanTarget(boardTileId?: string, workspaceId?: st
 }
 
 export async function saveKanbanTarget(target: ResolvedKanbanTarget, state: MCPKanbanState): Promise<void> {
-  await fs.mkdir(join(CONTEX_HOME, 'workspaces', target.workspaceId, '.contex'), { recursive: true })
+  await fs.mkdir(join(CODESURF_HOME, 'workspaces', target.workspaceId, '.codesurf'), { recursive: true })
   await fs.writeFile(target.path, JSON.stringify(state, null, 2))
 }
 

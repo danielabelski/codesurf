@@ -394,6 +394,10 @@ contextBridge.exposeInMainWorld('electron', {
     command: (payload: { tileId: string; command: 'back' | 'forward' | 'reload' | 'stop' | 'home' | 'navigate' | 'mode'; url?: string; mode?: 'desktop' | 'mobile' }) =>
       ipcRenderer.invoke('browserTile:command', payload),
     destroy: (tileId: string) => ipcRenderer.invoke('browserTile:destroy', tileId),
+    // Guest <webview> paint throttle: renderer has getWebContentsId only;
+    // main resolves WebContents via fromId and calls setFrameRate.
+    setFrameRate: (webContentsId: number, fps: number) =>
+      ipcRenderer.invoke('webview:setFrameRate', webContentsId, fps) as Promise<{ ok: boolean }>,
     onEvent: (cb: (event: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => void) => {
       const handler = (_: unknown, evt: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => cb(evt)
       ipcRenderer.on('browserTile:event', handler)
@@ -526,7 +530,7 @@ contextBridge.exposeInMainWorld('electron', {
     byAgent: (workspaceId: string) => ipcRenderer.invoke('activity:byAgent', workspaceId),
   },
 
-  // Contex protocol (.contex folder)
+  // CodeSurf protocol (.codesurf folder)
   collab: {
     ensureDir: (workspacePath: string, tileId: string) => ipcRenderer.invoke('collab:ensureDir', workspacePath, tileId),
     writeObjective: (workspacePath: string, tileId: string, md: string) => ipcRenderer.invoke('collab:writeObjective', workspacePath, tileId, md),
@@ -562,7 +566,7 @@ contextBridge.exposeInMainWorld('electron', {
     },
   },
 
-  // ContexRelay mailbox IPC — handlers exist only while Relay Suite power extension is active
+  // CodesurfRelay mailbox IPC — handlers exist only while Relay Suite power extension is active
   relay: {
     init: (workspacePath: string) => ipcRenderer.invoke('relay:init', workspacePath),
     syncWorkspace: (workspaceId: string, workspacePath: string, tiles: unknown[]) => ipcRenderer.invoke('relay:syncWorkspace', workspaceId, workspacePath, tiles),

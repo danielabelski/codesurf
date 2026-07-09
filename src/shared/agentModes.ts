@@ -13,7 +13,7 @@ import type { Persona } from './types'
 // the test suite imports BOTH and asserts the data + overlay agree (drift guard).
 //
 // BACK-COMPAT: the persisted override store is, and MUST remain,
-// `${workspaceRoot}/.contex/customisation/agents.json`. The on-disk filename is
+// `${workspaceRoot}/.codesurf/customisation/agents.json`. The on-disk filename is
 // retained (NOT renamed to personas.json) so existing user workspaces keep
 // working — this rename is in-code + UI only. Do not migrate the persisted file.
 

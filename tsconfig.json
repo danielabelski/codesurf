@@ -16,8 +16,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/renderer/src/*"],
-      "@contex/chat-bridge": ["packages/contex-chat-bridge/src/index.ts"],
-      "@contex/chat-bridge/*": ["packages/contex-chat-bridge/src/*"],
+      "@codesurf/chat-bridge": ["packages/codesurf-chat-bridge/src/index.ts"],
+      "@codesurf/chat-bridge/*": ["packages/codesurf-chat-bridge/src/*"],
       "@codesurf/plugin": ["packages/codesurf-plugin/src/index.ts"]
     }
   },

@@ -37,7 +37,7 @@ function emitLocationsChanged(kind: CustomisationLocationsChangedDetail['kind'],
 }
 
 function dataDir(workspacePath: string): string {
-  return `${workspacePath}/.contex/customisation`
+  return `${workspacePath}/.codesurf/customisation`
 }
 
 async function loadJson<T>(path: string, fallback: T): Promise<T> {

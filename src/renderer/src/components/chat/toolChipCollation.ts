@@ -73,7 +73,7 @@ export type ChipDisplayItem =
  * collateClusterChips — pure function turning a flat cluster chip list plus the
  * caller's expansion state into the ordered list the chip row should render.
  *
- * Ordering contract (adapted from grok-cli for contex's interleaved layout):
+ * Ordering contract (adapted from grok-cli for codesurf's interleaved layout):
  *   1. Done `thinking` chips, grouped as `N×THOUGHT` at the same threshold
  *      as tools, or loose in chronological order below that threshold
  *   2. Mega chip OR tier-1 group chips (first-seen-tool-name order)

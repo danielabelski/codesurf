@@ -1,6 +1,6 @@
 import { withDefaultSettings, DEFAULT_SETTINGS, type AppSettings } from '../../../shared/types'
 
-export const SETTINGS_CACHE_KEY = 'contex:settings-cache'
+export const SETTINGS_CACHE_KEY = 'codesurf:settings-cache'
 export const WORKSPACE_TAB_STATE_KEY = 'codesurf:workspace-tabs:v1'
 
 export type PersistedWorkspaceTabState = {

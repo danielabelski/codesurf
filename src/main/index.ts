@@ -42,6 +42,7 @@ import { registerWindowIPC } from './ipc/window'
 import { registerUpdaterIPC } from './ipc/updater'
 import { registerAppearanceIPC } from './ipc/appearance'
 import { registerPetsIPC } from './ipc/pets'
+import { registerWebviewPaintIPC } from './ipc/webview-paint'
 import { applyWindowAppearance, getWindowAppearanceOptions } from './windowAppearance'
 import { migrateLegacyStorage } from './migration'
 import { APP_ID, APP_NAME } from './paths'
@@ -745,6 +746,7 @@ app.whenReady().then(async () => {
   registerSecretsIpc()
   registerMcpConfigIPC()
   registerOwlIPC()
+  registerWebviewPaintIPC()
   registerFileProtocol()
   registerAgentPathsIPC()
   registerChromeSyncIPC()

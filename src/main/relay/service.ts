@@ -1,12 +1,12 @@
 import type {
-  ContexRelay,
+  CodesurfRelay,
   RelayChannelMessageDraft,
   RelayDirectMessageDraft,
   RelayEvent,
   RelayParticipant,
   RelaySpawnRequest,
-} from '../../../packages/contex-relay/src'
-import { ContexRelay as RelayCore, RelayRuntime } from '../../../packages/contex-relay/src'
+} from '../../../packages/codesurf-relay/src'
+import { CodesurfRelay as RelayCore, RelayRuntime } from '../../../packages/codesurf-relay/src'
 import type { TileState } from '../../shared/types'
 import { bus } from '../event-bus'
 import { broadcastToRenderer } from '../utils/broadcast'
@@ -14,7 +14,7 @@ import { loadWorkspaceTileState } from '../storage/workspaceArtifacts'
 import { createMainProcessRelayExecutor } from './provider-executor'
 
 interface WorkspaceRelayInstance {
-  relay: ContexRelay
+  relay: CodesurfRelay
   runtime: RelayRuntime
   unsubscribe: () => void
 }

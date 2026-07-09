@@ -1,9 +1,9 @@
 /**
- * Local MCP server for Contex kanban integration.
+ * Local MCP server for CodeSurf kanban integration.
  * Agents call these tools to signal completion, update status, add notes.
  *
  * Exposes an HTTP server on a random port. Port is written to:
- *   ~/.contex/mcp-server.json
+ *   ~/.codesurf/mcp-server.json
  *
  * MCP config for agents:
  *   { "mcpServers": { "kanban": { "type": "http", "url": "http://localhost:<port>/mcp" } } }
@@ -20,7 +20,7 @@ import { log } from './utils/logger.ts'
 
 const mcpLog = log.scope('MCP')
 import { getAllNodeTools } from '../shared/nodeTools'
-import { CONTEX_HOME } from './paths'
+import { CODESURF_HOME } from './paths'
 import { assertSafePathSegment } from './security/pathSegments'
 import { dispatchTool, getAllStaticTools } from './mcp/registry'
 import { executeImageEditTool as executeImageEditToolImpl } from './mcp/tools/generation'
@@ -56,7 +56,7 @@ export function getTileToken(tileId: string): string {
 // SSE client registry: cardId → response streams
 const sseClients = new Map<string, Set<ServerResponse>>()
 
-const getContexDir = (): string => CONTEX_HOME
+const getContexDir = (): string => CODESURF_HOME
 
 interface MCPRequest {
   jsonrpc: string
@@ -158,7 +158,7 @@ function normalizeMcpServer(entry: unknown, fallbackUrl?: string): Record<string
 function normalizeMcpServers(servers: Record<string, unknown>, contexUrl?: string): Record<string, Record<string, unknown>> {
   const normalized: Record<string, Record<string, unknown>> = {}
   for (const [name, server] of Object.entries(servers ?? {})) {
-    const fallbackUrl = name === 'contex' ? contexUrl : undefined
+    const fallbackUrl = name === 'codesurf' || name === 'contex' ? contexUrl : undefined
     normalized[name] = normalizeMcpServer(server, fallbackUrl)
   }
   return normalized
@@ -215,7 +215,7 @@ const LOCAL_TOOLS: McpToolSchema[] = [
   },
   {
     name: 'get_context',
-    description: 'Read all context files dropped into a block\'s .contex context folder. Returns concatenated content of all notes and reference files.',
+    description: 'Read all context files dropped into a block\'s .codesurf context folder. Returns concatenated content of all notes and reference files.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -260,6 +260,49 @@ export function buildContexHttpMcpServerEntry(contexUrl: string, tileId?: string
     url: contexUrl.replace(/\/$/, ''),
     headers: { Authorization: `Bearer ${token}` },
   }
+}
+
+/**
+ * Path for a per-tile MCP config that embeds the tile-scoped bearer token.
+ * Spawned agents (terminal CLI, Codex, etc.) should point at this file instead
+ * of the global `~/.codesurf/mcp-server.json` so plan-010 tile scope guards
+ * actually fire (SEC-05).
+ */
+export function tileMcpConfigPath(tileId: string): string {
+  return join(getContexDir(), 'tiles', assertSafePathSegment(tileId, 'tileId'), 'mcp-server.json')
+}
+
+/**
+ * Write (or refresh) a tile-scoped MCP config. Returns the absolute path, or
+ * null when the server is not yet listening / tileId is invalid.
+ */
+export async function writeTileMcpConfig(tileId: string): Promise<string | null> {
+  if (!serverPort || !tileId) return null
+  let safeTileId: string
+  try {
+    safeTileId = assertSafePathSegment(tileId, 'tileId')
+  } catch {
+    return null
+  }
+
+  const configPath = join(getContexDir(), 'tiles', safeTileId, 'mcp-server.json')
+  const baseUrl = `http://127.0.0.1:${serverPort}`
+  const contexUrl = `${baseUrl}/mcp`
+  const config = {
+    port: serverPort,
+    url: baseUrl,
+    // tile token only — not the global MCP_TOKEN
+    token: getTileToken(safeTileId),
+    tileId: safeTileId,
+    updatedAt: new Date().toISOString(),
+    mcpServers: {
+      codesurf: buildContexHttpMcpServerEntry(contexUrl, safeTileId),
+    },
+  }
+  await fs.mkdir(join(getContexDir(), 'tiles', safeTileId), { recursive: true })
+  await fs.writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 })
+  await fs.chmod(configPath, 0o600).catch(() => {})
+  return configPath
 }
 
 /** Names of all tools returned by tools/list (static + node bridge + extensions). */
@@ -326,7 +369,7 @@ async function handleLocalTool(name: string, args: Record<string, unknown>, prin
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
       for (const ws of workspaces) {
-        const objPath = join(ws.path, '.contex', tileId, 'objective.md')
+        const objPath = join(ws.path, '.codesurf', tileId, 'objective.md')
         try {
           return await fs.readFile(objPath, 'utf8')
         } catch { /* not in this workspace */ }
@@ -355,7 +398,7 @@ async function handleLocalTool(name: string, args: Record<string, unknown>, prin
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
       for (const ws of workspaces) {
-        const ctxDir = join(ws.path, '.contex', tileId, 'context')
+        const ctxDir = join(ws.path, '.codesurf', tileId, 'context')
         try {
           const entries = await fs.readdir(ctxDir)
           const parts: string[] = []
@@ -402,17 +445,16 @@ async function handleMCP(req: MCPRequest, principal: McpPrincipal): Promise<unkn
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'contex', version: '1.0.0' },
+        serverInfo: { name: 'codesurf', version: '1.0.0' },
         instructions: [
-          'You are connected to the CodeSurf canvas collaboration server.',
+          'You are connected to the CodeSurf agent-room collaboration server.',
           'Your block ID is in the CARD_ID environment variable.',
+          'Canvas wires place you in a shared agent room with other blocks.',
           '',
-          'IMMEDIATELY call peer_set_state with your tile_id, tile_type, and status="idle" to register yourself.',
-          'Then call peer_get_state to see linked peers.',
-          '',
-          'Before editing any file, call peer_get_state to check if a peer is already working on it.',
-          'When you see [contex] notifications, call peer_read_messages to read incoming messages.',
-          'Always call peer_set_state when changing tasks or files.',
+          'IMMEDIATELY call room_status(tile_id=$CARD_ID) to see your room and members.',
+          'Then call peer_set_state to announce idle/working status.',
+          'Use room_post for handoffs/tasks; room_consume for unread room traffic.',
+          'Chat agents auto-receive room traffic each turn; terminals should room_consume when needed.',
         ].join('\n'),
       }
     }
@@ -745,8 +787,8 @@ export async function startMCPServer(): Promise<number> {
         ? existingConfig.mcpServers as Record<string, unknown>
         : {}
       const normalizedServers = normalizeMcpServers(existingServers, contexUrl)
-      normalizedServers['contex'] = {
-        ...(normalizeMcpServer(existingConfig.mcpServers && typeof existingConfig.mcpServers === 'object' ? (existingConfig.mcpServers as Record<string, unknown>)['contex'] : undefined, contexUrl) as Record<string, unknown>),
+      normalizedServers['codesurf'] = {
+        ...(normalizeMcpServer(existingConfig.mcpServers && typeof existingConfig.mcpServers === 'object' ? (existingConfig.mcpServers as Record<string, unknown>)['codesurf'] : undefined, contexUrl) as Record<string, unknown>),
         ...buildContexHttpMcpServerEntry(contexUrl),
       }
 
@@ -772,7 +814,7 @@ export async function startMCPServer(): Promise<number> {
       await fs.chmod(configPath, 0o600).catch(() => {})
 
       // Write .mcp.json to all known workspace directories so Claude Code
-      // sessions in terminal tiles auto-discover the contex MCP server
+      // sessions in terminal tiles auto-discover the codesurf MCP server
       try {
         const workspaceRefs = await readWorkspaceRefsFromUserConfig()
         for (const ws of workspaceRefs) {
@@ -794,7 +836,7 @@ export function getMCPPort(): number | null {
 
 /**
  * Write a .mcp.json to a workspace directory so Claude Code sessions
- * in terminal tiles auto-discover the contex MCP server.
+ * in terminal tiles auto-discover the codesurf MCP server.
  * Also adds tool permissions so MCP tools don't need manual approval.
  */
 export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<void> {
@@ -830,7 +872,7 @@ export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<
     ? existing.mcpServers as Record<string, unknown>
     : {}
 
-  existingServers['contex'] = buildContexHttpMcpServerEntry(contexUrl)
+  existingServers['codesurf'] = buildContexHttpMcpServerEntry(contexUrl)
 
   const config = {
     ...existing,
@@ -854,16 +896,16 @@ export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<
  *  1. File absent                → write the managed file.
  *  2. File present, has marker   → already ours, no-op.
  *  3. File present, no marker    → user-owned. Write a sidecar
- *                                 `.claude/contex.md` instead and append a
- *                                 single one-line `@contex.md` import to their
+ *                                 `.claude/codesurf.md` instead and append a
+ *                                 single one-line `@codesurf.md` import to their
  *                                 CLAUDE.md (Claude Code's native include syntax).
  *                                 The import line is idempotent and reversible.
  */
 async function writeContexClaudeMd(workspacePath: string): Promise<void> {
   const claudeDir = join(workspacePath, '.claude')
   const claudeMdPath = join(claudeDir, 'CLAUDE.md')
-  const sidecarPath = join(claudeDir, 'contex.md')
-  const IMPORT_LINE = '@contex.md'
+  const sidecarPath = join(claudeDir, 'codesurf.md')
+  const IMPORT_LINE = '@codesurf.md'
 
   let existing = ''
   let exists = false
@@ -873,7 +915,7 @@ async function writeContexClaudeMd(workspacePath: string): Promise<void> {
   } catch { /* doesn't exist yet */ }
 
   // Case 2: already managed by us.
-  if (exists && existing.includes('<!-- contex-managed -->')) return
+  if (exists && existing.includes('<!-- codesurf-managed -->')) return
 
   await fs.mkdir(claudeDir, { recursive: true })
 
@@ -887,7 +929,7 @@ async function writeContexClaudeMd(workspacePath: string): Promise<void> {
     const next = `${existing.replace(/\s*$/, '')}\n\n${IMPORT_LINE}\n`
     await fs.writeFile(claudeMdPath, next, 'utf8')
     await fs.writeFile(sidecarPath, buildContexClaudeMdContent(), 'utf8')
-    mcpLog.info(`Added @contex.md import to existing ${claudeMdPath}`)
+    mcpLog.info(`Added @codesurf.md import to existing ${claudeMdPath}`)
     return
   }
 
@@ -897,53 +939,47 @@ async function writeContexClaudeMd(workspacePath: string): Promise<void> {
 }
 
 function buildContexClaudeMdContent(): string {
-  return `<!-- contex-managed -->
+  return `<!-- codesurf-managed -->
 # CodeSurf Canvas Agent
 
-You are running inside CodeSurf, an infinite canvas workspace where multiple AI agents collaborate.
-Your block ID is available as the environment variable \`CARD_ID\`.
+You are running inside CodeSurf, an infinite canvas workspace where multiple AI agents share agent rooms.
+Your block ID is the environment variable \`CARD_ID\`. Wires on the canvas put you in a room with other blocks.
 
 ## MANDATORY: First Action on Every Session
 
-Before doing ANYTHING else, you MUST run these two commands:
-
 \`\`\`
-1. mcp__contex__peer_set_state(tile_id=$CARD_ID, tile_type="terminal", status="idle", task="Ready")
-2. mcp__contex__peer_get_state(tile_id=$CARD_ID)
+1. mcp__codesurf__room_status(tile_id=$CARD_ID)
+2. mcp__codesurf__peer_set_state(tile_id=$CARD_ID, tile_type="terminal", status="idle", task="Ready")
+3. mcp__codesurf__room_consume(tile_id=$CARD_ID)   # if unconsumed > 0
 \`\`\`
 
-This registers you with the collaboration system and shows you who else is working.
+Also read \`~/.codesurf/room-inboxes/$CARD_ID/ROOM.md\` for a live inbox dump.
 
-## Peer Collaboration Protocol
+## Agent Room Protocol
 
 **When you receive a task:**
-1. Call \`peer_set_state\` with status "working" and describe your task
-2. Call \`peer_get_state\` to check what linked peers are doing
-3. If a peer lists the same files in their state, call \`peer_send_message\` to coordinate BEFORE editing
+1. \`peer_set_state\` status=working with a short task description
+2. \`room_status\` / \`peer_get_state\` to see room members
+3. \`room_post\` kind=task|handoff when another block should act
+4. Prefer room traffic over guessing what peers are doing
 
 **During work:**
-- Call \`peer_set_state\` whenever you switch files or tasks
-- Call \`peer_read_messages\` to check for incoming messages from peers
-- Use \`peer_add_todo\` for work you need a peer to handle
-- When you see a \`[contex]\` notification, call \`peer_read_messages\` immediately
+- \`room_consume\` when you need pending peer traffic
+- \`room_post\` for findings, blockers, questions
+- \`peer_set_state\` when files/tasks change
 
 **On completion:**
-- Call \`peer_set_state\` with status "done" and a summary
-- Call \`peer_complete_todo\` for any todos you finished
+- \`peer_set_state\` status=done
+- \`room_post\` kind=summary with what you finished
 
 **File conflict rule:**
-NEVER edit a file that a linked peer lists in their \`files\` array. Send them a \`peer_send_message\` first and wait for coordination.
+NEVER edit a file another room member lists in their files without \`room_post\` / \`peer_send_message\` coordination first.
 
-## Available Tool Prefixes
+## Tool prefix
 
-All contex tools use the prefix \`mcp__contex__\`. Examples:
-- \`mcp__contex__peer_set_state\` — declare your state
-- \`mcp__contex__peer_get_state\` — read peer states
-- \`mcp__contex__peer_send_message\` — message a peer
-- \`mcp__contex__peer_read_messages\` — read your messages
-- \`mcp__contex__peer_add_todo\` / \`peer_complete_todo\` — shared todos
-- \`mcp__contex__canvas_create_tile\` — create blocks on the canvas
-- \`mcp__contex__terminal_send_input\` — type into a peer terminal block
-- \`mcp__contex__chat_send_message\` — message a peer chat block
+All tools: \`mcp__codesurf__*\`
+- room_status / room_post / room_consume
+- peer_set_state / peer_get_state / peer_send_message
+- canvas_* / terminal_send_input / chat_send_message
 `
 }

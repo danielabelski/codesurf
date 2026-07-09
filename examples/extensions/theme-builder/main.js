@@ -4,7 +4,7 @@ const fs = require('fs')
 
 const THEMES_DIR = path.join(
   process.env.HOME || process.env.USERPROFILE || '',
-  '.contex', 'themes'
+  '.codesurf', 'themes'
 )
 
 function ensureDir() {

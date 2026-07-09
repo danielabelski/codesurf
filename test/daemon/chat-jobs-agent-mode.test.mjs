@@ -1287,7 +1287,7 @@ test('renderer: dispatchMessageContent deps include agentId + resolvedAgentMode 
 // loader — and prove it fails closed on real load/parse failures.
 
 async function writeAgentsJson(root, content) {
-  const dir = join(root, '.contex', 'customisation')
+  const dir = join(root, '.codesurf', 'customisation')
   await mkdirP(dir, { recursive: true })
   await writeFileP(join(dir, 'agents.json'), typeof content === 'string' ? content : JSON.stringify(content))
 }
@@ -1466,7 +1466,7 @@ test('chat:send wires authoritative resolution as a chokepoint above the runtime
 test('daemon runJob adds gated defense-in-depth re-resolution (#root-fix daemon)', () => {
   const src = readFileSync(join(ROOT_DIR, 'packages/codesurf-daemon/bin/chat-jobs.mjs'), 'utf8')
   assert.match(src, /resolveAuthoritativeAgentMode\(/, 'runJob must re-resolve authoritatively (defense in depth)')
-  // Gated on a PRESENT local agents.json so the cloud (no .contex) trusts main's
+  // Gated on a PRESENT local agents.json so the cloud (no .codesurf) trusts main's
   // shipped value rather than failing closed on a custom id.
   assert.match(src, /existsSync\(join\(workspaceDir, '\.contex', 'customisation', 'agents\.json'\)\)/, 'must gate re-resolution on a present local agents.json')
   assert.match(src, /request = \{ \.\.\.request, agentMode: authoritative\.agentMode \}/, 'must override request.agentMode with the re-resolved value')

@@ -1,4 +1,4 @@
-# Contex / CodeSurf — Code Review
+# CodeSurf / CodeSurf — Code Review
 
 **Date:** 2026-06-22
 **Scope:** Fresh review on top of the 2026-06-07 hardening wave. Focused on
@@ -15,7 +15,7 @@ this review finds new issues introduced since, plus a few latent ones.
 
 | ID | Status | Notes |
 |----|--------|-------|
-| HIGH `writeContexClaudeMd` clobber | **FIXED** | Three-way handling: absent→write, managed→no-op, user-owned→sidecar `.claude/contex.md` + reversible `@contex.md` import line. User CLAUDE.md never overwritten. |
+| HIGH `writeContexClaudeMd` clobber | **FIXED** | Three-way handling: absent→write, managed→no-op, user-owned→sidecar `.claude/contex.md` + reversible `@codesurf.md` import line. User CLAUDE.md never overwritten. |
 | M1 EventBus unbounded growth | **FIXED** | Global 1000-channel cap, microtask-coalesced eviction sweep (dormant channels pruned, oldest-first fallback), `lastPublishAt` tracking, cursor pruning in `dropChannel`. Subscribed channels never evicted. 2 new tests. |
 | M2 `tool_use` drop in reducer | **FIXED** | Synthesizes a completed block when no match (mirrors `tool_summary`). New test for orphan `tool_use`. |
 | M3 terminal agent detection drift | **FIXED** | `isAgent`/`isClaude` now derived from `ALLOWED_AGENT_BINS` via basename match — no spoofable substring test, no drift between allowlist and injection set. |

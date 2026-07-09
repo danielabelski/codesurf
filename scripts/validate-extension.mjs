@@ -11,7 +11,7 @@ const VALIDATION_ROOTS = [
   { root: BUNDLED_ROOT, label: 'bundled-extensions' },
 ]
 
-const HELP = `Validate Contex example or bundled extensions.
+const HELP = `Validate CodeSurf example or bundled extensions.
 
 Usage:
   node scripts/validate-extension.mjs --all

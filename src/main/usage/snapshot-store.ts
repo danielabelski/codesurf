@@ -2,7 +2,7 @@
  * UsageSnapshot store - pointer + overlay persistence.
  *
  * On disk:
- *   ~/.contex/usage/<provider>.json   - canonical full snapshot
+ *   ~/.codesurf/usage/<provider>.json   - canonical full snapshot
  *   provider_rate_limits_index        - SQLite row mirroring hot fields
  *
  * The JSON file is truth. The SQLite row exists only so the status-bar
@@ -20,11 +20,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'node:crypto'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { getDb, getDeviceId } from '../db'
 import type { UsageIndexRow, UsageProviderId, UsageSnapshot } from './types'
 
-const USAGE_DIR = join(CONTEX_HOME, 'usage')
+const USAGE_DIR = join(CODESURF_HOME, 'usage')
 
 function ensureUsageDir(): void {
   mkdirSync(USAGE_DIR, { recursive: true })

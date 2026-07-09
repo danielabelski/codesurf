@@ -1,4 +1,4 @@
-# Contex tile messaging protocol
+# CodeSurf tile messaging protocol
 
 Each tile now has a message store at:
 
@@ -14,7 +14,7 @@ Message files are Markdown first so humans can inspect them easily in Finder, Gi
 Structured data lives in two places:
 
 1. **YAML-style frontmatter header** for routing and indexing metadata
-2. **Optional `contex-data` JSON fenced block** for machine payloads
+2. **Optional `codesurf-data` JSON fenced block** for machine payloads
 
 That gives us readable files without giving up machine-friendly structure.
 
@@ -22,7 +22,7 @@ That gives us readable files without giving up machine-friendly structure.
 
 ```md
 ---
-protocol: "contex-message/v1"
+protocol: "codesurf-message/v1"
 id: "6d61b7f9-0f3a-47cb-9320-f0a0f4c6d314"
 threadId: "6d61b7f9-0f3a-47cb-9320-f0a0f4c6d314"
 fromTileId: "tile-a"
@@ -39,7 +39,7 @@ replyToId: null
 
 Can you send me the latest contract for the MCP workspace bridge?
 
-```contex-data
+```codesurf-data
 {
   "priority": "normal",
   "refs": ["workspace-bridge", "mcp"]
@@ -92,4 +92,4 @@ Renderer access is exposed on `window.electron.collab`:
 - `threadId` stays stable across replies.
 - `replyToId` links direct reply chains.
 - The body is plain Markdown so humans can read or edit it directly if needed.
-- The `contex-data` block is optional and intended for structured agent payloads.
+- The `codesurf-data` block is optional and intended for structured agent payloads.

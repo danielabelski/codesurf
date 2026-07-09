@@ -172,8 +172,8 @@ test('daemon skills list/get/install merge global and workspace roots with inspe
   const globalSkillDir = join(daemon.homeDir, 'skills', 'global-helper')
   const workspaceSkillDir = join(workspaceDir, '.codesurf', 'skills', 'workspace-helper')
   const compatCommandDir = join(workspaceDir, '.claude', 'commands')
-  const customSkillsFile = join(workspaceDir, '.contex', 'customisation', 'skills.json')
-  const tileSkillsFile = join(workspaceDir, '.contex', 'chat-skills', 'skills.json')
+  const customSkillsFile = join(workspaceDir, '.codesurf', 'customisation', 'skills.json')
+  const tileSkillsFile = join(workspaceDir, '.codesurf', 'chat-skills', 'skills.json')
 
   const globalSkillMdPath = join(globalSkillDir, 'SKILL.md')
   const workspaceSkillMdPath = join(workspaceSkillDir, 'SKILL.md')
@@ -297,7 +297,7 @@ test('listSkills skips unreadable custom skill directories without failing', asy
   const workspaceDir = join(homeDir, 'project')
   const blockedDir = join(workspaceDir, 'codesurf', 'skills')
   const goodSkillDir = join(workspaceDir, '.codesurf', 'skills', 'good-skill')
-  const locationsFile = join(workspaceDir, '.contex', 'customisation', 'locations-skills.json')
+  const locationsFile = join(workspaceDir, '.codesurf', 'customisation', 'locations-skills.json')
 
   await mkdir(blockedDir, { recursive: true })
   await writeFile(join(blockedDir, 'SKILL.md'), '---\nname: Blocked Skill\ndescription: hidden\n---\n', 'utf8')
@@ -325,7 +325,7 @@ test('listSkills treats a skill location file path as unreadable and continues',
   const homeDir = await makeTestTempDir('skills-index-enotdir-')
   const workspaceDir = join(homeDir, 'project')
   const blockedFile = join(workspaceDir, 'codesurf', 'skills')
-  const locationsFile = join(workspaceDir, '.contex', 'customisation', 'locations-skills.json')
+  const locationsFile = join(workspaceDir, '.codesurf', 'customisation', 'locations-skills.json')
 
   await mkdir(join(workspaceDir, 'codesurf'), { recursive: true })
   await writeFile(blockedFile, 'not a directory\n', 'utf8')

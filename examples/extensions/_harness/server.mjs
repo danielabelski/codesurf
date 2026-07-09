@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Contex Extension Dev Harness Server
+ * CodeSurf Extension Dev Harness Server
  * Serves examples/extensions/ as static root + /api/extensions discovery
  * for both tile entries and chat-surface entries.
  *
@@ -106,7 +106,7 @@ export async function startHarnessServer(
   const url = `http://${displayHost}:${actualPort}`
 
   if (!quiet) {
-    console.log(`\n  Contex Extension Harness`)
+    console.log(`\n  CodeSurf Extension Harness`)
     console.log(`  ${url}\n`)
   }
 

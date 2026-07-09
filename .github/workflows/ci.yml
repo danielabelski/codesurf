@@ -38,7 +38,7 @@ jobs:
         run: npm test
 
       - name: Install relay package deps
-        run: npm --prefix packages/contex-relay install
+        run: npm --prefix packages/codesurf-relay install
 
       - name: Run relay test suite
         run: npm run test:relay

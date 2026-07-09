@@ -114,7 +114,7 @@ function StickyNote({ initialContent, tileId, workspacePath }: { initialContent:
   }, [colour.bg, setColor])
 
   // Persist note content + appearance to tile context directory so agents can read via get_context
-  const contextDir = tileId && workspacePath ? `${workspacePath}/.contex/${tileId}/context` : null
+  const contextDir = tileId && workspacePath ? `${workspacePath}/.codesurf/${tileId}/context` : null
   const contextFile = contextDir ? `${contextDir}/note.txt` : null
   const settingsFile = contextDir ? `${contextDir}/note-settings.json` : null
 

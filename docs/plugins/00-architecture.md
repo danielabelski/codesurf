@@ -183,7 +183,7 @@ palette and the agent share one registry.
 Host services register **named capabilities** with a risk level; a plugin declares the
 ones it wants; the user **consents at enable/install time**; the broker returns a
 **scoped handle** with no ambient access. The relay 14-method surface becomes the
-broker's first consumer (retiring the hardcoded `id === 'contex-relay-suite'`
+broker's first consumer (retiring the hardcoded `id === 'codesurf-relay-suite'`
 special-case). `node` execution flows through the broker rather than raw `require()`
 into main. A `worker`/utilityProcess tier (true isolation) is the stretch. This gives
 the today-inert `permissions[]` real teeth — explicit user consent at install/enable
@@ -320,14 +320,14 @@ constrain power extensions.
 | Scope | Default | Requires explicit user opt-in? |
 |---|---|---|
 | bundled (shipped with the app) | enabled | no |
-| global (`~/.contex/extensions/`) | enabled | no |
+| global (`~/.codesurf/extensions/`) | enabled | no |
 | catalog (gallery entries) | **disabled** | yes — gallery "Add" / enable |
 | workspace (`.contex/extensions/` in a cloned repo) | **disabled** | yes — explicit enable, persisted |
 
 The workspace default-off is the critical protection: any project a user clones can
 ship `.contex/extensions/` but none of those power scripts will execute unless the
 user explicitly enables each one.  Opt-ins are persisted to
-`~/.contex/enabled-catalog-extensions.json`.
+`~/.codesurf/enabled-catalog-extensions.json`.
 
 A `[Security]` warning is emitted to the main-process log at `require()` time naming
 the extension, its scope, and the full entry path.  A separate `[Security]` warning is

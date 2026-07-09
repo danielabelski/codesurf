@@ -2,9 +2,9 @@ import { ipcMain } from 'electron'
 import { join } from 'path'
 import { promises as fsP } from 'fs'
 import { getMCPPort, getMCPToken, buildContexHttpMcpServerEntry } from '../mcp-server'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
-const mcpConfigPath = join(CONTEX_HOME, 'mcp-server.json')
+const mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
 
 function getRuntimeContexBase(): string | undefined {
   const port = getMCPPort()
@@ -66,12 +66,12 @@ export function registerMcpConfigIPC(): void {
       const contexBase = (typeof cfg.url === 'string' ? `${cfg.url.replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
       const globalServers = cfg.mcpServers ?? {}
       const normalizedServers = normalizeMcpServers(globalServers, (name) => {
-        if (name === 'contex' && contexBase) return contexBase
+        if ((name === 'codesurf' || name === 'contex') && contexBase) return contexBase
         return undefined
       })
       if (contexBase) {
-        normalizedServers['contex'] = {
-          ...(normalizedServers['contex'] ?? {}),
+        normalizedServers['codesurf'] = {
+          ...(normalizedServers['codesurf'] ?? {}),
           ...buildContexHttpMcpServerEntry(contexBase),
         }
       }
@@ -84,10 +84,10 @@ export function registerMcpConfigIPC(): void {
       const raw = await fsP.readFile(mcpConfigPath, 'utf8')
       const cfg = JSON.parse(raw) as { mcpServers?: Record<string, unknown>, url?: string, updatedAt?: string }
       const contexBase = (typeof cfg.url === 'string' ? `${cfg.url.replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
-      const contexServer = normalizeMcpServer(cfg.mcpServers?.contex ?? { url: contexBase }, contexBase)
+      const contexServer = normalizeMcpServer(cfg.mcpServers?.codesurf ?? cfg.mcpServers?.contex ?? { url: contexBase }, contexBase)
       const customServers = normalizeMcpServers(servers)
       cfg.mcpServers = {
-        contex: contexServer,
+        codesurf: contexServer,
         ...customServers
       }
       cfg.updatedAt = new Date().toISOString()
@@ -100,7 +100,7 @@ export function registerMcpConfigIPC(): void {
   // Per-workspace MCP servers
   ipcMain.handle('mcp:getWorkspaceServers', async (_, workspaceId: string) => {
     try {
-      const p = join(CONTEX_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
+      const p = join(CODESURF_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
       const raw = await fsP.readFile(p, 'utf8')
       return JSON.parse(raw)
     } catch { return {} }
@@ -108,7 +108,7 @@ export function registerMcpConfigIPC(): void {
 
   ipcMain.handle('mcp:saveWorkspaceServers', async (_, workspaceId: string, servers: Record<string, unknown>) => {
     try {
-      const dir = join(CONTEX_HOME, 'workspaces', workspaceId)
+      const dir = join(CODESURF_HOME, 'workspaces', workspaceId)
       await fsP.mkdir(dir, { recursive: true })
       const p = join(dir, 'mcp-servers.json')
       const normalized = normalizeMcpServers(servers)
@@ -135,7 +135,7 @@ export function registerMcpConfigIPC(): void {
       // Workspace servers
       let wsServers: Record<string, unknown> = {}
       try {
-        const wsPath = join(CONTEX_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
+        const wsPath = join(CODESURF_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
         const raw = await fsP.readFile(wsPath, 'utf8')
         wsServers = JSON.parse(raw)
       } catch (err) {
@@ -150,12 +150,12 @@ export function registerMcpConfigIPC(): void {
       const contexBase = (typeof globalCfgUrl === 'string' ? `${String(globalCfgUrl).replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
 
       const normalizedGlobal = normalizeMcpServers(globalServers, (name) => {
-        if (name === 'contex' && contexBase) return contexBase
+        if ((name === 'codesurf' || name === 'contex') && contexBase) return contexBase
         return undefined
       })
       if (contexBase) {
-        normalizedGlobal['contex'] = {
-          ...(normalizedGlobal['contex'] ?? {}),
+        normalizedGlobal['codesurf'] = {
+          ...(normalizedGlobal['codesurf'] ?? {}),
           ...buildContexHttpMcpServerEntry(contexBase),
         }
       }
@@ -171,8 +171,8 @@ export function registerMcpConfigIPC(): void {
         mergedAt: new Date().toISOString()
       }
 
-      // Also write a merged file inside .contex so it doesn't pollute the workspace root
-      const wsContex = join(CONTEX_HOME, 'workspaces', workspaceId, '.contex')
+      // Also write a merged file inside .codesurf so it doesn't pollute the workspace root
+      const wsContex = join(CODESURF_HOME, 'workspaces', workspaceId, '.codesurf')
       await fsP.mkdir(wsContex, { recursive: true })
       await fsP.writeFile(
         join(wsContex, 'mcp-merged.json'),

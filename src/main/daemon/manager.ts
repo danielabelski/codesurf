@@ -6,7 +6,7 @@ import {
   type DaemonStatusInfo,
 } from '@codesurf/daemon/manager'
 import { DAEMON_PACKAGE_VERSION } from '@codesurf/daemon/paths'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
 export type { DaemonStatusInfo }
 
@@ -45,7 +45,7 @@ function resolveDaemonScriptPath(): string {
 }
 
 const manager = createDaemonManager({
-  homeDir: CONTEX_HOME,
+  homeDir: CODESURF_HOME,
   getAppVersion: resolveAppVersion,
   resolveDaemonScriptPath,
   extraEnv: () => ({ CODESURF_HOST_APP_VERSION: resolveHostAppVersion() }),

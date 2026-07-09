@@ -1,4 +1,4 @@
-# Testing Guide for Contex Relay
+# Testing Guide for CodeSurf Relay
 
 ## Overview
 
@@ -16,7 +16,7 @@ The relay system now has comprehensive test coverage across multiple layers:
 ## Running Tests
 
 ```bash
-cd packages/contex-relay
+cd packages/codesurf-relay
 npm test          # Run once
 npm run test:watch # Watch mode
 ```
@@ -181,7 +181,7 @@ it('should do something with the runtime', async () => {
 ```typescript
 it('should work end-to-end', async () => {
   const tempDir = mkdtempSync(...)
-  const relay = new ContexRelay({ workspacePath: tempDir })
+  const relay = new CodesurfRelay({ workspacePath: tempDir })
   await relay.init()
   
   // Run your scenario
@@ -233,5 +233,5 @@ relay.on((event) => {
 ### Check File System State
 
 ```typescript
-console.log('Files:', readdirSync(join(tempDir, '.contex/relay/participants')))
+console.log('Files:', readdirSync(join(tempDir, '.codesurf/relay/participants')))
 ```

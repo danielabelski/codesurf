@@ -21,7 +21,7 @@ single boundary-hygiene alias fix.
 | soc-04 | `agent-adapter-registry` is well-bounded but has zero production consumers | low | M | `src/main/agents/agent-adapter-registry.ts`, `src/main/agents/agent-adapter-types.ts`, `test/agent-adapter-registry.test.ts` |
 | soc-05 | `event-bus` and `peer-state` are clean single-process modules — keep in main | low | S | `src/main/event-bus.ts`, `src/main/peer-state.ts` |
 | soc-06 | Theme/color engine is renderer-only and single-consumer — extract pure `colorMath` for testability, not packaging | low | S | `src/renderer/src/theme.ts`, `src/renderer/src/colorMath.ts`, `src/renderer/src/themeResolution.ts`, `src/renderer/src/theme-tokens.ts` |
-| soc-07 | `env.d.ts` imports `contex-relay` types via deep package-internal path | low | S | `src/renderer/src/env.d.ts` |
+| soc-07 | `env.d.ts` imports `codesurf-relay` types via deep package-internal path | low | S | `src/renderer/src/env.d.ts` |
 
 ---
 
@@ -259,7 +259,7 @@ surface for no consumer outside the Electron main process.
   (169).
 - `src/main/peer-state.ts`: module-scope `Map`s (lines 41-43), operations
   `setState` (70), `sendMessage` (162), `removeTile` (232).
-- Contrast `packages/contex-relay`, a package precisely because it is the
+- Contrast `packages/codesurf-relay`, a package precisely because it is the
   file-based, cross-process message store usable from daemon/TUI.
 
 **Recommendation.** Leave both in `src/main/`. They are correctly placed and
@@ -307,15 +307,15 @@ split, not a package. Keep everything under `src/renderer/src/`.
 
 ---
 
-### soc-07 — `env.d.ts` imports `contex-relay` types via deep package-internal path
+### soc-07 — `env.d.ts` imports `codesurf-relay` types via deep package-internal path
 
 **Severity:** low · **Effort:** S · **Category:** boundary-violation / package-hygiene
 
-**Problem.** The `contex-relay` package defines a proper exports map
-(`packages/contex-relay/package.json`: `main ./src/index.ts`, `exports '.'`),
-and `tsconfig` already aliases `@contex/chat-bridge` — but the renderer's
+**Problem.** The `codesurf-relay` package defines a proper exports map
+(`packages/codesurf-relay/package.json`: `main ./src/index.ts`, `exports '.'`),
+and `tsconfig` already aliases `@codesurf/chat-bridge` — but the renderer's
 `env.d.ts` reaches into the package by relative deep path
-`../../../packages/contex-relay/src` instead of via a `@contex/relay` alias.
+`../../../packages/codesurf-relay/src` instead of via a `@codesurf/relay` alias.
 This is the one real (if minor) instance of crossing a package boundary by
 internal path rather than through its published entry, coupling the renderer's
 type surface to the package's internal directory layout.
@@ -323,18 +323,18 @@ type surface to the package's internal directory layout.
 **Evidence.**
 
 - `src/renderer/src/env.d.ts:376-386` repeats
-  `import('../../../packages/contex-relay/src').RelayX` ~11 times
+  `import('../../../packages/codesurf-relay/src').RelayX` ~11 times
   (`RelayParticipant`, `RelayChannel`, `RelayMessage`,
   `RelayDirectMessageDraft`, etc.) — confirmed present.
-- By contrast `@contex/chat-bridge` has a tsconfig path alias
-  (`tsconfig.json:19-20`); `contex-relay`'s `package.json` declares an exports
+- By contrast `@codesurf/chat-bridge` has a tsconfig path alias
+  (`tsconfig.json:19-20`); `codesurf-relay`'s `package.json` declares an exports
   map but no alias is wired for it.
 
-**Recommendation.** Add a tsconfig path alias `@contex/relay` →
-`packages/contex-relay/src/index.ts` (mirroring the existing `@contex/chat-bridge`
+**Recommendation.** Add a tsconfig path alias `@codesurf/relay` →
+`packages/codesurf-relay/src/index.ts` (mirroring the existing `@codesurf/chat-bridge`
 alias) plus the matching Vite `resolve.alias`, then replace the deep
-`import('../../../packages/contex-relay/src')` references in `env.d.ts` with
-`@contex/relay`. This routes the renderer through the package's public entry,
+`import('../../../packages/codesurf-relay/src')` references in `env.d.ts` with
+`@codesurf/relay`. This routes the renderer through the package's public entry,
 decoupling it from internal file layout. Low effort, low risk, and aligns with
 the existing alias convention.
 
@@ -342,8 +342,8 @@ the existing alias convention.
 
 ## Quick wins
 
-- **soc-07 (S):** Add the `@contex/relay` tsconfig + Vite alias and swap the 11
-  deep `import('../../../packages/contex-relay/src')` references in `env.d.ts`.
+- **soc-07 (S):** Add the `@codesurf/relay` tsconfig + Vite alias and swap the 11
+  deep `import('../../../packages/codesurf-relay/src')` references in `env.d.ts`.
   Pure hygiene, low risk.
 - **soc-02 (S):** Move the already-exported prompt-convention symbols out of
   `chat.ts` into `src/main/chat/prompt-conventions.ts` and rewrite

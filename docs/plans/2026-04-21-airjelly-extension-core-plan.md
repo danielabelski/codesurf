@@ -128,7 +128,7 @@ Steps:
    - `notifications:show`
    - `activity:read`
 2. Expose capability request/grant plumbing in `ExtensionContext` instead of special-casing by extension id.
-3. Move Relay Suite from the hard-coded `manifest.id === 'contex-relay-suite'` branch to the capability registry.
+3. Move Relay Suite from the hard-coded `manifest.id === 'codesurf-relay-suite'` branch to the capability registry.
 4. Document the new capability model.
 
 Verification:

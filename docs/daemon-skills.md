@@ -8,7 +8,7 @@ The daemon always inspects these CodeSurf-owned roots first:
 
 - global: `~/.codesurf/skills`
 - workspace: `<workspace>/.codesurf/skills`
-- saved workspace custom skills: `<workspace>/.contex/customisation/skills.json`
+- saved workspace custom skills: `<workspace>/.codesurf/customisation/skills.json`
 
 ## Compatibility roots
 
@@ -25,8 +25,8 @@ To preserve the existing skill browser/chat surfaces, the daemon also scans the 
 
 Workspace custom location files are respected too:
 
-- `<workspace>/.contex/customisation/locations-skills.json`
-- `<workspace>/.contex/customisation/locations-prompts.json`
+- `<workspace>/.codesurf/customisation/locations-skills.json`
+- `<workspace>/.codesurf/customisation/locations-prompts.json`
 
 If no custom location override exists, the compatibility defaults above are used.
 
@@ -79,6 +79,6 @@ That means both runtime and daemon-backed chat paths can show:
 
 Selections stay daemon-readable and file-backed:
 
-- enabled ids come from `<workspace>/.contex/<tileId>/skills.json`
+- enabled ids come from `<workspace>/.codesurf/<tileId>/skills.json`
 - ids match the existing UI inventory ids (`discovered-<absolute-path>`, saved custom ids, and `command:/...` built-ins)
 - unresolved ids are reported in the daemon selection payload for inspection/debugging

@@ -7,7 +7,7 @@ import {
   isPathUnderRoot,
   validateFsPath,
 } from '../src/main/ipc/fs.ts'
-import { CONTEX_HOME } from '../src/main/paths.ts'
+import { CODESURF_HOME } from '../src/main/paths.ts'
 
 // `validateFsPath`'s `resolveHome()` falls back to `process.env.HOME` /
 // `os.homedir()` outside of Electron, which is the case here.
@@ -44,8 +44,8 @@ describe('assertPathAllowedForFs', () => {
     }))
   })
 
-  test('allows CONTEX_HOME when scoping is enabled', () => {
-    assert.doesNotThrow(() => assertPathAllowedForFs(join(CONTEX_HOME, 'settings.json'), {
+  test('allows CODESURF_HOME when scoping is enabled', () => {
+    assert.doesNotThrow(() => assertPathAllowedForFs(join(CODESURF_HOME, 'settings.json'), {
       restrictToWorkspaceRoots: true,
       allowedRoots: ['/tmp/workspace'],
     }))
@@ -61,7 +61,7 @@ describe('assertPathAllowedForFs', () => {
     )
   })
 
-  test('denies all non-CONTEX_HOME paths when no roots are configured', () => {
+  test('denies all non-CODESURF_HOME paths when no roots are configured', () => {
     assert.throws(
       () => assertPathAllowedForFs('/tmp/workspace/file.ts', {
         restrictToWorkspaceRoots: true,
@@ -86,12 +86,12 @@ describe('validateFsPath workspace scoping', () => {
     assert.equal(resolved, join('/tmp/workspace/readme.md'))
   })
 
-  test('always allows CONTEX_HOME paths when scoping is on', () => {
-    const resolved = validateFsPath(join(CONTEX_HOME, 'briefs/card.md'), {
+  test('always allows CODESURF_HOME paths when scoping is on', () => {
+    const resolved = validateFsPath(join(CODESURF_HOME, 'briefs/card.md'), {
       restrictToWorkspaceRoots: true,
       allowedRoots: ['/tmp/workspace'],
     })
-    assert.equal(resolved, join(CONTEX_HOME, 'briefs/card.md'))
+    assert.equal(resolved, join(CODESURF_HOME, 'briefs/card.md'))
   })
 
   test('rejects paths outside workspace roots when scoping is on', () => {

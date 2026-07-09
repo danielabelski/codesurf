@@ -10,13 +10,13 @@
  *       codesurf.db.reset-{timestamp}
  */
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
 export const DB_DIRNAME = 'db'
 export const DB_FILENAME = 'codesurf.db'
 export const DB_BACKUPS_DIRNAME = 'backups'
 
-export const DB_DIR = join(CONTEX_HOME, DB_DIRNAME)
+export const DB_DIR = join(CODESURF_HOME, DB_DIRNAME)
 export const DB_PATH = join(DB_DIR, DB_FILENAME)
 export const DB_BACKUPS_DIR = join(DB_DIR, DB_BACKUPS_DIRNAME)
 

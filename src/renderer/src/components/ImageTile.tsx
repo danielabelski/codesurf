@@ -31,7 +31,7 @@ interface ImageVariant {
 }
 
 function fileUrl(filePath: string): string {
-  return `contex-file://${encodeURI(filePath).replace(/#/g, '%23')}`
+  return `codesurf-file://${encodeURI(filePath).replace(/#/g, '%23')}`
 }
 
 function fileName(filePath: string): string {

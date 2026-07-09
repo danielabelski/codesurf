@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { LayoutTemplate } from '../../../shared/types'
 
-const TEMPLATES_PATH = '~/.contex/layout-templates.json'
+const TEMPLATES_PATH = '~/.codesurf/layout-templates.json'
 
 interface LayoutTemplatesFile {
   templates: LayoutTemplate[]

@@ -212,21 +212,21 @@ describe('buildSafeSpawnEnv — merges extra params', () => {
     assert.equal(env.CARD_ID, 'tile-42')
   })
 
-  it('adds CONTEX_DIR from extra', () => {
+  it('adds CODESURF_DIR from extra', () => {
     const env = buildSafeSpawnEnv(
-      { CONTEX_DIR: '/workspaces/project/.contex/tile-1' },
+      { CODESURF_DIR: '/workspaces/project/.codesurf/tile-1' },
       makeSourceEnv(),
     )
-    assert.equal(env.CONTEX_DIR, '/workspaces/project/.contex/tile-1')
+    assert.equal(env.CODESURF_DIR, '/workspaces/project/.codesurf/tile-1')
   })
 
   it('adds multiple extra vars at once', () => {
     const env = buildSafeSpawnEnv(
-      { CARD_ID: 'tile-7', CONTEX_DIR: '/tmp/.contex', COLLAB_DIR: '/tmp/.contex' },
+      { CARD_ID: 'tile-7', CODESURF_DIR: '/tmp/.contex', COLLAB_DIR: '/tmp/.contex' },
       makeSourceEnv(),
     )
     assert.equal(env.CARD_ID, 'tile-7')
-    assert.equal(env.CONTEX_DIR, '/tmp/.contex')
+    assert.equal(env.CODESURF_DIR, '/tmp/.contex')
     assert.equal(env.COLLAB_DIR, '/tmp/.contex')
   })
 

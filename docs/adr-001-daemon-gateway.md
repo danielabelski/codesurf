@@ -41,7 +41,7 @@ declined on evidence, which is the correct use of that authority:
   files only record wrapper launch cwd under `~/.omnigent` (`claude_native_state.py:1-38`) — a
   different, narrower contract. Adopting B means rebuilding this interop boundary around Python.
 - **CodeSurf's IDE substrate has no omnigent equivalent and would be rebuilt:** canvas/tile state
-  (`src/shared/types.ts:1004-1070`), relay/peer protocol (`packages/contex-relay/src/types.ts:30-169`,
+  (`src/shared/types.ts:1004-1070`), relay/peer protocol (`packages/codesurf-relay/src/types.ts:30-169`,
   `src/main/mcp/tools/peer-bridge.ts:123-232`), worktree checkpoints (`checkpoints.mjs`).
 
 B is feasible (omnigent runs fully local on SQLite, loopback, single-user header auth —

@@ -46,7 +46,7 @@ export interface UsageTotals {
   sessions30d: number
 }
 
-/** What we persist to ~/.contex/usage/<provider>.json and surface to the UI. */
+/** What we persist to ~/.codesurf/usage/<provider>.json and surface to the UI. */
 export interface UsageSnapshot {
   provider: UsageProviderId
   /** ISO timestamp of when this snapshot was last refreshed. */

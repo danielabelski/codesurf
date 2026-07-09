@@ -394,11 +394,11 @@ export class ExtensionBrokerHost {
 
       case 'relayHost': {
         if (method !== 'install') throw new Error(`Unknown relayHost method: ${method}`)
-        if (this.manifest.id !== 'contex-relay-suite') {
-          // Hardcoded transition: only contex-relay-suite can call this until
+        if (this.manifest.id !== 'codesurf-relay-suite') {
+          // Hardcoded transition: only codesurf-relay-suite can call this until
           // all installed relay suites declare the 'relay' capability explicitly.
           throw Object.assign(
-            new Error(`relayHost.install is only available to contex-relay-suite (got: ${this.manifest.id})`),
+            new Error(`relayHost.install is only available to codesurf-relay-suite (got: ${this.manifest.id})`),
             { code: BROKER_ERROR_CODES['capability-denied'] },
           )
         }

@@ -297,6 +297,8 @@ interface ElectronAPI {
     sync(payload: { tileId: string; url: string; mode: 'desktop' | 'mobile'; zIndex: number; visible: boolean; bounds: { left: number; top: number; width: number; height: number } }): Promise<unknown>
     command(payload: { tileId: string; command: 'back' | 'forward' | 'reload' | 'stop' | 'home' | 'navigate' | 'mode'; url?: string; mode?: 'desktop' | 'mobile' }): Promise<unknown>
     destroy(tileId: string): Promise<void>
+    /** Guest paint throttle: webContentsId from webview.getWebContentsId(), main applies setFrameRate. */
+    setFrameRate?(webContentsId: number, fps: number): Promise<{ ok: boolean }>
     onEvent(cb: (event: { tileId: string; currentUrl: string; canGoBack: boolean; canGoForward: boolean; isLoading: boolean; mode: 'desktop' | 'mobile' }) => void): () => void
     onNewWindow(cb: (event: { url: string }) => void): () => void
   }
@@ -400,22 +402,22 @@ interface ElectronAPI {
   relay: {
     init(workspacePath: string): Promise<boolean>
     syncWorkspace(workspaceId: string, workspacePath: string, tiles: import('../../shared/types').TileState[]): Promise<unknown[]>
-    listParticipants(workspacePath: string): Promise<import('../../../packages/contex-relay/src').RelayParticipant[]>
-    listChannels(workspacePath: string): Promise<import('../../../packages/contex-relay/src').RelayChannel[]>
-    listCentralFeed(workspacePath: string, limit?: number): Promise<import('../../../packages/contex-relay/src').RelayMessageListItem[]>
-    listMessages(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', limit?: number): Promise<import('../../../packages/contex-relay/src').RelayMessageListItem[]>
-    readMessage(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string): Promise<import('../../../packages/contex-relay/src').RelayMessage | null>
-    sendDirectMessage(workspacePath: string, from: string, draft: import('../../../packages/contex-relay/src').RelayDirectMessageDraft): Promise<import('../../../packages/contex-relay/src').RelayMessage>
-    sendChannelMessage(workspacePath: string, from: string, draft: import('../../../packages/contex-relay/src').RelayChannelMessageDraft): Promise<import('../../../packages/contex-relay/src').RelayMessage>
-    updateMessageStatus(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string, status: import('../../../packages/contex-relay/src').RelayMessageStatus): Promise<boolean>
+    listParticipants(workspacePath: string): Promise<import('../../../packages/codesurf-relay/src').RelayParticipant[]>
+    listChannels(workspacePath: string): Promise<import('../../../packages/codesurf-relay/src').RelayChannel[]>
+    listCentralFeed(workspacePath: string, limit?: number): Promise<import('../../../packages/codesurf-relay/src').RelayMessageListItem[]>
+    listMessages(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', limit?: number): Promise<import('../../../packages/codesurf-relay/src').RelayMessageListItem[]>
+    readMessage(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string): Promise<import('../../../packages/codesurf-relay/src').RelayMessage | null>
+    sendDirectMessage(workspacePath: string, from: string, draft: import('../../../packages/codesurf-relay/src').RelayDirectMessageDraft): Promise<import('../../../packages/codesurf-relay/src').RelayMessage>
+    sendChannelMessage(workspacePath: string, from: string, draft: import('../../../packages/codesurf-relay/src').RelayChannelMessageDraft): Promise<import('../../../packages/codesurf-relay/src').RelayMessage>
+    updateMessageStatus(workspacePath: string, participantId: string, mailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string, status: import('../../../packages/codesurf-relay/src').RelayMessageStatus): Promise<boolean>
     moveMessage(workspacePath: string, participantId: string, fromMailbox: 'inbox' | 'sent' | 'memory' | 'bin', toMailbox: 'inbox' | 'sent' | 'memory' | 'bin', filename: string): Promise<boolean>
-    setWorkContext(workspacePath: string, participantId: string, work: import('../../../packages/contex-relay/src').RelayWorkContext): Promise<import('../../../packages/contex-relay/src').RelayParticipant>
-    analyzeRelationships(workspacePath: string): Promise<import('../../../packages/contex-relay/src').RelayRelationshipHint[]>
-    spawnAgent(workspacePath: string, request: import('../../../packages/contex-relay/src').RelaySpawnRequest): Promise<import('../../../packages/contex-relay/src').RelayParticipant>
+    setWorkContext(workspacePath: string, participantId: string, work: import('../../../packages/codesurf-relay/src').RelayWorkContext): Promise<import('../../../packages/codesurf-relay/src').RelayParticipant>
+    analyzeRelationships(workspacePath: string): Promise<import('../../../packages/codesurf-relay/src').RelayRelationshipHint[]>
+    spawnAgent(workspacePath: string, request: import('../../../packages/codesurf-relay/src').RelaySpawnRequest): Promise<import('../../../packages/codesurf-relay/src').RelayParticipant>
     stopAgent(workspacePath: string, participantId: string): Promise<boolean>
     waitForReady(workspacePath: string, ids: string[], timeoutMs?: number): Promise<boolean>
-    waitForAny(workspacePath: string, ids: string[], timeoutMs?: number): Promise<import('../../../packages/contex-relay/src').RelayParticipant>
-    onEvent(callback: (data: { workspacePath: string; event: import('../../../packages/contex-relay/src').RelayEvent }) => void): () => void
+    waitForAny(workspacePath: string, ids: string[], timeoutMs?: number): Promise<import('../../../packages/codesurf-relay/src').RelayParticipant>
+    onEvent(callback: (data: { workspacePath: string; event: import('../../../packages/codesurf-relay/src').RelayEvent }) => void): () => void
   }
   extensions: {
     list(): Promise<Array<{ id: string; name: string; version: string; description?: string; author?: string; tier: 'safe' | 'power'; ui?: import('../../shared/types').ExtensionManifest['ui']; enabled: boolean; contributes?: import('../../shared/types').ExtensionManifest['contributes'] }>>

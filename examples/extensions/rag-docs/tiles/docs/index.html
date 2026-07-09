@@ -182,8 +182,8 @@ function initBridge(b) {
   b.ext.invoke('ping').then(() => setMode('semantic')).catch(() => setMode('keyword'))
 }
 window.addEventListener('message', e => {
-  if (e.data && e.data.type === 'contex-bridge-ready') initBridge(e.data.bridge || window.contex)
-  if (e.data && e.data.type === 'contex-action-invoke') onAction(e.data)
+  if (e.data && e.data.type === 'codesurf-bridge-ready') initBridge(e.data.bridge || window.contex)
+  if (e.data && e.data.type === 'codesurf-action-invoke') onAction(e.data)
 })
 if (window.contex) initBridge(window.contex)
 
@@ -200,7 +200,7 @@ function onAction(msg) {
     document.getElementById('qi').value = query
     doSearch(query); switchTab('results')
   }
-  if (msg.requestId) window.parent.postMessage({type:'contex-action-result',tileId:TID,requestId:msg.requestId,result:'ok'},'*')
+  if (msg.requestId) window.parent.postMessage({type:'codesurf-action-result',tileId:TID,requestId:msg.requestId,result:'ok'},'*')
 }
 
 /* chunking */

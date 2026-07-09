@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import type { TileState } from '../../../shared/types'
 import type { AppTheme } from '../theme'
 import type { CanvasDragState } from '../hooks/useCanvasEngine'
@@ -8,6 +8,7 @@ import type { AnchorPoint } from '../lib/discoveryRuntime'
 import { CanvasTileItem } from './canvas/CanvasTileItem'
 import { perfFlags, CANVAS_LOD_ZOOM } from '../perfFlags'
 import { isTileOffscreen, isHeavyTileType } from '../lib/canvasCulling'
+import { setManagedWebviewPaintActive } from './browser/webviewManager'
 
 type ResizeDir = 'e' | 's' | 'se' | 'w' | 'n' | 'nw' | 'ne' | 'sw'
 type Side = AnchorPoint['side']
@@ -23,6 +24,8 @@ export type AppCanvasTilesProps = {
   expandedCanvasMembership: ExpandedCanvasMembership | null
   dragState: CanvasDragState
   viewport: { tx: number, ty: number, zoom: number }
+  /** Canvas surface element — culling uses its client rect, not the full window. */
+  canvasRef?: React.RefObject<HTMLDivElement | null>
   canvasPointerWorld: { x: number, y: number } | null
   theme: AppTheme
   dsc: { line: string, dot: string, bg: string, text: string }
@@ -66,6 +69,7 @@ export function AppCanvasTiles(props: AppCanvasTilesProps): JSX.Element {
     expandedCanvasMembership,
     dragState,
     viewport,
+    canvasRef,
     theme,
     dsc,
     workspaceId,
@@ -95,8 +99,34 @@ export function AppCanvasTiles(props: AppCanvasTilesProps): JSX.Element {
   // event — imperative gestures throttle commits), so this stays cheap.
   const cullingOn = perfFlags.viewportCulling
   const lodActive = perfFlags.zoomLod && viewport.zoom < CANVAS_LOD_ZOOM
-  const screenW = typeof window !== 'undefined' ? window.innerWidth : 1920
-  const screenH = typeof window !== 'undefined' ? window.innerHeight : 1080
+  // Cull against the canvas surface rect (sidebar/panels excluded), not the
+  // full browser window — otherwise tiles under chrome look wrongly culled.
+  const canvasEl = canvasRef?.current
+  const screenW = canvasEl?.clientWidth
+    ?? (typeof window !== 'undefined' ? window.innerWidth : 1920)
+  const screenH = canvasEl?.clientHeight
+    ?? (typeof window !== 'undefined' ? window.innerHeight : 1080)
+  const lastPaintActiveRef = useRef<Map<string, boolean>>(new Map())
+
+  // Browser webview paint freeze: throttle frame production when the body is
+  // culled (off-canvas). Restores full rate when visible again. Pure policy
+  // lives in webviewPaint.ts; this only applies it when the flag flips.
+  useEffect(() => {
+    if (!cullingOn) return
+    for (const tile of visibleTiles) {
+      if (tile.type !== 'browser' && !tile.type.startsWith('ext:')) continue
+      const interacting =
+        tile.id === selectedTileId ||
+        selectedTileIds.has(tile.id) ||
+        panelTileIds.has(tile.id)
+      const culled = !interacting && isTileOffscreen(tile, viewport, screenW, screenH)
+      const paintActive = !culled
+      const prev = lastPaintActiveRef.current.get(tile.id)
+      if (prev === paintActive) continue
+      lastPaintActiveRef.current.set(tile.id, paintActive)
+      setManagedWebviewPaintActive(tile.id, paintActive)
+    }
+  }, [visibleTiles, viewport, screenW, screenH, cullingOn, selectedTileId, selectedTileIds, panelTileIds])
 
   // Only cheap, per-tile *scalars* are computed here. The expensive part — the tile
   // chrome, body (Monaco/terminal/browser), link sensors and handle — lives in the

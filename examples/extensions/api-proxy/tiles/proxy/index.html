@@ -285,8 +285,8 @@ function initBridge(b) {
   })
 }
 window.addEventListener('message', e => {
-  if (e.data && e.data.type === 'contex-bridge-ready') initBridge(e.data.bridge || window.contex)
-  if (e.data && e.data.type === 'contex-action-invoke') onAction(e.data)
+  if (e.data && e.data.type === 'codesurf-bridge-ready') initBridge(e.data.bridge || window.contex)
+  if (e.data && e.data.type === 'codesurf-action-invoke') onAction(e.data)
 })
 if (window.contex) initBridge(window.contex)
 
@@ -304,13 +304,13 @@ function onAction(msg) {
     const url = 'http://localhost:' + cfg.port + '/v1'
     if (msg.requestId) {
       window.parent.postMessage({
-        type: 'contex-action-result', tileId: TID, requestId: msg.requestId, result: { url }
+        type: 'codesurf-action-result', tileId: TID, requestId: msg.requestId, result: { url }
       }, '*')
       return
     }
   }
   if (msg.requestId) {
-    window.parent.postMessage({type:'contex-action-result',tileId:TID,requestId:msg.requestId,result:'ok'},'*')
+    window.parent.postMessage({type:'codesurf-action-result',tileId:TID,requestId:msg.requestId,result:'ok'},'*')
   }
 }
 

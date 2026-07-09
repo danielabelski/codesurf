@@ -44,7 +44,7 @@ export function ensureMonacoConfigured(): void {
 
 export function getMonacoThemeName(theme: AppTheme): string {
   ensureMonacoConfigured()
-  const monacoThemeName = `contex-${theme.id}`
+  const monacoThemeName = `codesurf-${theme.id}`
   monaco.editor.defineTheme(monacoThemeName, {
     base: theme.editor.monacoBase,
     inherit: true,

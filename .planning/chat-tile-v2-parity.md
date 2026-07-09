@@ -285,7 +285,7 @@ Critical refs:
 ```
 
 ### 7.2 Disk persistence (debounced 500ms via `persistTimerRef`)
-Written via `canvas:saveTileState` → `~/.contex/workspaces/{id}/tiles/{tileId}.json`.
+Written via `canvas:saveTileState` → `~/.codesurf/workspaces/{id}/tiles/{tileId}.json`.
 
 ### 7.3 External stores referenced
 - `chatStreamingStore` — `setChatStreaming(tileId, isStreaming)` for cross-tile awareness
@@ -294,7 +294,7 @@ Written via `canvas:saveTileState` → `~/.contex/workspaces/{id}/tiles/{tileId}
 - `chatTileRuntimeState` — `getChatTileRuntimeState / setChatTileRuntimeState / reviveChatTileRuntimeState / isChatTileRuntimeStateDisposed`
 
 ### 7.4 Skills/commands discovery roots
-Via `CHAT_DEFAULT_SKILL_LOCATIONS` (overridable by `~/.contex/workspaces/{id}/.contex/customisation/locations-skills.json` and `locations-prompts.json`):
+Via `CHAT_DEFAULT_SKILL_LOCATIONS` (overridable by `~/.codesurf/workspaces/{id}/.contex/customisation/locations-skills.json` and `locations-prompts.json`):
 ```
 $HOME/.claude/commands
 $WORKSPACE/.claude/commands
@@ -1052,7 +1052,7 @@ apps/
         assistant-ui/                ← MarkdownText, ToolFallback, etc.
 
 packages/
-  contex-chat-bridge/                ← NEW shared TS package: the host↔chat protocol
+  codesurf-chat-bridge/                ← NEW shared TS package: the host↔chat protocol
     package.json
     src/
       protocol.ts                    ← message shapes (request/response/event/stream chunk)
@@ -1133,7 +1133,7 @@ Everything else canvas-related stays. Other tiles (terminal, code editor, browse
 ### Phase 0 (revised) — do NOW
 
 1. Create `apps/chat-app/` with Vite + React 19 + TypeScript scaffold. assistant-ui dependencies installed inside this package, NOT in root.
-2. Create `packages/contex-chat-bridge/` with `protocol.ts`, `client.ts`, `host.ts`.
+2. Create `packages/codesurf-chat-bridge/` with `protocol.ts`, `client.ts`, `host.ts`.
 3. Create `src/renderer/src/components/ChatTileWebview.tsx` using the host bridge adapter.
 4. Wire feature flag `settings.experimental?.chatTileWebview` (default false) at the canvas mount site.
 5. Make a minimal echo path work end-to-end: type a message in webview chat → host receives via bridge → host echoes back via channel event → chat renders the response.

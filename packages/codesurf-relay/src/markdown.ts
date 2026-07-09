@@ -20,7 +20,7 @@ function decodeValue(raw: string): string | number | null {
 }
 
 function extractStructuredData(body: string): { body: string; data?: Record<string, unknown> } {
-  const match = body.match(/\n```contex-data\n([\s\S]*?)\n```\s*$/)
+  const match = body.match(/\n```codesurf-data\n([\s\S]*?)\n```\s*$/)
   if (!match) return { body: body.trim() }
   try {
     return {
@@ -58,7 +58,7 @@ export function renderRelayMessage(meta: RelayMessageMeta, body: string, data?: 
   ]
 
   if (data && Object.keys(data).length > 0) {
-    lines.push('', '```contex-data', JSON.stringify(data, null, 2), '```')
+    lines.push('', '```codesurf-data', JSON.stringify(data, null, 2), '```')
   }
 
   lines.push('')
@@ -76,11 +76,11 @@ export function parseRelayMessage(content: string, mailbox: RelayMailbox, filena
     values.set(line.slice(0, idx).trim(), decodeValue(line.slice(idx + 1)))
   }
 
-  if (values.get('protocol') !== 'contex-relay/v1') return null
+  if (values.get('protocol') !== 'codesurf-relay/v1') return null
 
   const payload = extractStructuredData(match[2] ?? '')
   const meta: RelayMessageMeta = {
-    protocol: 'contex-relay/v1',
+    protocol: 'codesurf-relay/v1',
     id: String(values.get('id') ?? ''),
     threadId: String(values.get('threadId') ?? ''),
     scope: String(values.get('scope') ?? 'direct') as RelayMessageMeta['scope'],

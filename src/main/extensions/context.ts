@@ -19,7 +19,7 @@ import type { ExtensionManifest, ExtensionMCPToolContrib } from '../../shared/ty
 import type { ExtensionRegistry } from './registry'
 import { registerRelayIPC, unregisterRelayIPC } from '../ipc/relay'
 import { stopAllRelayServices } from '../relay/service'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { getPluginState, setPluginState, replacePluginState, stateChannel } from './plugin-store'
 import { log } from '../utils/logger.ts'
 
@@ -52,7 +52,7 @@ export class ExtensionContext {
   }
 
   /**
-   * Relay Suite only: registers relay:* IPC + ContexRelay host. Returns dispose
+   * Relay Suite only: registers relay:* IPC + CodesurfRelay host. Returns dispose
    * (unregister IPC + stop relay services). Core app does not register relay.
    */
   readonly relayHost: { install: () => () => void } | undefined
@@ -146,7 +146,7 @@ export class ExtensionContext {
       },
     }
 
-    if (manifest.id === 'contex-relay-suite') {
+    if (manifest.id === 'codesurf-relay-suite') {
       this.relayHost = {
         install: () => {
           registerRelayIPC()
@@ -163,7 +163,7 @@ export class ExtensionContext {
     // renderer bridge and ext:settings-* IPC use. Previously this only returned the
     // manifest default and never read the user's saved value (a bug); now it merges
     // persisted values over defaults, and can write them back.
-    const settingsFile = join(CONTEX_HOME, 'extension-settings', `${extId}.json`)
+    const settingsFile = join(CODESURF_HOME, 'extension-settings', `${extId}.json`)
     // Declared keys come from v1 contributes.settings and v2 settingsSections controls.
     const declaredKeys = (): Set<string> => {
       const keys = new Set<string>()
@@ -208,7 +208,7 @@ export class ExtensionContext {
           Object.entries(values ?? {}).filter(([key]) => allowed.has(key)),
         )
         const next = { ...readPersisted(), ...filtered }
-        mkdirSync(join(CONTEX_HOME, 'extension-settings'), { recursive: true })
+        mkdirSync(join(CODESURF_HOME, 'extension-settings'), { recursive: true })
         writeFileSync(settingsFile, JSON.stringify(next, null, 2))
       },
     }

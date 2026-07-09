@@ -61,8 +61,8 @@ describe('authorizeRequestPath', () => {
   })
 
   test('rejects unsupported (non-media) extensions', () => {
-    assert.throws(() => authorizeRequestPath('/tmp/secret.txt', HOME), /Unsupported contex-file type/)
-    assert.throws(() => authorizeRequestPath(`${HOME}/.netrc`, HOME), /Unsupported contex-file type/)
+    assert.throws(() => authorizeRequestPath('/tmp/secret.txt', HOME), /Unsupported codesurf-file type/)
+    assert.throws(() => authorizeRequestPath(`${HOME}/.netrc`, HOME), /Unsupported codesurf-file type/)
   })
 
   test('rejects media files inside sensitive home dirs', () => {

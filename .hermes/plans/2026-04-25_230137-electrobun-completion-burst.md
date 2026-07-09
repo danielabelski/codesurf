@@ -22,7 +22,7 @@ Updated `/Users/jkneen/clawd/collaborator-clone/electrobun/bun/index.ts` to impl
 - activity upsert/query/byTile/byAgent/delete/clearTile in memory
 - git status/branches/checkout/createBranch via git CLI
 - execution host resolution to the local Electrobun runtime
-- MCP config reads from `~/.contex/mcp-server.json`
+- MCP config reads from `~/.codesurf/mcp-server.json`
 - daemon/updater/local-proxy/chrome-sync UI-safe runtime responses
 
 ### Terminal parity

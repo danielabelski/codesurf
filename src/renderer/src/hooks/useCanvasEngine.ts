@@ -242,6 +242,7 @@ export type UseCanvasEngineReturn = {
   viewport: CanvasViewport
   setViewport: Dispatch<SetStateAction<CanvasViewport>>
   viewportRef: MutableRefObject<CanvasViewport>
+  pendingViewportRef: MutableRefObject<CanvasViewport>
   nextZIndex: number
   setNextZIndex: Dispatch<SetStateAction<number>>
   nextZIndexRef: MutableRefObject<number>
@@ -821,6 +822,7 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
     viewport,
     setViewport,
     viewportRef,
+    pendingViewportRef,
     nextZIndex,
     setNextZIndex,
     nextZIndexRef,

@@ -8,14 +8,15 @@
 //   2. ~/.codex/pets     (codex overlay)
 //   3. ~/.hermes/pets    (hermes overlay)
 //
-// The renderer loads spritesheets via the contex-file:// protocol and animates
+// The renderer loads spritesheets via the codesurf-file:// protocol and animates
 // using CSS background-position — no frame extraction needed in main.
 
 import { ipcMain } from 'electron'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { extname, join, resolve } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
+import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
 import type {
   PetGalleryEntry,
   PetGalleryResponse,
@@ -26,6 +27,9 @@ import type {
 } from '../../shared/pet-types'
 import { broadcastToRenderer } from '../utils/broadcast'
 import { parseSuffixedPetId } from './pets-id'
+import { resolvePetBundleDir, tryResolvePetBundleDir } from './pets-path'
+
+export { resolvePetBundleDir } from './pets-path'
 
 // ── Scan dirs ───────────────────────────────────────────────────────────────────
 
@@ -39,13 +43,13 @@ function hermesHome(): string {
 
 function petsDirs(): string[] {
   return [
-    join(CONTEX_HOME, 'pets'),
+    join(CODESURF_HOME, 'pets'),
     join(codexHome(), 'pets'),
     join(hermesHome(), 'pets'),
   ]
 }
 
-const PRIMARY_PETS_DIR = join(CONTEX_HOME, 'pets')
+const PRIMARY_PETS_DIR = join(CODESURF_HOME, 'pets')
 
 // ── Manifest loading ───────────────────────────────────────────────────────────
 
@@ -121,7 +125,8 @@ function loadInstalledIds(): Set<string> {
   try {
     for (const entry of readdirSync(PRIMARY_PETS_DIR)) {
       if (entry.startsWith('.')) continue
-      installed.add(join(PRIMARY_PETS_DIR, entry))
+      const bundleDir = tryResolvePetBundleDir(PRIMARY_PETS_DIR, entry)
+      if (bundleDir) installed.add(bundleDir)
     }
   } catch {
     // ignore
@@ -145,15 +150,22 @@ function listPetManifests(): PetManifest[] {
     }
     for (const entry of entries) {
       if (entry.startsWith('.')) continue
-      const bundleDir = join(dir, entry)
-      const stat = statSync(bundleDir)
+      const bundleDir = tryResolvePetBundleDir(dir, entry)
+      if (!bundleDir) continue
+      let stat
+      try {
+        stat = statSync(bundleDir)
+      } catch {
+        continue
+      }
       if (!stat.isDirectory()) continue
 
       const meta = loadBundleMetadata(bundleDir, installedDirs)
       if (!meta) continue
 
       if (seenIds.has(meta.id)) {
-        const suffixed = `${meta.id}__${entry.replace(/[^a-zA-Z0-9_-]/g, '-')}`
+        const safeEntry = entry.replace(/[^a-zA-Z0-9_-]/g, '-')
+        const suffixed = `${meta.id}__${safeEntry}`
         out.push({
           ...meta,
           id: suffixed,
@@ -176,20 +188,23 @@ function listPetManifests(): PetManifest[] {
  *  Handles suffixed ids (e.g. `id__dirname`) produced by listPetManifests
  *  when the same pet id appears in multiple scan dirs. */
 function loadPetManifest(id: string): PetManifest | null {
+  if (typeof id !== 'string' || id.length === 0) return null
   const installedDirs = loadInstalledIds()
+  // Plain id path — reject traversal before joining under any scan dir.
   for (const dir of petsDirs()) {
-    const candidate = join(dir, id)
-    if (!existsSync(candidate)) continue
+    const candidate = tryResolvePetBundleDir(dir, id)
+    if (!candidate || !existsSync(candidate)) continue
     const m = loadBundleMetadata(candidate, installedDirs)
     if (m && m.id === id) return m
   }
   // Handle suffixed ids: `originalId__dirName` — look up the dirName
   // segment and return the manifest with the suffixed id patched in.
+  // parseSuffixedPetId already rejects path separators / `..`.
   const suffix = parseSuffixedPetId(id)
   if (suffix) {
     for (const dir of petsDirs()) {
-      const candidate = join(dir, suffix)
-      if (!existsSync(candidate)) continue
+      const candidate = tryResolvePetBundleDir(dir, suffix)
+      if (!candidate || !existsSync(candidate)) continue
       const m = loadBundleMetadata(candidate, installedDirs)
       if (m) return { ...m, id }
     }
@@ -229,9 +244,20 @@ async function fetchGallery(): Promise<PetGalleryEntry[]> {
 }
 
 async function downloadAndInstallPet(slug: string): Promise<PetInstallResponse> {
+  let safeSlug: string
+  let bundleDir: string
+  try {
+    safeSlug = assertSafePathSegment(slug, 'pet slug')
+    bundleDir = resolveInside(PRIMARY_PETS_DIR, safeSlug)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Invalid pet slug' }
+  }
+
   try {
     // Download the bundle as a JSON manifest + spritesheet pair.
-    const manifestResp = await fetch(`${PETDEX_DOWNLOAD_BASE}/${slug}/manifest.json`, {
+    // Use encodeURIComponent so a slug never becomes a path segment on the CDN URL.
+    const encoded = encodeURIComponent(safeSlug)
+    const manifestResp = await fetch(`${PETDEX_DOWNLOAD_BASE}/${encoded}/manifest.json`, {
       signal: AbortSignal.timeout(15000),
     })
     if (!manifestResp.ok) {
@@ -247,14 +273,12 @@ async function downloadAndInstallPet(slug: string): Promise<PetInstallResponse> 
       }
     }
 
-    // Create bundle dir
-    const bundleDir = join(PRIMARY_PETS_DIR, slug as string)
     if (!existsSync(bundleDir)) {
       mkdirSync(bundleDir, { recursive: true })
     }
 
     // Download spritesheet
-    const sheetResp = await fetch(`${PETDEX_DOWNLOAD_BASE}/${slug}/spritesheet.webp`, {
+    const sheetResp = await fetch(`${PETDEX_DOWNLOAD_BASE}/${encoded}/spritesheet.webp`, {
       signal: AbortSignal.timeout(60000),
     })
     if (!sheetResp.ok) {
@@ -280,7 +304,7 @@ async function downloadAndInstallPet(slug: string): Promise<PetInstallResponse> 
       ),
     )
 
-    broadcastToRenderer('pets:gallery-changed', { slug })
+    broadcastToRenderer('pets:gallery-changed', { slug: safeSlug })
     return { ok: true }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -289,8 +313,13 @@ async function downloadAndInstallPet(slug: string): Promise<PetInstallResponse> 
 }
 
 function removePet(slug: string): PetRemoveResponse {
+  let bundleDir: string
   try {
-    const bundleDir = join(PRIMARY_PETS_DIR, slug)
+    bundleDir = resolvePetBundleDir(PRIMARY_PETS_DIR, slug)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Invalid pet slug' }
+  }
+  try {
     if (!existsSync(bundleDir)) {
       return { ok: false, error: `Pet "${slug}" is not installed locally` }
     }
@@ -310,12 +339,22 @@ function removePet(slug: string): PetRemoveResponse {
 
 // ── Thumbnail generation ────────────────────────────────────────────────────────
 
-const THUMBS_DIR = join(CONTEX_HOME, 'pets', '.thumbs')
+const THUMBS_DIR = join(CODESURF_HOME, 'pets', '.thumbs')
 
 async function ensureThumbnail(manifest: PetManifest): Promise<string | null> {
   // Thumbnails are PNG extractions of the first frame (idle[0]) from the
   // spritesheet. They're displayed in the picker at small size.
-  const thumbPath = join(THUMBS_DIR, `${manifest.id}.png`)
+  // Thumb filenames use only the safe path segment of the id (suffix-safe).
+  let thumbName: string
+  try {
+    // Suffixed ids (`id__dir`) are valid lookup keys but invalid single
+    // path segments — hash the full id into a safe file name instead.
+    const base = assertSafePathSegment(manifest.id.replace(/__/g, '--'), 'pet thumb id')
+    thumbName = `${base}.png`
+  } catch {
+    thumbName = `pet-${Buffer.from(manifest.id).toString('hex').slice(0, 32)}.png`
+  }
+  const thumbPath = resolveInside(THUMBS_DIR, thumbName)
 
   try {
     if (existsSync(thumbPath) && existsSync(manifest.spritesheetPath)) {
@@ -382,12 +421,22 @@ export function registerPetsIPC(): void {
     if (typeof slug !== 'string' || slug.length === 0) {
       return { ok: false, error: 'Invalid slug' }
     }
+    try {
+      assertSafePathSegment(slug, 'pet slug')
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Invalid slug' }
+    }
     return downloadAndInstallPet(slug)
   })
 
   ipcMain.handle('pets:remove', (_evt, slug: string): PetRemoveResponse => {
     if (typeof slug !== 'string' || slug.length === 0) {
       return { ok: false, error: 'Invalid slug' }
+    }
+    try {
+      assertSafePathSegment(slug, 'pet slug')
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'Invalid slug' }
     }
     return removePet(slug)
   })
@@ -408,7 +457,7 @@ export function registerPetsIPC(): void {
 
   // Return the full spritesheet as a base64 data URL so the renderer can use
   // it directly as a CSS background-image without any custom protocol scheme.
-  // Avoids contex-file:// path-encoding issues entirely.
+  // Avoids codesurf-file:// path-encoding issues entirely.
   ipcMain.handle('pets:spritesheetData', async (_evt, slug: string): Promise<string | null> => {
     if (typeof slug !== 'string') return null
     const manifest = loadPetManifest(slug)

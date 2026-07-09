@@ -1,9 +1,9 @@
 import { copyFileSync, unlinkSync, mkdirSync, existsSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { profilePath } from './profiles'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
-const TEMP_DIR = join(CONTEX_HOME, 'chrome-sync-temp')
+const TEMP_DIR = join(CODESURF_HOME, 'chrome-sync-temp')
 
 export interface HistoryEntry {
   url: string

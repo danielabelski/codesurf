@@ -69,7 +69,7 @@ describe('buildPeerSystemPrompt', () => {
     assert.match(out, /Block "term-1" \(terminal\):/)
     assert.match(out, /Tools: terminal_send_input/)
     assert.match(out, /## Peer Collaboration/)
-    assert.match(out, /mcp__contex__peer_get_state/)
+    assert.match(out, /mcp__codesurf__peer_get_state/)
   })
 
   test('emits the Browser Control guide only when a peer exposes a browser_ tool', () => {

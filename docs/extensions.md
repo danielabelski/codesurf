@@ -5,8 +5,8 @@
 
 This repo now supports two extension locations:
 
-- global: `~/.contex/extensions/<ext>/`
-- workspace-local: `<workspace>/.contex/extensions/<ext>/`
+- global: `~/.codesurf/extensions/<ext>/`
+- workspace-local: `<workspace>/.codesurf/extensions/<ext>/`
 
 The active workspace path is rescanned by the renderer hook, so dropping a folder into `.contex/extensions/` is enough for local development.
 
@@ -53,7 +53,7 @@ That maps to namespaced power-extension handlers registered with:
 
 Extension settings are stored at:
 
-- `~/.contex/extension-settings/<extId>.json`
+- `~/.codesurf/extension-settings/<extId>.json`
 
 Behavior:
 
@@ -119,9 +119,9 @@ What is still missing for a fully externalized relay backend:
 
 See:
 
-- `.contex/extensions/contex-relay-suite/extension.json`
-- `.contex/extensions/contex-relay-suite/main.js`
-- `.contex/extensions/contex-relay-suite/dist/index.html`
+- `.codesurf/extensions/codesurf-relay-suite/extension.json`
+- `.codesurf/extensions/codesurf-relay-suite/main.js`
+- `.codesurf/extensions/codesurf-relay-suite/dist/index.html`
 
 That extension demonstrates:
 

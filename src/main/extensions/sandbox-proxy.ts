@@ -6,7 +6,7 @@
  * it at `SandboxConfig.url`. This module returns a fully self-contained HTML document
  * (no ES imports — it is served as a static string), served at:
  *
- *     contex-ext://__runext_sandbox__/proxy.html
+ *     codesurf-ext://__runext_sandbox__/proxy.html
  *
  * CONTRACT (verified against @mcp-ui/client dist/index.mjs + @modelcontextprotocol/ext-apps):
  *
@@ -19,8 +19,8 @@
  *   double-iframe.
  *
  * ORIGIN ISOLATION NOTE: The proxy is served from its own dedicated host
- *   contex-ext://__runext_sandbox__, which is DIFFERENT from every extension's
- *   origin (contex-ext://<extId>). The browser's same-origin policy therefore
+ *   codesurf-ext://__runext_sandbox__, which is DIFFERENT from every extension's
+ *   origin (codesurf-ext://<extId>). The browser's same-origin policy therefore
  *   prevents any extension from scripting or reading the proxy document. The inner
  *   guest iframe uses "allow-scripts" only (opaque origin), so it cannot reach the
  *   proxy either. NEVER add allow-same-origin to the inner frame.
@@ -61,7 +61,7 @@ const PROXY_HTML = `<!doctype html>
 
   // Build the inner sandboxed iframe and load guest HTML via srcdoc.
   // SECURITY: "allow-scripts" ONLY — opaque origin. Never add allow-same-origin here:
-  // the proxy is served from contex-ext://__runext_sandbox__ (its own isolated host).
+  // the proxy is served from codesurf-ext://__runext_sandbox__ (its own isolated host).
   function mountGuest(html, sandboxAttr) {
     if (inner && inner.parentNode) inner.parentNode.removeChild(inner);
     inner = document.createElement("iframe");

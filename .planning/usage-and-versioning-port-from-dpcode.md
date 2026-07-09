@@ -32,7 +32,7 @@ Where dpcode's idioms differ from codesurf's, the port adapts to codesurf:
 ## Build order
 
 1. **Migration 005** — `provider_rate_limits_index` table (one row per provider, plus pointer to JSON file)
-2. **Snapshot store** — `~/.contex/usage/<provider>.json` writer/reader following codesurf's pointer+overlay pattern
+2. **Snapshot store** — `~/.codesurf/usage/<provider>.json` writer/reader following codesurf's pointer+overlay pattern
 3. **Codex usage reader** — port from dpcode (`~/.codex/sessions/YYYY/MM/DD/*.jsonl`)
 4. **Claude usage reader** — port from dpcode (`~/.claude/projects/*/transcripts.jsonl`)
 5. **Live event hook** — wire `account.rate-limits.updated` from agent-stream into the snapshot writer

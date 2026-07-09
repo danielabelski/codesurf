@@ -57,7 +57,7 @@ export const AGENT_MODE_RESOLUTION_DENIED_ERROR =
 // to personas.json) — this Persona rename is in-code + UI only. Existing user
 // workspaces depend on this filename; renaming it would orphan their definitions.
 function agentsJsonPath(workspaceRoot: string): string {
-  return join(workspaceRoot, '.contex', 'customisation', 'agents.json')
+  return join(workspaceRoot, '.codesurf', 'customisation', 'agents.json')
 }
 
 /**

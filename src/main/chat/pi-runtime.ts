@@ -32,7 +32,7 @@ import { promises as fs, existsSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { pathToFileURL } from 'url'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { buildAsyncExecutionPrompt, type AsyncExecutionContext } from './prompt-builders'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
 
@@ -40,7 +40,7 @@ import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildC
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
 
 /** PI session JSONL store — under ~/.codesurf, NOT ~/.pi. */
-const CSAGENT_SESSION_DIR = join(CONTEX_HOME, 'agent-sessions')
+const CSAGENT_SESSION_DIR = join(CODESURF_HOME, 'agent-sessions')
 
 // ── Emit + request shapes (host-owned; kept minimal to avoid coupling) ──────
 
@@ -318,7 +318,7 @@ async function getCsagentRuntime(): Promise<PiRuntime> {
   return _csagentRuntime as PiRuntime
 }
 
-/** contex thinking id -> runtime ThinkingLevel (off|minimal|low|medium|high|xhigh). */
+/** codesurf thinking id -> runtime ThinkingLevel (off|minimal|low|medium|high|xhigh). */
 function mapThinking(thinking: string | undefined): string {
   switch (thinking) {
     case 'none':
@@ -368,7 +368,7 @@ async function buildCsagentImages(
 }
 
 /**
- * Translate the subscribe-channel AgentSessionEvent stream into contex's
+ * Translate the subscribe-channel AgentSessionEvent stream into codesurf's
  * agent:stream event schema.
  *
  * MANDATORY mitigation (both required even though deltas are pre-extracted):
@@ -710,7 +710,7 @@ export function hasCsagentSession(cardId: string): boolean {
 
 /**
  * List the models the user's installed pi can actually use (auth-configured),
- * via ModelRegistry.getAvailable(). Returned in contex's "provider/id" model
+ * via ModelRegistry.getAvailable(). Returned in codesurf's "provider/id" model
  * convention so the chat tile can offer real models instead of a static list.
  * Best-effort: any failure yields [] and the caller keeps its static defaults.
  */

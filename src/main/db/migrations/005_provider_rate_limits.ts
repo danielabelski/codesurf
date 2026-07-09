@@ -2,7 +2,7 @@
  * Migration 005 - provider rate-limit snapshot index.
  *
  * Pointer + overlay pattern (mirrors migration 004):
- *   ~/.contex/usage/<provider>.json   - canonical snapshot, agent-writable
+ *   ~/.codesurf/usage/<provider>.json   - canonical snapshot, agent-writable
  *   provider_rate_limits_index        - fast index row pointing at the file
  *
  * One row per provider. The JSON file holds the full last-known

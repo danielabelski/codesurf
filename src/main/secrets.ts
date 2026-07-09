@@ -21,9 +21,9 @@ import { app, safeStorage } from 'electron'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { randomUUID } from 'node:crypto'
-import { CONTEX_HOME } from './paths'
+import { CODESURF_HOME } from './paths'
 
-const SECRETS_PATH = join(CONTEX_HOME, 'secrets.json')
+const SECRETS_PATH = join(CODESURF_HOME, 'secrets.json')
 const SECRETS_VERSION = 1
 
 interface SecretsFile {

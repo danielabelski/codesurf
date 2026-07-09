@@ -13,6 +13,8 @@ export interface ExitListener {
 export interface ExitableSession {
   pty: unknown
   listeners: Set<ExitListener>
+  /** When set, the PTY was attached to a named tmux session that should die with it. */
+  tmuxSession?: string
 }
 
 export interface TerminalBufferEntry {
@@ -24,6 +26,11 @@ export interface HandlePtyExitDeps<TSession extends ExitableSession> {
   terminals: Map<string, TSession>
   terminalBuffers: Map<string, TerminalBufferEntry>
   publish: (event: Omit<BusEvent, 'id' | 'timestamp'>) => unknown
+  /**
+   * Optional: kill the backing tmux session so Enter/respawn does not reattach
+   * a dead shell (shell already exited; tmux session would otherwise linger).
+   */
+  killTmuxSession?: (sessionName: string) => void
 }
 
 /**
@@ -53,6 +60,13 @@ export function handlePtyExit<TSession extends ExitableSession>(
   if (buf?.timer) clearTimeout(buf.timer)
   deps.terminalBuffers.delete(tileId)
   deps.terminals.delete(tileId)
+
+  // Kill tmux so a later terminal:create does not reattach a dead session.
+  if (current.tmuxSession && deps.killTmuxSession) {
+    try {
+      deps.killTmuxSession(current.tmuxSession)
+    } catch { /* best-effort */ }
+  }
 
   deps.publish({
     channel: `tile:${tileId}`,

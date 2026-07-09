@@ -30,14 +30,14 @@ Counts: **6 Critical, 12 High, ~20 Medium, ~18 Low.**
 
 **CR-2 — Cross-plugin iframe isolation is broken; all custom-HTML extensions share one origin.**
 `src/renderer/src/components/ExtensionTile.tsx:792`, `src/main/extensions/protocol.ts:40-51,74-79`
-The iframe is `sandbox="allow-scripts allow-same-origin allow-modals"` and `contex-ext` is a single standard origin, so plugin A can `fetch('contex-ext://extension/<extB-id>/...')` and read every other enabled plugin's on-disk source/assets (templates, embedded tokens, prompts). The sandbox-proxy code explicitly warns "NEVER add allow-same-origin to the inner frame" — the primary path does exactly that. **Fix:** drop `allow-same-origin` (the bridge uses postMessage, not same-origin DOM), or serve each extension from a per-extension origin and scope resource-auth to the requesting extId.
+The iframe is `sandbox="allow-scripts allow-same-origin allow-modals"` and `contex-ext` is a single standard origin, so plugin A can `fetch('codesurf-ext://extension/<extB-id>/...')` and read every other enabled plugin's on-disk source/assets (templates, embedded tokens, prompts). The sandbox-proxy code explicitly warns "NEVER add allow-same-origin to the inner frame" — the primary path does exactly that. **Fix:** drop `allow-same-origin` (the bridge uses postMessage, not same-origin DOM), or serve each extension from a per-extension origin and scope resource-auth to the requesting extId.
 
 **CR-3 — `power`-tier extensions are unsandboxed `require()` into the main process.**
 `src/main/extensions/loader.ts:21-29`
 `require(entryPath)` + `mod.activate(ctx)` runs with full Node/fs/`child_process`/network. The capability system governs only the iframe bridge; it has zero effect here. Any enabled power plugin can read `~/.ssh`, spawn processes, and reach every other plugin's state. The architecture doc says `node` execution "should flow through the broker rather than raw require() into main" — unimplemented. **Fix:** move to a utilityProcess/worker with brokered capabilities; until then, document `power` = full-trust / equivalent to installing native software, and keep the untrusted-scope default-off activation gate.
 
 **CR-4 — MCP `reload_objective` / `get_context` path traversal → arbitrary file/dir read.**
-`src/main/mcp-server.ts:291-301, 315-335` (verified: `tileId` from args used raw in `join(ws.path, '.contex', tileId, ...)`; no `assertMcpSafeId` anywhere in this file, unlike `mcp/tools/context.ts`)
+`src/main/mcp-server.ts:291-301, 315-335` (verified: `tileId` from args used raw in `join(ws.path, '.codesurf', tileId, ...)`; no `assertMcpSafeId` anywhere in this file, unlike `mcp/tools/context.ts`)
 `tile_id: "../../../../etc"` escapes the tile dir; `get_context` then `readdir`s the target and returns the concatenated contents of every file in it. Any holder of the MCP token (every local agent) reads arbitrary files through the "kanban" server. **Fix:** run `tile_id` through `assertSafePathSegment` in `handleLocalTool` before building any path — the sibling context tools already do.
 
 **CR-5 — Job metadata writes are non-atomic; a crash mid-write corrupts the record and leaks it forever.**
@@ -111,7 +111,7 @@ Codex stdout has no backpressure (unbounded buffer growth); stderr buffers uncap
 
 - Main-window Electron hardening: contextIsolation on, nodeIntegration off, guest webviews sandboxed with preload stripped + webSecurity on + allowpopups off.
 - Secrets via `safeStorage`/keychain with atomic 0o600 writes; renderer can set/clear/check but never read back.
-- `contex-file://` protocol: tested traversal + sensitive-dir denylist + deliberate CORS strip.
+- `codesurf-file://` protocol: tested traversal + sensitive-dir denylist + deliberate CORS strip.
 - MCP server: DNS-rebinding (Host-header) + body-size defenses; CORS reflection is safe *because* no credentials/cookies and token isn't a cookie (but make it fail-closed on every method to keep the invariant).
 - SQL: parameter-bound everywhere; no string-concatenated queries. DB lifecycle: WAL, pre-migration backup, single-txn monotonic migrations.
 - Cookie crypto params match Chromium macOS os_crypt; decrypt failure → empty, not crash.

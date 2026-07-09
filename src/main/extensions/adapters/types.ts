@@ -15,7 +15,7 @@ export interface ExtensionAdapter {
   canLoad(dir: string): Promise<boolean>
 
   /**
-   * Parse the directory and produce a contex ExtensionManifest.
+   * Parse the directory and produce a codesurf ExtensionManifest.
    * Called only when canLoad() returned true.
    */
   toManifest(dir: string): Promise<ExtensionManifest>

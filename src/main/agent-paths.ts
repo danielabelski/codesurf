@@ -2,7 +2,7 @@
  * Agent binary detection + persistence.
  *
  * On startup, resolves full paths for claude, codex, opencode.
- * Persists to ~/.contex/agent-paths.json so the packaged app knows where they are.
+ * Persists to ~/.codesurf/agent-paths.json so the packaged app knows where they are.
  * Exports getAgentPath(id) for use by chat.ts and anywhere else.
  */
 
@@ -11,12 +11,12 @@ import { execFileSync } from 'child_process'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { CONTEX_HOME } from './paths'
+import { CODESURF_HOME } from './paths'
 import { log } from './utils/logger.ts'
 
 const agentPathsLog = log.scope('AgentPaths')
 
-const PATHS_FILE = join(CONTEX_HOME, 'agent-paths.json')
+const PATHS_FILE = join(CODESURF_HOME, 'agent-paths.json')
 
 export interface AgentPathEntry {
   path: string | null
@@ -339,7 +339,7 @@ export async function initializeAgentPathsCache(): Promise<AgentPathsConfig | nu
 
 /** Save paths to disk */
 async function savePaths(config: AgentPathsConfig): Promise<void> {
-  await fs.mkdir(CONTEX_HOME, { recursive: true })
+  await fs.mkdir(CODESURF_HOME, { recursive: true })
   await fs.writeFile(PATHS_FILE, JSON.stringify(config, null, 2))
   cachedPaths = config
 }

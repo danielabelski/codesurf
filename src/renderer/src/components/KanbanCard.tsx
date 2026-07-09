@@ -71,7 +71,7 @@ export const MODELS: Record<string, string[]> = {
   shell:    []
 }
 
-const MCP_CONFIG = '~/.contex/mcp-server.json'
+const MCP_CONFIG = '~/.codesurf/mcp-server.json'
 const BUILTIN_TOOLS = ['read', 'write', 'edit', 'bash', 'computer', 'web_search', 'browser']
 
 function resolveMcpConfigPath(input: string): string {
@@ -79,11 +79,11 @@ function resolveMcpConfigPath(input: string): string {
   const home = (window as any).process?.env?.HOME
   if (!home) return input
   if (input === '~') return home
-  if (input.startsWith('~/.contex/')) {
-    return `${home}/.contex/${input.slice('~/.contex/'.length)}`
+  if (input.startsWith('~/.codesurf/')) {
+    return `${home}/.codesurf/${input.slice('~/.codesurf/'.length)}`
   }
-  if (input.startsWith('~\\.contex\\')) {
-    return `${home}/.contex/${input.slice('~\\.contex\\'.length)}`
+  if (input.startsWith('~\\.codesurf\\')) {
+    return `${home}/.codesurf/${input.slice('~\\.codesurf\\'.length)}`
   }
   return `${home}/${input.slice(2)}`
 }

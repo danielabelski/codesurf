@@ -82,7 +82,7 @@ function workspaceDreamFilePath(workspaceDir) {
 
 function dreamingDir(homeDir, workspaceId) {
   assertSafeId(workspaceId)
-  return join(homeDir, 'workspaces', workspaceId, '.contex', 'dreaming')
+  return join(homeDir, 'workspaces', workspaceId, '.codesurf', 'dreaming')
 }
 
 function dreamingRunsDir(homeDir, workspaceId) {

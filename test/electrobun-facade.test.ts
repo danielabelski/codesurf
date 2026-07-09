@@ -62,5 +62,7 @@ describe('Electrobun window.electron facade', () => {
     expect(getDefaultElectrobunInvokeResponse('window:isFresh')).toBe(false)
     expect(getDefaultElectrobunInvokeResponse('canvas:load')).toBe(null)
     expect(getDefaultElectrobunInvokeResponse('bus:publish')).toBe(true)
+    expect(getDefaultElectrobunInvokeResponse('pets:list')).toEqual([])
+    expect(getDefaultElectrobunInvokeResponse('webview:setFrameRate')).toMatchObject({ ok: true })
   })
 })

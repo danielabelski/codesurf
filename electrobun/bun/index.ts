@@ -9,7 +9,7 @@ import type { CodeSurfElectrobunRPC } from '../../src/shared/electrobun-rpc.ts'
 import type { ExecutionHostRecord, ExecutionPreference, ProjectRecord, Workspace, WorkspaceRecord } from '../../src/shared/types.ts'
 import { DEFAULT_SETTINGS, normalizeLoadedSettings, withDefaultSettings, withFreshInstallDefaults } from '../../src/shared/types.ts'
 import { buildHermesChatArgs, buildOpenClawAgentArgs, buildOpenCodeRunArgs, sanitizeAgentCliDiagnostic } from '../../src/main/agents/agent-cli-contracts.ts'
-import { CONTEX_HOME, WORKSPACES_DIR } from '../../src/main/paths.ts'
+import { CODESURF_HOME, WORKSPACES_DIR } from '../../src/main/paths.ts'
 import { getDefaultElectrobunInvokeResponse } from '../../src/electrobun/browser/electron-facade.ts'
 import {
   formatExtensionSidebarResponse,
@@ -19,6 +19,14 @@ import {
 import { createElectrobunDbRuntime } from './runtime-db.ts'
 import { builtInDaemonHosts, createElectrobunDaemonRuntime, sanitizeDaemonStatusError, summarizeDaemonDashboard } from './runtime-daemon.ts'
 import { parseClaudeStreamJsonLine, parseCodexJsonLine, parseOpenClawOutput, parseOpenCodeJsonLine, type ElectrobunStreamEvent } from './chat-streams.ts'
+import {
+  galleryLocal as listPetsGalleryLocal,
+  getPetManifest,
+  installPet,
+  listPets,
+  removePet,
+  spritesheetData as petSpritesheetData,
+} from './runtime-pets.ts'
 
 type WorkspacesDocument = {
   version?: number
@@ -81,14 +89,14 @@ type BusEvent = {
 const RENDERER_DEV_URL = process.env.CODESURF_ELECTROBUN_RENDERER_URL ?? 'http://localhost:5173'
 const RENDERER_BUNDLED_URL = 'views://mainview/index.html'
 const BRIDGE_PRELOAD_URL = 'views://codesurf-electrobun/index.js'
-const PROJECTS_PATH = join(CONTEX_HOME, 'projects', 'projects.json')
-const WORKSPACES_PATH = join(CONTEX_HOME, 'workspaces', 'workspaces.json')
-const SETTINGS_PATH = join(CONTEX_HOME, 'settings.json')
-const MCP_CONFIG_PATH = join(CONTEX_HOME, 'mcp-server.json')
+const PROJECTS_PATH = join(CODESURF_HOME, 'projects', 'projects.json')
+const WORKSPACES_PATH = join(CODESURF_HOME, 'workspaces', 'workspaces.json')
+const SETTINGS_PATH = join(CODESURF_HOME, 'settings.json')
+const MCP_CONFIG_PATH = join(CODESURF_HOME, 'mcp-server.json')
 const MAX_BUS_HISTORY = 500
 const MAX_TERMINAL_BUFFER = 200_000
-const dbRuntime = createElectrobunDbRuntime(CONTEX_HOME)
-const daemonRuntime = createElectrobunDaemonRuntime(CONTEX_HOME)
+const dbRuntime = createElectrobunDbRuntime(CODESURF_HOME)
+const daemonRuntime = createElectrobunDaemonRuntime(CODESURF_HOME)
 const OPEN_CODE_FALLBACK_MODELS = [
   { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
   { id: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4.6' },
@@ -603,6 +611,9 @@ function handlePtyHostMessage(message: PtyHostMessage): void {
   if (message.type === 'exit' && tileId) {
     terminalSessions.delete(tileId)
     const exitCode = Number(message.exitCode ?? 0)
+    // Must match Electron terminal:exit:${tileId} so TerminalTile onExit fires
+    // (facade maps window.electron.terminal.onExit → this channel).
+    broadcast(`terminal:exit:${tileId}`, exitCode)
     broadcast(`terminal:data:${tileId}`, `\r\n[process exited ${exitCode}]\r\n`)
     publishBus(`tile:${tileId}`, 'system', `terminal:${tileId}`, { action: 'exited', exitCode })
     return
@@ -646,8 +657,10 @@ function ensurePtyHost(): ChildProcess | null {
   })
   proc.on('close', () => {
     ptyHostProcess = null
-    for (const tileId of terminalSessions.keys()) {
+    for (const tileId of [...terminalSessions.keys()]) {
+      broadcast(`terminal:exit:${tileId}`, 1)
       broadcast(`terminal:data:${tileId}`, '\r\n\x1b[31mPTY host stopped\x1b[0m\r\n')
+      publishBus(`tile:${tileId}`, 'system', `terminal:${tileId}`, { action: 'exited', exitCode: 1 })
     }
     terminalSessions.clear()
   })
@@ -1354,7 +1367,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'chat:selectFiles':
         return await Utils.openFileDialog({ canChooseFiles: true, canChooseDirectory: false, allowsMultipleSelection: true })
       case 'chat:writeTempAttachment': {
-        const dir = join(CONTEX_HOME, 'tmp', 'attachments')
+        const dir = join(CODESURF_HOME, 'tmp', 'attachments')
         await mkdir(dir, { recursive: true })
         const filePath = join(dir, `${Date.now()}-${basename(String((args[0] as any)?.name ?? 'attachment.txt'))}`)
         await writeFile(filePath, String((args[0] as any)?.content ?? ''))
@@ -1601,6 +1614,56 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'permissions:clear':
       case 'permissions:clearAll':
         return true
+
+      // Pets — local scan/install without Electron IPC (runtime-pets.ts)
+      case 'pets:list':
+        return listPets()
+      case 'pets:gallery':
+        // Remote petdex gallery is best-effort; fall back to local installed.
+        try {
+          const resp = await fetch('https://petdex.dev/api/manifest.json', {
+            signal: AbortSignal.timeout(10000),
+          })
+          if (resp.ok) {
+            const data = await resp.json() as Array<Record<string, unknown>> | { pets?: Array<Record<string, unknown>> }
+            const entries = Array.isArray(data) ? data : data.pets ?? []
+            const installed = new Set(listPets().map(p => p.id))
+            return entries.map(e => ({
+              id: String(e.id ?? ''),
+              displayName: String(e.displayName ?? e.id ?? ''),
+              description: String(e.description ?? ''),
+              category: typeof e.category === 'string' ? e.category : undefined,
+              installed: installed.has(String(e.id ?? '')),
+            })).filter(e => e.id)
+          }
+        } catch { /* offline */ }
+        return listPetsGalleryLocal()
+      case 'pets:gallery-local':
+        return listPetsGalleryLocal()
+      case 'pets:install': {
+        const result = await installPet(String(args[0] ?? ''))
+        if (result.ok) broadcast('pets:gallery-changed', { slug: String(args[0] ?? '') })
+        return result
+      }
+      case 'pets:remove': {
+        const result = removePet(String(args[0] ?? ''))
+        if (result.ok) broadcast('pets:gallery-changed', { slug: String(args[0] ?? '') })
+        return result
+      }
+      case 'pets:thumbnail':
+      case 'pets:thumbnailData':
+        // sharp not available in Electrobun host — spritesheet data is enough for UI.
+        return null
+      case 'pets:spritesheetData':
+        return petSpritesheetData(String(args[0] ?? ''))
+      case 'pets:getManifest':
+        return getPetManifest(String(args[0] ?? ''))
+
+      // Guest paint throttle is Electron-WebContents-specific; no-op successfully
+      // on Electrobun so the renderer path does not error.
+      case 'webview:setFrameRate':
+        return { ok: true, runtime: 'electrobun-noop' }
+
       default:
         return getDefaultElectrobunInvokeResponse(channel)
     }

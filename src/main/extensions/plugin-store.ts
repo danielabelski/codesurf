@@ -14,10 +14,10 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { bus } from '../event-bus'
 
-const STORE_DIR = join(CONTEX_HOME, 'plugin-state')
+const STORE_DIR = join(CODESURF_HOME, 'plugin-state')
 const cache = new Map<string, Record<string, unknown>>()
 
 function fileFor(extId: string): string {

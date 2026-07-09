@@ -16,14 +16,14 @@ import { log } from '../utils/logger.ts'
 const wsLog = log.scope('workspace')
 import { writeMCPConfigToWorkspace } from '../mcp-server'
 import { applyWindowAppearance } from '../windowAppearance'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { ensureCodeSurfStructure } from '../session-sources'
 import { validateGenerationProvider } from '../generation-provider-validation'
 import { persistGenerationKeys, resolveGenerationKeys, setGenerationSecretStore } from '../generation-secrets'
 import { getSecret, setSecret } from '../secrets'
 
-const SETTINGS_PATH = join(CONTEX_HOME, 'settings.json')
-const LEGACY_CONFIG_PATH = join(CONTEX_HOME, 'config.json')
+const SETTINGS_PATH = join(CODESURF_HOME, 'settings.json')
+const LEGACY_CONFIG_PATH = join(CODESURF_HOME, 'config.json')
 
 // gap-03: inject the real keychain-backed store into the (electron-free,
 // testable) generation-secrets module. Only stores function refs here;

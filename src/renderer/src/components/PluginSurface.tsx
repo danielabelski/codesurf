@@ -2,16 +2,16 @@
  * PluginSurface — renders a plugin contribution surface in one of three render modes.
  *
  *   render: 'component'  → trusted in-host React node (built-ins). Renders props.component.
- *   render: 'iframe'     → a sandboxed iframe pointed at a pre-resolved contex-ext:// entry
+ *   render: 'iframe'     → a sandboxed iframe pointed at a pre-resolved codesurf-ext:// entry
  *                          URL. Same serving path ExtensionTile uses; the host injects the
- *                          window.contex bridge into contex-ext://-served HTML.
+ *                          window.contex bridge into codesurf-ext://-served HTML.
  *   render: 'mcp-ui'     → @mcp-ui/client <AppRenderer> fed pre-fetched HTML (or an entry
  *                          URL resolved to HTML upstream), a self-hosted cross-origin sandbox
  *                          proxy, explicit hostContext + hostCapabilities, and onCallTool
- *                          bridged to contex via window.electron.extensions.invoke.
+ *                          bridged to codesurf via window.electron.extensions.invoke.
  *
  * mcp-ui guests do NOT receive the window.contex postMessage bridge — they speak AppBridge
- * JSON-RPC through the double-iframe sandbox proxy. The only contex-ext:// touchpoint for
+ * JSON-RPC through the double-iframe sandbox proxy. The only codesurf-ext:// touchpoint for
  * mcp-ui is serving the proxy document itself (see src/main/extensions/sandbox-proxy.ts).
  */
 
@@ -27,7 +27,7 @@ export interface PluginSurfaceProps {
   extId: string
   /** Which paint path to use. */
   render: PluginSurfaceRenderMode
-  /** Pre-resolved contex-ext:// entry URL (render:'iframe'). */
+  /** Pre-resolved codesurf-ext:// entry URL (render:'iframe'). */
   entry?: string
   /** Pre-fetched HTML string for the mcp-ui guest (render:'mcp-ui'). */
   html?: string

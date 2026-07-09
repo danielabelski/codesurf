@@ -4,7 +4,7 @@ import { promises as fs, watch as fsWatch, type FSWatcher } from 'fs'
 import path from 'node:path'
 import { basename, extname, join, parse } from 'path'
 import { homedir } from 'os'
-import { CONTEX_HOME, CONTEX_HOME_DIRNAME } from '../paths.ts'
+import { CODESURF_HOME, CODESURF_HOME_DIRNAME } from '../paths.ts'
 import { SENSITIVE_HOME_DIRS } from '../security/sensitivePaths.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
@@ -55,7 +55,7 @@ function trackWatchSender(sender: WebContents, resolvedPath: string): void {
 }
 
 // --- Security: path validation (SEC-03) ---
-// Denylist shared with the `contex-file://` media protocol boundary via
+// Denylist shared with the `codesurf-file://` media protocol boundary via
 // `security/sensitivePaths.ts` so the two boundaries guarding the home
 // directory can't drift apart.
 
@@ -79,8 +79,8 @@ export function assertPathAllowedForFs(
 ): void {
   if (!options?.restrictToWorkspaceRoots) return
 
-  // CONTEX_HOME is always allowed when workspace scoping is enabled.
-  if (resolvedPath === CONTEX_HOME || resolvedPath.startsWith(CONTEX_HOME + path.sep)) return
+  // CODESURF_HOME is always allowed when workspace scoping is enabled.
+  if (resolvedPath === CODESURF_HOME || resolvedPath.startsWith(CODESURF_HOME + path.sep)) return
 
   const allowedRoots = options.allowedRoots ?? []
   if (allowedRoots.length === 0) {
@@ -120,7 +120,7 @@ export function validateFsPath(filePath: string, options?: FsPathScopeOptions): 
   const resolved = path.resolve(resolveFsPath(filePath))
   const home = resolveHome()
   // Always allow app config paths
-  if (resolved.startsWith(CONTEX_HOME + path.sep) || resolved === CONTEX_HOME) return resolved
+  if (resolved.startsWith(CODESURF_HOME + path.sep) || resolved === CODESURF_HOME) return resolved
 
   if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, home)) {
     return resolved
@@ -197,21 +197,21 @@ const resolveHome = (): string => {
 function resolveFsPath(rawPath: string): string {
   const home = resolveHome()
   if (rawPath === '~') return home
-  // Support both legacy ~/.contex/ and new ~/.codesurf/ paths
-  if (rawPath.startsWith('~/.contex/')) {
-    return join(CONTEX_HOME, rawPath.slice('~/.contex/'.length))
+  // Support both legacy ~/.codesurf/ and new ~/.codesurf/ paths
+  if (rawPath.startsWith('~/.codesurf/')) {
+    return join(CODESURF_HOME, rawPath.slice('~/.codesurf/'.length))
   }
-  if (rawPath.startsWith('~\\.contex\\')) {
-    return join(CONTEX_HOME, rawPath.slice('~\\.contex\\'.length))
+  if (rawPath.startsWith('~\\.codesurf\\')) {
+    return join(CODESURF_HOME, rawPath.slice('~\\.codesurf\\'.length))
   }
-  if (rawPath.startsWith(`~/${CONTEX_HOME_DIRNAME}/`)) {
-    return join(CONTEX_HOME, rawPath.slice(`~/${CONTEX_HOME_DIRNAME}/`.length))
+  if (rawPath.startsWith(`~/${CODESURF_HOME_DIRNAME}/`)) {
+    return join(CODESURF_HOME, rawPath.slice(`~/${CODESURF_HOME_DIRNAME}/`.length))
   }
   if (rawPath.startsWith('~/') || rawPath.startsWith('~\\')) return join(home, rawPath.slice(2))
-  if (rawPath.startsWith('/.contex/')) return join(CONTEX_HOME, rawPath.slice('/.contex/'.length))
-  if (rawPath === '/.contex') return CONTEX_HOME
-  if (rawPath.startsWith(`/${CONTEX_HOME_DIRNAME}/`)) return join(CONTEX_HOME, rawPath.slice(`/${CONTEX_HOME_DIRNAME}/`.length))
-  if (rawPath === `/${CONTEX_HOME_DIRNAME}`) return CONTEX_HOME
+  if (rawPath.startsWith('/.codesurf/')) return join(CODESURF_HOME, rawPath.slice('/.codesurf/'.length))
+  if (rawPath === '/.codesurf') return CODESURF_HOME
+  if (rawPath.startsWith(`/${CODESURF_HOME_DIRNAME}/`)) return join(CODESURF_HOME, rawPath.slice(`/${CODESURF_HOME_DIRNAME}/`.length))
+  if (rawPath === `/${CODESURF_HOME_DIRNAME}`) return CODESURF_HOME
   return rawPath
 }
 
@@ -356,7 +356,7 @@ export function registerFsIPC(): void {
     handler: async (_evt, cardId, content) => {
       assertSafeCardId(cardId)
       const { join } = await import('path')
-      const briefDir = join(CONTEX_HOME, 'briefs')
+      const briefDir = join(CODESURF_HOME, 'briefs')
       await fs.mkdir(briefDir, { recursive: true })
       const briefPath = join(briefDir, `${cardId}.md`)
       await fs.writeFile(briefPath, content, 'utf8')

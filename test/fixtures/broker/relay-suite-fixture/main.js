@@ -1,7 +1,7 @@
 /**
  * relay-suite-fixture main.js
  *
- * Simulates contex-relay-suite calling ctx.relayHost.install().
+ * Simulates codesurf-relay-suite calling ctx.relayHost.install().
  * Used by the integration test to verify that a relay-granted extension
  * can call relayHost.install() through the broker.
  */
@@ -19,7 +19,7 @@ module.exports = {
     ctx.bus.publish('broker-test', 'relay-result', { result: relayResult })
 
     return () => {
-      ctx.bus.publish('broker-test', 'deactivated', { extId: 'contex-relay-suite' })
+      ctx.bus.publish('broker-test', 'deactivated', { extId: 'codesurf-relay-suite' })
     }
   },
 }

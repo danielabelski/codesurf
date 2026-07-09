@@ -340,7 +340,7 @@
     if (window.contex.bus) {
       window.contex.bus.subscribe('hq-email')
       window.addEventListener('message', function(e) {
-        if (!e.data || e.data.type !== 'contex-event') return
+        if (!e.data || e.data.type !== 'codesurf-event') return
         if (e.data.event !== 'bus.event.hq-email') return
         var d = e.data.data || {}
         if (d.action === 'listUpdate' && d.query === QUERIES[currentFolder] && d.emails) {
@@ -376,7 +376,7 @@
   }
 
   window.addEventListener('message', function(e) {
-    if (e.data && e.data.type === 'contex-bridge-ready') init()
+    if (e.data && e.data.type === 'codesurf-bridge-ready') init()
   })
   if (window.contex) init()
 </script>

@@ -1,6 +1,6 @@
 # Extension Dev Harness
 
-Isolated development environment for building Contex extensions without touching the main app.
+Isolated development environment for building CodeSurf extensions without touching the main app.
 
 ## Problem it solves
 
@@ -210,7 +210,7 @@ directory — they are explicitly told not to touch anything outside their exten
 
     // Bridge handshake
     window.addEventListener('message', function(e) {
-      if (e.data && e.data.type === 'contex-bridge-ready') init()
+      if (e.data && e.data.type === 'codesurf-bridge-ready') init()
     })
     if (window.contex) init()
 
@@ -221,11 +221,11 @@ directory — they are explicitly told not to touch anything outside their exten
       return new Promise(function(resolve, reject) {
         var id = ++seq
         pending[id] = { resolve: resolve, reject: reject }
-        window.parent.postMessage({ type: 'contex-rpc', id: id, tileId: tileId || 'unknown', method: method, params: params || null }, '*')
+        window.parent.postMessage({ type: 'codesurf-rpc', id: id, tileId: tileId || 'unknown', method: method, params: params || null }, '*')
       })
     }
     window.addEventListener('message', function(e) {
-      if (!e.data || e.data.type !== 'contex-rpc-response') return
+      if (!e.data || e.data.type !== 'codesurf-rpc-response') return
       var cb = pending[e.data.id]
       if (!cb) return
       delete pending[e.data.id]

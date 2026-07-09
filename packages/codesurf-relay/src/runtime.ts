@@ -9,7 +9,7 @@ import type {
   RelaySpawnRequest,
   RelayTurnInput,
 } from './types'
-import { ContexRelay } from './relay'
+import { CodesurfRelay } from './relay'
 
 export interface RelayRuntimeOptions {
   executorFactory: (participant: RelayParticipant, spawn: RelaySpawnRequest) => RelayAgentExecutor
@@ -71,7 +71,7 @@ function buildPrompt(input: RelayTurnInput, task: string): string {
   }))
 
   return [
-    `You are ${input.participant.name} in the Contex relay runtime.`,
+    `You are ${input.participant.name} in the CodeSurf relay runtime.`,
     `Your persistent task: ${task}`,
     '',
     'You are coordinating work, surfacing dependencies, and telling others when your work could affect them.',
@@ -124,12 +124,12 @@ function buildPrompt(input: RelayTurnInput, task: string): string {
 }
 
 export class RelayRuntime {
-  private readonly relay: ContexRelay
+  private readonly relay: CodesurfRelay
   private readonly options: RelayRuntimeOptions
   private readonly agents = new Map<string, RuntimeAgentState>()
   private readonly unsubscribe: () => void
 
-  constructor(relay: ContexRelay, options: RelayRuntimeOptions) {
+  constructor(relay: CodesurfRelay, options: RelayRuntimeOptions) {
     this.relay = relay
     this.options = options
     this.unsubscribe = this.relay.on(event => { void this.onRelayEvent(event) })

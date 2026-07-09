@@ -10,12 +10,12 @@ function isAudioFile(path: string): boolean {
 }
 
 function toMediaUrl(filePath: string): string {
-  // contex-file:// is the custom privileged scheme registered in main/file-protocol.ts.
+  // codesurf-file:// is the custom privileged scheme registered in main/file-protocol.ts.
   // It's required because the dev renderer origin is http://localhost:... which
   // means direct file:// <video>/<audio>/<img> loads are blocked by Chromium's
   // cross-origin policy. The scheme forwards Range requests so video seeking
   // works correctly.
-  return `contex-file://${encodeURI(filePath).replace(/#/g, '%23')}`
+  return `codesurf-file://${encodeURI(filePath).replace(/#/g, '%23')}`
 }
 
 function createMediaNode(filePath: string): HTMLElement {

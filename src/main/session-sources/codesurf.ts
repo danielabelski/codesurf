@@ -17,12 +17,12 @@ import {
   listFilesRecursive,
   getProjectCodeSurfDir,
 } from './shared.ts'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 
 export async function listCodeSurfSessionFiles(workspacePath: string | null): Promise<AggregatedSessionEntry[]> {
   const roots: Array<{ dir: string; scope: SessionScope }> = []
   if (workspacePath) roots.push({ dir: join(getProjectCodeSurfDir(workspacePath), 'sessions'), scope: 'project' })
-  roots.push({ dir: join(CONTEX_HOME, 'sessions'), scope: 'user' })
+  roots.push({ dir: join(CODESURF_HOME, 'sessions'), scope: 'user' })
 
   const entries: AggregatedSessionEntry[] = []
 

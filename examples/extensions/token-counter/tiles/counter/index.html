@@ -554,7 +554,7 @@
         const id = ++seq
         pending[id] = { resolve, reject }
         window.parent.postMessage(
-          { type: 'contex-rpc', id, tileId, method, params: params ?? null },
+          { type: 'codesurf-rpc', id, tileId, method, params: params ?? null },
           '*'
         )
       })
@@ -582,12 +582,12 @@
       const msg = e.data
       if (!msg) return
 
-      if (msg.type === 'contex-bridge-ready') {
+      if (msg.type === 'codesurf-bridge-ready') {
         init()
         return
       }
 
-      if (msg.type === 'contex-rpc-response') {
+      if (msg.type === 'codesurf-rpc-response') {
         const cb = pending[msg.id]
         if (!cb) return
         delete pending[msg.id]
@@ -597,7 +597,7 @@
       }
 
       // Auto-populate textarea when a linked chat tile emits a message
-      if (msg.type === 'contex-event' && msg.event === 'context.peerChanged') {
+      if (msg.type === 'codesurf-event' && msg.event === 'context.peerChanged') {
         if (msg.data?.key === 'ctx:chat:message' && msg.data?.value) {
           document.getElementById('text-input').value = String(msg.data.value)
           updateStats()
@@ -607,19 +607,19 @@
       }
 
       // Handle countText action invocations from agents / other tiles
-      if (msg.type === 'contex-action-invoke' && msg.action === 'countText') {
+      if (msg.type === 'codesurf-action-invoke' && msg.action === 'countText') {
         const text = String(msg.params?.text ?? '')
         document.getElementById('text-input').value = text
         updateStats()
         window.parent.postMessage(
-          { type: 'contex-action-result', tileId, requestId: msg.requestId, result: { tokens: estimateTokens(text) } },
+          { type: 'codesurf-action-result', tileId, requestId: msg.requestId, result: { tokens: estimateTokens(text) } },
           '*'
         )
         return
       }
 
       // Keep peer badge in sync
-      if (msg.type === 'contex-event' && msg.event === 'tile.peersChanged') {
+      if (msg.type === 'codesurf-event' && msg.event === 'tile.peersChanged') {
         const peers = msg.data?.peers ?? []
         const badge = document.getElementById('peer-badge')
         badge.textContent = peers.length > 0

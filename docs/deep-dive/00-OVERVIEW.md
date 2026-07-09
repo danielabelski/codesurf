@@ -25,7 +25,7 @@ codebase live there. Both are exploitable with **zero user interaction**:
   See [10-holes.md → risk-01](./10-holes.md).
 - **Unauthenticated local MCP server.** The MCP HTTP server binds `127.0.0.1:<random>`
   with the auth check explicitly disabled; a bearer token is generated and written to
-  `~/.contex/mcp-server.json` but never validated, and that config file is world-readable
+  `~/.codesurf/mcp-server.json` but never validated, and that config file is world-readable
   (`0o644`). Any local process can read the port and drive `POST /inject`, which submits
   arbitrary commands into a terminal tile — local command execution.
   See [10-holes.md → risk-02 / risk-03](./10-holes.md).
@@ -54,7 +54,7 @@ Do not report this codebase as "0 critical." It has two, and they are the story.
 
 1. **No security axis — and the worst lives there.** Two criticals (RCE-on-open,
    unauthenticated MCP command execution) plus a cluster of high/medium trust-boundary
-   issues (world-readable token file, `contex-file://` exfil, plaintext generation-provider
+   issues (world-readable token file, `codesurf-file://` exfil, plaintext generation-provider
    keys, full Chrome cookie jar injected into untrusted webviews). All in
    [10-holes.md](./10-holes.md); none were reachable by the nine dimensions.
 2. **Lifecycle / teardown leaks.** Tile delete and daemon shutdown never reclaim state:
@@ -72,7 +72,7 @@ Do not report this codebase as "0 critical." It has two, and they are the story.
    logic, forcing its test to `readFileSync`-scrape source ([C6](#3-cross-cutting-root-cause-table));
    `App.tsx` carries the inline discovery copy and the whole canvas engine ([C1](#3-cross-cutting-root-cause-table),
    [perf-01](./03-performance.md)).
-5. **Testing / CI gaps on the highest-risk subsystem.** The entire `packages/contex-relay`
+5. **Testing / CI gaps on the highest-risk subsystem.** The entire `packages/codesurf-relay`
    vitest suite — the agent-coordination core flagged as highest leak risk — never executes
    anywhere (vitest declared but not installed, excluded from `npm test`), and there is **no
    PR/push CI** at all; tests only run at release-tag time. See
@@ -94,12 +94,12 @@ Three tiers. Items are ordered **severity-then-effort within tier**, not by dime
 | QW-2 | **Lock down the token file.** Write `mcp-server.json` with `{mode:0o600}` (matching `secrets.json`); audit `permissions.json` for the same default-permission leak. | The bearer token is world-readable today; auth in QW-1 is moot if the token leaks. | S | [risk-03](./10-holes.md) |
 | QW-3 | **Add PR/push CI.** New workflow on `pull_request` + push-to-main running `npm ci && npm test && typecheck`. | No CI gates merges today — tests only run at release-tag time. | S | [gap-04](./10-holes.md) |
 | QW-4 | **git arg-injection guard.** Insert `--end-of-options` (or use `git switch`) before user-supplied branch names; reject leading `-`. | `git:checkoutBranch/createBranch` forward renderer input as argv. | S | [risk-05](./10-holes.md) |
-| QW-5 | **Remove the hardcoded `/Users/jkneen/...` codicon path** from the `contex-ext://` handler; add a build-time grep gate rejecting `/Users/` in `src/`. | Dead/broken on every other machine; leaks dev dir layout into the binary. | S | [gap-05](./10-holes.md) |
+| QW-5 | **Remove the hardcoded `/Users/jkneen/...` codicon path** from the `codesurf-ext://` handler; add a build-time grep gate rejecting `/Users/` in `src/`. | Dead/broken on every other machine; leaks dev dir layout into the binary. | S | [gap-05](./10-holes.md) |
 | QW-6 | **Memory teardown.** Add a `chat:disposeCard(cardId)` IPC that evicts all five session maps + prunes `session-ids.json`, called from `cleanupTileResources`; drop orphaned `card:`/`ctx:` bus channels on tile cleanup; clean up `activeStreams` on renderer disconnect. | mem-01/02/03 — unbounded per-tile growth, all S, all in the same cleanup path. | S×3 | [02-memory.md](./02-memory.md) |
 | QW-7 | **Canvas/IPC perf S-wins.** `viewportRef` in `onWheel` (perf-03); `LIMIT 500` on `listThreadsFromDb(null)` (perf-08); wire or delete the dead rAF batcher (perf-02); minimap viewport-only redraw (perf-09). | Cheap frame-rate and payload wins on the canvas hot path. | S×4 | [03-performance.md](./03-performance.md) |
 | QW-8 | **Reliability S-wins.** Abort the relay SDK query on turn timeout (rel-03 — stops a billing leak); kill child/PTY processes on app quit (rel-02). | Stops orphaned billing and zombie agent/codex processes. | S | [04-reliability.md](./04-reliability.md) |
 | QW-9 | **Daemon stream S-wins.** SSE heartbeat + backpressure + try/catch (daemon-08); idempotent terminal events (daemon-09); single `liveJobs` liveness guard to close the post-crash SSE wedge (daemon-04 path B). | Hardens the daemon SSE fan-out and the resume-wedge. | S | [08-daemon.md](./08-daemon.md) |
-| QW-10 | **Separation hygiene.** Add the `@contex/relay` tsconfig + Vite alias and swap the 11 deep `../../../packages/contex-relay/src` imports in `env.d.ts` (soc-07). | Pure hygiene, removes fragile deep-internal imports. | S | [07-separation.md](./07-separation.md) |
+| QW-10 | **Separation hygiene.** Add the `@codesurf/relay` tsconfig + Vite alias and swap the 11 deep `../../../packages/codesurf-relay/src` imports in `env.d.ts` (soc-07). | Pure hygiene, removes fragile deep-internal imports. | S | [07-separation.md](./07-separation.md) |
 
 ### Tier 2 — Structural bets (M/L)
 
@@ -112,12 +112,12 @@ Three tiers. Items are ordered **severity-then-effort within tier**, not by dime
 | SB-5 | **Bound daemon artifact growth.** Cap checkpoint snapshot bytes (daemon-06), debounce `appendEvent`'s double full-file write (daemon-07), and add retention for job metadata/timeline/checkpoints (daemon-05). | Disk and write-amplification grow unbounded per job today. | M | [08-daemon.md](./08-daemon.md) |
 | SB-6 | **Unify the discovery geometry engine (C1).** Make `App.tsx` import `discovery-graph-impl.ts` for both the `<10` and `>=10` tile paths; delete the now-dead `findDiscoveryConnections` (soc-01 step 1); add an equivalence test. | The two copies already compute *different* graphs across the 10-tile boundary. | M | [06-duplication.md](./06-duplication.md) (dup-02), [07-separation.md](./07-separation.md) (soc-01) |
 | SB-7 | **Wire the relay test suite into CI (gap-02).** Install vitest at the root (or port the relay tests to `node:test`) and run them from `npm test` + the new CI; confirm they pass — they may have rotted while never running. | The highest-leak-risk subsystem has zero executed coverage. | M | [05-testing.md](./05-testing.md), [10-holes.md](./10-holes.md) |
-| SB-8 | **Trust-boundary cleanup (security).** Confine renderer-supplied `workspacePath` to registered roots in shared path helpers (gap-06); restrict/confine `contex-file://` and drop its `ACAO:*` (risk-04); route generation-provider keys through the keychain (gap-03); scope Chrome cookie injection to approved domains (risk-08). | The medium-severity remainder of the missing security axis. | M | [10-holes.md](./10-holes.md) |
+| SB-8 | **Trust-boundary cleanup (security).** Confine renderer-supplied `workspacePath` to registered roots in shared path helpers (gap-06); restrict/confine `codesurf-file://` and drop its `ACAO:*` (risk-04); route generation-provider keys through the keychain (gap-03); scope Chrome cookie injection to approved domains (risk-08). | The medium-severity remainder of the missing security axis. | M | [10-holes.md](./10-holes.md) |
 
 ### Tier 3 — Packaging plan
 
 Existing namespace conventions: **`@contex/*`** for renderer/main shared TS (e.g.
-`contex-relay`), **`@codesurf/*`** for daemon/runtime ESM (e.g. `codesurf-dreaming`,
+`codesurf-relay`), **`@codesurf/*`** for daemon/runtime ESM (e.g. `codesurf-dreaming`,
 `codesurf-daemon`). Align extractions to these; do not invent a third namespace.
 
 | Action | Type | What & why | Effort | Read |
@@ -126,7 +126,7 @@ Existing namespace conventions: **`@contex/*`** for renderer/main shared TS (e.g
 | **Collapse dreaming into existing `@codesurf/dreaming` (C2)** | De-dup, **not** new extraction | `packages/codesurf-dreaming/src/index.mjs` and `packages/codesurf-daemon/vendor/dreaming.mjs` are byte-identical; the daemon imports only the vendor copy and the package is dead. Make the daemon import the named package, delete the vendor copy, fix the electrobun build to ship one. | S–M | [06-duplication.md](./06-duplication.md) (dup-01), [09-selflearning.md](./09-selflearning.md) (sl-06) |
 | **Extract `prompt-conventions` + checkpoint helpers** | Pure module, **for testability, not npm** | From `chat.ts` (see SB-2). Keep in `src/main/chat/`; the goal is importability/testability, not a published package. | M | [07-separation.md](./07-separation.md) (soc-02) |
 | **Extract discovery-geometry** | Pure module, **for testability** | The shared geometry pipeline behind C1 (SB-6). A pure `discovery-graph` module both call sites import; not a package. | M | [06-duplication.md](./06-duplication.md), [07-separation.md](./07-separation.md) |
-| **`@contex/relay` alias** | Hygiene | Replace deep `../../../packages/contex-relay/src` imports (soc-07, also QW-10). | S | [07-separation.md](./07-separation.md) |
+| **`@codesurf/relay` alias** | Hygiene | Replace deep `../../../packages/codesurf-relay/src` imports (soc-07, also QW-10). | S | [07-separation.md](./07-separation.md) |
 
 **Do NOT package these** (the separation section evaluated and rejected extraction —
 honor those verdicts):
@@ -170,7 +170,7 @@ subject of [10-holes.md](./10-holes.md). Applied fixes are tracked in [FIXES.md]
 ~**250 files / ~52K LOC went unread**. Largest genuinely-uncited source files (never opened
 by the dimension audit): `SettingsPanel.tsx` (2306), `ai-elements/prompt-input.tsx` (1464),
 `chat/ToolBlockView.tsx` (1274), `FileExplorerTile.tsx` (1246), `KanbanCard.tsx` (1017),
-`KanbanTile.tsx` (982), `PanelLayout.tsx` (976), `contex-relay/relay.ts` (755),
+`KanbanTile.tsx` (982), `PanelLayout.tsx` (976), `codesurf-relay/relay.ts` (755),
 `collab.ts` (651), `db/job-indexer.ts` (580), `extensions/registry.ts` (549),
 `extensions/protocol.ts`, `localProxy.ts` (432). The security-relevant ones were swept in the
 meta-pass; the pure-UI files swept clean of `eval` / `dangerouslySetInnerHTML` /
@@ -178,7 +178,7 @@ meta-pass; the pure-UI files swept clean of `eval` / `dangerouslySetInnerHTML` /
 
 **Security pass — audited vs not.** The meta-pass [risk critic](./10-holes.md) audited in
 depth: MCP server auth/binding/CORS/`inject`, secrets storage + IPC, Chrome-sync cookie/
-keychain decryption, the `file-protocol` and `contex-ext://` handlers, the extension
+keychain decryption, the `file-protocol` and `codesurf-ext://` handlers, the extension
 permission/activation model, the terminal spawn allowlist, git arg-injection, DB migration
 idempotency (verified solid), and path-traversal guards in `collab.ts` / `fs.ts` (verified
 solid). **Not deeply audited** (declared residual scope): the `codesurf-daemon` HTTP router

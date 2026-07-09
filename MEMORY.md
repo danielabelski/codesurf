@@ -177,7 +177,7 @@ Investigated the runtime failure in `src/main/ipc/chat.ts` after the user pasted
 
 ## 2026-04-10 18:36 — Migration now preserves symlinked extensions instead of crashing
 
-Fixed `src/main/migration.ts` so `~/.contex -> ~/.codesurf` merges no longer call `copyFile()` on symlink entries like `~/.contex/extensions/agent-kanban -> .../examples/extensions/agent-kanban`. `mergeDir(...)` now detects symlinks, recreates them at the destination, copies only regular files, recurses only into real directories, and logs/skips unsupported special entries. This avoids the startup `ENOTSUP` failure during merge when the legacy extensions folder contains live symlinks.
+Fixed `src/main/migration.ts` so `~/.contex -> ~/.codesurf` merges no longer call `copyFile()` on symlink entries like `~/.codesurf/extensions/agent-kanban -> .../examples/extensions/agent-kanban`. `mergeDir(...)` now detects symlinks, recreates them at the destination, copies only regular files, recurses only into real directories, and logs/skips unsupported special entries. This avoids the startup `ENOTSUP` failure during merge when the legacy extensions folder contains live symlinks.
 
 ## 2026-04-03 18:XX — Extension host styling now includes font tokens
 
@@ -199,7 +199,7 @@ Created new extension:
 - `examples/extensions/morph/extension.json`
 - `examples/extensions/morph/main.js`
 - `examples/extensions/morph/tiles/main/index.html`
-- symlinked live runtime path: `~/.contex/extensions/morph -> .../examples/extensions/morph`
+- symlinked live runtime path: `~/.codesurf/extensions/morph -> .../examples/extensions/morph`
 
 Current Morph extension behavior:
 - config form in tile for API key, image/snapshot, resources, TTL, desktop password, startup command
@@ -238,18 +238,18 @@ Jason explicitly called out fonts as part of the extension/native-UI cleanup. Wh
 
 ## 2026-04-03 18:XX — copied global extensions normalized to live symlinks
 
-Cleaned up the remaining stale copied extensions in `~/.contex/extensions/` that could drift from repo edits and cause confusing runtime mismatches. Moved these real directories into `~/.contex/extension-backups/20260403-120406/` and replaced them with symlinks to the live repo sources:
+Cleaned up the remaining stale copied extensions in `~/.codesurf/extensions/` that could drift from repo edits and cause confusing runtime mismatches. Moved these real directories into `~/.codesurf/extension-backups/20260403-120406/` and replaced them with symlinks to the live repo sources:
 - `artifact-builder`
 - `markdown-preview`
 - `pomodoro`
 - `system-monitor`
 - `timer`
 
-`~/.contex/extensions/` is now mostly live symlinks for actively developed extensions, which should stop the "edited code vs rendered extension" split-brain issue.
+`~/.codesurf/extensions/` is now mostly live symlinks for actively developed extensions, which should stop the "edited code vs rendered extension" split-brain issue.
 
 ## 2026-04-03 17:XX — hq-email stale backup was still overriding live extension
 
-Found the real reason email-list kept looking old even after symlinking `~/.contex/extensions/hq-email`: the old backup directory `~/.contex/extensions/hq-email.backup-20260403-112832` was still inside the scanned extensions folder. The registry loads by manifest id, so the backup copy could override the symlinked live copy depending on scan order. Moved the backup out to `~/.contex/extension-backups/`, leaving only the live symlink in `~/.contex/extensions/`. This should stop the stale email-list HTML/CSS from winning.
+Found the real reason email-list kept looking old even after symlinking `~/.codesurf/extensions/hq-email`: the old backup directory `~/.codesurf/extensions/hq-email.backup-20260403-112832` was still inside the scanned extensions folder. The registry loads by manifest id, so the backup copy could override the symlinked live copy depending on scan order. Moved the backup out to `~/.codesurf/extension-backups/`, leaving only the live symlink in `~/.codesurf/extensions/`. This should stop the stale email-list HTML/CSS from winning.
 
 ## 2026-04-03 16:XX — host-native extension styling pass started
 
@@ -273,7 +273,7 @@ Build verification: `npm run build` passes after the host-native pass.
 
 ## 2026-04-03 15:XX — hq-email runtime source mismatch fixed
 
-Root cause of the "light mode still looks wrong" screenshot was not CSS anymore — it was loading the wrong extension copy. `~/.contex/extensions/hq-email/` was a real directory from 2026-04-02, not the live `examples/extensions/hq-email` source we were editing. The other new extensions were symlinked, but HQ Email was not. Moved the old global folder aside to `~/.contex/extensions/hq-email.backup-<timestamp>` and replaced it with a symlink to `examples/extensions/hq-email`. Verified `diff` is now clean for `tiles/email-list/index.html`.
+Root cause of the "light mode still looks wrong" screenshot was not CSS anymore — it was loading the wrong extension copy. `~/.codesurf/extensions/hq-email/` was a real directory from 2026-04-02, not the live `examples/extensions/hq-email` source we were editing. The other new extensions were symlinked, but HQ Email was not. Moved the old global folder aside to `~/.codesurf/extensions/hq-email.backup-<timestamp>` and replaced it with a symlink to `examples/extensions/hq-email`. Verified `diff` is now clean for `tiles/email-list/index.html`.
 
 ## 2026-04-03 14:XX — Light-mode contrast pass on core-style extensions
 
@@ -307,7 +307,7 @@ Build verification: `npm run build` passes.
 
 Investigated the HEARTBEAT item about security hook false positives blocking extension file writes (innerHTML SVG, regex .exec). Full audit of all active hooks:
 
-- `PermissionRequest`: `~/.claude/permission_hook.sh` — routes to `/tmp/claude_permission_request.json`, waits for human response via Contex overlay. **This is the block source.** The Contex overlay shows file content with old/new strings, and a reviewer (human or automated) flags `innerHTML = ...` as XSS and `.exec(` as shell injection.
+- `PermissionRequest`: `~/.claude/permission_hook.sh` — routes to `/tmp/claude_permission_request.json`, waits for human response via CodeSurf overlay. **This is the block source.** The CodeSurf overlay shows file content with old/new strings, and a reviewer (human or automated) flags `innerHTML = ...` as XSS and `.exec(` as shell injection.
 - `PreToolUse`: Two hooks — `fieldtheory-read-permission-hook.py` (auto-approves fieldtheory-mac and .cursor/commands paths) and `fieldtheory-librarian-pretool.py` (auto-approves ~/.fieldtheory/librarian paths). Neither scans content.
 - `PostToolUse`: `gsd-context-monitor.js` (context window warning), superset notify.sh. Neither scans content.
 - No pattern-matching security scanner exists. The blocks are from the human-in-the-loop PermissionRequest gate, not an automated rule.
@@ -347,7 +347,7 @@ Completed `src/main/ipc/localProxy.ts` — full Anthropic→OpenAI/Ollama format
 - api-proxy extension upgraded to `tier: power` with `main.js` that handles `ext:api-proxy:getStatus`
   via bus cache. `ext:api-proxy:probeBackends` does live HTTP probes.
 
-Symlinked all 6 new extensions into `~/.contex/extensions/`:
+Symlinked all 6 new extensions into `~/.codesurf/extensions/`:
 agent-kanban, local-models, token-counter, model-hub, rag-docs, api-proxy
 
 BusEvent.type must be one of the constrained union — use `'data'` with `payload.action` for sub-types.

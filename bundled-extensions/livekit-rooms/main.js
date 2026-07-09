@@ -205,8 +205,8 @@ module.exports = {
       }
 
       if (!binaryPath) {
-        pushLog('[contex] livekit-server was not found on your shell PATH')
-        pushLog('[contex] Install livekit-server or expose it in your login shell PATH')
+        pushLog('[codesurf] livekit-server was not found on your shell PATH')
+        pushLog('[codesurf] Install livekit-server or expose it in your login shell PATH')
         publishStatus()
         return { ok: false, error: 'livekit-server not found on PATH' }
       }
@@ -222,7 +222,7 @@ module.exports = {
 
       serverRunning = true
       serverLogs = []
-      pushLog('[contex] Starting ' + binaryPath + ' --dev ...')
+      pushLog('[codesurf] Starting ' + binaryPath + ' --dev ...')
 
       serverProcess.stdout.on('data', (data) => {
         const lines = data.toString().split('\n').filter(Boolean)
@@ -237,14 +237,14 @@ module.exports = {
       })
 
       serverProcess.on('close', (code) => {
-        pushLog('[contex] livekit-server exited with code ' + code)
+        pushLog('[codesurf] livekit-server exited with code ' + code)
         serverProcess = null
         serverRunning = false
         publishStatus()
       })
 
       serverProcess.on('error', (err) => {
-        pushLog('[contex] Error: ' + err.message)
+        pushLog('[codesurf] Error: ' + err.message)
         serverProcess = null
         serverRunning = false
         publishStatus()
@@ -257,7 +257,7 @@ module.exports = {
     function stopLocal() {
       if (!serverProcess) return { ok: false, error: 'Not running' }
       serverProcess.kill('SIGTERM')
-      pushLog('[contex] Sent SIGTERM to livekit-server')
+      pushLog('[codesurf] Sent SIGTERM to livekit-server')
       // Process close handler will update state
       return { ok: true }
     }

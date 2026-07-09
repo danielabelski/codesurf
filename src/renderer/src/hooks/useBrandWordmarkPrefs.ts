@@ -3,8 +3,8 @@ import { getBrandPalettes } from '../lib/brandPalettes'
 import { BRAND_WORDMARKS } from '../lib/brandWordmarks'
 import type { ThemeMode } from '../theme'
 
-const BRAND_WORDMARK_CACHE_KEY = 'contex:brand-wordmark-index'
-const BRAND_WORDMARK_PALETTE_CACHE_KEY = 'contex:brand-wordmark-palette-index'
+const BRAND_WORDMARK_CACHE_KEY = 'codesurf:brand-wordmark-index'
+const BRAND_WORDMARK_PALETTE_CACHE_KEY = 'codesurf:brand-wordmark-palette-index'
 
 /** Persist per-theme brand wordmark/palette indices and keep asset tables warm. */
 export function useBrandWordmarkPrefs(effectiveThemeId: string, themeMode: ThemeMode): void {

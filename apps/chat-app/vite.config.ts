@@ -10,7 +10,7 @@ export default defineConfig({
       '@': resolve(__dirname, 'src'),
       // Direct alias so we don't need a real workspace install of the
       // bridge package — its source lives at a stable repo path.
-      '@contex/chat-bridge': resolve(__dirname, '../../packages/contex-chat-bridge/src/index.ts'),
+      '@codesurf/chat-bridge': resolve(__dirname, '../../packages/codesurf-chat-bridge/src/index.ts'),
     },
   },
   server: {

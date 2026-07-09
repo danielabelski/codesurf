@@ -2,7 +2,7 @@ import type { KanbanCardData } from '../components/KanbanCard'
 
 /**
  * Assembles a markdown brief for the agent.
- * Written to ~/.contex/briefs/<card-id>.md before launch.
+ * Written to ~/.codesurf/briefs/<card-id>.md before launch.
  * Passed as the first file reference in the launch command.
  */
 export function buildAgentBrief(card: KanbanCardData, allCards: KanbanCardData[]): string {
@@ -116,7 +116,7 @@ export function buildAgentBrief(card: KanbanCardData, allCards: KanbanCardData[]
   lines.push('```')
   lines.push('')
   lines.push('The canvas subscribes to `GET /events?card_id=global&token=$MCP_TOKEN` and renders updates in real-time.')
-  lines.push('Read `$MCP_TOKEN` from `~/.contex/mcp-server.json` (field `token`).')
+  lines.push('Read `$MCP_TOKEN` from `~/.codesurf/mcp-server.json` (field `token`).')
   lines.push('')
 
   if (card.mcpServers.length > 0) {

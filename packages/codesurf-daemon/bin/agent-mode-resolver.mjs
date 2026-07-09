@@ -9,7 +9,7 @@ import { join } from 'node:path'
 // agree (cross-consistency drift guard). The daemon now uses this for
 // defense-in-depth: the LOCAL daemon shares the filesystem with main, so when a
 // real agents.json is present it RE-RESOLVES and overrides request.agentMode. The
-// remote/cloud daemon has no `.contex` (the gitignored dir is excluded from the
+// remote/cloud daemon has no `.codesurf` (the gitignored dir is excluded from the
 // clone) → no file → it trusts the agentMode main already resolved and shipped.
 //
 // See agent-mode-resolver.ts for the full fail-closed rationale. The built-in
@@ -101,9 +101,9 @@ export const AGENT_MODE_RESOLUTION_DENIED_ERROR =
   'Refusing to launch rather than fall back to looser default permissions — ' +
   'fix the agent definition or clear the selected agent.'
 
-// BACK-COMPAT: on-disk path retained as `.contex/customisation/agents.json`.
+// BACK-COMPAT: on-disk path retained as `.codesurf/customisation/agents.json`.
 function agentsJsonPath(workspaceRoot) {
-  return join(workspaceRoot, '.contex', 'customisation', 'agents.json')
+  return join(workspaceRoot, '.codesurf', 'customisation', 'agents.json')
 }
 
 // Mirror of resolveAuthoritativeAgentMode in agent-mode-resolver.ts. Same

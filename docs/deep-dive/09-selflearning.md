@@ -23,7 +23,7 @@ This dimension covers how the system carries learning forward across sessions, a
 
 1. **Disk scan** of skill directories — `scanSkillDirectory` in `packages/codesurf-daemon/bin/skills-index.mjs:235-269`.
 2. **Extraction** of a user-supplied `.skill` zip — `extractSkillArchive` (`skills-index.mjs:389-404`) / `extractSkill` (`src/main/ipc/skills.ts:147-167`).
-3. **User-authored JSON** in `.contex/customisation/skills.json` — `loadSavedCustomSkills` (`skills-index.mjs:193-218`), written by the `CustomisationTile` skills editor (`src/renderer/src/components/CustomisationTile.tsx:501-560`).
+3. **User-authored JSON** in `.codesurf/customisation/skills.json` — `loadSavedCustomSkills` (`skills-index.mjs:193-218`), written by the `CustomisationTile` skills editor (`src/renderer/src/components/CustomisationTile.tsx:501-560`).
 
 There is no consolidation-to-skill pass analogous to dreaming. The dreaming pass writes prose memory (`DREAMING.md`) but is explicitly told **not** to produce reusable procedures — `'You are not writing user instructions; you are writing generated project memory.'` (`packages/codesurf-daemon/vendor/dreaming.mjs:292`). So recurring successful workflows are never distilled into invokable skills; the "auto-skill" leg of the self-learning system simply does not exist.
 

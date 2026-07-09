@@ -63,7 +63,7 @@ export function isPowerActivationPermitted(
   if (!manifest._enabled) {
     if (scope === 'workspace') {
       // Workspace extensions are attacker-controllable (any cloned repo can ship
-      // .contex/extensions/).  Enforce that they passed the untrustedScope gate.
+      // .codesurf/extensions/).  Enforce that they passed the untrustedScope gate.
       console.error(
         `[Security] Blocked activation of workspace power extension "${manifest.name}" (${manifest.id}): ` +
         `workspace-local power extensions require explicit user opt-in.`,
@@ -155,7 +155,7 @@ export async function loadPowerExtension(
  *  2. manifest.execution==='worker'  → force broker for this extension.
  *  3. bundled scope  → always legacy (safest default; no regression risk).
  *  4. CODESURF_POWER_BROKER=1 OR default (non-bundled)  → broker.
- *     contex-relay-suite is the first consumer; its relay grant is validated
+ *     codesurf-relay-suite is the first consumer; its relay grant is validated
  *     in main before registerRelayIPC() runs.
  *
  * Legacy-scope exceptions:

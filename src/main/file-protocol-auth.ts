@@ -1,12 +1,12 @@
 /**
- * Pure path-authorization for the `contex-file://` privileged scheme, extracted
+ * Pure path-authorization for the `codesurf-file://` privileged scheme, extracted
  * from `file-protocol.ts` so the security-sensitive logic is unit-testable
  * (see `test/file-protocol-auth.test.ts`).
  *
  * risk-04: the primary cross-origin exfil boundary is now that the protocol
  * response no longer sends `Access-Control-Allow-Origin: *` — media tiles load
  * via `<img>/<video>/<audio> src` (no-cors), which never needed CORS, so a
- * webview page can no longer `fetch()`/read contex-file responses cross-origin.
+ * webview page can no longer `fetch()`/read codesurf-file responses cross-origin.
  * The checks below are defense-in-depth: a media-extension filter plus a
  * denylist of sensitive home directories. A positive workspace/media-root
  * allowlist (per-file registration) is the remaining hardening and is tracked
@@ -75,7 +75,7 @@ export function authorizeRequestPath(filePath: string, home: string): string {
   const resolved = resolve(filePath)
 
   if (inferMimeType(resolved) === 'application/octet-stream') {
-    throw new Error(`Unsupported contex-file type: ${extname(resolved) || '(none)'}`)
+    throw new Error(`Unsupported codesurf-file type: ${extname(resolved) || '(none)'}`)
   }
   if (isSensitiveHomePath(resolved, home)) {
     throw new Error('Access denied: sensitive home directory')

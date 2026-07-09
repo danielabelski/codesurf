@@ -48,7 +48,7 @@ export type CollabMessageType = 'request' | 'reply' | 'note' | 'signal' | 'memor
 export type CollabMessageStatus = 'unread' | 'read' | 'sent' | 'archived'
 
 export interface CollabMessageMeta {
-  protocol: 'contex-message/v1'
+  protocol: 'codesurf-message/v1'
   id: string
   threadId: string
   fromTileId: string

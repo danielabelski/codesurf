@@ -152,7 +152,7 @@
     })
   } else {
     window.addEventListener('message', function handler(e) {
-      if (e.data?.type === 'contex-bridge-ready') {
+      if (e.data?.type === 'codesurf-bridge-ready') {
         window.removeEventListener('message', handler)
         setTimeout(() => {
           if (window.contex) {

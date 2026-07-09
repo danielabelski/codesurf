@@ -5,7 +5,7 @@ import {
   type ExternalStoreAdapter,
   type ThreadMessageLike,
 } from '@assistant-ui/react'
-import { callHost, subscribe, type BridgeContext, type ChannelName } from '@contex/chat-bridge'
+import { callHost, subscribe, type BridgeContext, type ChannelName } from '@codesurf/chat-bridge'
 
 type ChatMessage = ThreadMessageLike & { id: string }
 const STREAM_FLUSH_INTERVAL_MS = 50
@@ -22,9 +22,9 @@ interface Props {
  *   - subscribe to stream:${tileId} for chunks, translating
  *     each chunk into the assistant message's parts on the fly.
  * When standalone (no host) we run a local echo so the preview is
- * usable without contex behind it.
+ * usable without codesurf behind it.
  */
-export function ContexRuntimeProvider({ context, children }: Props) {
+export function CodesurfRuntimeProvider({ context, children }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const streamingIdRef = useRef<string | null>(null)
@@ -108,7 +108,7 @@ export function ContexRuntimeProvider({ context, children }: Props) {
 
       if (!context) {
         // Standalone fallback — synthesize a local echo so preview works
-        // without contex behind it.
+        // without codesurf behind it.
         await sleep(120)
         setMessages(prev => prev.map(msg => msg.id === assistantId
           ? { ...msg, content: `(standalone preview) you said: ${textOf(newMessage.content)}` }

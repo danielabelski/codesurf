@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { onContext, type BridgeContext } from '@contex/chat-bridge'
+import { onContext, type BridgeContext } from '@codesurf/chat-bridge'
 import { Thread } from './Thread'
-import { ContexRuntimeProvider } from './runtime/ContexRuntimeProvider'
+import { CodesurfRuntimeProvider } from './runtime/CodesurfRuntimeProvider'
 
 export function ChatApp() {
   const [ctx, setCtx] = useState<BridgeContext | null>(null)
@@ -32,14 +32,14 @@ export function ChatApp() {
   }, [])
 
   return (
-    <ContexRuntimeProvider context={ctx}>
+    <CodesurfRuntimeProvider context={ctx}>
       <div className="flex h-full w-full flex-col bg-background text-foreground">
         <Header status={bridgeStatus} ctx={ctx} />
         <div className="flex min-h-0 flex-1 flex-col">
           <Thread />
         </div>
       </div>
-    </ContexRuntimeProvider>
+    </CodesurfRuntimeProvider>
   )
 }
 
@@ -54,7 +54,7 @@ function Header({ status, ctx }: { status: 'idle' | 'connected' | 'standalone'; 
     <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-4 text-xs text-muted-foreground">
       <span className="size-1.5 rounded-full" style={{ background: dotColor }} />
       <span className="truncate">{label}</span>
-      <span className="ml-auto opacity-60">contex chat</span>
+      <span className="ml-auto opacity-60">codesurf chat</span>
     </div>
   )
 }

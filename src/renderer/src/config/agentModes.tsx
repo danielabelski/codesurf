@@ -8,7 +8,7 @@ import { DEFAULT_PERSONAS, overlayPersonas } from '../../../shared/agentModes'
 // authoritative SEND-time resolver) and the renderer share ONE source of truth.
 // This file keeps the renderer-only concerns: the icon/palette JSX and the
 // window.electron.fs-backed loader used for DISPLAY. BACK-COMPAT: the persisted
-// override store is still `${workspace}/.contex/customisation/agents.json`.
+// override store is still `${workspace}/.codesurf/customisation/agents.json`.
 //
 // NOTE: loadPersonas below is DISPLAY-only now. The SEND path no longer trusts
 // it — main re-resolves the selected agentId authoritatively (see
@@ -33,7 +33,7 @@ export function getAgentIcon(name: string | undefined): JSX.Element {
 }
 
 function agentsDataDir(workspacePath: string): string {
-  return `${workspacePath}/.contex/customisation`
+  return `${workspacePath}/.codesurf/customisation`
 }
 
 /**

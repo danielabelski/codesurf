@@ -288,7 +288,7 @@ async function readTileSkillSelection(workspaceDir, cardId) {
     return { enabledIds: [], disabledIds: [] }
   }
   const candidates = [
-    join(normalizedWorkspace, '.contex', normalizedCardId, 'skills.json'),
+    join(normalizedWorkspace, '.codesurf', normalizedCardId, 'skills.json'),
     join(normalizedWorkspace, '.collab', normalizedCardId, 'skills.json'),
   ]
   for (const candidate of candidates) {
@@ -465,7 +465,7 @@ export function createSkillsIndex({ homeDir, userHomeDir }) {
         ...context,
       })
 
-      const savedSkillsFile = join(normalizedWorkspace, '.contex', 'customisation', 'skills.json')
+      const savedSkillsFile = join(normalizedWorkspace, '.codesurf', 'customisation', 'skills.json')
       roots.push(buildRoot({
         path: savedSkillsFile,
         scope: 'workspace',
@@ -476,8 +476,8 @@ export function createSkillsIndex({ homeDir, userHomeDir }) {
       }))
       skills.push(...await loadSavedCustomSkills(savedSkillsFile, context, includeContent))
 
-      const skillsLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.contex', 'customisation', 'locations-skills.json'))
-      const promptLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.contex', 'customisation', 'locations-prompts.json'))
+      const skillsLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.codesurf', 'customisation', 'locations-skills.json'))
+      const promptLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.codesurf', 'customisation', 'locations-prompts.json'))
       const mergedLocationText = [skillsLocationsText, promptLocationsText].filter(text => text && text.trim()).join('\n') || DEFAULT_COMPAT_LOCATION_LINES.join('\n')
       const compatLocations = resolveLocationLines(mergedLocationText, normalizedUserHome, normalizedWorkspace)
       const seenCompat = new Set()

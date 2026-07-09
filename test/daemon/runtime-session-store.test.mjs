@@ -94,7 +94,7 @@ test('daemon runtime session store upserts, lists, reads, and deletes local chat
 
   const workspaceId = 'ws-runtime'
   const workspaceDir = join(daemon.homeDir, 'workspaces', workspaceId)
-  await mkdir(join(workspaceDir, '.contex'), { recursive: true })
+  await mkdir(join(workspaceDir, '.codesurf'), { recursive: true })
   await writeFile(join(daemon.homeDir, 'workspaces.json'), JSON.stringify({
     workspaces: [{ id: workspaceId, name: 'Runtime', path: workspaceDir }],
     activeWorkspaceId: workspaceId,
@@ -149,6 +149,6 @@ test('daemon runtime session store upserts, lists, reads, and deletes local chat
   })
   assert.equal(response.status, 200)
   assert.deepEqual(response.payload, { ok: true })
-  assert.equal(existsSync(join(workspaceDir, '.contex', 'runtime-session-chat-123.json')), false)
-  assert.equal(existsSync(join(workspaceDir, '.contex', 'deleted', 'runtime-session-chat-123.json')), true)
+  assert.equal(existsSync(join(workspaceDir, '.codesurf', 'runtime-session-chat-123.json')), false)
+  assert.equal(existsSync(join(workspaceDir, '.codesurf', 'deleted', 'runtime-session-chat-123.json')), true)
 })

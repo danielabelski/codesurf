@@ -301,7 +301,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     ])
   }, [workspaceId, tileId, currentUrl, pageTitle, mode, isLoading, canGoBack, canGoForward, browserEvidence, browserEvidenceSummary.total, browserEvidenceSummary.errorCount, browserEvidenceSummary.warningCount, browserPageHealth.status, createCurrentEvidenceSnapshot])
 
-  // Fan-out bus traffic from this browser tile to canvas peers (unrelated to ContexRelay mailbox).
+  // Fan-out bus traffic from this browser tile to canvas peers (unrelated to CodesurfRelay mailbox).
   useEffect(() => {
     const peers = new Set(connectedPeers)
     if (!window.electron?.bus || peers.size === 0) {

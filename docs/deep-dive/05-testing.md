@@ -1,6 +1,6 @@
 # Test Coverage & Quality
 
-This section audits the test suite for the contex Electron app and its sibling packages (`codesurf-daemon`, `contex-relay`, `electrobun` runtime). The codebase runs tests through Node's built-in `node:test` runner via a root `npm test` glob, plus one package-local `vitest` suite that is not wired into the gate. The dominant pattern in the gaps below is the same: the most regression-prone logic in the system — the streaming state machines that convert agent/SDK output into persisted timelines and renderer state — is structurally untestable or simply undriven, while the safer decision paths around it are well covered. A secondary theme is duplication: several pure-logic helpers exist in two or three copies (daemon vs. local IPC vs. renderer), and no test asserts the copies agree, so they can drift silently.
+This section audits the test suite for the contex Electron app and its sibling packages (`codesurf-daemon`, `codesurf-relay`, `electrobun` runtime). The codebase runs tests through Node's built-in `node:test` runner via a root `npm test` glob, plus one package-local `vitest` suite that is not wired into the gate. The dominant pattern in the gaps below is the same: the most regression-prone logic in the system — the streaming state machines that convert agent/SDK output into persisted timelines and renderer state — is structurally untestable or simply undriven, while the safer decision paths around it are well covered. A secondary theme is duplication: several pure-logic helpers exist in two or three copies (daemon vs. local IPC vs. renderer), and no test asserts the copies agree, so they can drift silently.
 
 Two cross-cutting clusters intersect this dimension and are owned by other sections:
 
@@ -16,7 +16,7 @@ Two cross-cutting clusters intersect this dimension and are owned by other secti
 | `test-03` | Canvas discovery logic duplicated in `App.tsx` and `discovery-graph-impl.ts`, neither tested | Medium | M | `src/renderer/src/App.tsx`, `src/renderer/src/workers/discovery-graph-impl.ts` |
 | `test-04` | `agent-stream.ts` SSE/NDJSON parsers untested; UTF-8 multibyte chunk-split corrupts text | Medium | M | `src/main/agent-stream.ts` |
 | `test-05` | Migration 004 FTS5 search triggers (`job_search` / `timeline_search`) never exercised | Medium | M | `src/main/db/migrations/004_job_index.ts`, `test/electrobun-runtime-db.test.mjs` |
-| `test-06` | `contex-relay` scheduler tests exist but are not run by root `npm test` (the CI command) | Medium | S | `package.json`, `packages/contex-relay/package.json`, `.github/workflows/release-on-tag.yml` |
+| `test-06` | `codesurf-relay` scheduler tests exist but are not run by root `npm test` (the CI command) | Medium | S | `package.json`, `packages/codesurf-relay/package.json`, `.github/workflows/release-on-tag.yml` |
 | `test-07` | Shared assertion helper (`node-expect.ts`) uses loose matchers; `toBeNull`/`toBeUndefined` interchangeable | Medium | S | `test/node-expect.ts` |
 | `test-08` | Local-execution checkpoint safety helpers in `chat.ts` duplicate the daemon's tested copies but are untested | Medium | M | `src/main/ipc/chat.ts`, `packages/codesurf-daemon/bin/chat-jobs.mjs` |
 
@@ -113,13 +113,13 @@ Part of cluster `C1` (discovery-graph geometry duplication). See also: the **dup
 
 ---
 
-### `test-06` — `contex-relay` scheduler tests exist but are not run by root `npm test` (Medium)
+### `test-06` — `codesurf-relay` scheduler tests exist but are not run by root `npm test` (Medium)
 
 **Problem.** The relay runtime (`RelayRuntime.schedule`, `executorFactory`, `RuntimeAgentState` in `runtime.ts`) is the agent turn scheduler central to multi-agent coordination. It has a real vitest suite covering spawn+initial-task, run-turn-on-message, emit-error-on-failure, timeout, and parse-output. But these run via `vitest run` scoped to the package, and the root `npm test` glob does not include `packages/**`. CI runs root `npm test`, with no root vitest dependency/config and no `workspaces` field — so a regression in the relay execution loop passes CI green even though tests for it exist on disk.
 
-**Evidence.** Root `package.json:22` `test` globs only `test/` subdirs (`test/*.test.ts test/*.test.mjs test/main/* test/sidebar/* test/daemon/*`). `packages/contex-relay/package.json:11` has its own `test: vitest run` and a local vitest install at `packages/contex-relay/node_modules/.bin/vitest`. Root has no vitest (`node_modules/.bin/vitest` missing, no vitest in root `package.json`, no `vitest.config`) and no `workspaces` field. The only CI workflow, `.github/workflows/release-on-tag.yml:72`, calls `npm test`. `runtime.test.ts` confirms `class RelayRuntime`, `schedule()`, `RuntimeAgentState`, `executorFactory`.
+**Evidence.** Root `package.json:22` `test` globs only `test/` subdirs (`test/*.test.ts test/*.test.mjs test/main/* test/sidebar/* test/daemon/*`). `packages/codesurf-relay/package.json:11` has its own `test: vitest run` and a local vitest install at `packages/codesurf-relay/node_modules/.bin/vitest`. Root has no vitest (`node_modules/.bin/vitest` missing, no vitest in root `package.json`, no `vitest.config`) and no `workspaces` field. The only CI workflow, `.github/workflows/release-on-tag.yml:72`, calls `npm test`. `runtime.test.ts` confirms `class RelayRuntime`, `schedule()`, `RuntimeAgentState`, `executorFactory`.
 
-**Recommendation.** Wire the package tests into the gate: either add `"test:relay": "npm --prefix packages/contex-relay test"` and chain it into the root `test` script (or a `test:all`), or add a `workspaces` field and run `npm test --workspaces`. Then update `release-on-tag.yml` to run the combined command. Confirm vitest is installable in CI (the devDependency is present in the package).
+**Recommendation.** Wire the package tests into the gate: either add `"test:relay": "npm --prefix packages/codesurf-relay test"` and chain it into the root `test` script (or a `test:all`), or add a `workspaces` field and run `npm test --workspaces`. Then update `release-on-tag.yml` to run the combined command. Confirm vitest is installable in CI (the devDependency is present in the package).
 
 **Effort.** S.
 

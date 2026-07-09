@@ -362,7 +362,7 @@ function tryInitContex() {
   initContex();
 }
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'contex-bridge-ready') tryInitContex();
+  if (e.data && e.data.type === 'codesurf-bridge-ready') tryInitContex();
 });
 tryInitContex();
 setTimeout(tryInitContex, 0);

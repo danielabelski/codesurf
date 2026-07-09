@@ -1,6 +1,6 @@
 /**
  * Bridge script injected into extension tile iframes.
- * Creates the window.contex API using postMessage RPC.
+ * Creates the window.codesurf API using postMessage RPC.
  *
  * Returned as a string — evaluated in the iframe context.
  */
@@ -37,7 +37,7 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
       const timeoutMs = method === 'ext.invoke' ? 15 * 60 * 1000 : 10000;
       _pending.set(id, { resolve, reject });
       window.parent.postMessage({
-        type: 'contex-rpc',
+        type: 'codesurf-rpc',
         id,
         method,
         params: params ?? null,
@@ -67,7 +67,7 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
 
   function _emit(event, data) {
     const cbs = _listeners.get(event);
-    if (cbs) cbs.forEach(cb => { try { cb(data); } catch(e) { console.error('[contex bridge]', e); } });
+    if (cbs) cbs.forEach(cb => { try { cb(data); } catch(e) { console.error('[codesurf bridge]', e); } });
   }
 
   window.addEventListener('message', (e) => {
@@ -75,7 +75,7 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
     if (!msg || typeof msg !== 'object') return;
 
     // Theme CSS variable injection from host
-    if (msg.type === 'contex-theme-vars' && msg.vars) {
+    if (msg.type === 'codesurf-theme-vars' && msg.vars) {
       var style = document.getElementById('__contex_theme__');
       if (!style) {
         style = document.createElement('style');
@@ -92,7 +92,7 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
     }
 
     // RPC response
-    if (msg.type === 'contex-rpc-response' && msg.id) {
+    if (msg.type === 'codesurf-rpc-response' && msg.id) {
       const p = _pending.get(msg.id);
       if (p) {
         _pending.delete(msg.id);
@@ -103,29 +103,29 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
     }
 
     // Event push from host
-    if (msg.type === 'contex-event') {
+    if (msg.type === 'codesurf-event') {
       _emit(msg.event, msg.data);
       return;
     }
 
     // Action invocation from a connected peer
-    if (msg.type === 'contex-action-invoke') {
-      console.log('[contex bridge] action invoke:', msg.action, 'registered:', Array.from(_actionHandlers.keys()));
+    if (msg.type === 'codesurf-action-invoke') {
+      console.log('[codesurf bridge] action invoke:', msg.action, 'registered:', Array.from(_actionHandlers.keys()));
       var handler = _actionHandlers.get(msg.action);
       if (handler) {
         Promise.resolve().then(function() { return handler(msg.params || {}); }).then(function(result) {
-          window.parent.postMessage({ type: 'contex-action-result', requestId: msg.requestId, tileId: _tileId, result: result }, '*');
+          window.parent.postMessage({ type: 'codesurf-action-result', requestId: msg.requestId, tileId: _tileId, result: result }, '*');
         }).catch(function(err) {
-          window.parent.postMessage({ type: 'contex-action-result', requestId: msg.requestId, tileId: _tileId, error: err.message || String(err) }, '*');
+          window.parent.postMessage({ type: 'codesurf-action-result', requestId: msg.requestId, tileId: _tileId, error: err.message || String(err) }, '*');
         });
       } else {
-        window.parent.postMessage({ type: 'contex-action-result', requestId: msg.requestId, tileId: _tileId, error: 'Unknown action: ' + msg.action }, '*');
+        window.parent.postMessage({ type: 'codesurf-action-result', requestId: msg.requestId, tileId: _tileId, error: 'Unknown action: ' + msg.action }, '*');
       }
       return;
     }
   });
 
-  window.contex = {
+  window.codesurf = {
     tileId: _tileId,
     extId: _extId,
 
@@ -266,18 +266,18 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
   (function() {
     var _granted = ${JSON.stringify(gate.granted)};
     ${JSON.stringify([...CAPABILITY_GATED_NAMESPACES])}.forEach(function(ns) {
-      if (_granted.indexOf(ns) === -1 && window.contex[ns]) { delete window.contex[ns]; }
+      if (_granted.indexOf(ns) === -1 && window.codesurf[ns]) { delete window.codesurf[ns]; }
     });
   })();
   ` : ''}
 
-  // Canonical alias going forward (window.contex stays for back-compat).
-  window.codesurf = window.contex;
+  // Back-compat alias for older extensions that still call window.contex.
+  window.contex = window.codesurf;
 
   // Inject base component stylesheet (uses --ct-* vars; structural styles baked in at load time)
   (function() {
     var baseStyle = document.createElement('style');
-    baseStyle.id = '__contex_base__';
+    baseStyle.id = '__codesurf_base__';
     baseStyle.textContent = [
       '*,*::before,*::after{box-sizing:border-box}',
       'html,body{margin:0;padding:0;font-family:var(--ct-font-sans,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif);font-size:var(--ct-font-size,13px);line-height:var(--ct-font-line,1.5);font-weight:var(--ct-font-weight,400);color:var(--ct-text,#111);background:var(--ct-bg,transparent)}',
@@ -352,7 +352,7 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
   })();
 
   // Signal ready
-  window.parent.postMessage({ type: 'contex-bridge-ready', tileId: _tileId, extId: _extId }, '*');
+  window.parent.postMessage({ type: 'codesurf-bridge-ready', tileId: _tileId, extId: _extId }, '*');
 })();
 `
 }

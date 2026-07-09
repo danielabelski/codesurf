@@ -11,7 +11,7 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import type { ExtensionRegistry } from '../extensions/registry'
 import { getBridgeScript } from '../extensions/bridge'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { readSettingsSync } from './workspace'
 import { getPluginState, setPluginState, replacePluginState } from '../extensions/plugin-store'
 import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
@@ -20,7 +20,7 @@ import { log } from '../utils/logger.ts'
 const extLog = log.scope('Extensions')
 
 const execFileAsync = promisify(execFile)
-const EXTENSIONS_DIR = join(CONTEX_HOME, 'extensions')
+const EXTENSIONS_DIR = join(CODESURF_HOME, 'extensions')
 
 /** Result of installing a packaged plugin (.vsix / .zip) into the plugins dir. */
 interface InstallPluginResult {
@@ -194,7 +194,7 @@ async function installPluginArchive(registry: ExtensionRegistry, archivePath: st
 }
 
 function extensionSettingsPath(extId: string): string {
-  return join(CONTEX_HOME, 'extension-settings', `${extId}.json`)
+  return join(CODESURF_HOME, 'extension-settings', `${extId}.json`)
 }
 
 async function readExtensionSettings(registry: ExtensionRegistry, extId: string): Promise<Record<string, unknown>> {
@@ -406,7 +406,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
   })
 
 
-  // Extension settings (persisted in ~/.contex/extension-settings/{extId}.json)
+  // Extension settings (persisted in ~/.codesurf/extension-settings/{extId}.json)
   ipcMain.handle('ext:settings-get', async (_, extId: string) => {
     return readExtensionSettings(registry, extId)
   })
@@ -426,7 +426,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       Object.entries(settings ?? {}).filter(([key]) => allowedKeys.has(key)),
     )
 
-    await fs.mkdir(join(CONTEX_HOME, 'extension-settings'), { recursive: true })
+    await fs.mkdir(join(CODESURF_HOME, 'extension-settings'), { recursive: true })
     await fs.writeFile(extensionSettingsPath(extId), JSON.stringify(filtered, null, 2))
     return true
   })

@@ -253,8 +253,8 @@
   }
 
   window.addEventListener('message', (e) => {
-    if (e.data?.type === 'contex-bridge-ready') init()
-    if (e.data?.type === 'contex-event' && e.data?.event === 'bus.event.livekit') {
+    if (e.data?.type === 'codesurf-bridge-ready') init()
+    if (e.data?.type === 'codesurf-event' && e.data?.event === 'bus.event.livekit') {
       const d = e.data.data
       if (d?.payload) Object.assign(state, d.payload)
       else if (d) Object.assign(state, d)

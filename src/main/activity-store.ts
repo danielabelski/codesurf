@@ -2,9 +2,12 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'node:crypto'
 import type { ActivityRecord, ActivityQuery, ActivityType, ActivityStatus } from '../shared/types'
-import { CONTEX_HOME } from './paths'
+import { CODESURF_HOME } from './paths'
+import { capActivityRecords } from './activity-cap.ts'
 
-const CONTEX_DIR = CONTEX_HOME
+export { MAX_ACTIVITY_RECORDS, MAX_ACTIVITY_AGE_MS, capActivityRecords } from './activity-cap.ts'
+
+const CODESURF_DIR = CODESURF_HOME
 const SAVE_DEBOUNCE_MS = 1000
 
 interface StoreState {
@@ -17,11 +20,11 @@ interface StoreState {
 const stores = new Map<string, StoreState>()
 
 function storePath(workspaceId: string): string {
-  return join(CONTEX_DIR, 'workspaces', workspaceId, '.contex', 'activity.json')
+  return join(CODESURF_DIR, 'workspaces', workspaceId, '.codesurf', 'activity.json')
 }
 
 async function ensureDir(workspaceId: string): Promise<void> {
-  await fs.mkdir(join(CONTEX_DIR, 'workspaces', workspaceId, '.contex'), { recursive: true })
+  await fs.mkdir(join(CODESURF_DIR, 'workspaces', workspaceId, '.codesurf'), { recursive: true })
 }
 
 async function loadStore(workspaceId: string): Promise<StoreState> {
@@ -36,8 +39,12 @@ async function loadStore(workspaceId: string): Promise<StoreState> {
     // No file yet — start empty
   }
 
-  const state: StoreState = { records, dirty: false, saveTimer: null }
+  // Cap on load so legacy unbounded files shrink on first open.
+  const capped = capActivityRecords(records)
+  const dirty = capped !== records
+  const state: StoreState = { records: capped, dirty, saveTimer: null }
   stores.set(workspaceId, state)
+  if (dirty) scheduleSave(workspaceId, state)
   return state
 }
 
@@ -110,7 +117,10 @@ export async function upsertActivity(
     updatedAt: now,
   }
   store.records.push(record)
+  store.records = capActivityRecords(store.records)
   scheduleSave(workspaceId, store)
+  // Return the created record even if a concurrent cap could theoretically
+  // drop older rows — the just-inserted row is always newest and retained.
   return record
 }
 

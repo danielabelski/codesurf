@@ -1,10 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { RelayParticipant, RelayAgentExecutor, RelayTurnInput, RelayMessage, RelayEvent } from './types'
-import type { ContexRelay } from './relay'
+import type { CodesurfRelay } from './relay'
 import { RelayRuntime, RelayTimeoutError } from './runtime'
 
 // Mock relay that properly handles events
-function createMockRelay(): ContexRelay {
+function createMockRelay(): CodesurfRelay {
   const eventHandlers: Array<(event: RelayEvent) => void> = []
   
   return {
@@ -25,11 +25,11 @@ function createMockRelay(): ContexRelay {
     },
     workspacePath: '/tmp/test',
     paths: {
-      root: '/tmp/test/.contex/relay',
-      participants: '/tmp/test/.contex/relay/participants',
-      channels: '/tmp/test/.contex/relay/channels',
-      archive: '/tmp/test/.contex/relay/archive/all',
-      relationships: '/tmp/test/.contex/relay/relationships',
+      root: '/tmp/test/.codesurf/relay',
+      participants: '/tmp/test/.codesurf/relay/participants',
+      channels: '/tmp/test/.codesurf/relay/channels',
+      archive: '/tmp/test/.codesurf/relay/archive/all',
+      relationships: '/tmp/test/.codesurf/relay/relationships',
     },
     upsertParticipant: vi.fn().mockImplementation((p) => Promise.resolve(p as RelayParticipant)),
     getParticipant: vi.fn(),
@@ -45,12 +45,12 @@ function createMockRelay(): ContexRelay {
     advanceChannelCursor: vi.fn().mockResolvedValue(undefined),
     analyzeRelationships: vi.fn().mockResolvedValue([]),
     storeMemory: vi.fn().mockResolvedValue({}),
-  } as unknown as ContexRelay
+  } as unknown as CodesurfRelay
 }
 
 describe('runtime', () => {
   describe('RelayRuntime', () => {
-    let mockRelay: ContexRelay
+    let mockRelay: CodesurfRelay
     let mockExecutor: RelayAgentExecutor
 
     beforeEach(() => {
@@ -108,7 +108,7 @@ describe('runtime', () => {
         mailbox: 'inbox',
         filename: 'test.md',
         meta: {
-          protocol: 'contex-relay/v1',
+          protocol: 'codesurf-relay/v1',
           id: 'msg-1',
           threadId: 'msg-1',
           scope: 'direct',
@@ -167,7 +167,7 @@ describe('runtime', () => {
         mailbox: 'inbox',
         filename: 'test.md',
         meta: {
-          protocol: 'contex-relay/v1',
+          protocol: 'codesurf-relay/v1',
           id: 'msg-1',
           threadId: 'msg-1',
           scope: 'direct',
@@ -234,7 +234,7 @@ describe('runtime', () => {
         mailbox: 'inbox',
         filename: 'test.md',
         meta: {
-          protocol: 'contex-relay/v1',
+          protocol: 'codesurf-relay/v1',
           id: 'msg-1',
           threadId: 'msg-1',
           scope: 'direct',
@@ -304,7 +304,7 @@ describe('runtime', () => {
         mailbox: 'inbox',
         filename: 'test.md',
         meta: {
-          protocol: 'contex-relay/v1',
+          protocol: 'codesurf-relay/v1',
           id: 'msg-1',
           threadId: 'msg-1',
           scope: 'direct',

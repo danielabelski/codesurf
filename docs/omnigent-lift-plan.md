@@ -53,8 +53,8 @@ CodeSurf's current state is genuinely strong in places and should be *kept*, not
 
 ### F4. Async inbox + durable sub-agent sessions (spawn / fan-out / collect)  ·  Effort: **L**
 - **omnigent:** `sys_call_async` dispatches background work → `task_id`; `sys_read_inbox` drains mid-turn; `sys_cancel_task` — `omnigent/tools/builtins/async_inbox.py:1-27,129-288`. Durable child sessions via `sys_session_send` (spawn-or-continue, concurrent fan-out) and `sys_session_create` — `omnigent/tools/builtins/spawn.py:56-154,550-588`.
-- **CodeSurf now:** only synchronous turns + sequential queued turns — `src/renderer/src/components/chat/ChatTileQueuedTurnsDrawer.tsx:24-100`; relay has participants + scheduled ticks but no async inbox — `packages/contex-relay/src/runtime.ts:143-186`.
-- **Slots into:** new MCP tools `codesurf_session_send/create/read_inbox` backed by `packages/contex-relay` + daemon job timelines; completions publish to `src/main/event-bus.ts`; a spawned agent becomes a new chat tile via `canvas_create_tile`.
+- **CodeSurf now:** only synchronous turns + sequential queued turns — `src/renderer/src/components/chat/ChatTileQueuedTurnsDrawer.tsx:24-100`; relay has participants + scheduled ticks but no async inbox — `packages/codesurf-relay/src/runtime.ts:143-186`.
+- **Slots into:** new MCP tools `codesurf_session_send/create/read_inbox` backed by `packages/codesurf-relay` + daemon job timelines; completions publish to `src/main/event-bus.ts`; a spawned agent becomes a new chat tile via `canvas_create_tile`.
 - **Why foundational:** unlocks chat #3 (user-facing spawn), #2 (async), #6 (aggregated approvals), and is the daemon's spawn-tree backbone.
 
 ---
@@ -78,7 +78,7 @@ Note: A1 is also a daemon item (needs session ACL for multi-user attribution) �
 | # | Lift | omnigent | CodeSurf now | Effort |
 |---|------|----------|--------------|--------|
 | D2 | **Per-user session-discovery stream** (fail-closed list + WS deltas + grant notify) | `server/routes/sessions.py:12056-12080,12279-12308,16537-16539`, `runtime/user_session_stream.py:1-22` | on-demand merged HTTP list, in-memory bus — `src/main/ipc/canvas.ts:819-866`, `event-bus.ts:15-35` | **M/L** (depends on F1, else leaks session IDs) |
-| D3 | **Spawn-tree sessions w/ inherited visibility** (`parent`/`root` ids, READ-on-parent) | `entities/conversation.py:39-50`, `sessions.py:13798-13844,1750-1810` | flat relay participants/channels, spawn lacks parent/root — `packages/contex-relay/src/types.ts:30-48,157-169` | **L** |
+| D3 | **Spawn-tree sessions w/ inherited visibility** (`parent`/`root` ids, READ-on-parent) | `entities/conversation.py:39-50`, `sessions.py:13798-13844,1750-1810` | flat relay participants/channels, spawn lacks parent/root — `packages/codesurf-relay/src/types.ts:30-48,157-169` | **L** |
 | D4 | **Owner-scoped host/runner binding + tokenized launch** | `server/routes/hosts.py:241-289,328-395,497-546` | hosts have URL/token, no owner; `/host/list` returns all — `codesurf-daemon/src/types.ts:22-31`, `codesurfd.mjs:3738-3749` | **L/XL** (needs real remote runner/tunnel) |
 | D5 | **Canonical workspace binding for shared/remote exec** | `entities/conversation.py:156-166`, `hosts.py:369-395,514-526` | path records, raw `workspaceDir` at job start — `codesurfd.mjs:1587-1596,3231-3234` (worktrees exist) | **M/L** |
 | D6 | **Session-scoped, attributed, anchored review comments** (server side of A1) | `server/routes/comments.py:117-130`, `entities/comment.py:8-69` | tile mailbox markdown w/ frontmatter, no path/range anchor — `src/main/ipc/collab.ts:41-79,173-189` | **M** |
@@ -124,7 +124,7 @@ omnigent** (multi-user/sharing); (3) tool-call grouping — keep our front-end r
 
 - **`AgentMode` is the existing agent-definition framework** (`src/shared/types.ts:121-133`):
   `name, description, systemPrompt, tools[], icon, color, isBuiltin, defaultNextMode, source`.
-  Authored in `CustomisationTile.tsx` → `${workspace}/.contex/customisation/agents.json`.
+  Authored in `CustomisationTile.tsx` → `${workspace}/.codesurf/customisation/agents.json`.
 - **It is ORPHANED.** It is read by exactly one file and **never enters the chat launch payload**
   (`useChatTileMessaging.ts:317` sends `provider/model/mode/thinking`, no `agentId`/persona).
   → **Wiring `AgentMode` into launch is the prerequisite for everything below.**

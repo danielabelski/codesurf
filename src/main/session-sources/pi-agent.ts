@@ -25,9 +25,9 @@ import {
   isExternalSessionImportableInChat,
   roleFromUnknown,
 } from './shared.ts'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 
-const CODESURF_AGENT_SESSION_DIR = join(CONTEX_HOME, 'agent-sessions')
+const CODESURF_AGENT_SESSION_DIR = join(CODESURF_HOME, 'agent-sessions')
 
 type PiListingMeta = {
   sessionId: string | null

@@ -8,7 +8,7 @@ import {
   ALLOWED_SHELLS,
   ALLOWED_AGENT_BINS,
 } from '../src/main/ipc/terminal-helpers.ts'
-import { CONTEX_HOME } from '../src/main/paths.ts'
+import { CODESURF_HOME } from '../src/main/paths.ts'
 
 // ---------------------------------------------------------------------------
 // isAllowedBinary
@@ -150,24 +150,24 @@ describe('expandHome — tilde expansion', () => {
   })
 })
 
-describe('expandHome — CONTEX_HOME resolution', () => {
-  it('resolves legacy ~/.contex/ paths to CONTEX_HOME', () => {
-    const result = expandHome('~/.contex/workspaces/abc')
-    assert.equal(result, join(CONTEX_HOME, 'workspaces/abc'))
-  })
-
-  it('resolves legacy ~/.contex/ with a single segment', () => {
-    const result = expandHome('~/.contex/settings.json')
-    assert.equal(result, join(CONTEX_HOME, 'settings.json'))
-  })
-
-  it('resolves current ~/.codesurf/ paths to CONTEX_HOME', () => {
+describe('expandHome — CODESURF_HOME resolution', () => {
+  it('resolves legacy ~/.codesurf/ paths to CODESURF_HOME', () => {
     const result = expandHome('~/.codesurf/workspaces/abc')
-    assert.equal(result, join(CONTEX_HOME, 'workspaces/abc'))
+    assert.equal(result, join(CODESURF_HOME, 'workspaces/abc'))
   })
 
-  it('resolves legacy Windows-style ~\\.contex\\ paths to CONTEX_HOME', () => {
+  it('resolves legacy ~/.codesurf/ with a single segment', () => {
+    const result = expandHome('~/.codesurf/settings.json')
+    assert.equal(result, join(CODESURF_HOME, 'settings.json'))
+  })
+
+  it('resolves current ~/.codesurf/ paths to CODESURF_HOME', () => {
+    const result = expandHome('~/.codesurf/workspaces/abc')
+    assert.equal(result, join(CODESURF_HOME, 'workspaces/abc'))
+  })
+
+  it('resolves legacy Windows-style ~\\.contex\\ paths to CODESURF_HOME', () => {
     const result = expandHome('~\\.contex\\workspaces\\abc')
-    assert.equal(result, join(CONTEX_HOME, 'workspaces\\abc'))
+    assert.equal(result, join(CODESURF_HOME, 'workspaces\\abc'))
   })
 })

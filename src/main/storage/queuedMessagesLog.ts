@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
 /**
  * Append-only JSONL event log for chat-tile queued messages.
@@ -53,13 +53,13 @@ export interface ActiveQueuedMessage {
   enqueuedAt: number
 }
 
-const LOG_PATH = join(CONTEX_HOME, 'queued-messages.log.jsonl')
+const LOG_PATH = join(CODESURF_HOME, 'queued-messages.log.jsonl')
 
 /** Compact the log when it exceeds this size. */
 const LOG_MAX_BYTES = 512 * 1024
 
 async function ensureLogDir(): Promise<void> {
-  await fs.mkdir(CONTEX_HOME, { recursive: true })
+  await fs.mkdir(CODESURF_HOME, { recursive: true })
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

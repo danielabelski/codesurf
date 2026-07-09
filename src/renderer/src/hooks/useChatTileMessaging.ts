@@ -542,12 +542,12 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
             if (getChatSurfaceIframe(surface.instanceId)?.contentWindow !== e.source) return
             const msg = e.data
             if (!msg || typeof msg !== 'object') return
-            if (msg.type === 'contex-rpc' && msg.method === 'surface.setPayload' && msg.tileId === surface.instanceId) {
+            if (msg.type === 'codesurf-rpc' && msg.method === 'surface.setPayload' && msg.tileId === surface.instanceId) {
               ack()
             }
           }
           window.addEventListener('message', onceAck)
-          postToChatSurface(surface.instanceId, { type: 'contex-event', event: 'surface.requestFlush', data: {} })
+          postToChatSurface(surface.instanceId, { type: 'codesurf-event', event: 'surface.requestFlush', data: {} })
         })
       } catch { /* best-effort */ }
 
@@ -608,7 +608,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     setAttachments([])
 
     for (const openSurface of openChatSurfacesRef.current) {
-      postToChatSurface(openSurface.instanceId, { type: 'contex-event', event: 'surface.clear', data: {} })
+      postToChatSurface(openSurface.instanceId, { type: 'codesurf-event', event: 'surface.clear', data: {} })
     }
     setOpenChatSurfaces([])
     setActiveChatSurfaceId(null)

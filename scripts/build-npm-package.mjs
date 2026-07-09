@@ -128,7 +128,7 @@ function main() {
   copyIfExists('dist-electron')
   copyResources()
   copyDaemonPackage()
-  copyIfExists('packages/contex-relay/dist')
+  copyIfExists('packages/codesurf-relay/dist')
   copyIfExists('README.md')
   copyIfExists('LICENSE')
 

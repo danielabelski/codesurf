@@ -27,7 +27,7 @@ The MCP server maintains a per-tile token registry whose stated purpose
 authentication is a boolean: `requireMcpAuth` accepts *any* tile token for
 *any* request, and the handlers never learn which principal authenticated. So a
 single leaked tile token — handed to every spawned agent via
-`CONTEX_MCP_TILE_TOKEN` and written into workspace `.mcp.json` files — can
+`CODESURF_MCP_TILE_TOKEN` and written into workspace `.mcp.json` files — can
 inject terminal input into ANY tile (`POST /inject` with attacker-chosen
 `card_id`), push SSE events to any tile, and call every MCP tool. The
 isolation the design claims does not exist; only revocation does. This plan

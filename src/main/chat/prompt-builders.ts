@@ -101,26 +101,37 @@ export function buildPeerSystemPrompt(peers?: PromptPeerContext[]): string | und
   return [
     'You are an AI agent running inside CodeSurf, an infinite canvas workspace.',
     '',
-    'The following peer blocks are directly connected to you on the canvas:',
+    '## Agent room',
+    'Canvas wires put you in a shared agent room with the blocks below. Room traffic is injected into your context at the start of each turn (you do not need to poll).',
+    'To send to the room: mcp__codesurf__room_post (or peer_send_message). To inspect membership: mcp__codesurf__room_status.',
+    'When you finish meaningful work, a turn summary is posted to the room automatically for your peers.',
+    '',
+    'The following peer blocks share your room:',
     peerLines,
     '',
     'Treat the connected peer list above as authoritative for this turn.',
     'Do not waste time rediscovering tools or the canvas when a connected peer already exposes the needed tool.',
     '',
-    '## Peer Collaboration',
-    'Use these MCP tools to coordinate with linked peers:',
-    '- peer_set_state: Declare your status, task, and files (do this when starting work)',
-    '- peer_get_state: See what peers are working on, their todos, and files',
-    '- peer_send_message: Send a direct message to a peer',
-    '- peer_read_messages: Read incoming messages from peers',
-    '- peer_add_todo: Add a shared todo (peers are notified)',
-    '- peer_complete_todo: Mark a todo done',
+    '## Room / peer tools (mcp__codesurf__*)',
+    '- room_status: Your room id, members, unread count',
+    '- room_post: Post a message/task/handoff/summary into the room',
+    '- room_consume: Drain unread room traffic (normally auto-injected each turn)',
+    '- peer_set_state: Announce your status/task/files to the room',
+    '- peer_get_state: Snapshot of other room members',
+    '- peer_send_message: Direct message a room member',
     '',
     'Peer bridge tools for connected blocks require the block ID from the list above as tile_id.',
     'When a connected block already exposes a direct tool for the job, use it immediately instead of stalling or asking the user to perform the action manually.',
     'Do not call canvas_list_tiles or list_extensions first unless the connected peers above do not cover the request.',
-    'All tools are prefixed mcp__contex__ (for example mcp__contex__peer_get_state).',
     ...browserGuide,
     ...extActionGuide,
   ].join('\n')
+}
+
+/** Append room membership + consumed traffic for this turn. */
+export function appendRoomContext(systemPrompt: string | undefined, roomExtra: string | undefined): string | undefined {
+  const extra = roomExtra?.trim()
+  if (!extra) return systemPrompt
+  if (!systemPrompt?.trim()) return extra
+  return `${systemPrompt}\n\n${extra}`
 }

@@ -3,11 +3,12 @@ import type { ChildProcess } from 'child_process'
 import * as http from 'http'
 import { promises as fs, readFileSync } from 'fs'
 import { dirname, join } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { daemonClient } from '../daemon/client'
 import { broadcastToRenderer } from '../utils/broadcast'
 import { log as scopedLog } from '../utils/logger.ts'
 import type { ChatMessage, ChatRequest, RuntimeChatSessionState } from './types'
+import { publishTurnSummary } from '../agent-room'
 
 export type { RuntimeChatSessionState } from './types'
 
@@ -20,8 +21,34 @@ export function log(...args: unknown[]): void {
   chatLog.debug(...args)
 }
 
+/** Accumulated assistant text for room turn summaries (cleared on done). */
+const assistantTextByCard = new Map<string, string>()
+
 export function sendStream(cardId: string, event: Record<string, unknown>): void {
   log('sendStream', event.type, event.text ? `"${String(event.text).slice(0, 50)}"` : '', event.error ?? '')
+
+  const type = String(event.type ?? '')
+  if (type === 'text' || type === 'assistant' || type === 'delta') {
+    const chunk = String(event.text ?? event.delta ?? '')
+    if (chunk) {
+      assistantTextByCard.set(cardId, (assistantTextByCard.get(cardId) ?? '') + chunk)
+    }
+  }
+  if (type === 'done') {
+    const summary = (assistantTextByCard.get(cardId) ?? '').trim()
+    assistantTextByCard.delete(cardId)
+    if (summary) {
+      try {
+        publishTurnSummary(cardId, summary.slice(0, 2000), 'chat')
+      } catch {
+        // room optional
+      }
+    }
+  }
+  if (type === 'error') {
+    assistantTextByCard.delete(cardId)
+  }
+
   broadcastToRenderer('agent:stream', { cardId, ...event })
 }
 
@@ -81,7 +108,7 @@ export function deleteCardSessionIds(cardId: string): void {
 }
 
 // Persist session IDs to disk so they survive main-process restarts.
-export const SESSION_IDS_PATH = join(CONTEX_HOME, 'session-ids.json')
+export const SESSION_IDS_PATH = join(CODESURF_HOME, 'session-ids.json')
 let sessionIdsPersistTimer: ReturnType<typeof setTimeout> | null = null
 
 export function persistSessionIds(): void {

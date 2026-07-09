@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 import { readJsonArtifact, writeJsonArtifactAtomic } from './jsonArtifacts.ts'
 
 export function assertSafeWorkspaceArtifactId(id: string): void {
@@ -9,8 +9,8 @@ export function assertSafeWorkspaceArtifactId(id: string): void {
 
 async function migrateStorageToContexDir(storageId: string): Promise<void> {
   assertSafeWorkspaceArtifactId(storageId)
-  const workspaceDir = join(CONTEX_HOME, 'workspaces', storageId)
-  const contexDir = join(workspaceDir, '.contex')
+  const workspaceDir = join(CODESURF_HOME, 'workspaces', storageId)
+  const contexDir = join(workspaceDir, '.codesurf')
 
   try {
     await fs.mkdir(contexDir, { recursive: true })
@@ -62,30 +62,30 @@ export async function ensureWorkspaceStorageMigrated(workspaceId: string): Promi
 
 export function canvasStatePath(storageId: string): string {
   assertSafeWorkspaceArtifactId(storageId)
-  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', 'canvas-state.json')
+  return join(CODESURF_HOME, 'workspaces', storageId, '.codesurf', 'canvas-state.json')
 }
 
 export function kanbanStatePath(storageId: string, tileId: string): string {
   assertSafeWorkspaceArtifactId(storageId)
   assertSafeWorkspaceArtifactId(tileId)
-  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', `kanban-${tileId}.json`)
+  return join(CODESURF_HOME, 'workspaces', storageId, '.codesurf', `kanban-${tileId}.json`)
 }
 
 export function tileStatePath(storageId: string, tileId: string): string {
   assertSafeWorkspaceArtifactId(storageId)
   assertSafeWorkspaceArtifactId(tileId)
-  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', `tile-state-${tileId}.json`)
+  return join(CODESURF_HOME, 'workspaces', storageId, '.codesurf', `tile-state-${tileId}.json`)
 }
 
 export function tileSessionSummaryPath(storageId: string, tileId: string): string {
   assertSafeWorkspaceArtifactId(storageId)
   assertSafeWorkspaceArtifactId(tileId)
-  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', `tile-session-${tileId}.json`)
+  return join(CODESURF_HOME, 'workspaces', storageId, '.codesurf', `tile-session-${tileId}.json`)
 }
 
 export function sessionArchiveStatePath(storageId: string): string {
   assertSafeWorkspaceArtifactId(storageId)
-  return join(CONTEX_HOME, 'workspaces', storageId, '.contex', 'session-archives.json')
+  return join(CODESURF_HOME, 'workspaces', storageId, '.codesurf', 'session-archives.json')
 }
 
 function isMergeableObject(value: unknown): value is Record<string, unknown> {
@@ -133,7 +133,7 @@ export async function loadWorkspaceTileState<T>(workspaceId: string, tileId: str
 export async function saveWorkspaceTileState(workspaceId: string, tileId: string, state: unknown): Promise<{ storageId: string; path: string }> {
   const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
   const storageId = storageIds[0] ?? workspaceId
-  const dir = join(CONTEX_HOME, 'workspaces', storageId, '.contex')
+  const dir = join(CODESURF_HOME, 'workspaces', storageId, '.codesurf')
   const path = tileStatePath(storageId, tileId)
   await fs.mkdir(dir, { recursive: true })
   const existing = await readJsonArtifact(path)

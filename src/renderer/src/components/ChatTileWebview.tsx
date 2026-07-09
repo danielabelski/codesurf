@@ -6,7 +6,7 @@ import {
   type ChannelStarter,
   type MethodHandler,
   type RequestMethod,
-} from '@contex/chat-bridge'
+} from '@codesurf/chat-bridge'
 import type { AppSettings } from '../../../shared/types'
 import { useTheme } from '../ThemeContext'
 

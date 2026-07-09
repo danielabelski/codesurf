@@ -5,10 +5,11 @@
  * logic (no React); the BrowserTile component imports the public surface.
  */
 import { formatGuestWebviewTagPreferences } from '../../../../shared/guest-webview-preferences'
+import { resolveWebviewPaintCommand } from '../../../../shared/webview-paint-bridge'
 
 export const HOMEPAGE = 'https://www.google.com'
 export const DESKTOP_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) @contex/electron/0.2.0 Chrome/132.0.6834.159 Safari/537.36'
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) @codesurf/electron/0.2.0 Chrome/132.0.6834.159 Safari/537.36'
 export const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
 const WEBVIEW_DISPOSE_DELAY_MS = 15000
@@ -272,6 +273,38 @@ function createManagedWebview(tileId: string, src: string, bgColor = '#111317'):
     `position: absolute; top: 0; left: 0; right: 0; bottom: 0; border: none; background: ${bgColor};`
   webview.src = src
   return webview
+}
+
+/**
+ * Throttle or restore guest webview frame production for a managed tile.
+ *
+ * Electron 41 WebviewTag has no getWebContents() — only getWebContentsId().
+ * We resolve the paint command in the renderer, then hand webContentsId + fps
+ * to main via webview:setFrameRate (webContents.fromId → setFrameRate).
+ * Safe no-op for iframe fallback / Electrobun / unattached guests.
+ */
+export function setManagedWebviewPaintActive(tileId: string, paintActive: boolean): void {
+  const entry = webviewRegistry.get(tileId)
+  if (!entry) return
+  const webview = entry.webview as Electron.WebviewTag & {
+    getWebContentsId?: () => number
+    isDestroyed?: () => boolean
+  }
+  try {
+    if (typeof webview.isDestroyed === 'function' && webview.isDestroyed()) return
+    const cmd = resolveWebviewPaintCommand(
+      () => (typeof webview.getWebContentsId === 'function' ? webview.getWebContentsId() : undefined),
+      paintActive,
+    )
+    if (!cmd) return
+    const api = (window as unknown as {
+      electron?: { browserTile?: { setFrameRate?: (webContentsId: number, fps: number) => Promise<{ ok: boolean }> } }
+    }).electron?.browserTile?.setFrameRate
+    if (typeof api !== 'function') return
+    void api(cmd.webContentsId, cmd.fps).catch(() => { /* best-effort */ })
+  } catch {
+    // Best-effort — destroyed guests or missing preload bridge.
+  }
 }
 
 export function getOrCreateManagedWebview(tileId: string, src: string, bgColor?: string): { webview: Electron.WebviewTag; reused: boolean } {
@@ -611,7 +644,7 @@ export function createBusBridgeScript(tileId: string, bridgeToken: string): stri
       const BRIDGE_CHANNEL = 'browser:${tileId}';
 
       // Allow localhost dev pages to send events to the host via console.log transport
-      window.contex = {
+      window.codesurf = {
         publish: function(type, payload) {
           console.log(JSON.stringify({
             __contex: true,

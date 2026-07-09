@@ -32,7 +32,7 @@ interface RelayPaths {
 
 const INVALID_ID_PATTERN = /\.\.|\/|\\|^\.|\0/
 
-export interface ContexRelayOptions {
+export interface CodesurfRelayOptions {
   workspacePath: string
 }
 
@@ -91,21 +91,21 @@ async function readMessage(path: string, mailbox: RelayMailbox, filename: string
   }
 }
 
-export class ContexRelay {
+export class CodesurfRelay {
   readonly workspacePath: string
   readonly paths: RelayPaths
   readonly events = new EventEmitter()
   private initialized = false
   private initializing: Promise<void> | null = null
 
-  constructor(options: ContexRelayOptions) {
+  constructor(options: CodesurfRelayOptions) {
     this.workspacePath = options.workspacePath
     this.paths = {
-      root: join(this.workspacePath, '.contex', 'relay'),
-      participants: join(this.workspacePath, '.contex', 'relay', 'participants'),
-      channels: join(this.workspacePath, '.contex', 'relay', 'channels'),
-      archive: join(this.workspacePath, '.contex', 'relay', 'archive', 'all'),
-      relationships: join(this.workspacePath, '.contex', 'relay', 'relationships'),
+      root: join(this.workspacePath, '.codesurf', 'relay'),
+      participants: join(this.workspacePath, '.codesurf', 'relay', 'participants'),
+      channels: join(this.workspacePath, '.codesurf', 'relay', 'channels'),
+      archive: join(this.workspacePath, '.codesurf', 'relay', 'archive', 'all'),
+      relationships: join(this.workspacePath, '.codesurf', 'relay', 'relationships'),
     }
   }
 
@@ -192,7 +192,7 @@ export class ContexRelay {
   }
 
   tileMailboxDir(tileId: string, mailbox: Exclude<RelayMailbox, 'channel' | 'central'>): string {
-    return join(this.workspacePath, '.contex', tileId, 'messages', mailbox)
+    return join(this.workspacePath, '.codesurf', tileId, 'messages', mailbox)
   }
 
   async listParticipants(): Promise<RelayParticipant[]> {
@@ -410,7 +410,7 @@ export class ContexRelay {
     const id = randomUUID()
     const filename = `${stamp.iso.replace(/[:.]/g, '-')}-${safeSlug(draft.subject)}.md`
     const meta: RelayMessageMeta = {
-      protocol: 'contex-relay/v1',
+      protocol: 'codesurf-relay/v1',
       id,
       threadId: draft.threadId ?? id,
       scope: from === 'system' ? 'system' : 'direct',
@@ -452,7 +452,7 @@ export class ContexRelay {
     const id = randomUUID()
     const filename = `${stamp.iso.replace(/[:.]/g, '-')}-${safeSlug(draft.subject)}.md`
     const meta: RelayMessageMeta = {
-      protocol: 'contex-relay/v1',
+      protocol: 'codesurf-relay/v1',
       id,
       threadId: draft.threadId ?? id,
       scope: 'channel',
@@ -491,7 +491,7 @@ export class ContexRelay {
     const id = randomUUID()
     const filename = `${stamp.iso.replace(/[:.]/g, '-')}-${safeSlug(subject)}.md`
     const meta: RelayMessageMeta = {
-      protocol: 'contex-relay/v1',
+      protocol: 'codesurf-relay/v1',
       id,
       threadId: id,
       scope: 'system',

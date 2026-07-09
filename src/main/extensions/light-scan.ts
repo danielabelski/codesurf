@@ -1,13 +1,13 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 import { resolveExtensionEnabled } from './activation-policy.ts'
 import type { ExtensionCapabilityRequest, ExtensionManifest } from '../../shared/types.ts'
 
 const EXTENSIONS_DIRNAME = 'extensions'
 
 function resolveContexHome(contexHome?: string): string {
-  return contexHome ?? CONTEX_HOME
+  return contexHome ?? CODESURF_HOME
 }
 
 export type ExtensionListEntry = {
@@ -107,7 +107,7 @@ export async function scanExtensionManifests(
   await scanDirLight(join(contexHome, EXTENSIONS_DIRNAME), manifests, disabledIds, enabledCatalogIds)
   if (workspacePath) {
     await scanDirLight(
-      join(workspacePath, '.contex', EXTENSIONS_DIRNAME),
+      join(workspacePath, '.codesurf', EXTENSIONS_DIRNAME),
       manifests,
       disabledIds,
       enabledCatalogIds,

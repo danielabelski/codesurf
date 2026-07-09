@@ -11,7 +11,7 @@
   "files": [
     "bin/",
     "dist-electron/",
-    "packages/contex-relay/dist/",
+    "packages/codesurf-relay/dist/",
     "packages/codesurf-daemon/",
     "resources/",
     "package.json",
@@ -20,7 +20,7 @@
   "scripts": {
     "test": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs && npm run test:relay",
     "test:daemon": "node --test test/daemon/*.test.mjs",
-    "test:relay": "npm --prefix packages/contex-relay test",
+    "test:relay": "npm --prefix packages/codesurf-relay test",
     "test:all": "npm test && npm run test:relay",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:build": "npm run build && npm run test:e2e",
@@ -55,7 +55,8 @@
     "validate-extension": "node scripts/validate-extension.mjs",
     "ensure-electron": "node scripts/ensure-electron.js",
     "rebuild": "node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty",
-    "postinstall": "node scripts/ensure-electron.js && node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty"
+    "postinstall": "node scripts/ensure-electron.js && node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty",
+    "test:unit": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs"
   },
   "keywords": [],
   "author": "Jason",
@@ -75,7 +76,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.27",
     "cross-env": "^10.1.0",
-    "electron": "^41.3.0",
+    "electron": "41.3.0",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "postcss": "^8.5.8",

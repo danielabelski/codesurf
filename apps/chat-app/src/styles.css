@@ -3,7 +3,7 @@
 /* Tailwind 4 theme tokens — these become utility classes
    (bg-background, text-foreground, border-input, etc.) and are
    overridden at runtime by the host via BridgeContext.theme.
-   Defaults match the contex dark palette so standalone preview
+   Defaults match the codesurf dark palette so standalone preview
    isn't naked. */
 @theme inline {
   --color-background: #1e1e1e;

@@ -20,8 +20,8 @@ import {
   listCsagentModels,
 } from '../chat/pi-runtime'
 import { getShellEnvPath } from '../agent-paths'
-import { updateLinks } from '../peer-state'
-import { CONTEX_HOME } from '../paths'
+import { updateLinks, prepareTurnContext, post as roomPost } from '../agent-room'
+import { CODESURF_HOME } from '../paths'
 
 import {
   applyProjectContextPolicy,
@@ -47,6 +47,7 @@ import {
   getOpenCodeModelsSnapshot,
   shutdownOpenCodeServer,
 } from '../chat/providers/opencode'
+import { revokeTileToken } from '../mcp-server'
 import {
   buildClaudeTextInput,
   cancelPendingAskUserQuestionsForCard,
@@ -214,7 +215,7 @@ async function convertVisionImageToPng(
     // daemon can access without per-job grants. (os.tmpdir() lives under
     // /private/var/folders/... on macOS, which is not in the daemon's
     // allowlist by default — Reads from agent jobs would fail.)
-    const dir = join(CONTEX_HOME, 'chat-vision')
+    const dir = join(CODESURF_HOME, 'chat-vision')
     await fs.mkdir(dir, { recursive: true })
     const safeBase = basename(displayPath || sourcePath)
       .replace(/\.[^.]+$/, '')
@@ -442,7 +443,42 @@ function buildAsyncExecutionContext(params: {
 // are imported at the top of this file.
 
 function syncPeerLinks(req: ChatRequest): void {
-  updateLinks(req.cardId, req.peers?.map(peer => peer.peerId) ?? [])
+  const tileTypes: Record<string, string> = { [req.cardId]: 'chat' }
+  for (const peer of req.peers ?? []) {
+    tileTypes[peer.peerId] = peer.peerType || 'unknown'
+  }
+  updateLinks(
+    req.cardId,
+    (req.peers ?? []).map(peer => peer.peerId),
+    tileTypes,
+  )
+}
+
+/** Join room from canvas wires, inject pending room traffic, announce identity. */
+function attachRoomContext(req: ChatRequest): ChatRequest {
+  syncPeerLinks(req)
+  const { roomId, systemExtra } = prepareTurnContext(req.cardId, 'chat')
+  if (roomId) {
+    // Share the latest user message into the room so peers get it on their next turn
+    const lastUser = [...(req.messages ?? [])].reverse().find(m => m.role === 'user')
+    const userText = String(lastUser?.content ?? '').trim()
+    if (userText) {
+      roomPost({
+        fromTileId: req.cardId,
+        fromTileType: 'chat',
+        kind: 'message',
+        text: userText.slice(0, 4000),
+        meta: { source: 'chat_user_turn' },
+      })
+    }
+  }
+  if (!systemExtra.trim()) return req
+  return {
+    ...req,
+    roomContext: systemExtra,
+    // Also fold into memoryPrompt so providers that only use memory still see it
+    memoryPrompt: [req.memoryPrompt, systemExtra].filter(Boolean).join('\n\n') || undefined,
+  }
 }
 
 function normalizeContextBucketBundle(context: LoadedMemoryContext | null | undefined): ChatContextBucketBundle | undefined {
@@ -886,6 +922,50 @@ async function cancelChatDaemonJob(cardId: string): Promise<void> {
   }
 }
 
+/**
+ * Tear down every in-flight provider for a card (Claude SDK query, CLI procs,
+ * HTTP streams, daemon jobs, OpenCode, csagent). Shared by chat:stop,
+ * chat:disposeCard, and foreground chat:send replace so no path leaves
+ * orphaned work streaming into a dead cardId.
+ */
+async function stopCardExecution(
+  cardId: string,
+  options?: { emitDone?: boolean, reason?: string },
+): Promise<void> {
+  const reason = options?.reason ?? 'Chat stopped'
+  const ac = cardAbortControllers.get(cardId)
+  if (ac) {
+    ac.abort()
+    cardAbortControllers.delete(cardId)
+  }
+  const q = activeQueries.get(cardId)
+  if (q) {
+    markClaudeQueryIntentionallyClosed(q)
+    q.close()
+    activeQueries.delete(cardId)
+  }
+  const proc = activeProcesses.get(cardId)
+  if (proc) {
+    proc.kill('SIGTERM')
+    activeProcesses.delete(cardId)
+  }
+  const httpRequest = activeHttpRequests.get(cardId)
+  if (httpRequest) {
+    httpRequest.destroy()
+    activeHttpRequests.delete(cardId)
+  }
+  await cancelChatDaemonJob(cardId)
+  cancelPendingAskUserQuestionsForCard(cardId, reason)
+  cancelPendingToolPermissionsForCard(cardId, reason)
+  cardPermissionModes.delete(cardId)
+  await abortOpenCodeSession(cardId)
+  try { await stopCsagent(cardId) } catch { /* best-effort */ }
+  disposeCsagent(cardId)
+  if (options?.emitDone !== false) {
+    sendStream(cardId, { type: 'done' })
+  }
+}
+
 export function registerChatIPC(): void {
   log('registerChatIPC: handlers registered')
   ipcMain.handle('chat:send', async (_, req: ChatRequest) => {
@@ -893,30 +973,10 @@ export function registerChatIPC(): void {
     const requestedRunMode = req.runMode === 'background' ? 'background' : 'foreground'
     if (requestedRunMode === 'foreground') {
       // Foreground turns replace the current foreground execution for this card.
-      const existingQuery = activeQueries.get(req.cardId)
-      if (existingQuery) {
-        markClaudeQueryIntentionallyClosed(existingQuery)
-        existingQuery.close()
-        activeQueries.delete(req.cardId)
-      }
-      const existingProc = activeProcesses.get(req.cardId)
-      if (existingProc) {
-        existingProc.kill('SIGTERM')
-        activeProcesses.delete(req.cardId)
-      }
-      const existingHttpRequest = activeHttpRequests.get(req.cardId)
-      if (existingHttpRequest) {
-        existingHttpRequest.destroy()
-        activeHttpRequests.delete(req.cardId)
-      }
-
-      await cancelChatDaemonJob(req.cardId)
-
-      // Medium: abort any live OpenCode SSE session so the old turn's stream
-      // does not keep running on the server and interleave events into the new
-      // turn's stream. Must happen before chatOpencode() establishes the next
-      // session subscription.
-      await abortOpenCodeSession(req.cardId)
+      // Full stop (incl. csagent) so the previous turn cannot interleave events.
+      // emitDone:false — the new turn owns the stream; a premature done would
+      // flip the UI to idle before the replacement send starts.
+      await stopCardExecution(req.cardId, { emitDone: false, reason: 'Replaced by new turn' })
     }
 
     // ROOT FIX (server-side authoritative agent resolution). The renderer sends
@@ -1020,6 +1080,9 @@ export function registerChatIPC(): void {
 
     emitFileReferenceExpansion(req.cardId, fileReferenceExpansion)
 
+    // Room membership + consume pending traffic (all execution backends)
+    requestWithFileReferences = attachRoomContext(requestWithFileReferences)
+
     if (daemonHost) {
       log('chat execution route', {
         cardId: req.cardId,
@@ -1038,7 +1101,6 @@ export function registerChatIPC(): void {
     emitMemoryContextLoaded(req.cardId, memoryContext)
     emitSelectedSkillsLoaded(req.cardId, skillsContext)
     emitSkippedSkillLocations(req.cardId, skillsContext)
-    syncPeerLinks(requestWithFileReferences)
 
     if (requestedRunMode === 'background') {
       sendStream(req.cardId, {
@@ -1132,50 +1194,25 @@ export function registerChatIPC(): void {
   })
 
   ipcMain.handle('chat:stop', async (_, cardId: string) => {
-    // Abort the in-flight SDK HTTP request (claude.ts) before closing the query
-    const ac = cardAbortControllers.get(cardId)
-    if (ac) {
-      ac.abort()
-      cardAbortControllers.delete(cardId)
-    }
-    const q = activeQueries.get(cardId)
-    if (q) {
-      markClaudeQueryIntentionallyClosed(q)
-      q.close()
-      activeQueries.delete(cardId)
-    }
-    const proc = activeProcesses.get(cardId)
-    if (proc) {
-      proc.kill('SIGTERM')
-      activeProcesses.delete(cardId)
-    }
-    const httpRequest = activeHttpRequests.get(cardId)
-    if (httpRequest) {
-      httpRequest.destroy()
-      activeHttpRequests.delete(cardId)
-    }
-    await cancelChatDaemonJob(cardId)
-    cancelPendingAskUserQuestionsForCard(cardId, 'Chat stopped')
-    cancelPendingToolPermissionsForCard(cardId, 'Chat stopped')
-    cardPermissionModes.delete(cardId)
-    await abortOpenCodeSession(cardId)
-    try { await stopCsagent(cardId) } catch { /* best-effort */ }
-    disposeCsagent(cardId)
-    sendStream(cardId, { type: 'done' })
+    await stopCardExecution(cardId, { emitDone: true, reason: 'Chat stopped' })
   })
 
   // Permanently dispose a card's chat state when its tile is deleted. Unlike
-  // clearSession (same tile, fresh conversation) this also prunes the persisted
-  // session-ids.json so neither the in-memory maps nor the on-disk file grow
-  // unbounded across the install lifetime.
+  // clearSession (same tile, fresh conversation) this also stops live work and
+  // prunes the persisted session-ids.json so neither the in-memory maps nor the
+  // on-disk file grow unbounded across the install lifetime.
   ipcMain.handle('chat:disposeCard', async (_, cardId: string) => {
     if (!cardId || typeof cardId !== 'string') return { ok: false }
+    // Stop every provider first — tile delete used to only clear session maps,
+    // leaving Codex/Claude/daemon/csagent running against a dead cardId.
+    await stopCardExecution(cardId, { emitDone: true, reason: 'Card disposed' })
     deleteCardSessionIds(cardId)
     clearOpenCodeSession(cardId)
     clearOpenclawSession(cardId)
     clearHermesSession(cardId)
-    disposeCsagent(cardId)
-    cardPermissionModes.delete(cardId)
+    clearCsagentSession(cardId)
+    // Drop the tile-scoped MCP token so a deleted tile's agent can no longer auth.
+    revokeTileToken(cardId)
     // Schedule a rewrite of session-ids.json from the (now-pruned) map.
     persistSessionIds()
     return { ok: true }
@@ -1366,7 +1403,7 @@ export function registerChatIPC(): void {
       // ~/.codesurf/chat-attachments — see chat-vision comment above for
       // the rationale: stable, user-owned path inside the daemon's
       // permission scope so agent jobs can Read attachments back.
-      const dir = join(CONTEX_HOME, 'chat-attachments')
+      const dir = join(CODESURF_HOME, 'chat-attachments')
       await fs.mkdir(dir, { recursive: true })
       const filename = `${safeHint}-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}.${ext}`
       const dest = join(dir, filename)

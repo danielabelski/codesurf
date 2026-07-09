@@ -6,7 +6,7 @@ describe('markdown', () => {
   describe('renderRelayMessage', () => {
     it('should render basic message with frontmatter', () => {
       const meta: RelayMessageMeta = {
-        protocol: 'contex-relay/v1',
+        protocol: 'codesurf-relay/v1',
         id: 'msg-1',
         threadId: 'thread-1',
         scope: 'direct',
@@ -25,7 +25,7 @@ describe('markdown', () => {
       
       const result = renderRelayMessage(meta, 'Hello world')
       
-      expect(result).toContain('protocol: "contex-relay/v1"')
+      expect(result).toContain('protocol: "codesurf-relay/v1"')
       expect(result).toContain('id: "msg-1"')
       expect(result).toContain('from: "agent-a"')
       expect(result).toContain('to: "agent-b"')
@@ -34,7 +34,7 @@ describe('markdown', () => {
 
     it('should include data block when provided', () => {
       const meta: RelayMessageMeta = {
-        protocol: 'contex-relay/v1',
+        protocol: 'codesurf-relay/v1',
         id: 'msg-1',
         threadId: 'thread-1',
         scope: 'direct',
@@ -54,14 +54,14 @@ describe('markdown', () => {
       const data = { files: ['src/auth.ts'], branch: 'feature/auth' }
       const result = renderRelayMessage(meta, 'Check this', data)
       
-      expect(result).toContain('```contex-data')
+      expect(result).toContain('```codesurf-data')
       expect(result).toContain('"files": [')
       expect(result).toContain('"src/auth.ts"')
     })
 
     it('should handle special characters in subject', () => {
       const meta: RelayMessageMeta = {
-        protocol: 'contex-relay/v1',
+        protocol: 'codesurf-relay/v1',
         id: 'msg-1',
         threadId: 'thread-1',
         scope: 'direct',
@@ -86,7 +86,7 @@ describe('markdown', () => {
   describe('parseRelayMessage', () => {
     it('should parse valid message', () => {
       const content = `---
-protocol: "contex-relay/v1"
+protocol: "codesurf-relay/v1"
 id: "msg-1"
 threadId: "thread-1"
 scope: "direct"
@@ -118,7 +118,7 @@ Hello world
 
     it('should parse message with data block', () => {
       const content = `---
-protocol: "contex-relay/v1"
+protocol: "codesurf-relay/v1"
 id: "msg-1"
 threadId: "thread-1"
 scope: "direct"
@@ -139,7 +139,7 @@ bcc: "central"
 
 Body text
 
-\`\`\`contex-data
+\`\`\`codesurf-data
 {"key": "value"}
 \`\`\`
 `
@@ -170,7 +170,7 @@ Body
 
     it('should reject missing required fields', () => {
       const content = `---
-protocol: "contex-relay/v1"
+protocol: "codesurf-relay/v1"
 id: ""
 from: ""
 ---
@@ -186,7 +186,7 @@ Body
   describe('roundtrip', () => {
     it('should preserve message through render and parse', () => {
       const meta: RelayMessageMeta = {
-        protocol: 'contex-relay/v1',
+        protocol: 'codesurf-relay/v1',
         id: 'msg-1',
         threadId: 'thread-1',
         scope: 'direct',

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ContexRelay } from './relay'
+import { CodesurfRelay } from './relay'
 import { RelayRuntime } from './runtime'
 import type { RelayAgentExecutor } from './types'
 
@@ -12,12 +12,12 @@ import type { RelayAgentExecutor } from './types'
  */
 describe('integration', () => {
   let tempDir: string
-  let relay: ContexRelay
+  let relay: CodesurfRelay
   let events: Array<{ type: string; payload: unknown }> = []
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'relay-test-'))
-    relay = new ContexRelay({ workspacePath: tempDir })
+    relay = new CodesurfRelay({ workspacePath: tempDir })
     events = []
     
     // Capture all events
@@ -33,14 +33,14 @@ describe('integration', () => {
     }
   })
 
-  describe('ContexRelay', () => {
+  describe('CodesurfRelay', () => {
     it('should initialize storage structure', async () => {
       await relay.init()
 
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'participants'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'channels'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'archive', 'all'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'relationships'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'participants'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'channels'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'archive', 'all'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'relationships'))).toBe(true)
     })
 
     it('should create system participant on init', async () => {
@@ -63,10 +63,10 @@ describe('integration', () => {
         channels: [],
       })
 
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'participants', 'agent-1', 'mailboxes', 'inbox'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'participants', 'agent-1', 'mailboxes', 'sent'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'participants', 'agent-1', 'mailboxes', 'memory'))).toBe(true)
-      expect(existsSync(join(tempDir, '.contex', 'relay', 'participants', 'agent-1', 'mailboxes', 'bin'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'participants', 'agent-1', 'mailboxes', 'inbox'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'participants', 'agent-1', 'mailboxes', 'sent'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'participants', 'agent-1', 'mailboxes', 'memory'))).toBe(true)
+      expect(existsSync(join(tempDir, '.codesurf', 'relay', 'participants', 'agent-1', 'mailboxes', 'bin'))).toBe(true)
     })
 
     it('should send direct message and create files', async () => {
@@ -96,17 +96,17 @@ describe('integration', () => {
       })
 
       // Check sender's sent mailbox
-      const sentDir = join(tempDir, '.contex', 'relay', 'participants', 'agent-a', 'mailboxes', 'sent')
+      const sentDir = join(tempDir, '.codesurf', 'relay', 'participants', 'agent-a', 'mailboxes', 'sent')
       const sentFiles = readdirSync(sentDir)
       expect(sentFiles.length).toBeGreaterThan(0)
 
       // Check recipient's inbox
-      const inboxDir = join(tempDir, '.contex', 'relay', 'participants', 'agent-b', 'mailboxes', 'inbox')
+      const inboxDir = join(tempDir, '.codesurf', 'relay', 'participants', 'agent-b', 'mailboxes', 'inbox')
       const inboxFiles = readdirSync(inboxDir)
       expect(inboxFiles.length).toBeGreaterThan(0)
 
       // Check archive
-      const archiveDir = join(tempDir, '.contex', 'relay', 'archive', 'all')
+      const archiveDir = join(tempDir, '.codesurf', 'relay', 'archive', 'all')
       const archiveFiles = readdirSync(archiveDir)
       expect(archiveFiles.length).toBeGreaterThan(0)
 
@@ -136,7 +136,7 @@ describe('integration', () => {
       })
 
       // Check channel messages
-      const channelDir = join(tempDir, '.contex', 'relay', 'channels', 'general', 'messages')
+      const channelDir = join(tempDir, '.codesurf', 'relay', 'channels', 'general', 'messages')
       expect(existsSync(channelDir)).toBe(true)
       const channelFiles = readdirSync(channelDir)
       expect(channelFiles.length).toBeGreaterThan(0)

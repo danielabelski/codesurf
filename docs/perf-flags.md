@@ -35,10 +35,14 @@ Implementation map:
 
 Notes for future work:
 
+- Culling uses the **canvas surface client rect** (via `canvasRef`), not the
+  full window — sidebar/panel chrome is excluded.
 - Culling refreshes on viewport **commits** (throttled during gestures) — the
   600px margin exists so tiles entering the screen mid-gesture are already
   painting. If the margin ever feels wrong, tune `CULL_MARGIN_PX`, don't add
   per-frame recomputes.
+- Offscreen browser/extension webviews throttle paint via
+  `setManagedWebviewPaintActive` → `webContents.setFrameRate(1)` when culled;
+  restore to 60 when visible (`src/renderer/src/lib/webviewPaint.ts`).
 - Next tier (not built): snapshot LOD via `webContents.capturePage` for the
-  sub-0.3 zoom card, and frame-freezing offscreen webviews via
-  `setFrameRate(1)`.
+  sub-0.3 zoom card.

@@ -10,8 +10,8 @@ import { promisify } from 'util'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import { daemonClient } from '../../daemon/client'
-import { writeMCPConfigToWorkspace, getTileToken } from '../../mcp-server'
-import { CONTEX_HOME } from '../../paths'
+import { writeMCPConfigToWorkspace, writeTileMcpConfig, tileMcpConfigPath, getTileToken } from '../../mcp-server'
+import { CODESURF_HOME } from '../../paths'
 import { buildPeerSystemPrompt } from '../prompt-builders'
 import { sanitizeToolOutputText } from '../output-sanitizers'
 import { buildCodexSpawnArgs } from './agent-mode-payloads'
@@ -354,6 +354,10 @@ export function chatCodex(req: ChatRequest): void {
       asyncExecution: req.asyncExecution,
     })
   } catch (err) {
+    // Clear isStreaming before returning — we already upserted true above.
+    // Leaving it stuck true makes resume/job UI treat the turn as live forever.
+    runtimeSession.isStreaming = false
+    void upsertRuntimeSessionState(req, runtimeSession)
     sendStream(req.cardId, { type: 'error', error: err instanceof Error ? err.message : String(err) })
     sendStream(req.cardId, { type: 'done' })
     return
@@ -364,8 +368,18 @@ export function chatCodex(req: ChatRequest): void {
   }
 
   const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) })
-  spawnEnv.CONTEX_MCP_CONFIG = join(CONTEX_HOME, 'mcp-server.json')
-  spawnEnv.CONTEX_MCP_TILE_TOKEN = getTileToken(req.cardId)
+  // Prefer tile-scoped MCP config so Codex presents the tile bearer token
+  // (SEC-05). Fire-and-forget the write; point CODESURF_MCP_CONFIG at the
+  // deterministic path so a prior run (or a racing write) still finds it.
+  let mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
+  try {
+    mcpConfigPath = tileMcpConfigPath(req.cardId)
+    void writeTileMcpConfig(req.cardId).catch(() => {})
+  } catch {
+    // invalid cardId / path — keep global fallback
+  }
+  spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
+  spawnEnv.CODESURF_MCP_TILE_TOKEN = getTileToken(req.cardId)
 
   const proc = spawn(codexBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -560,6 +574,9 @@ export function chatCodex(req: ChatRequest): void {
       activeProcesses.delete(req.cardId)
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
+      // Always emit done on abort so tool blocks leave `running` (reducer
+      // finalizes tools only on `done`, not on `error` alone).
+      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
       return
     }
     activeProcesses.delete(req.cardId)
@@ -610,5 +627,6 @@ export function chatCodex(req: ChatRequest): void {
     sendStream(req.cardId, { type: 'error', error: err.message.includes('ENOENT')
       ? 'Codex CLI not found. Install: npm install -g @openai/codex'
       : err.message })
+    sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
   })
 }

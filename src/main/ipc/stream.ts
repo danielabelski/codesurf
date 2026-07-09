@@ -88,7 +88,18 @@ export function registerStreamIPC(): void {
     }
 
     return new Promise<{ ok: boolean }>((resolve, reject) => {
-      const httpReq = reqFn(options, res => {
+      // Declare httpReq first so reclaim can close over the binding safely.
+      let httpReq: ReturnType<typeof httpRequest>
+      const reclaim = (): void => {
+        // Only reclaim if we still own the slot (a newer stream:start for the
+        // same cardId would have replaced the Map entry already).
+        if (activeStreams.get(req.cardId) === httpReq) {
+          activeStreams.delete(req.cardId)
+        }
+        senderCardIds.get(event.sender)?.delete(req.cardId)
+      }
+
+      httpReq = reqFn(options, res => {
         // Non-2xx responses (401/403/500/etc.) carry an error body, not SSE.
         // Feeding them to the stream parser produces an empty/garbled transcript;
         // surface a real error instead (M4).
@@ -103,16 +114,27 @@ export function registerStreamIPC(): void {
             broadcastToRenderer('agent:stream', {
               cardId: req.cardId, type: 'error', error: message
             })
+            reclaim()
             reject(new Error(message))
           }
+          // Cap body at 4KB without destroy()-before-end so the error path
+          // still settles (BUG-03). Truncate further reads instead.
           res.on('data', (chunk: Buffer | string) => {
-            body += chunk
-            if (body.length > 4096) { finish(); res.destroy() }
+            if (body.length < 4096) {
+              body += chunk
+              if (body.length > 4096) body = body.slice(0, 4096)
+            }
           })
           res.on('end', finish)
           res.on('error', finish)
+          res.on('close', () => { if (!settled) finish() })
           return
         }
+        // Successful SSE: reclaim the Map entry when the response ends so
+        // completed multi-turn streams don't leak sockets forever.
+        res.on('end', reclaim)
+        res.on('close', reclaim)
+        res.on('error', reclaim)
         const parse = getStreamParser(req.agentId)
         parse(req.cardId, res)
         resolve({ ok: true })
@@ -123,8 +145,10 @@ export function registerStreamIPC(): void {
         broadcastToRenderer('agent:stream', {
           cardId: req.cardId, type: 'error', error: err.message
         })
+        reclaim()
         reject(err)
       })
+      httpReq.on('close', reclaim)
 
       if (req.body) httpReq.write(req.body)
       httpReq.end()

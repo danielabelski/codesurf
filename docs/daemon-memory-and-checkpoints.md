@@ -200,11 +200,11 @@ all have a consistent prompt path, with the initiating host able to preserve mul
 
 Checkpoints are stored under workspace daemon state:
 
-- `~/.codesurf/workspaces/<workspaceId>/.contex/checkpoints/<checkpointId>.json`
+- `~/.codesurf/workspaces/<workspaceId>/.codesurf/checkpoints/<checkpointId>.json`
 
 Runtime sessions remain at:
 
-- `~/.codesurf/workspaces/<workspaceId>/.contex/runtime-session-<tileId>.json`
+- `~/.codesurf/workspaces/<workspaceId>/.codesurf/runtime-session-<tileId>.json`
 
 Checkpoint records capture:
 

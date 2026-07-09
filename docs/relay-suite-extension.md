@@ -2,7 +2,7 @@
 
 Path:
 
-- `.contex/extensions/contex-relay-suite/`
+- `.codesurf/extensions/codesurf-relay-suite/`
 
 ## Goal
 
@@ -43,16 +43,16 @@ That lets the tile ask the power side for an architecture summary and lets MCP c
 
 ## Host vs extension boundary
 
-- **Relay Suite** (`contex-relay-suite`) is a power extension. On `activate`, it calls `ctx.relayHost.install()`, which registers all `relay:*` IPC handlers and tears them down on deactivate. The core app does **not** call `registerRelayIPC()`.
-- The **ContexRelay** implementation still ships in the app bundle (`packages/contex-relay`, `src/main/relay/`, `src/main/ipc/relay.ts`) so the extension does not need its own Node build pipeline yet — only **registration** is extension-gated.
+- **Relay Suite** (`codesurf-relay-suite`) is a power extension. On `activate`, it calls `ctx.relayHost.install()`, which registers all `relay:*` IPC handlers and tears them down on deactivate. The core app does **not** call `registerRelayIPC()`.
+- The **CodesurfRelay** implementation still ships in the app bundle (`packages/codesurf-relay`, `src/main/relay/`, `src/main/ipc/relay.ts`) so the extension does not need its own Node build pipeline yet — only **registration** is extension-gated.
 - **Canvas save** (`canvas:save`) syncs chat tiles into relay participants **only while** the relay host is active (`isRelayHostActive()`), so agent mirrors stay updated without `App.tsx` calling relay.
-- **Tile drawer / collab** no longer merges ContexRelay central feed or mirrors collab sends into relay; use the Relay Suite tile for mailbox / feed UX.
+- **Tile drawer / collab** no longer merges CodesurfRelay central feed or mirrors collab sends into relay; use the Relay Suite tile for mailbox / feed UX.
 - **Browser tile** “relay” naming in the bus is peer fan-out only — not the mailbox relay.
 
 ## How to use it
 
 1. Open the workspace in collaborator-clone
-2. The app rescans `<workspace>/.contex/extensions/`
+2. The app rescans `<workspace>/.codesurf/extensions/`
 3. Add a tile of type **Relay Suite**
 4. Use **Init relay** if the workspace has not initialized relay storage yet
 5. Spawn agents, inspect mailboxes, or post direct/channel messages

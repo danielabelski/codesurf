@@ -7,7 +7,7 @@ Tracks fixes for findings in `docs/CODE_REVIEW.md`. Status as of 2026-06-09.
 | ID | Fix | Files |
 |----|-----|-------|
 | CR-1 | chrome-sync default-DENY (empty allowlist injects nothing; `allowUnscoped` opt-in) + `profileDir` traversal guard (`assertSafeProfileDir`) + partition validation | `chrome-sync/cookies.ts`, `chrome-sync/profiles.ts`, `ipc/chromeSync.ts` |
-| CR-2 | Per-extension origins (`contex-ext://<extId>`); removed wildcard CORS; scoped resource-auth to requesting ext; sandbox-proxy on dedicated `__runext_sandbox__` host | `extensions/registry.ts`, `extensions/protocol.ts`, `extensions/sandbox-proxy.ts`, `shared/mcpUiProxy.ts` |
+| CR-2 | Per-extension origins (`codesurf-ext://<extId>`); removed wildcard CORS; scoped resource-auth to requesting ext; sandbox-proxy on dedicated `__runext_sandbox__` host | `extensions/registry.ts`, `extensions/protocol.ts`, `extensions/sandbox-proxy.ts`, `shared/mcpUiProxy.ts` |
 | CR-3 | Defense-in-depth load gate (`isPowerActivationPermitted`), load-time `[Security]` warnings, fixed MCP-tool double-registration, documented trust boundary; broker deferred | `extensions/loader.ts`, `extensions/registry.ts`, `docs/plugins/00-architecture.md` |
 | CR-4 | `assertSafePathSegment(tile_id)` in `reload_objective`/`get_context` | `mcp-server.ts` |
 | CR-5 | Atomic `writeJobMetadata` (temp + rename) | `codesurf-daemon/bin/chat-jobs.mjs` |

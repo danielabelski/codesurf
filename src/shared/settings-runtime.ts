@@ -242,7 +242,7 @@ export interface AppSettings {
     scale: number
   }
   security: {
-    /** When true, fs IPC paths must fall under a workspace project root or CONTEX_HOME. */
+    /** When true, fs IPC paths must fall under a workspace project root or CODESURF_HOME. */
     restrictFsToWorkspaceRoots: boolean
     /** One-time marker after legacy default-off installs are migrated to scoping-on. */
     fsScopingMigrated?: boolean

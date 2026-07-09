@@ -497,7 +497,7 @@ test('daemon lists, reads, and deletes local session state while maintaining sum
 
   const workspaceId = 'ws-test'
   const tileId = 'alpha'
-  const contexDir = join(daemon.homeDir, 'workspaces', workspaceId, '.contex')
+  const contexDir = join(daemon.homeDir, 'workspaces', workspaceId, '.codesurf')
   const tileStateFile = join(contexDir, `tile-state-${tileId}.json`)
   const summaryFile = join(contexDir, `tile-session-${tileId}.json`)
   const state = {
@@ -566,7 +566,7 @@ test('daemon hides local tile sessions for tiles no longer present on the canvas
   const workspaceId = 'ws-orphaned-tile'
   const liveTileId = 'live-chat'
   const staleTileId = 'stale-chat'
-  const contexDir = join(daemon.homeDir, 'workspaces', workspaceId, '.contex')
+  const contexDir = join(daemon.homeDir, 'workspaces', workspaceId, '.codesurf')
   const liveStateFile = join(contexDir, `tile-state-${liveTileId}.json`)
   const staleStateFile = join(contexDir, `tile-state-${staleTileId}.json`)
   const staleSummaryFile = join(contexDir, `tile-session-${staleTileId}.json`)
@@ -1660,9 +1660,9 @@ test('GET /personas/list returns built-ins + agents.json overlay, never the disc
   // With a workspace whose agents.json adds a custom persona, overrides a built-in,
   // and contains an ephemeral discovered-* entry.
   const workspaceDir = join(daemon.homeDir, 'repos', 'personas-ws')
-  await mkdir(join(workspaceDir, '.contex', 'customisation'), { recursive: true })
+  await mkdir(join(workspaceDir, '.codesurf', 'customisation'), { recursive: true })
   await writeFile(
-    join(workspaceDir, '.contex', 'customisation', 'agents.json'),
+    join(workspaceDir, '.codesurf', 'customisation', 'agents.json'),
     JSON.stringify([
       { id: 'custom-y', name: 'Custom Y', description: 'c', tools: ['Read'], isBuiltin: false },
       { id: 'ask', name: 'Ask Overridden', tools: ['Read'], isBuiltin: true },

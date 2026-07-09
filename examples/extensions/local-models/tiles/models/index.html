@@ -318,7 +318,7 @@ function rpc(method, params) {
     const id = ++seq
     pending[id] = { resolve, reject }
     window.parent.postMessage(
-      { type: 'contex-rpc', id, tileId: TILE_ID, method, params: params ?? null },
+      { type: 'codesurf-rpc', id, tileId: TILE_ID, method, params: params ?? null },
       '*'
     )
   })
@@ -327,8 +327,8 @@ function rpc(method, params) {
 window.addEventListener('message', function(e) {
   const msg = e.data
   if (!msg) return
-  if (msg.type === 'contex-bridge-ready') { bridgeReady = true; init(); return }
-  if (msg.type === 'contex-rpc-response') {
+  if (msg.type === 'codesurf-bridge-ready') { bridgeReady = true; init(); return }
+  if (msg.type === 'codesurf-rpc-response') {
     const cb = pending[msg.id]
     if (!cb) return
     delete pending[msg.id]
@@ -336,7 +336,7 @@ window.addEventListener('message', function(e) {
     else cb.resolve(msg.result)
     return
   }
-  if (msg.type === 'contex-action-invoke') { handleActionMsg(msg); return }
+  if (msg.type === 'codesurf-action-invoke') { handleActionMsg(msg); return }
 })
 
 if (window.contex) { bridgeReady = true; init() }
@@ -506,7 +506,7 @@ function handleActionMsg(msg) {
     setActiveModel({ modelId: msg.params.modelId, name: msg.params.name || msg.params.modelId, size: msg.params.size || '' })
   }
   window.parent.postMessage(
-    { type: 'contex-action-result', tileId: TILE_ID, requestId: msg.requestId, result: 'ok' },
+    { type: 'codesurf-action-result', tileId: TILE_ID, requestId: msg.requestId, result: 'ok' },
     '*'
   )
 }
@@ -1055,7 +1055,7 @@ function buildEndpointsBlock() {
   block.appendChild(h3)
 
   var p = document.createElement('p')
-  p.textContent = 'Contex probes these endpoints. Start Ollama, llama.cpp, or LM Studio, then add your models below.'
+  p.textContent = 'CodeSurf probes these endpoints. Start Ollama, llama.cpp, or LM Studio, then add your models below.'
   block.appendChild(p)
 
   var endpoints = [

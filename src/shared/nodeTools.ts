@@ -17,7 +17,7 @@ export type NodeMCPTool = {
 }
 
 export const NODE_TOOL_SCOPE_PREFIX = 'tool:'
-export const CONTEX_MCP_TOOL_PREFIX = 'mcp__contex__'
+export const CODESURF_MCP_TOOL_PREFIX = 'mcp__codesurf__'
 
 export const NODE_MCP_TOOLSETS: Record<string, NodeMCPTool[]> = {
   terminal: [
@@ -463,13 +463,13 @@ export function stripCapabilityPrefix(raw: string): string {
   return raw
 }
 
-export function toContexMcpToolName(toolName: string): string {
-  return `${CONTEX_MCP_TOOL_PREFIX}${toolName}`
+export function toCodesurfMcpToolName(toolName: string): string {
+  return `${CODESURF_MCP_TOOL_PREFIX}${toolName}`
 }
 
 export function normalizeNodeToolName(raw: string): string {
   let name = stripCapabilityPrefix(raw)
-  if (name.startsWith(CONTEX_MCP_TOOL_PREFIX)) name = name.slice(CONTEX_MCP_TOOL_PREFIX.length)
+  if (name.startsWith(CODESURF_MCP_TOOL_PREFIX)) name = name.slice(CODESURF_MCP_TOOL_PREFIX.length)
   return name
 }
 
@@ -477,7 +477,7 @@ export function getDisconnectedPeerBridgeMcpToolNames(negotiatedTools: Iterable<
   const negotiated = new Set(Array.from(negotiatedTools, normalizeNodeToolName))
   return getPeerBridgeNodeTools()
     .filter(tool => !negotiated.has(tool.name))
-    .map(tool => toContexMcpToolName(tool.name))
+    .map(tool => toCodesurfMcpToolName(tool.name))
     .sort()
 }
 

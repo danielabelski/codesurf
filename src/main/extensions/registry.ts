@@ -1,16 +1,16 @@
 /**
- * Extension registry — scans, validates, and manages contex extensions.
+ * Extension registry — scans, validates, and manages codesurf extensions.
  *
  * Extensions live in:
- *   ~/.contex/extensions/       (global)
- *   {workspace}/.contex/extensions/  (per-workspace, loaded later)
+ *   ~/.codesurf/extensions/       (global)
+ *   {workspace}/.codesurf/extensions/  (per-workspace, loaded later)
  *
  * Each extension dir contains an extension.json manifest.
  */
 
 import { promises as fs } from 'fs'
 import { join, resolve } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { ExtensionContext } from './context'
 import { activatePowerExtension, type ExtensionScope } from './loader'
 import { bus } from '../event-bus'
@@ -35,13 +35,13 @@ export interface AggregatedContributions {
 
 // ── Persisted disabled-extension set ──────────────────────────────────────────
 
-const DISABLED_EXTS_PATH = join(CONTEX_HOME, 'disabled-extensions.json')
+const DISABLED_EXTS_PATH = join(CODESURF_HOME, 'disabled-extensions.json')
 /** Catalog extensions the user has explicitly enabled via the Gallery. Without
  *  this, a rescan would re-apply the catalog default-off and silently
  *  uninstall what the user just installed. */
-const ENABLED_CATALOG_PATH = join(CONTEX_HOME, 'enabled-catalog-extensions.json')
+const ENABLED_CATALOG_PATH = join(CODESURF_HOME, 'enabled-catalog-extensions.json')
 /** Capability grants (P1): extId -> consented capability names (see loadGrantsMap). */
-const GRANTS_PATH = join(CONTEX_HOME, 'plugin-capability-grants.json')
+const GRANTS_PATH = join(CODESURF_HOME, 'plugin-capability-grants.json')
 
 async function loadDisabledSet(): Promise<Set<string>> {
   try {
@@ -54,7 +54,7 @@ async function loadDisabledSet(): Promise<Set<string>> {
 }
 
 async function saveDisabledSet(ids: Set<string>): Promise<void> {
-  await fs.mkdir(CONTEX_HOME, { recursive: true })
+  await fs.mkdir(CODESURF_HOME, { recursive: true })
   await fs.writeFile(DISABLED_EXTS_PATH, JSON.stringify([...ids], null, 2))
 }
 
@@ -69,7 +69,7 @@ async function loadEnabledCatalogSet(): Promise<Set<string>> {
 }
 
 async function saveEnabledCatalogSet(ids: Set<string>): Promise<void> {
-  await fs.mkdir(CONTEX_HOME, { recursive: true })
+  await fs.mkdir(CODESURF_HOME, { recursive: true })
   await fs.writeFile(ENABLED_CATALOG_PATH, JSON.stringify([...ids], null, 2))
 }
 
@@ -90,7 +90,7 @@ async function loadGrantsMap(): Promise<Record<string, string[]>> {
 }
 
 async function saveGrantsMap(grants: Record<string, string[]>): Promise<void> {
-  await fs.mkdir(CONTEX_HOME, { recursive: true })
+  await fs.mkdir(CODESURF_HOME, { recursive: true })
   await fs.writeFile(GRANTS_PATH, JSON.stringify(grants, null, 2))
 }
 
@@ -160,7 +160,7 @@ export class ExtensionRegistry {
     for (const bundledDir of this.bundledDirs) {
       await this.scanDir(bundledDir)
     }
-    const globalDir = join(CONTEX_HOME, EXTENSIONS_DIRNAME)
+    const globalDir = join(CODESURF_HOME, EXTENSIONS_DIRNAME)
     await this.scanDir(globalDir)
     // Catalog dirs load last — any id already loaded from bundled/global wins,
     // so shipped bundled extensions override the catalog copies.
@@ -170,8 +170,8 @@ export class ExtensionRegistry {
   }
 
   async scanWorkspace(workspacePath: string): Promise<void> {
-    const wsDir = join(workspacePath, '.contex', EXTENSIONS_DIRNAME)
-    // A workspace's .contex/extensions dir is attacker-controllable (it ships
+    const wsDir = join(workspacePath, '.codesurf', EXTENSIONS_DIRNAME)
+    // A workspace's .codesurf/extensions dir is attacker-controllable (it ships
     // with any cloned repo). Mark the scan untrusted so power-tier extensions
     // there require explicit user enablement instead of auto-activating.
     await this.scanDir(wsDir, { untrustedScope: true })
@@ -201,9 +201,9 @@ export class ExtensionRegistry {
     for (const bundledDir of this.bundledDirs) {
       await this.scanDirLight(bundledDir, manifests, disabledIds)
     }
-    await this.scanDirLight(join(CONTEX_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
+    await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
     if (targetWorkspacePath) {
-      await this.scanDirLight(join(targetWorkspacePath, '.contex', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
+      await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
     }
     // Catalog dirs — scanned last, default-disabled unless the user has
     // explicitly enabled the id (reflected in disabledIds set membership).
@@ -235,7 +235,7 @@ export class ExtensionRegistry {
       try {
         await this.loadExtension(extDir, opts)
       } catch {
-        // Not a native contex extension — try adapters
+        // Not a native codesurf extension — try adapters
         try {
           const adapted = await tryAdaptExtension(extDir)
           if (adapted) {
@@ -341,7 +341,7 @@ export class ExtensionRegistry {
     // enabledCatalogIds set, which is persisted).
     manifest._path = resolve(extDir)
     // Power-tier extensions found in an untrusted scope (a workspace's
-    // .contex/extensions dir) run Node in the main process, so they must be
+    // .codesurf/extensions dir) run Node in the main process, so they must be
     // explicitly enabled by the user before activation — never auto-run on
     // workspace open. They reuse the same persisted enabled set as catalog
     // entries.
@@ -619,7 +619,7 @@ export class ExtensionRegistry {
       .map(segment => encodeURIComponent(segment))
     const query = tileId ? `?tileId=${encodeURIComponent(tileId)}&_t=${Date.now()}` : ''
 
-    return `contex-ext://${encodeURIComponent(extId)}/${entrySegments.join('/')}${query}`
+    return `codesurf-ext://${encodeURIComponent(extId)}/${entrySegments.join('/')}${query}`
   }
 
   getChatSurfaceEntry(extId: string, surfaceId: string, instanceId?: string): string | null {
@@ -638,7 +638,7 @@ export class ExtensionRegistry {
     params.push(`_t=${Date.now()}`)
     const query = `?${params.join('&')}`
 
-    return `contex-ext://${encodeURIComponent(extId)}/${entrySegments.join('/')}${query}`
+    return `codesurf-ext://${encodeURIComponent(extId)}/${entrySegments.join('/')}${query}`
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -695,7 +695,7 @@ export class ExtensionRegistry {
         ? 'catalog'
         : this.bundledDirs.some(d => m._path && resolve(m._path).startsWith(resolve(d)))
           ? 'bundled'
-          : m._path && resolve(m._path).startsWith(resolve(join(CONTEX_HOME, EXTENSIONS_DIRNAME)))
+          : m._path && resolve(m._path).startsWith(resolve(join(CODESURF_HOME, EXTENSIONS_DIRNAME)))
             ? 'global'
             : 'workspace'
       console.warn(

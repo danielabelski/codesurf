@@ -13,14 +13,14 @@ describe('node peer bridge tools', () => {
     const disallowed = getDisconnectedPeerBridgeMcpToolNames([
       'browser_navigate',
       'tool:browser_reload',
-      'mcp__contex__chat_send_message',
+      'mcp__codesurf__chat_send_message',
     ])
 
-    expect(disallowed).not.toContain('mcp__contex__browser_navigate')
-    expect(disallowed).not.toContain('mcp__contex__browser_reload')
-    expect(disallowed).not.toContain('mcp__contex__chat_send_message')
-    expect(disallowed).not.toContain('mcp__contex__tile_context_get')
-    expect(disallowed).toContain('mcp__contex__terminal_send_input')
+    expect(disallowed).not.toContain('mcp__codesurf__browser_navigate')
+    expect(disallowed).not.toContain('mcp__codesurf__browser_reload')
+    expect(disallowed).not.toContain('mcp__codesurf__chat_send_message')
+    expect(disallowed).not.toContain('mcp__codesurf__tile_context_get')
+    expect(disallowed).toContain('mcp__codesurf__terminal_send_input')
   })
 
   test('does not classify universal context tools as peer bridge tools', () => {
@@ -32,7 +32,7 @@ describe('node peer bridge tools', () => {
 
   test('normalizes capability and MCP tool prefixes for comparison', () => {
     expect(normalizeNodeToolName('tool:browser_navigate')).toBe('browser_navigate')
-    expect(normalizeNodeToolName('mcp__contex__browser_navigate')).toBe('browser_navigate')
+    expect(normalizeNodeToolName('mcp__codesurf__browser_navigate')).toBe('browser_navigate')
   })
 
   test('peer command payloads include the explicit target fields chat tiles require', () => {

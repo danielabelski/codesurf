@@ -1,100 +1,177 @@
-# CodeSurf Workspace — Generated Memory
-
-Last updated: 2026-07-02
-
----
+# CodeSurf Workspace — Generated Memory (2026-07-09)
 
 ## Overview
 
-CodeSurf (internal legacy name: contex) is an Electron desktop app — an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat, pets) live on a 2D canvas. AI agents connect via a local HTTP MCP 2.0 server. Current active branch: `main`.
+CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat) live on a 2D canvas. AI agents connect via MCP and collaborate with humans asynchronously. Internal config paths and some legacy variable names still use `contex` / `window.contex` / `~/.codesurf/` — do not rename these.
 
 ---
 
 ## Durable Facts
 
-### Repository state (as of 2026-07-02)
-- Current branch: `main`
-- Latest commit: `16f2e00` — "Fix chat-send git stall, stream error loss, codex backpressure, settings re-parse; refresh docs + pets facade parity"
-- All eleven plans (001–011) tracked in `plans/README.md`
-- Only dirty file: `bun.lock` (modified, not committed; `package-lock.json` targets electron 41.3, `bun.lock` targets 41.7 — disagree)
+### Identity
+- Product name: **CodeSurf** (never "contex" in user-facing copy; `contex` is legacy internal namespace only)
+- Legacy internal namespace: `contex`, `window.contex`, `~/.codesurf/` — stable, do not rename
+- Owner: Jason Kneen, Andover UK, Europe/London
 
-### Recently landed (since last memory)
-- `f861473` — Flag-gated canvas perf optimisations: imperative pan, drag RAF coalescing, tile culling, zoom LOD (off by default, gated behind feature flag)
-- `16f2e00` — Chat-send: fixed git stall on send, stream error loss, codex backpressure, settings re-parse; pets facade parity; docs refresh
+### Codebase Anchors
+- `src/renderer/src/App.tsx` — entire canvas engine, ~1944 LOC; be surgical; changes ripple widely
+- `src/main/index.ts` — window management, IPC registration, app init
+- `src/main/event-bus.ts` — in-memory pub/sub, wildcard patterns, ring-buffer (500 events/channel), no persistence
+- `src/main/mcp-server.ts` — local HTTP MCP 2.0 server, random port; config at `~/.codesurf/mcp-server.json`
+- `src/main/ipc/` — IPC handler modules, one file per feature domain
+- `src/main/ipc/stream.ts` — NDJSON/SSE streaming for all chat providers
+- `src/preload/index.ts` — context bridge (workspace, fs, canvas, terminal, chat, bus, mcp…)
+- `src/renderer/src/components/` — tile components, all lazy-loaded via `React.lazy` + `Suspense`
+- `src/renderer/src/hooks/` — `useDetectedAgents`, `useMCPServers`
+- `src/shared/types.ts` — shared TypeScript types, `TileType` union
 
-### Plan status
-| Plan | Title | Status |
-|------|-------|--------|
-| 001–004 | Security/guard fixes (broker deactivate, manifest path traversal, workspace scope, channel validation) | DONE |
-| 005 | Unit tests for `isPowerActivationPermitted` | **TODO** — unblocked |
-| 006 | Quick cleanups (tile-type normalisation, test glob, LiveKit creds) | **TODO** — unblocked |
-| 007–011 | Runtime fixes + security (Codex abort, PTY exit, Pets, MCP token scope, fs denylist) | DONE |
+### Persistence (file-based, no cloud)
+- Canvas state: `~/.codesurf/workspaces/{id}/canvas.json` — auto-saved, 500ms debounce
+- Kanban tile state: `~/.codesurf/workspaces/{id}/tiles/{tileId}.json`
+- MCP config: `~/.codesurf/mcp-server.json`
+
+### Tech Stack
+- Electron ^41.3.0, React 19.2.4, TypeScript 5.9.3
+- Vite / electron-vite 7.3.1 / 5.0.0
+- Tailwind CSS 4.0.0 (dark theme hardcoded: `#1e1e1e`, `#252525`, `#333`)
+- xterm + node-pty (terminal), Monaco (code tiles)
+- `@anthropic-ai/claude-agent-sdk` 0.2.79, `@opencode-ai/sdk` 1.2.27
+- chokidar for filesystem watch
+- `cluso-widget` optional local file dep (`file:../agentation-real`) — absence must not break build
+
+### Chat Providers
+| Provider | Integration |
+|---|---|
+| Claude | `@anthropic-ai/claude-agent-sdk` — session resumption, adaptive thinking |
+| Codex | codex CLI subprocess |
+| OpenCode | `@opencode-ai/sdk` HTTP server |
+
+All providers stream via `src/main/ipc/stream.ts`.
+
+### Build Commands
+- `npm run dev` — electron-vite dev with hot reload
+- `npm run build` — full build (main + preload + renderer)
+- `npm run rebuild` — native rebuild for node-pty (required after dep changes)
+
+### Style Conventions
+- Dark theme only; no `prefers-color-scheme`; `body.dark` via bridge for extensions; solid hex only
+- Tailwind + inline `React.CSSProperties`; no CSS-in-JS library
+- Strict TypeScript; `any` avoided except legacy `chat.ts` sections
+- 2-space indent, trailing commas, no semicolons
+- No emoji anywhere — use SVG icons, CSS shapes, or text labels
+
+---
+
+## Known Hazards / Footguns
+
+- **App.tsx size** — ~1944 LOC; be surgical
+- **node-pty** — requires `npm run rebuild` after any dependency change
+- **MCP port is random** — always read from `~/.codesurf/mcp-server.json`; never hardcode
+- **Canvas undo** — holds full snapshots (max 50); don't push to undo stack in hot paths
+- **tsc baseline is dirty** — ~145 pre-existing errors; measure regressions per-file, not by exit code
+- **Electron binary footgun** — `npm install` can wipe electron dist binary; fix by extracting cached zip
+- **Peer bridge tools not always ToolSearch-loadable** — `chat_send_message` and `chat_acknowledge` are declared in session context but ToolSearch may not surface their schemas; fallback is direct HTTP call to the local MCP server
+- **Codex sandbox blocks `~/.cache/uv/`** — `uv` commands that touch `~/.cache/uv/sdists-v6/.git` fail with `Operation not permitted (os error 1)`; don't rely on uv in Codex tasks without verifying sandbox policy first
+
+---
+
+## Chip Chrome Rules (DO NOT BREAK)
+
+| Component | Chrome |
+|---|---|
+| `ThinkingBlockView` | Full chip — background + border + shadow |
+| `WorkingChipView` | Full chip — background + border + shadow |
+| `ToolBlockView` | Full chip — canonical reference |
+| `CollationSummaryChip` / group chips | Accent chip — coloured background/border, still bordered |
+
+- `ThinkingBlockView` and `WorkingChipView` are independent — changing one must not touch the other
+- Canvas overlap issues → check App.tsx `bringToFront`/`nextZIndex` first; do not add `position: relative` + `zIndex` to transcript rows
+- `textTransform: uppercase` on spans containing `${n}s` renders as `NS` — remove or split the element
+- Chip expand toggles → wrap in `React.startTransition`
 
 ---
 
 ## Active Subsystems
 
-### Canvas engine
-- All 2D physics (pan/zoom, drag, resize, snap, groups, undo/redo) in `src/renderer/src/App.tsx` (~1944 LOC)
-- Undo: full-state snapshots, max 50 — never push to undo stack in hot paths
-- New flag-gated path: imperative pan + RAF-coalesced drag + culling + zoom LOD (all off by default)
+### Plugin / Extension Platform
+- Rebuild in progress: `docs/plugins/00-architecture.md`; P0, P2, P3 landed; P1+ pending
+- Extension SDK: bridge API, RPC flow, actions/context systems, chat integration
+- Theming rule: never `prefers-color-scheme`; default light CSS; `body.dark` via bridge; solid hex only
+- Sidebar/settings toggles: `hiddenFromSidebarExtIds` / `settingsPanelExtIds`, section type `ext:${id}`
 
-### Chat / streaming
-- Providers: Claude (`@anthropic-ai/claude-agent-sdk`), Codex (CLI subprocess), OpenCode (`@opencode-ai/sdk`)
-- All stream via NDJSON/SSE parsed in `src/main/ipc/stream.ts`
-- Recent fix (`16f2e00`): codex backpressure resolved; git stall on send fixed; stream error loss closed
+### Chrome Data Sync
+- Cookie decryption via macOS Keychain, AES-128-CBC; must inject before webview attachment
 
-### Harness (daemon-side, desktop UI pending)
-- `packages/codesurf-daemon/bin/harness-runtime.mjs` — `LocalHostSandboxProvider` + `createHarnessRunner`
-- Supports providers: claude, codex (auth-broken locally — codex config deprecation warnings), pi (`@ai-sdk/harness-pi`)
-- Worktree isolation: agent edits happen in a throwaway git worktree → applied to live workspace on success; non-git falls back to live
-- Gitignored-file recovery: agent-created ignored files are enumerated and applied (capped at 500)
-- Tool approval loop wired via existing daemon `awaitToolPermissionAnswer` mechanism
-- Opt-in: `settings.harness.enabled` in `~/.codesurf/settings.json` OR `CODESURF_HARNESS=1` env; desktop never sends `useHarness:true` — dormant in production
-- **CAUTION:** `node_modules/@codesurf/daemon` must be a symlink to `packages/codesurf-daemon/` — `npm install` may overwrite it with a stale copy (re-symlink after every install)
-- Desktop `useHarness` toggle: not yet built
+### Customisation Locations Panel
+- Folder path lists with `$HOME`/`$WORKSPACE` vars replace import dialogs
 
-### MCP server
-- Random port at startup; config at `~/.contex/mcp-server.json` — never hardcode port
-- 34 tools exposed; results propagate to canvas/kanban via event bus
-- SEC-05 open: per-tile token guards wired but dormant — callers never send tile tokens; fix = pass `tileId` into `buildContexHttpMcpServerEntry`
+### Zenbu Rearchitecture
+- Analysis at `docs/zenbu-analysis/`
 
-### Cron agents (status as of 2026-07-02)
-| Cron | Status | Notes |
-|------|--------|-------|
-| Urgent Email Alert | **OK** | HEARTBEAT_OK at 10:01 UTC |
-| Tom Doerr Tweet Tracker | **Blocked** | X.com login wall; Chrome agent profile not authenticated |
-| VibeClaw Skills Scout | **Failing** | Assistant turn fails before content (repeated) |
-| VibeClaw Wallpaper Generator | **Failing** | Assistant turn fails before content (repeated) |
-| VibeClaw Article Generator | **Failing** | Assistant turn fails before content (repeated) |
-| OpenClaw Lead heartbeat | **OK** | Gateway OK, heartbeat passing |
-| OpenClaw MC Gateway heartbeat | **Unstable** | Turn failures + partial recovery; localhost:8000 connection refused |
-| Codex gpt-5.5 image session | **Completed** | Generated 8 ship-material PNGs via `gpt-image-2`; script at `generate_ship_mats.py` |
+### Webview Paint Bridge
+- 3-layer subsystem: `src/main/ipc/webview-paint.ts`, `src/renderer/src/lib/webviewPaint.ts`, `src/shared/webview-paint-bridge.ts`
+
+### Pets Subsystem
+- New files: `src/main/ipc/pets-path.ts`, `electrobun/bun/runtime-pets.ts`, companion tests
+- In active expansion; not yet fully committed
+
+### Activity Cap (PERF-01)
+- `activity-cap.ts` has a companion test file; in-flight, nearing ready
+
+### MCP Per-Tile Scoping (SEC-05)
+- Status: DONE
+
+---
+
+## Peer Collaboration System
+
+- Agent peer state managed via `mcp__codesurf__peer_set_state` / `peer_get_state` / `peer_send_message` / `peer_read_messages`
+- On every session start: call `peer_set_state` (tile_id=$CARD_ID, status="idle") then `peer_get_state`
+- Bridge tools `chat_send_message` / `chat_acknowledge` — use direct HTTP MCP call if ToolSearch fails
+- Peer connectivity confirmed working at MCP HTTP level (2026-07-09)
+- File conflict rule: never edit a file a linked peer lists in their `files` array; message first
+
+---
+
+## Harness / Runtime Notes
+
+- **Local harness sandbox**: `LocalHostSandboxProvider` runs `@ai-sdk/harness` claude-code on localhost; spike proven; verdict: don't build adapters; status: dormant
+- **Helmor evaluation**: concluded; shipped on `feature/helmor-harvest`; rest redundant
+
+---
+
+## OpenClaw / Automation Health (as of 2026-07-09)
+
+| Gateway / Cron | Status |
+|---|---|
+| Lead gateway (`lead-c3f78d0c-…`) | HEARTBEAT_OK |
+| MC gateway (`mc-gateway-894a3d5b-…`) | HEARTBEAT_FAILED — persistent ~145+ hours; assistant turns fail before producing content; needs root-cause |
+| Urgent Email Alert cron | HEARTBEAT_OK |
+| Tom Doerr Tweet Tracker cron | Degraded — Twitter/X blocking automated access to `x.com/search` even via Chrome profile; state at `/Users/jkneen/clawd/memory/tom-doerr-seen.json` |
+| VibeClaw Article Generator cron | Running — 3-source verification requirement limits throughput when web search unavailable; DGX fallback active |
+| VibeClaw Skills Scout cron | Running — successfully adding new skills/tools to explore page |
+| Google Image Generation API | 403 — not available |
+| OpenAI Image API (`gpt-image-1`) | billing_hard_limit_reached — do not attempt until billing resolved |
+| DGX image endpoint | Down — fallback `image_generate` tool in use |
+
+---
+
+## Sibling Projects
+
+- **grok-cli** — `~/Documents/GitHub/grok-cli`; model list must mirror `src/renderer/src/config/providers.ts` DEFAULT_MODELS; edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array; permission system blocked in daemon mode (needs CodeSurf Desktop UI)
+- **Voxel Poser avatar** — canonical file: `~/Downloads/voxel-poser_20_patched.html` (~4500 LOC, Three.js, no build); backup at `voxel-poser_20_patched.BACKUP.html`; all capabilities verified: walk, run, jump, sit, crawl, crate-step-up, climb (both walls) + mantle + walk-on-top, grappling-hook abseil, LLM-only agent brain (`claude-sonnet-4-6`), procedural voxel textures, island-world sea, head-tracking off-axis parallax; serve via `python3 -m http.server 8765`; always cache-bust with `?v=N`; never `file://`
 
 ---
 
 ## Open Threads
 
-- **Plans 005 & 006** — only remaining unexecuted plans; both unblocked and independent
-- **SEC-05** — MCP per-tile token guards dormant; fix is `tileId` propagation into MCP server entry builder
-- **Harness desktop UI** — daemon fully built and tested; desktop toggle not wired; re-symlink `node_modules/@codesurf/daemon` after every `npm install`
-- **VibeClaw crons** — three cron agents failing before content; root cause unknown (not an X.com auth issue — separate from the tweet tracker); needs investigation
-- **bun.lock drift** — only uncommitted file on `main`; electron version mismatch between lock files
-- **gpt-5.5 in providers.ts** — Codex sessions are using it; verify it appears in `src/renderer/src/config/providers.ts` DEFAULT_MODELS
-- **Large session loading** — `session-index.mjs` trims transcripts over 2 MB (`MAX_SESSION_LISTING_JSON_BYTES`); 13 MB+ sessions show only a sliver in the desktop conversation list
-
----
-
-## Hard-Won Rules
-
-- `App.tsx` is ~1944 LOC — be surgical; changes ripple widely
-- `node-pty` requires native rebuild after dep changes (`npm run rebuild`)
-- MCP server port is random — always read from config, never hardcode
-- Canvas undo holds full snapshots — never push in hot paths
-- `cluso-widget` is an optional `file:` dep (`file:../agentation-real`) — may not exist
-- `ThinkingBlockView` and `WorkingChipView` are independent components — changing chrome on one must not touch the other (caused three regressions)
-- Canvas overlap issues → check `App.tsx` z-index (`bringToFront`, `nextZIndex`) first; do not add `position: relative` + `zIndex` to transcript rows
-- `textTransform: uppercase` on spans containing `${n}s` renders as `NS` — use separate elements or remove transform
-- Chip expand: use `React.startTransition`; collation system is already lazy
-- Extension tiles: never use `prefers-color-scheme`; default to light CSS; apply `body.dark` via bridge; use solid hex not rgba opacity
-- Never surface `pi`/`earendil` to users — `src/main/chat/pi-runtime.ts`/`csagent` is a separate internal provider, not the harness `@ai-sdk/harness-pi`
+- MC gateway persistent failure — root-cause diagnosis needed
+- Google Cloud Image Generation API 403 — needs API enablement or provider switch
+- OpenAI Image API billing blocked — resolve before retrying `gpt-image-1`
+- DGX spark endpoint down — needs restart or substitution in article generator
+- Tom Doerr Tweet Tracker — needs alternative to blocked `x.com/search` automation
+- Pets subsystem — working tree, not yet committed
+- PERF-01 activity-cap companion test — in-flight
+- Plugin platform P1+ phases — not yet landed
+- grok-cli permission system in daemon mode — needs UI in CodeSurf Desktop
+- Voxel Poser: character swimming/sinking when walking into water — deferred

@@ -382,20 +382,20 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     if (!mcpConfig) return
     const servers = { ...mcpConfig.mcpServers }
     servers[name] = { ...servers[name], ...patch }
-    // Don't pass contex through saveServers — it's preserved server-side
-    const { contex: _, ...rest } = servers
+    // Don't pass built-in codesurf MCP through saveServers — it's preserved server-side
+    const { codesurf: _, contex: __, ...rest } = servers
     saveMcpServers(rest)
   }, [mcpConfig, saveMcpServers])
 
   const removeServer = useCallback((name: string) => {
     if (!mcpConfig) return
-    const { contex: _, [name]: __, ...rest } = mcpConfig.mcpServers
+    const { codesurf: _cs, contex: _cx, [name]: __, ...rest } = mcpConfig.mcpServers
     saveMcpServers(rest)
   }, [mcpConfig, saveMcpServers])
 
   const addServer = useCallback(() => {
     if (!newServer.name.trim() || !mcpConfig) return
-    const { contex: _, ...rest } = mcpConfig.mcpServers
+    const { codesurf: _cs, contex: _cx, ...rest } = mcpConfig.mcpServers
     const entry: MCPServerEntry = {
       type: newServer.url ? 'http' : 'stdio',
       ...(newServer.url ? { url: newServer.url } : {}),

@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'child_process'
 import { tmpdir } from 'os'
 import { sep, resolve as resolvePath } from 'path'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
-import type { RelayAgentExecutor, RelaySpawnRequest, RelayTurnInput } from '../../../packages/contex-relay/src'
+import type { RelayAgentExecutor, RelaySpawnRequest, RelayTurnInput } from '../../../packages/codesurf-relay/src'
 import { getAgentPath, getShellEnvPath } from '../agent-paths'
 import {
   buildHermesChatArgs,
@@ -15,7 +15,7 @@ import {
   sanitizeAgentCliDiagnostic,
 } from '../agents/agent-cli-contracts'
 import { resolveStoredPermission } from '../permissions'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
 // Daemon-produced paths that should be intrinsically Read-allowed without
 // requiring a workspace-level grant. These directories exist solely because
@@ -26,17 +26,17 @@ import { CONTEX_HOME } from '../paths'
 // Scope: Read only. Write/Edit on these paths still go through the normal
 // grant flow — the daemon shouldn't mutate user attachments without consent.
 //
-// Trust model: the producer (Contex itself) is trusted. The consumer (the
+// Trust model: the producer (CodeSurf itself) is trusted. The consumer (the
 // agent) is gated by the user's intent ("I attached this image"). Same
 // pattern as ~/.fieldtheory/librarian/ in the Claude Code hook chain.
 const DAEMON_AUTOREAD_PREFIXES: string[] = [
-  resolvePath(CONTEX_HOME, 'chat-attachments') + sep,
-  resolvePath(CONTEX_HOME, 'chat-vision') + sep,
+  resolvePath(CODESURF_HOME, 'chat-attachments') + sep,
+  resolvePath(CODESURF_HOME, 'chat-vision') + sep,
   // Legacy compat: the pre-fix build wrote sketches under
-  // os.tmpdir()/contex-chat-attach. Keep this in the allowlist until all
+  // os.tmpdir()/codesurf-chat-attach. Keep this in the allowlist until all
   // dist-electron bundles in the wild have been rebuilt with the fix that
-  // moved sketches into CONTEX_HOME.
-  resolvePath(tmpdir(), 'contex-chat-attach') + sep,
+  // moved sketches into CODESURF_HOME.
+  resolvePath(tmpdir(), 'codesurf-chat-attach') + sep,
 ]
 
 function isDaemonAutoReadablePath(filePath: string): boolean {
@@ -106,7 +106,7 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
         // ── Path-based auto-allow for daemon-produced attachments ──────
         // Read calls against ~/.codesurf/chat-attachments/ and chat-vision/
         // (and the legacy tmpdir path) bypass the stored-grant check.
-        // These directories are produced exclusively by Contex IPC
+        // These directories are produced exclusively by CodeSurf IPC
         // handlers in response to user actions (attaching / sketching),
         // so a Read against them is implicitly user-consented.
         if (toolName === 'Read' && typeof input?.file_path === 'string' && isDaemonAutoReadablePath(input.file_path)) {

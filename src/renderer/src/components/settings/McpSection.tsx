@@ -80,7 +80,7 @@ export function McpSection(props: McpSectionProps): React.JSX.Element {
   const fonts = useAppFonts()
 
         const servers = mcpConfig?.mcpServers ?? {}
-        const userServers = Object.entries(servers).filter(([k]) => k !== 'contex')
+        const userServers = Object.entries(servers).filter(([k]) => k !== 'codesurf' && k !== 'contex')
         return (
           <>
             {/* Tools & permissions — only when accessed via Tools tab */}
@@ -97,7 +97,7 @@ export function McpSection(props: McpSectionProps): React.JSX.Element {
             <div style={{ background: theme.surface.panelMuted, borderRadius: 10, padding: '12px 16px', marginBottom: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <span style={{ width: 7, height: 7, borderRadius: '50%', background: mcpConfig ? theme.status.success : '#555', boxShadow: mcpConfig ? '0 0 6px #3fb950' : 'none', flexShrink: 0 }} />
-                <span style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 500 }}>contex</span>
+                <span style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 500 }}>codesurf</span>
                 <span style={{ fontSize: fonts.secondarySize, color: theme.text.muted, fontFamily: 'inherit', marginLeft: 'auto' }}>built-in</span>
               </div>
               {mcpConfig && (
@@ -316,9 +316,9 @@ export function McpSection(props: McpSectionProps): React.JSX.Element {
             {/* Config paths */}
             <div style={{ marginTop: 20, padding: '14px 16px', background: theme.surface.panel, borderRadius: 10, border: `1px solid ${theme.border.default}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
               {[
-                { label: 'Global config', path: '~/.contex/mcp-server.json' },
-                { label: 'Workspace servers', path: '~/.contex/workspaces/<id>/mcp-servers.json' },
-                { label: 'Merged config (point agents here)', path: '~/.contex/workspaces/<id>/.contex/mcp-merged.json', highlight: true },
+                { label: 'Global config', path: '~/.codesurf/mcp-server.json' },
+                { label: 'Workspace servers', path: '~/.codesurf/workspaces/<id>/mcp-servers.json' },
+                { label: 'Merged config (point agents here)', path: '~/.codesurf/workspaces/<id>/.codesurf/mcp-merged.json', highlight: true },
               ].map(row => (
                 <div key={row.label}>
                   <div style={{ fontSize: 10, color: theme.text.muted, marginBottom: 3, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{row.label}</div>

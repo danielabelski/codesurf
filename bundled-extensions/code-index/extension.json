@@ -2,7 +2,7 @@
   "id": "code-index",
   "name": "Context Map",
   "version": "1.0.0",
-  "description": "Agent-readable repo map for CodeSurf. Scans the workspace, builds a lightweight dependency graph, manages context pins, and exposes MCP tools for repo navigation.",
+  "description": "Agent-readable repo map for CodeSurf. Scans the workspace, builds a lightweight dependency graph, manages codesurft pins, and exposes MCP tools for repo navigation.",
   "author": "contex",
   "tier": "power",
   "ui": { "mode": "native" },

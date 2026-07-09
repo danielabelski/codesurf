@@ -902,7 +902,7 @@ function init() {
 }
 
 window.addEventListener('message', function(e) {
-  if (e.data && e.data.type === 'contex-bridge-ready') init()
+  if (e.data && e.data.type === 'codesurf-bridge-ready') init()
 })
 if (window.contex) init()
 </script>

@@ -35,7 +35,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (reason) | REJECTED (reason)
 
 Ordered by leverage. Ask `/improve plan <slug>` to turn any into a full plan.
 
-- **SEC-05** (found during plan 010 execution) `CONTEX_MCP_TILE_TOKEN` is exported to spawned agents (`terminal.ts:287`, `codex.ts:368`) but never read; every MCP config written to disk (`buildContexHttpMcpServerEntry` call sites in `mcp-server.ts:750/:833`, `ipc/mcp-config.ts:75/:159`) omits `tileId` and bakes in the GLOBAL token. So per-tile tokens are never presented by real callers and the plan-010 scope guards are dormant. Fix: pass `tileId` through config generation so spawned agents get their tile token instead of the global one. (S-M, HIGH)
+- **SEC-05** ~~dormant tile tokens~~ **DONE (2026-07-08)** — spawned agents (terminal + Codex) now get a per-tile MCP config via `writeTileMcpConfig` / `tileMcpConfigPath` with a tile-scoped Bearer; Claude CLI gets `--mcp-config` pointing at it. Workspace `.mcp.json` still uses the global token for human CLI auto-discovery (by design).
 - **PERF-02** `ipc/chat.ts:701-715` — `buildProjectContext` runs 3 synchronous `git` subprocesses on the main thread on EVERY chat send, uncached; plus sync settings reads at :632/:797. Fix: async `execFile` in parallel + per-workspace memo. (S-M, HIGH confidence)
 - **TEST-01** No fast test lane — `npm test` requires full native install + electron; pure-logic tests can't run in isolation. Add `test:unit` glob over electron-free specs. (M, HIGH)
 - **PERF-01** `activity-store.ts:112/:53/:127` — records array unbounded; every save rewrites the whole pretty-printed JSON; every query re-sorts all records. Cap + presorted or indexed store. (M, HIGH)

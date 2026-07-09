@@ -603,7 +603,7 @@ function App(): JSX.Element {
     init()
 
     // Check if agent setup is needed (first run or paths not confirmed)
-    // Force with: CONTEX_SHOW_SETUP=1 npm run dev
+    // Force with: CODESURF_SHOW_SETUP=1 npm run dev
     const forceSetup = import.meta.env.VITE_SHOW_SETUP === '1'
     if (!miniChatOptions) {
       if (forceSetup) {
@@ -1857,6 +1857,7 @@ function App(): JSX.Element {
               expandedCanvasMembership={expandedCanvasMembership}
               dragState={dragState}
               viewport={viewport}
+              canvasRef={canvasRef}
               canvasPointerWorld={null}
               theme={theme}
               dsc={dsc}

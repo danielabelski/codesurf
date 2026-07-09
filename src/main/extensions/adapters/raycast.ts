@@ -9,7 +9,7 @@
  *
  * Compatibility approach:
  *   - Each "view" command becomes a tile contribution
- *   - We generate a shim HTML that provides @raycast/api backed by contex bridge
+ *   - We generate a shim HTML that provides @raycast/api backed by codesurf bridge
  *   - The shim maps List → scrollable list, Detail → markdown renderer, etc.
  *   - User must pre-build the extension (npm run build)
  *
@@ -17,7 +17,7 @@
  * needs to provide React + a subset of @raycast/api components. The most-used
  * components (List, Detail, Action) are straightforward to map. Form and
  * ActionPanel need more work. The main gap is Raycast's built-in preferences
- * and OAuth — those would need contex equivalents.
+ * and OAuth — those would need codesurf equivalents.
  */
 
 import { promises as fs } from 'fs'

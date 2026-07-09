@@ -652,7 +652,7 @@ These are only visible in dist bundles and should be rewritten in TS:
 2. `hook-config-manager.cjs`
    - path roots should be CodeSurf-owned, not `~/.nyx`
    - expose opt-in settings + diagnostics UI
-   - likely write `~/.codesurf/` or `~/.contex/agent-hooks/` scripts
+   - likely write `~/.codesurf/` or `~/.codesurf/agent-hooks/` scripts
 
 3. `main.cjs` lifecycle policy
    - CodeSurf is multi-window and already has other daemons/services

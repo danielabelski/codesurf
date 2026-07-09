@@ -1,9 +1,9 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
-const UI_STATE_PATH = join(CONTEX_HOME, 'ui-state.json')
+const UI_STATE_PATH = join(CODESURF_HOME, 'ui-state.json')
 
 interface UIState {
   zoomLevel?: number
@@ -26,7 +26,7 @@ async function readState(): Promise<UIState> {
 async function writeState(next: UIState): Promise<void> {
   cached = next
   try {
-    await fs.mkdir(CONTEX_HOME, { recursive: true })
+    await fs.mkdir(CODESURF_HOME, { recursive: true })
     await fs.writeFile(UI_STATE_PATH, JSON.stringify(next, null, 2))
   } catch {
     // best-effort — a write failure shouldn't crash the app

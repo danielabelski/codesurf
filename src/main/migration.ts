@@ -5,7 +5,7 @@ import { log } from './utils/logger.ts'
 const migrationLog = log.scope('Migration')
 import {
   APP_NAME,
-  CONTEX_HOME,
+  CODESURF_HOME,
   LEGACY_HOME,
   LEGACY_TILE_CONTEXT_DIRNAME,
   TILE_CONTEXT_DIRNAME,
@@ -72,14 +72,14 @@ async function mergeDir(src: string, dest: string): Promise<void> {
 async function migrateHomeDirectory(): Promise<void> {
   if (!(await exists(LEGACY_HOME))) return
 
-  if (!(await exists(CONTEX_HOME))) {
+  if (!(await exists(CODESURF_HOME))) {
     // Clean case: just rename
-    await fs.rename(LEGACY_HOME, CONTEX_HOME)
-    migrationLog.info(`Renamed ${LEGACY_HOME} -> ${CONTEX_HOME}`)
+    await fs.rename(LEGACY_HOME, CODESURF_HOME)
+    migrationLog.info(`Renamed ${LEGACY_HOME} -> ${CODESURF_HOME}`)
   } else {
     // Both exist: merge legacy into new (new wins on conflict)
-    migrationLog.info(`Merging ${LEGACY_HOME} into ${CONTEX_HOME}`)
-    await mergeDir(LEGACY_HOME, CONTEX_HOME)
+    migrationLog.info(`Merging ${LEGACY_HOME} into ${CODESURF_HOME}`)
+    await mergeDir(LEGACY_HOME, CODESURF_HOME)
     migrationLog.info(`Merge complete, removing ${LEGACY_HOME}`)
     await fs.rm(LEGACY_HOME, { recursive: true, force: true })
   }
@@ -87,12 +87,12 @@ async function migrateHomeDirectory(): Promise<void> {
 
 /** Rewrite workspace paths in config.json that still reference ~/.contex */
 async function migrateConfigPaths(): Promise<void> {
-  const configPath = join(CONTEX_HOME, 'config.json')
+  const configPath = join(CODESURF_HOME, 'config.json')
   if (!(await exists(configPath))) return
 
   try {
     const raw = await fs.readFile(configPath, 'utf8')
-    const updated = raw.replaceAll(LEGACY_HOME, CONTEX_HOME)
+    const updated = raw.replaceAll(LEGACY_HOME, CODESURF_HOME)
     if (updated !== raw) {
       await fs.writeFile(configPath, updated)
       migrationLog.info('Updated paths in config.json')
@@ -121,7 +121,7 @@ async function migrateWorkspaceTileDirs(): Promise<void> {
 export async function migrateLegacyStorage(): Promise<void> {
   try {
     await migrateHomeDirectory()
-    await fs.mkdir(CONTEX_HOME, { recursive: true })
+    await fs.mkdir(CODESURF_HOME, { recursive: true })
     await migrateConfigPaths()
     await migrateWorkspaceTileDirs()
   } catch (error) {

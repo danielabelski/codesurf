@@ -23,7 +23,7 @@ export function FontTokenEditor({ settings, onSettingsChange }: {
   useEffect(() => {
     if (typeof window.electron.settings.getRawJson !== 'function') {
       setRawJson(JSON.stringify(settings.fonts ?? {}, null, 2))
-      setConfigPath('~/..contex/config.json')
+      setConfigPath('~/.codesurf/config.json')
       setLoading(false)
       return
     }

@@ -147,6 +147,10 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   if (channel === 'agentPaths:needsSetup') return false
   if (channel === 'skills:getDefaultTargetDir') return ''
   if (channel === 'skills:inspect') return { ok: false, error: 'Electrobun runtime skill inspection handler was unavailable.' }
+  if (channel === 'pets:list' || channel === 'pets:gallery' || channel === 'pets:gallery-local') return []
+  if (channel === 'pets:install' || channel === 'pets:remove') return { ok: false, error: 'Electrobun pets handler unavailable.' }
+  if (channel === 'pets:thumbnail' || channel === 'pets:thumbnailData' || channel === 'pets:spritesheetData' || channel === 'pets:getManifest') return null
+  if (channel === 'webview:setFrameRate') return { ok: true, runtime: 'electrobun-fallback' }
 
   if (
     channel.startsWith('bus:')
@@ -173,6 +177,7 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
     || channel.startsWith('spokify:')
     || channel.startsWith('secrets:')
     || channel.startsWith('chat:')
+    || channel.startsWith('pets:')
   ) return true
 
   return null
@@ -391,6 +396,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       sync: makeInvoker(invoke, 'browserTile:sync'),
       command: makeInvoker(invoke, 'browserTile:command'),
       destroy: makeInvoker(invoke, 'browserTile:destroy'),
+      setFrameRate: makeInvoker(invoke, 'webview:setFrameRate'),
       onEvent: makeEventListener(eventHub, 'browserTile:event'),
       onNewWindow: makeEventListener(eventHub, 'webview:new-window'),
     },

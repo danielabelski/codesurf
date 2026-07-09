@@ -5,9 +5,9 @@ import { session } from 'electron'
 import { getChromeKeychainPassword } from './keychain'
 import { profilePath } from './profiles'
 import { isCookieDomainApproved } from './domain-allowlist'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 
-const TEMP_DIR = join(CONTEX_HOME, 'chrome-sync-temp')
+const TEMP_DIR = join(CODESURF_HOME, 'chrome-sync-temp')
 const SALT = 'saltysalt'
 const ITERATIONS = 1003
 const KEY_LENGTH = 16

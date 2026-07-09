@@ -2,7 +2,7 @@ import { promises as fs } from 'fs'
 import { dirname, join } from 'path'
 import type { AppSettings, TileState } from '../../../shared/types'
 import { withDefaultSettings } from '../../../shared/types'
-import { CONTEX_HOME } from '../../paths'
+import { CODESURF_HOME } from '../../paths'
 import { canvasStatePath, ensureWorkspaceStorageMigrated, loadWorkspaceTileState, saveWorkspaceTileState } from '../../storage/workspaceArtifacts'
 import {
   extractGeminiInlineImage,
@@ -24,15 +24,15 @@ export function publishPeerCommand(
   const evt = bus.publish({
     channel: `tile:${tileId}`,
     type: 'data',
-    source: 'mcp:contex',
+    source: 'mcp:codesurf',
     payload: buildPeerCommandPayload(tileId, command, payload),
   })
   ctx.sendToRenderer('bus:event', evt)
   return `Dispatched ${command} to ${tileId}`
 }
 
-const SETTINGS_PATH = join(CONTEX_HOME, 'settings.json')
-const LEGACY_CONFIG_PATH = join(CONTEX_HOME, 'config.json')
+const SETTINGS_PATH = join(CODESURF_HOME, 'settings.json')
+const LEGACY_CONFIG_PATH = join(CODESURF_HOME, 'config.json')
 
 type UserConfigWorkspaceRef = {
   id: string
@@ -67,7 +67,7 @@ async function readAppSettingsForMcp(): Promise<ReturnType<typeof withDefaultSet
 
 async function readWorkspaceRefsFromUserConfig(): Promise<UserConfigWorkspaceRef[]> {
   try {
-    const userConfigPath = join(CONTEX_HOME, 'config.json')
+    const userConfigPath = join(CODESURF_HOME, 'config.json')
     const raw = await fs.readFile(userConfigPath, 'utf8')
     const parsed = JSON.parse(raw) as {
       projects?: Array<{ id?: string; path?: string }>
@@ -152,7 +152,7 @@ async function findImageTileSourcePath(tileId: string): Promise<ResolvedImageTil
 async function setTileContextFromMcp(workspaceId: string, tileId: string, key: string, value: unknown): Promise<void> {
   const state = await loadWorkspaceTileState<TileContextBackedState>(workspaceId, tileId, {})
   if (!state._context) state._context = {}
-  state._context[key] = { key, value, updatedAt: Date.now(), source: 'mcp:contex' }
+  state._context[key] = { key, value, updatedAt: Date.now(), source: 'mcp:codesurf' }
   await saveWorkspaceTileState(workspaceId, tileId, state)
 }
 

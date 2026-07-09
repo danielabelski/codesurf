@@ -22,7 +22,7 @@ const MIME_TYPES: Record<string, string> = {
 }
 
 // ── Security: no wildcard CORS on extension assets ─────────────────────────
-// Each extension is served on its own origin (contex-ext://<extId>), so the
+// Each extension is served on its own origin (codesurf-ext://<extId>), so the
 // browser's same-origin policy already prevents cross-extension fetches.
 // We do NOT set Access-Control-Allow-Origin at all; if a future use-case needs
 // CORS within an extension's own assets, add it narrowly there.
@@ -43,7 +43,7 @@ function serveFile(filePath: string): Promise<Response> {
 
 protocol.registerSchemesAsPrivileged([
   {
-    scheme: 'contex-ext',
+    scheme: 'codesurf-ext',
     privileges: {
       standard: true,
       secure: true,
@@ -85,14 +85,14 @@ function isExtensionResourcePath(registry: ExtensionRegistry, extId: string, can
 }
 
 export function registerExtensionProtocol(registry: ExtensionRegistry): void {
-  protocol.handle('contex-ext', async request => {
+  protocol.handle('codesurf-ext', async request => {
     try {
       const url = new URL(request.url)
       // Under the new per-extension origin scheme the URL authority IS the routing key:
-      //   contex-ext://<extId>/<file>          — extension assets
-      //   contex-ext://__runext_sandbox__/...   — MCP-UI double-iframe proxy (trusted host)
-      //   contex-ext://__runext_codicons__/...  — @vscode/codicons from node_modules
-      //   contex-ext://__runext_resource__/...  — absolute-path asset for extensions
+      //   codesurf-ext://<extId>/<file>          — extension assets
+      //   codesurf-ext://__runext_sandbox__/...   — MCP-UI double-iframe proxy (trusted host)
+      //   codesurf-ext://__runext_codicons__/...  — @vscode/codicons from node_modules
+      //   codesurf-ext://__runext_resource__/...  — absolute-path asset for extensions
       //
       // This gives every extension its own browser origin so the browser's built-in
       // same-origin policy prevents plugin A from fetching plugin B's assets.
@@ -124,7 +124,7 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
       }
 
       // ── __runext_resource__ — serve absolute file paths scoped to one extension ──
-      // URL format: contex-ext://__runext_resource__/<extId>/<abs-path-segments>
+      // URL format: codesurf-ext://__runext_resource__/<extId>/<abs-path-segments>
       // The extId in the first path segment scopes the read to that extension's root,
       // preventing one extension from using this route to read another extension's files.
       if (host === '__runext_resource__') {

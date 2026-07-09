@@ -107,7 +107,7 @@ Renderer bridge:
 
 Omnigent has first-class spawn-tree fields on conversations: `kind`, `parent_conversation_id`, and `root_conversation_id` in `omnigent/entities/conversation.py:25-50`, with persisted fields in `omnigent/entities/conversation.py:181-203`. Its SQL store sets top-level roots to self and child roots to the parent root in `omnigent/stores/conversation_store/sqlalchemy_store.py:539-649`. Access to a sub-agent session delegates to the parent session in `omnigent/server/permissions.py:31-39`.
 
-CodeSurf currently has only flat relay participants and channels. `RelayParticipant` has `tileId`, channels, and metadata in `packages/contex-relay/src/types.ts:30-48`. `RelaySpawnRequest` has `tileId`, channels, provider/model, task, and metadata, but no typed parent/root ids in `packages/contex-relay/src/types.ts:157-169`. The relay runtime upserts participants from that flat request and preserves metadata in `packages/contex-relay/src/runtime.ts:143-160`. The main process syncs chat tiles to relay participants by tile id in `src/main/relay/service.ts:65-105`.
+CodeSurf currently has only flat relay participants and channels. `RelayParticipant` has `tileId`, channels, and metadata in `packages/codesurf-relay/src/types.ts:30-48`. `RelaySpawnRequest` has `tileId`, channels, provider/model, task, and metadata, but no typed parent/root ids in `packages/codesurf-relay/src/types.ts:157-169`. The relay runtime upserts participants from that flat request and preserves metadata in `packages/codesurf-relay/src/runtime.ts:143-160`. The main process syncs chat tiles to relay participants by tile id in `src/main/relay/service.ts:65-105`.
 
 Incremental model:
 
@@ -157,7 +157,7 @@ Porting cost: omnigent's implementation is Python/FastAPI/SQLAlchemy with route 
 
 6. Owner transfer and admins: should CodeSurf have daemon admins like omnigent's permission store supports in `omnigent/stores/permission_store/sqlalchemy_store.py:208-236`, or should owner recovery stay local-only?
 
-7. Relay API shape: should parent/root ids become typed fields immediately in `packages/contex-relay/src/types.ts:157-169`, or remain metadata until the daemon registry proves the canonical session model?
+7. Relay API shape: should parent/root ids become typed fields immediately in `packages/codesurf-relay/src/types.ts:157-169`, or remain metadata until the daemon registry proves the canonical session model?
 
 8. Comments/review surface: if CodeSurf adds comments later, it should follow omnigent's read/edit/author model from `omnigent/server/routes/comments.py:190-341`; decide now whether that is in scope for the first sharing milestone.
 

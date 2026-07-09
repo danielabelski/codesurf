@@ -13,7 +13,7 @@ describe('extension light-scan', () => {
   test('defaults workspace power extensions off until enabled in catalog', async () => {
     const home = await mkdtemp(join(tmpdir(), 'codesurf-light-scan-'))
     const workspace = join(home, 'project')
-    const extDir = join(workspace, '.contex', 'extensions', 'power-loop')
+    const extDir = join(workspace, '.codesurf', 'extensions', 'power-loop')
     await mkdir(extDir, { recursive: true })
     await writeFile(join(extDir, 'extension.json'), JSON.stringify({
       id: 'power-loop',
@@ -33,7 +33,7 @@ describe('extension light-scan', () => {
   test('formatExtensionSidebarResponse omits disabled power-tier tiles', async () => {
     const home = await mkdtemp(join(tmpdir(), 'codesurf-sidebar-'))
     const workspace = join(home, 'project')
-    const extDir = join(workspace, '.contex', 'extensions', 'power-tile')
+    const extDir = join(workspace, '.codesurf', 'extensions', 'power-tile')
     await mkdir(extDir, { recursive: true })
     await writeFile(join(extDir, 'extension.json'), JSON.stringify({
       id: 'power-tile',

@@ -1,6 +1,6 @@
 ---
 name: build-extensions
-description: Build Contex extensions in isolation. Each gets its own agent working only in examples/extensions/<name>/
+description: Build CodeSurf extensions in isolation. Each gets its own agent working only in examples/extensions/<name>/
 ---
 
 # Build Extensions
@@ -24,7 +24,7 @@ For EACH extension, use the Agent tool:
 
 ## Agent prompt template
 
-You are building the Contex extension **EXT_NAME** (id: EXT_ID).
+You are building the CodeSurf extension **EXT_NAME** (id: EXT_ID).
 
 STRICT BOUNDARY: Only write files under examples/extensions/EXT_ID/
 The main app (src/, root configs) is completely off-limits. Other extensions are read-only.

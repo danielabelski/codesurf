@@ -29,7 +29,7 @@ Full codebase review (June 6, 2026) identified security gaps, correctness races,
 
 - **Scope**: P0 + P1 from review; defer full `ChatTile.tsx` / `chat.ts` splits to Phase 2
 - **Approach**: Wave-based parallelism with strict file ownership; orchestrator owns merge + gates
-- **Runtime**: Cursor Task subagents (or Contex peer agents via MCP coordination)
+- **Runtime**: Cursor Task subagents (or CodeSurf peer agents via MCP coordination)
 - **Stack**: No new dependencies unless required (e.g. IP parsing can use Node `net`)
 
 ### Research findings
@@ -46,7 +46,7 @@ Full codebase review (June 6, 2026) identified security gaps, correctness races,
 ### Assumptions
 
 - Target branch: `main` (or feature branch `feature/hardening-wave-1` created by orchestrator)
-- Agents run in isolated git worktrees OR coordinate via Contex `peer_set_state` + file ownership
+- Agents run in isolated git worktrees OR coordinate via CodeSurf `peer_set_state` + file ownership
 - MCP auth breaking change is acceptable (local agents must read token from `~/.codesurf/mcp-server.json`)
 - Workspace-root FS scoping remains **out of scope** (intentional dev-tool behavior)
 
@@ -130,7 +130,7 @@ Evidence → `.plans/evidence/wave-{N}-{agent}-{scenario}.txt`
 | **Worker** | Implement one task manifest; self-verify; report files touched |
 | **Reviewer** | Post-wave diff review (code-reviewer subagent or `/check-work`) |
 
-### Coordination protocol (Contex / multi-agent)
+### Coordination protocol (CodeSurf / multi-agent)
 
 On task start, each worker calls:
 1. `peer_set_state` — status `working`, files array = ownership manifest
@@ -458,7 +458,7 @@ Task: W1-D FS Brief — [paste W1-D agent prompt]
 # After all complete → TASK-G1 merge → Wave 2 (3 parallel) → etc.
 ```
 
-### Contex canvas
+### CodeSurf canvas
 
 ```text
 # Create 4 terminal/chat tiles, one per W1 agent.

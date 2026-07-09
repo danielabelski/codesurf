@@ -14,19 +14,19 @@ What the nine-dimension audit did not reach.
 
 The audit covered the right hotspots *within* its dimensions but left two structural holes. **First, there is no security dimension at all** — yet this is an Electron app that loads and executes agent/extension code, registers a custom privileged URL scheme, spawns local HTTP servers, injects a vendored 2433-LOC bundle into arbitrary browsed pages, and stores API keys. The audited axes (refactor, memory, performance, reliability, testing, duplication, separation, daemon, self-learning) contain no security/trust-boundary axis, so every concrete issue on that axis went unevaluated.
 
-**Second, coverage breadth was thin.** Of 306 files / 107K LOC, the audit cited roughly 66 files; 250 files / 52K LOC got no attention. The largest genuinely-uncited source files were never read: `SettingsPanel.tsx` (2306 LOC, the largest non-vendored file, with a massive IPC surface and plaintext provider-key input), `ai-elements/prompt-input.tsx` (1464), `chat/ToolBlockView.tsx` (1274, a perf-hot tool-render path), `FileExplorerTile.tsx` (1246), `KanbanCard.tsx` (1017), `KanbanTile.tsx` (982, 3s polling), `PanelLayout.tsx` (976), `contex-relay/relay.ts` (755, flagged highest-leak-risk in the digest yet untested), `collab.ts` (651), `db/job-indexer.ts` (580, sync fs at startup), `extensions/registry.ts` (549), `extensions/protocol.ts`, and `localProxy.ts` (432). The security-relevant ones were swept for this pass; the pure-UI ones (prompt-input, ToolBlockView, FileExplorer, Kanban, PanelLayout) swept clean of `eval` / `dangerouslySetInnerHTML` / `postMessage('*')` and are genuine refactor/perf candidates the audit could still have named.
+**Second, coverage breadth was thin.** Of 306 files / 107K LOC, the audit cited roughly 66 files; 250 files / 52K LOC got no attention. The largest genuinely-uncited source files were never read: `SettingsPanel.tsx` (2306 LOC, the largest non-vendored file, with a massive IPC surface and plaintext provider-key input), `ai-elements/prompt-input.tsx` (1464), `chat/ToolBlockView.tsx` (1274, a perf-hot tool-render path), `FileExplorerTile.tsx` (1246), `KanbanCard.tsx` (1017), `KanbanTile.tsx` (982, 3s polling), `PanelLayout.tsx` (976), `codesurf-relay/relay.ts` (755, flagged highest-leak-risk in the digest yet untested), `collab.ts` (651), `db/job-indexer.ts` (580, sync fs at startup), `extensions/registry.ts` (549), `extensions/protocol.ts`, and `localProxy.ts` (432). The security-relevant ones were swept for this pass; the pure-UI ones (prompt-input, ToolBlockView, FileExplorer, Kanban, PanelLayout) swept clean of `eval` / `dangerouslySetInnerHTML` / `postMessage('*')` and are genuine refactor/perf candidates the audit could still have named.
 
-Shallow dimensions relative to surface area: **testing** cited test files but never noticed that the entire `packages/contex-relay` vitest suite — the agent-coordination core the digest calls the highest-leak-risk subsystem — never executes anywhere, and that CI has no PR/push gate. **Duplication/separation** never characterized the checked-in 2433-LOC minified third-party bundle or the systemic unconfined-`workspacePath` pattern. **Daemon** never reached the synchronous startup filesystem scan in `job-indexer.ts`.
+Shallow dimensions relative to surface area: **testing** cited test files but never noticed that the entire `packages/codesurf-relay` vitest suite — the agent-coordination core the digest calls the highest-leak-risk subsystem — never executes anywhere, and that CI has no PR/push gate. **Duplication/separation** never characterized the checked-in 2433-LOC minified third-party bundle or the systemic unconfined-`workspacePath` pattern. **Daemon** never reached the synchronous startup filesystem scan in `job-indexer.ts`.
 
 ### Findings
 
 | ID | Title | Severity | Effort | Files |
 |----|-------|----------|--------|-------|
 | gap-01 | No security dimension: code-execution, custom-protocol, and secret surfaces never audited | high | L | `src/main/extensions/protocol.ts`, `src/main/extensions/registry.ts`, `src/main/ipc/localProxy.ts`, `src/main/secrets.ts`, `src/renderer/src/components/BrowserTile.tsx` |
-| gap-02 | contex-relay test suite never executes — declared in vitest, not installed, excluded from `npm test` and CI | high | M | `package.json`, `packages/contex-relay/package.json`, `packages/contex-relay/src/runtime.test.ts` |
+| gap-02 | codesurf-relay test suite never executes — declared in vitest, not installed, excluded from `npm test` and CI | high | M | `package.json`, `packages/codesurf-relay/package.json`, `packages/codesurf-relay/src/runtime.test.ts` |
 | gap-03 | Generation-provider API keys stored plaintext in settings.json while every other provider uses the OS keychain | medium | M | `src/renderer/src/components/SettingsPanel.tsx`, `src/main/ipc/workspace.ts`, `src/shared/types.ts`, `src/main/secrets.ts` |
 | gap-04 | No CI on pull requests or pushes — tests gate releases, not merges | medium | S | `.github/workflows/release-on-tag.yml` |
-| gap-05 | Hardcoded developer-machine absolute path shipped in the contex-ext:// protocol handler | low | S | `src/main/extensions/protocol.ts` |
+| gap-05 | Hardcoded developer-machine absolute path shipped in the codesurf-ext:// protocol handler | low | S | `src/main/extensions/protocol.ts` |
 | gap-06 | Renderer-supplied workspacePath is unconfined across the IPC filesystem layer | low | M | `src/main/ipc/collab.ts`, `src/main/ipc/fs.ts`, `src/main/ipc/canvas.ts`, `src/main/paths.ts` |
 | gap-07 | job-indexer runs a synchronous filesystem scan of all job files on startup, blocking the main process | low | M | `src/main/db/job-indexer.ts` |
 | gap-08 | cluso-embed.js: 2433-LOC vendored minified bundle checked into source, no integrity pin, injected into every browsed page | low | M | `src/renderer/src/assets/cluso/cluso-embed.js`, `src/renderer/src/components/BrowserTile.tsx` |
@@ -37,31 +37,31 @@ Shallow dimensions relative to surface area: **testing** cited test files but ne
 
 **Severity:** high · **Effort:** L · **Category:** security
 
-**Problem.** The nine audited dimensions contain no security/trust-boundary axis. This is an Electron app whose core function is loading and executing third-party agent/extension code: `extensions/registry.ts` `require()`s and runs `manifest.main` (`loadPowerExtension`); `extensions/protocol.ts` registers a *privileged* `contex-ext://` scheme that reads files from disk; `localProxy.ts` spins up a localhost HTTP server translating Anthropic↔OpenAI; `BrowserTile` injects a 2433-LOC vendored bundle into arbitrary browsed pages; `secrets.ts` manages keychain keys. None of these surfaces — code-execution boundaries, the custom protocol's path-traversal handling, secret-at-rest storage, or renderer→main path trust — were evaluated. The concrete findings in both parts of this section are symptoms of this one missing axis.
+**Problem.** The nine audited dimensions contain no security/trust-boundary axis. This is an Electron app whose core function is loading and executing third-party agent/extension code: `extensions/registry.ts` `require()`s and runs `manifest.main` (`loadPowerExtension`); `extensions/protocol.ts` registers a *privileged* `codesurf-ext://` scheme that reads files from disk; `localProxy.ts` spins up a localhost HTTP server translating Anthropic↔OpenAI; `BrowserTile` injects a 2433-LOC vendored bundle into arbitrary browsed pages; `secrets.ts` manages keychain keys. None of these surfaces — code-execution boundaries, the custom protocol's path-traversal handling, secret-at-rest storage, or renderer→main path trust — were evaluated. The concrete findings in both parts of this section are symptoms of this one missing axis.
 
 **Evidence.**
 - Audited dimensions: refactor, memory, performance, reliability, testing, duplication, separation, daemon, self-learning — no security.
 - `src/main/extensions/registry.ts:307-309` — `loadPowerExtension(manifest, ctx)` on `manifest.main`.
 - `src/main/extensions/protocol.ts:39-50` — `registerSchemesAsPrivileged({ standard, secure, supportFetchAPI })`.
-- `src/main/extensions/protocol.ts:81` — `protocol.handle('contex-ext', ...)`.
+- `src/main/extensions/protocol.ts:81` — `protocol.handle('codesurf-ext', ...)`.
 
-**Recommendation.** Add a security pass as a distinct dimension. Minimum scope: (1) the `contex-ext://` protocol handler and its traversal defenses, (2) extension power-tier code execution and what manifests can do, (3) secret-storage consistency (keychain vs plaintext settings.json), (4) the localhost proxy's lack of auth, (5) renderer-supplied filesystem-path confinement across all IPC handlers. Treat extension/agent code as semi-trusted, not trusted.
+**Recommendation.** Add a security pass as a distinct dimension. Minimum scope: (1) the `codesurf-ext://` protocol handler and its traversal defenses, (2) extension power-tier code execution and what manifests can do, (3) secret-storage consistency (keychain vs plaintext settings.json), (4) the localhost proxy's lack of auth, (5) renderer-supplied filesystem-path confinement across all IPC handlers. Treat extension/agent code as semi-trusted, not trusted.
 
 ---
 
-### gap-02 — contex-relay test suite never executes — declared in vitest, not installed, excluded from `npm test` and CI
+### gap-02 — codesurf-relay test suite never executes — declared in vitest, not installed, excluded from `npm test` and CI
 
 **Severity:** high · **Effort:** M · **Category:** testing
 
-**Problem.** `packages/contex-relay` — the agent turn-scheduling/message-store core the architecture digest flags as the highest session/cleanup-leak risk — has four test files (`integration` / `runtime` / `markdown` / `validation` `.test.ts`) that never run. Its `package.json` test script is `vitest run`, but vitest is declared only in that package's devDeps (`^1.0.0`) and is not installed (no `node_modules/.bin/vitest`). The root `npm test` uses `node --test` globbing `test/**`, `test/main/**`, `test/sidebar/**`, `test/daemon/**` — it never touches `packages/**`. So the subsystem most likely to leak (per digest: 4 unbounded session Maps, silent mailbox-write failures, unbounded message growth) has zero executed test coverage despite tests existing on disk.
+**Problem.** `packages/codesurf-relay` — the agent turn-scheduling/message-store core the architecture digest flags as the highest session/cleanup-leak risk — has four test files (`integration` / `runtime` / `markdown` / `validation` `.test.ts`) that never run. Its `package.json` test script is `vitest run`, but vitest is declared only in that package's devDeps (`^1.0.0`) and is not installed (no `node_modules/.bin/vitest`). The root `npm test` uses `node --test` globbing `test/**`, `test/main/**`, `test/sidebar/**`, `test/daemon/**` — it never touches `packages/**`. So the subsystem most likely to leak (per digest: 4 unbounded session Maps, silent mailbox-write failures, unbounded message growth) has zero executed test coverage despite tests existing on disk.
 
 **Evidence.**
 - `package.json:22` — `test = node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs` (no `packages/`).
-- `packages/contex-relay/package.json:11` — `test = vitest run`; devDeps declare `vitest ^1.0.0`.
+- `packages/codesurf-relay/package.json:11` — `test = vitest run`; devDeps declare `vitest ^1.0.0`.
 - `ls node_modules/.bin/vitest` → not installed.
 - Confirmed `test/*.ts` run fine under pinned node (`theme-resolution.test.ts`: 2 pass), so the isolation is cleanly to `packages/`.
 
-**Recommendation.** Either add vitest to the root toolchain and invoke `npm --prefix packages/contex-relay test` (or a workspace test target) from the root test script and CI, or port the relay tests to `node:test` under `test/`. Confirm they pass — they may have rotted while never running.
+**Recommendation.** Either add vitest to the root toolchain and invoke `npm --prefix packages/codesurf-relay test` (or a workspace test target) from the root test script and CI, or port the relay tests to `node:test` under `test/`. Confirm they pass — they may have rotted while never running.
 
 ---
 
@@ -74,7 +74,7 @@ Shallow dimensions relative to surface area: **testing** cited test files but ne
 **Evidence.**
 - `src/shared/types.ts:584` — `generationProviders.gemini.apiKey: ''`.
 - `src/renderer/src/components/SettingsPanel.tsx:1406-1407` — `input type=password` bound to `provider.apiKey` → `updateGenerationProvider`.
-- `src/main/ipc/workspace.ts:14` — `SETTINGS_PATH = join(CONTEX_HOME, 'settings.json')`; `settings:set` → `daemonClient.setSettings` (plaintext JSON).
+- `src/main/ipc/workspace.ts:14` — `SETTINGS_PATH = join(CODESURF_HOME, 'settings.json')`; `settings:set` → `daemonClient.setSettings` (plaintext JSON).
 - The secrets module is used by `transcribe.ts` / `tts.ts` / `spokify.ts` but NOT for `generationProviders`.
 
 **Recommendation.** Route `generationProviders[*].apiKey` through the same secrets/keychain path used by tts/transcribe/spokify; store only a reference (e.g. a secret name) in settings.json, or encrypt the field. At minimum, document the inconsistency and gate it behind `safeStorage.isEncryptionAvailable()` like the rest.
@@ -97,7 +97,7 @@ Shallow dimensions relative to surface area: **testing** cited test files but ne
 
 ---
 
-### gap-05 — Hardcoded developer-machine absolute path shipped in the contex-ext:// protocol handler
+### gap-05 — Hardcoded developer-machine absolute path shipped in the codesurf-ext:// protocol handler
 
 **Severity:** low · **Effort:** S · **Category:** supply-chain
 
@@ -164,7 +164,7 @@ Security, supply-chain, and build/config issues that no single dimension owns.
 
 The new-risk critic audited the surfaces dimension auditors structurally miss: trust boundaries, code-execution paths, and cross-cutting correctness. Two findings are critical and exploitable with no user interaction: (1) workspace-scoped "power" extensions auto-activate and run arbitrary Node in the Electron main process simply by opening/cloning a repo that ships a `.contex/extensions/` manifest — a classic RCE-on-clone supply-chain hole; (2) the local MCP HTTP server has no authentication (a token is generated and written to config but never checked), and its `/inject` endpoint writes and submits arbitrary commands into terminal tiles, giving any local process full command execution. Both are amplified by a world-readable `mcp-server.json` (`0o644`, unlike `secrets.json`'s `0o600`).
 
-Lower-severity findings cover `contex-file://` exfil via webviews, git option injection, a silent plaintext-secrets fallback, a stale 798KB committed bundle of unclear provenance, and full-cookie-jar injection into untrusted webview partitions. DB migrations and the collab/fs path-traversal guards were checked and are solid.
+Lower-severity findings cover `codesurf-file://` exfil via webviews, git option injection, a silent plaintext-secrets fallback, a stale 798KB committed bundle of unclear provenance, and full-cookie-jar injection into untrusted webview partitions. DB migrations and the collab/fs path-traversal guards were checked and are solid.
 
 ### Findings
 
@@ -173,7 +173,7 @@ Lower-severity findings cover `contex-file://` exfil via webviews, git option in
 | risk-01 | RCE on workspace open: per-workspace power extensions auto-activate without consent | critical | M | `src/main/extensions/registry.ts`, `src/main/extensions/loader.ts`, `src/main/ipc/extensions.ts` |
 | risk-02 | Local MCP HTTP server has no authentication; /inject grants arbitrary command execution | critical | S | `src/main/mcp-server.ts` |
 | risk-03 | mcp-server.json (port + auth token) is world-readable; secrets.json is 0o600 but this isn't | high | S | `src/main/mcp-server.ts`, `src/main/permissions.ts`, `src/main/secrets.ts` |
-| risk-04 | contex-file:// privileged scheme is a cross-origin exfil channel reachable from navigated webviews | medium | M | `src/main/file-protocol.ts`, `src/main/index.ts` |
+| risk-04 | codesurf-file:// privileged scheme is a cross-origin exfil channel reachable from navigated webviews | medium | M | `src/main/file-protocol.ts`, `src/main/index.ts` |
 | risk-05 | git branch operations pass user input as argv, enabling git option injection | medium | S | `src/main/ipc/git.ts` |
 | risk-06 | Chrome cookie sync injects all site cookies into webview partitions accessible to untrusted pages/agents | medium | M | `src/main/chrome-sync/cookies.ts`, `src/main/chrome-sync/keychain.ts`, `src/renderer/src/components/BrowserTile.tsx` |
 | risk-07 | Secrets fall back to plaintext base64 when safeStorage is unavailable, silently | low | S | `src/main/secrets.ts` |
@@ -203,7 +203,7 @@ Lower-severity findings cover `contex-file://` exfil via webviews, git option in
 
 **Severity:** critical · **Effort:** S · **Category:** security
 
-**Problem.** `startMCPServer` binds an HTTP server on `127.0.0.1:<random>` but the auth check is explicitly disabled ("Auth check disabled — MCP server is localhost-only"). A bearer token (`MCP_TOKEN`) is generated and written to `~/.contex/mcp-server.json` but never validated on any request. Any local process — a malicious npm/postinstall script, a compromised dependency, another user, or any agent on the box — reads the port from that config file and drives the server. `POST /inject` sends `{card_id, message, append_newline=true}` which the renderer writes into the target terminal tile *with* a trailing newline, so the command is submitted to that shell = arbitrary command execution. `POST /push` injects arbitrary renderer events, and `POST /mcp` exposes all 17+ tools (note read/write, kanban mutation, image gen, file open). CORS is wildcard `*` with no Host-header validation, so DNS-rebinding from a visited website is not structurally blocked (weaker vector since the random port is not web-readable, but undefended).
+**Problem.** `startMCPServer` binds an HTTP server on `127.0.0.1:<random>` but the auth check is explicitly disabled ("Auth check disabled — MCP server is localhost-only"). A bearer token (`MCP_TOKEN`) is generated and written to `~/.codesurf/mcp-server.json` but never validated on any request. Any local process — a malicious npm/postinstall script, a compromised dependency, another user, or any agent on the box — reads the port from that config file and drives the server. `POST /inject` sends `{card_id, message, append_newline=true}` which the renderer writes into the target terminal tile *with* a trailing newline, so the command is submitted to that shell = arbitrary command execution. `POST /push` injects arbitrary renderer events, and `POST /mcp` exposes all 17+ tools (note read/write, kanban mutation, image gen, file open). CORS is wildcard `*` with no Host-header validation, so DNS-rebinding from a visited website is not structurally blocked (weaker vector since the random port is not web-readable, but undefended).
 
 **Evidence.**
 - `src/main/mcp-server.ts:1887` — auth-disabled comment, no check.
@@ -231,11 +231,11 @@ Lower-severity findings cover `contex-file://` exfil via webviews, git option in
 
 ---
 
-### risk-04 — contex-file:// privileged scheme is a cross-origin exfil channel reachable from navigated webviews
+### risk-04 — codesurf-file:// privileged scheme is a cross-origin exfil channel reachable from navigated webviews
 
 **Severity:** medium · **Effort:** M · **Category:** security
 
-**Problem.** The `contex-file://` scheme is registered globally as standard + secure + corsEnabled, and every response sets `access-control-allow-origin: *`. Its only access control is: block files whose first home-dir segment is one of `.ssh` / `.gnupg` / `.aws` / `.config`, and require a known media/document extension. Any other readable file with a whitelisted extension is served — e.g. `~/Documents/contract.pdf`, `~/Desktop/secret.png`, project source renamed `*.svg`. Because the scheme is global with wildcard CORS and `webviewTag` is enabled, a page navigated inside a browser-tile webview can `fetch('contex-file:///Users/.../file.pdf')` cross-origin and exfiltrate it. The MIME-extension gate is not a security boundary (attacker controls the extension), and the 4-dir denylist misses `~/.config` siblings like `~/.kube`, `~/.docker`, `~/.netrc`, browser profile dirs, etc.
+**Problem.** The `codesurf-file://` scheme is registered globally as standard + secure + corsEnabled, and every response sets `access-control-allow-origin: *`. Its only access control is: block files whose first home-dir segment is one of `.ssh` / `.gnupg` / `.aws` / `.config`, and require a known media/document extension. Any other readable file with a whitelisted extension is served — e.g. `~/Documents/contract.pdf`, `~/Desktop/secret.png`, project source renamed `*.svg`. Because the scheme is global with wildcard CORS and `webviewTag` is enabled, a page navigated inside a browser-tile webview can `fetch('codesurf-file:///Users/.../file.pdf')` cross-origin and exfiltrate it. The MIME-extension gate is not a security boundary (attacker controls the extension), and the 4-dir denylist misses `~/.config` siblings like `~/.kube`, `~/.docker`, `~/.netrc`, browser profile dirs, etc.
 
 **Evidence.**
 - `src/main/file-protocol.ts:19` — 4-dir denylist.
@@ -244,7 +244,7 @@ Lower-severity findings cover `contex-file://` exfil via webviews, git option in
 - `src/main/file-protocol.ts:118` — `Access-Control-Allow-Origin: '*'`.
 - `src/main/index.ts:419` — `webviewTag: true`.
 
-**Recommendation.** Restrict `contex-file://` to the trusted main renderer only (do not register it as corsEnabled with `ACAO:*` for webview partitions), OR confine served paths to an explicit allowlist of workspace/media roots rather than a small home-dir denylist. Drop the `access-control-allow-origin: *` header. Stop using file extension as an authorization signal.
+**Recommendation.** Restrict `codesurf-file://` to the trusted main renderer only (do not register it as corsEnabled with `ACAO:*` for webview partitions), OR confine served paths to an explicit allowlist of workspace/media roots rather than a small home-dir denylist. Drop the `access-control-allow-origin: *` header. Stop using file extension as an authorization signal.
 
 ---
 

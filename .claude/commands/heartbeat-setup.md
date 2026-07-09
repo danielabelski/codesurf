@@ -35,7 +35,7 @@ Every 30 minutes (at :03 and :33), Claude wakes up and:
 ## The heartbeat prompt
 
 ---
-This is your 30-minute heartbeat for the Contex project.
+This is your 30-minute heartbeat for the CodeSurf project.
 
 1. Read SOUL.md — your identity and working principles.
 2. Read MEMORY.md — recent notes and context.

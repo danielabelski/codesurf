@@ -1,7 +1,7 @@
 // PetOverlay — floating animated pet mascot rendered via CSS spritesheet animation.
 //
 // The pet sprite is a 1536×1872 WebP/PNG spritesheet (8 cols × 9 rows of 192×208
-// cells). We load it via the contex-file:// protocol and animate by shifting
+// cells). We load it via the codesurf-file:// protocol and animate by shifting
 // background-position through the frames of the active animation row.
 //
 // Animation rows react to agent activity events from the event bus:

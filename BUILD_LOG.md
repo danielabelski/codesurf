@@ -38,7 +38,7 @@
 
 ### What's Built
 - ✅ Real main process IPC: workspace, fs, canvas, terminal (node-pty)
-- ✅ Workspace config at ~/.contex/
+- ✅ Workspace config at ~/.codesurf/
 - ✅ File tree sidebar with lazy expand, colored file dots, resizable panel
 - ✅ Workspace switcher dropdown
 - ✅ TileChrome with 8-direction resize handles + macOS-style close button
@@ -46,7 +46,7 @@
 - ✅ CodeTile: Monaco editor with auto-save + language detection
 - ✅ NoteTile: textarea with auto-save
 - ✅ ImageTile: file:// image display
-- ✅ Canvas state persists to ~/.contex/workspaces/<id>/canvas-state.json
+- ✅ Canvas state persists to ~/.codesurf/workspaces/<id>/canvas-state.json
 - ✅ Design: matches Collaborator reference (#3c3c3c canvas, #1e1e1e sidebar, VS Code dark palette)
 
 ### Critical Setup Step

@@ -304,8 +304,8 @@
     }
 
     window.addEventListener('message', e => {
-      if (e.data && e.data.type === 'contex-bridge-ready') initBridge(window.contex)
-      if (e.data && e.data.type === 'contex-event') handleBusMessage(e.data)
+      if (e.data && e.data.type === 'codesurf-bridge-ready') initBridge(window.contex)
+      if (e.data && e.data.type === 'codesurf-event') handleBusMessage(e.data)
     })
 
     if (window.contex) initBridge(window.contex)

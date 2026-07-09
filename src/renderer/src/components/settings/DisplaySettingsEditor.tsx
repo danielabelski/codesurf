@@ -100,6 +100,9 @@ export function DisplaySettingsEditor({
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [configPath, setConfigPath] = useState('')
   const jsonSyncTimeoutRef = useRef<number | null>(null)
+  // Only write to disk when the user actually edited JSON — not when settings
+  // echo back into the editor on mount or after an external apply (M3).
+  const jsonDirtyRef = useRef(false)
 
   useEffect(() => {
     if (typeof window.electron.settings.getRawJson !== 'function') return
@@ -107,6 +110,9 @@ export function DisplaySettingsEditor({
   }, [])
 
   useEffect(() => {
+    // External settings change → refresh the editor only when the user is not
+    // mid-edit. Never treat this as a dirty write-back.
+    if (jsonDirtyRef.current) return
     const next = buildDisplayJson(settings)
     setRawJson(current => current === next ? current : next)
   }, [settings])
@@ -119,8 +125,11 @@ export function DisplaySettingsEditor({
       return
     }
     setJsonError(null)
+    if (!jsonDirtyRef.current) return
     jsonSyncTimeoutRef.current = window.setTimeout(() => {
       onApply(withDefaultSettings({ ...settings, ...validation.parsed }))
+      // Settings prop will echo; allow the next settings effect to sync cleanly.
+      jsonDirtyRef.current = false
     }, 180)
     return () => {
       if (jsonSyncTimeoutRef.current) window.clearTimeout(jsonSyncTimeoutRef.current)
@@ -316,7 +325,10 @@ export function DisplaySettingsEditor({
           </div>
           <textarea
             value={rawJson}
-            onChange={e => setRawJson(e.target.value)}
+            onChange={e => {
+              jsonDirtyRef.current = true
+              setRawJson(e.target.value)
+            }}
             spellCheck={false}
             style={{
               width: '100%', minHeight: 520,

@@ -112,7 +112,7 @@ export function useChatTileSurfaces(options: {
           : surface))
         for (const [key, value] of Object.entries(initialContext)) {
           postToChatSurface(existing.instanceId, {
-            type: 'contex-event',
+            type: 'codesurf-event',
             event: 'context.changed',
             data: { key, value },
           })
@@ -174,7 +174,7 @@ export function useChatTileSurfaces(options: {
   const closeChatSurface = useCallback((instanceId?: string) => {
     const targetId = instanceId ?? activeChatSurfaceRef.current?.instanceId
     if (!targetId) return
-    postToChatSurface(targetId, { type: 'contex-event', event: 'surface.clear', data: {} })
+    postToChatSurface(targetId, { type: 'codesurf-event', event: 'surface.clear', data: {} })
     pendingChatSurfaceActionResultsRef.current.forEach((pending, requestId) => {
       pending.reject(new Error('Chat surface closed'))
       pendingChatSurfaceActionResultsRef.current.delete(requestId)
@@ -191,17 +191,17 @@ export function useChatTileSurfaces(options: {
       const sourceIsChatSurface = Object.values(chatSurfaceIframeRefs.current)
         .some(frame => frame?.contentWindow === sourceWin)
       const reply = (result: unknown, error?: string) => {
-        sourceWin?.postMessage({ type: 'contex-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
+        sourceWin?.postMessage({ type: 'codesurf-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
       }
 
-      if (msg.type === 'contex-bridge-ready' && typeof msg.tileId === 'string') {
+      if (msg.type === 'codesurf-bridge-ready' && typeof msg.tileId === 'string') {
         const surface = openChatSurfacesRef.current.find(candidate => candidate.instanceId === msg.tileId)
         if (!surface) return
         if (getChatSurfaceIframe(surface.instanceId)?.contentWindow !== sourceWin) return
-        sourceWin?.postMessage({ type: 'contex-theme-vars', vars: chatSurfaceThemeVars }, '*')
+        sourceWin?.postMessage({ type: 'codesurf-theme-vars', vars: chatSurfaceThemeVars }, '*')
         for (const [key, value] of Object.entries(surface.context || {})) {
           sourceWin?.postMessage({
-            type: 'contex-event',
+            type: 'codesurf-event',
             event: 'context.changed',
             data: { key, value },
           }, '*')
@@ -209,7 +209,7 @@ export function useChatTileSurfaces(options: {
         for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
           for (const entry of peer.contextEntries) {
             sourceWin?.postMessage({
-              type: 'contex-event',
+              type: 'codesurf-event',
               event: 'context.peerChanged',
               data: { peerId: peer.peerId, key: entry.key, value: entry.value },
             }, '*')
@@ -218,7 +218,7 @@ export function useChatTileSurfaces(options: {
         return
       }
 
-      if (msg.type === 'contex-action-result' && typeof msg.requestId === 'string') {
+      if (msg.type === 'codesurf-action-result' && typeof msg.requestId === 'string') {
         if (!sourceIsChatSurface) return
         const pending = pendingChatSurfaceActionResultsRef.current.get(msg.requestId)
         if (!pending) return
@@ -228,7 +228,7 @@ export function useChatTileSurfaces(options: {
         return
       }
 
-      if (msg.type !== 'contex-rpc' || typeof msg.tileId !== 'string') return
+      if (msg.type !== 'codesurf-rpc' || typeof msg.tileId !== 'string') return
       const surface = openChatSurfacesRef.current.find(candidate => candidate.instanceId === msg.tileId)
       if (!surface) return
       if (getChatSurfaceIframe(surface.instanceId)?.contentWindow !== sourceWin) return
@@ -313,7 +313,7 @@ export function useChatTileSurfaces(options: {
             : candidate))
           for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
             postToChatSurface(peer.peerId, {
-              type: 'contex-event',
+              type: 'codesurf-event',
               event: 'context.peerChanged',
               data: { peerId: surface.instanceId, key, value },
             })
@@ -340,7 +340,7 @@ export function useChatTileSurfaces(options: {
           }))
           for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
             postToChatSurface(peer.peerId, {
-              type: 'contex-event',
+              type: 'codesurf-event',
               event: 'context.peerChanged',
               data: { peerId: surface.instanceId, key, value: null },
             })
@@ -400,7 +400,7 @@ export function useChatTileSurfaces(options: {
           const result = await new Promise<unknown>((resolve, reject) => {
             pendingChatSurfaceActionResultsRef.current.set(requestId, { resolve, reject })
             postToChatSurface(peer.instanceId, {
-              type: 'contex-action-invoke',
+              type: 'codesurf-action-invoke',
               action,
               params: msg.params?.params ?? {},
               requestId,

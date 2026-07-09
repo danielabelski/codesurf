@@ -9,13 +9,13 @@ import { authorizeRequestPath, inferMimeType } from './file-protocol-auth'
 // webSecurity on. A custom privileged scheme sidesteps this without having to
 // disable web security.
 //
-// URL form: contex-file:///absolute/path/to/file.mp4
+// URL form: codesurf-file:///absolute/path/to/file.mp4
 // (three slashes — the "host" is empty and the path starts at /)
 //
 // Range requests are forwarded to net.fetch() so <video> seeking and partial
 // loading work correctly for large media files.
 
-const SCHEME = 'contex-file'
+const SCHEME = 'codesurf-file'
 
 function decodeRequestPath(url: URL): string {
   const host = decodeURIComponent(url.host || '')
@@ -72,7 +72,7 @@ export function registerFileProtocol(): void {
       })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      return new Response(`contex-file error: ${message}`, { status: 500 })
+      return new Response(`codesurf-file error: ${message}`, { status: 500 })
     }
   })
 }

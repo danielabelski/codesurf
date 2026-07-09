@@ -73,6 +73,25 @@ describe('handlePtyExit', () => {
     assert.deepEqual(listener.sent, [['terminal:exit:tile-1', [7]]])
   })
 
+  test('kills the backing tmux session when killTmuxSession is provided', () => {
+    const { terminals, deps } = makeDeps()
+    const pty = {}
+    const killed: string[] = []
+    terminals.set('tile-tmux', {
+      pty,
+      listeners: new Set(),
+      tmuxSession: 'contex-tile-tmux',
+    })
+
+    handlePtyExit('tile-tmux', 0, pty, {
+      ...deps,
+      killTmuxSession: (name) => { killed.push(name) },
+    })
+
+    assert.deepEqual(killed, ['contex-tile-tmux'])
+    assert.equal(terminals.has('tile-tmux'), false)
+  })
+
   test('skips destroyed listeners without throwing', () => {
     const { terminals, deps } = makeDeps()
     const pty = {}

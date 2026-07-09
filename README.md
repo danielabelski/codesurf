@@ -28,10 +28,14 @@ CodeSurf is an Electron desktop app where terminals, chats, code editors, browse
 
 ## Development
 
-Install dependencies:
+Install dependencies with **npm** (authoritative lockfile: `package-lock.json`).
+Do not use `bun install` for this package — a dual lockfile previously caused
+Electron ABI drift for native modules (`node-pty`, `better-sqlite3`, `sharp`).
+Electron is pinned to `41.3.0` in `package.json` / `package-lock.json`.
 
 ```bash
 npm install
+# CI: npm ci --omit=optional
 ```
 
 Run in development:

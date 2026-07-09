@@ -88,6 +88,8 @@ export interface ChatRequest {
     detachedDaemonPreferred: boolean
   }
   memoryPrompt?: string
+  /** Agent-room standing + consumed traffic for this turn (main injects). */
+  roomContext?: string
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle

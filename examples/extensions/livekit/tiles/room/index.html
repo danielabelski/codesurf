@@ -523,11 +523,11 @@
   }
 
   window.addEventListener('message', event => {
-    if (event.data?.type === 'contex-bridge-ready') {
+    if (event.data?.type === 'codesurf-bridge-ready') {
       loadInitialState().then(wireBusAndContext)
     }
 
-    if (event.data?.type === 'contex-event' && event.data?.event === 'bus.event.livekit') {
+    if (event.data?.type === 'codesurf-event' && event.data?.event === 'bus.event.livekit') {
       const payload = event.data?.data?.payload || event.data?.data
       applyBusState(payload)
       render()

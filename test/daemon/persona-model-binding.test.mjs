@@ -189,7 +189,7 @@ test('drift guard: the daemon mirror of resolvePersonaModelSeed matches the rend
 test('altitude: defaultBinding does NOT flow through resolveAuthoritativeAgentMode (model is not a permission boundary)', async () => {
   const root = await mkdtempP(join(tmpdir(), 'persona-binding-'))
   try {
-    const dir = join(root, '.contex', 'customisation')
+    const dir = join(root, '.codesurf', 'customisation')
     await mkdirP(dir, { recursive: true })
     // A persisted persona carrying BOTH a tools restriction and a soft binding.
     await writeFileP(join(dir, 'agents.json'), JSON.stringify([

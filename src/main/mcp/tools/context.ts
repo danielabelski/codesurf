@@ -1,9 +1,10 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { bus } from '../../event-bus'
-import { CONTEX_HOME } from '../../paths'
+import { CODESURF_HOME } from '../../paths'
 import { loadWorkspaceTileState, saveWorkspaceTileState } from '../../storage/workspaceArtifacts'
 import * as peerState from '../../peer-state'
+import * as agentRoom from '../../agent-room'
 import { broadcastToRenderer } from '../../utils/broadcast'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
 import { errorMessage } from '../../../shared/errors.ts'
@@ -14,7 +15,7 @@ type UserConfigWorkspaceRef = {
   path: string
 }
 
-const getContexDir = (): string => CONTEX_HOME
+const getContexDir = (): string => CODESURF_HOME
 
 async function readWorkspaceRefsFromUserConfig(): Promise<UserConfigWorkspaceRef[]> {
   try {
@@ -68,8 +69,48 @@ function assertMcpSafeId(id: string): string | null {
 
 export const CONTEXT_TOOLS: McpToolSchema[] = [
   {
+    name: 'room_status',
+    description: 'Show your agent room: room id, members, their status, and how many unread room events you have. Canvas wires place you in a room automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tile_id: { type: 'string', description: 'Your block ID (use $CARD_ID)' },
+      },
+      required: ['tile_id'],
+    },
+  },
+  {
+    name: 'room_post',
+    description: 'Post into the shared agent room (message, task, handoff, summary, question, …). Room peers receive it on their next turn (and via realtime bus). Prefer this over freeform guessing about peers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tile_id: { type: 'string', description: 'Your block ID' },
+        text: { type: 'string', description: 'Message body' },
+        kind: {
+          type: 'string',
+          enum: ['message', 'task', 'handoff', 'summary', 'status', 'finding', 'blocker', 'question', 'decision'],
+          description: 'Event kind (default message)',
+        },
+        to_tile_id: { type: 'string', description: 'Optional: target a single room member; omit for whole room' },
+      },
+      required: ['tile_id', 'text'],
+    },
+  },
+  {
+    name: 'room_consume',
+    description: 'Drain unread room events for you and mark them consumed. Usually auto-injected each chat turn; call from terminals when you need pending traffic now.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tile_id: { type: 'string', description: 'Your block ID' },
+      },
+      required: ['tile_id'],
+    },
+  },
+  {
     name: 'peer_set_state',
-    description: 'Declare your current work state so linked peers can see what you are doing. Call this when you start a task, change status, or update your file list.',
+    description: 'Announce your work state to the agent room (status, task, files). Room peers see this via room_status / peer_get_state and realtime updates.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -84,18 +125,18 @@ export const CONTEXT_TOOLS: McpToolSchema[] = [
   },
   {
     name: 'peer_get_state',
-    description: 'Read the work state of all linked peers — their status, current task, todos, and files. Call this to coordinate and avoid duplicating work.',
+    description: 'Snapshot of other members in your agent room (status, task, files). Prefer room traffic injection + room_status for coordination.',
     inputSchema: {
       type: 'object',
       properties: {
-        tile_id: { type: 'string', description: 'Your block ID — returns states of your linked peers' },
+        tile_id: { type: 'string', description: 'Your block ID — returns states of your room peers' },
       },
       required: ['tile_id']
     }
   },
   {
     name: 'peer_send_message',
-    description: 'Send a direct message to a linked peer. The peer will see it as a notification and can read it with peer_read_messages.',
+    description: 'Send a direct message to a room peer (posts into the room ledger targeted at them).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -108,7 +149,7 @@ export const CONTEXT_TOOLS: McpToolSchema[] = [
   },
   {
     name: 'peer_read_messages',
-    description: 'Read messages sent to you by linked peers. Returns all messages (marks unread as read).',
+    description: 'Consume unread room messages for you (same as room_consume).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -119,7 +160,7 @@ export const CONTEXT_TOOLS: McpToolSchema[] = [
   },
   {
     name: 'peer_add_todo',
-    description: 'Add a todo item to your shared list. Linked peers are notified and can see your todos via peer_get_state.',
+    description: 'Add a todo and announce it to the room.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -131,7 +172,7 @@ export const CONTEXT_TOOLS: McpToolSchema[] = [
   },
   {
     name: 'peer_complete_todo',
-    description: 'Mark one of your todos as done. Linked peers are notified.',
+    description: 'Mark one of your todos as done and announce it to the room.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -192,6 +233,62 @@ export async function handleContextTool(
 ): Promise<string | null> {
   if (!CONTEXT_TOOL_NAMES.has(name)) return null
 
+  if (name === 'room_status') {
+    const tileId = asString(args.tile_id)
+    if (!tileId) return 'Missing tile_id'
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
+    const d = agentRoom.digest(tileId)
+    if (!d.roomId) {
+      return JSON.stringify({
+        inRoom: false,
+        message: 'Not in an agent room. Wire this block to another chat/terminal on the canvas first.',
+      }, null, 2)
+    }
+    return JSON.stringify({
+      inRoom: true,
+      roomId: d.roomId,
+      unconsumed: d.unconsumed,
+      members: d.members,
+      standing: d.standingText,
+    }, null, 2)
+  }
+
+  if (name === 'room_post') {
+    const tileId = ctx.principal.kind === 'tile' ? ctx.principal.tileId : asString(args.tile_id)
+    const text = asString(args.text)
+    if (!tileId || !text) return 'Missing tile_id or text'
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
+    const kindRaw = asString(args.kind) ?? 'message'
+    const allowedKinds = new Set([
+      'message', 'task', 'handoff', 'summary', 'status', 'finding', 'blocker', 'question', 'decision',
+    ])
+    const kind = (allowedKinds.has(kindRaw) ? kindRaw : 'message') as agentRoom.RoomEventKind
+    const to = asString(args.to_tile_id)
+    const event = agentRoom.post({
+      fromTileId: tileId,
+      text,
+      kind,
+      targetTileIds: to ? [to] : undefined,
+    })
+    if (!event) {
+      return 'Not in an agent room (or empty text). Wire this block to peers on the canvas first.'
+    }
+    return JSON.stringify({ ok: true, event }, null, 2)
+  }
+
+  if (name === 'room_consume') {
+    const tileId = asString(args.tile_id)
+    if (!tileId) return 'Missing tile_id'
+    const scopeError = assertTileScope(ctx.principal, tileId)
+    if (scopeError) return scopeError
+    const result = agentRoom.consume(tileId)
+    if (!result.roomId) return 'Not in an agent room.'
+    if (result.events.length === 0) return 'No unread room events.'
+    return result.text || JSON.stringify(result.events, null, 2)
+  }
+
   if (name === 'peer_set_state') {
     const tileId = asString(args.tile_id)
     if (!tileId) return 'Missing tile_id'
@@ -219,9 +316,21 @@ export async function handleContextTool(
     // tile-scoped token only queries its own peer graph.
     const scopeError = assertTileScope(ctx.principal, tileId)
     if (scopeError) return scopeError
+    const room = agentRoom.getRoomForTile(tileId)
     const peerStates = peerState.getLinkedPeerStates(tileId)
-    if (peerStates.length === 0) return 'No linked peers with registered state. Peers must call peer_set_state first.'
-    return JSON.stringify(peerStates, null, 2)
+    if (!room) {
+      return JSON.stringify({
+        inRoom: false,
+        peers: [],
+        message: 'Not in an agent room. Wire this block to another on the canvas.',
+      }, null, 2)
+    }
+    return JSON.stringify({
+      inRoom: true,
+      roomId: room.id,
+      peers: peerStates,
+      members: room.members,
+    }, null, 2)
   }
 
   if (name === 'peer_send_message') {

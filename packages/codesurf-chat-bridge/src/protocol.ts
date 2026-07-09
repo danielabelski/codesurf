@@ -5,7 +5,7 @@
 // chat-app subscribes to (stream chunks, bus events).
 
 export const PROTOCOL_VERSION = 1
-export const BRIDGE_NAMESPACE = 'contex-chat-bridge'
+export const BRIDGE_NAMESPACE = 'codesurf-chat-bridge'
 
 export type RequestMethod =
   // Send pipeline

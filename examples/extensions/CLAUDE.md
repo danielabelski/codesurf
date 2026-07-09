@@ -1,6 +1,6 @@
 # Extension Development Workspace
 
-You are building a Contex extension. This directory is your ENTIRE working scope.
+You are building a CodeSurf extension. This directory is your ENTIRE working scope.
 
 ## CRITICAL FILE BOUNDARY
 
@@ -73,7 +73,7 @@ The bridge is available after the `contex-bridge-ready` message arrives:
 
 ```javascript
 window.addEventListener('message', function(e) {
-  if (e.data?.type === 'contex-bridge-ready') init()
+  if (e.data?.type === 'codesurf-bridge-ready') init()
 })
 if (window.contex) init()  // already ready (rare)
 ```
@@ -109,7 +109,7 @@ await window.contex.bus.publish('my-ext-channel', 'data', { foo: 'bar' })
 await window.contex.bus.subscribe('my-ext-channel')
 
 window.addEventListener('message', e => {
-  if (e.data?.type === 'contex-event' && e.data?.event === 'bus.event.my-ext-channel') {
+  if (e.data?.type === 'codesurf-event' && e.data?.event === 'bus.event.my-ext-channel') {
     handleBusEvent(e.data.data)
   }
 })
@@ -123,10 +123,10 @@ await window.contex.actions.register('showItem', 'Show item by ID')
 
 // Listen for incoming action invocations
 window.addEventListener('message', e => {
-  if (e.data?.type === 'contex-action-invoke') {
+  if (e.data?.type === 'codesurf-action-invoke') {
     if (e.data.action === 'showItem') handleShowItem(e.data.params)
     // Send result back
-    window.parent.postMessage({ type: 'contex-action-result', tileId: TILE_ID, requestId: e.data.requestId, result: 'ok' }, '*')
+    window.parent.postMessage({ type: 'codesurf-action-result', tileId: TILE_ID, requestId: e.data.requestId, result: 'ok' }, '*')
   }
 })
 
@@ -152,7 +152,7 @@ const size = await window.contex.tile.getSize()
 
 // Listen for resize
 window.addEventListener('message', e => {
-  if (e.data?.type === 'contex-event' && e.data?.event === 'tile.resize') {
+  if (e.data?.type === 'codesurf-event' && e.data?.event === 'tile.resize') {
     const { width, height } = e.data.data
   }
 })

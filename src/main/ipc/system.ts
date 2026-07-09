@@ -6,7 +6,7 @@ import { bus } from '../event-bus'
 import { removeTile as removePeerTile } from '../peer-state'
 import { getDaemonStatus, restartDaemon } from '../daemon/manager'
 import { daemonClient } from '../daemon/client'
-import { CONTEX_HOME } from '../paths'
+import { CODESURF_HOME } from '../paths'
 import { getDb, getDbStatus, resetDatabase } from '../db'
 import { broadcastToRenderer } from '../utils/broadcast'
 
@@ -107,7 +107,7 @@ function readDaemonJobSummary(): {
       error: string | null
     }>
 } {
-  const jobsDir = join(CONTEX_HOME, 'jobs')
+  const jobsDir = join(CODESURF_HOME, 'jobs')
   if (!existsSync(jobsDir)) {
     return {
       total: 0,

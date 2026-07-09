@@ -1,4 +1,4 @@
-# Contex — Full Code Review Report
+# CodeSurf — Full Code Review Report
 
 **Date:** 2026-03-21 (original) · **Updated:** 2026-06-07
 **Codebase:** ~92K LOC (June 2026)  
@@ -39,7 +39,7 @@
 | ARCH mcp-server.ts | **IMPROVED** | Tool modules + registry (2237 → 791 LOC) |
 | ARCH ChatTile.tsx | **IMPROVED** | Composer menus, live activity, autocomplete hooks |
 | CI build + e2e | **FIXED** | PR workflow runs `npm run build` + `npm run test:e2e` |
-| TEST contex-relay | **FIXED** | Relay vitest suite wired into root `npm test` |
+| TEST codesurf-relay | **FIXED** | Relay vitest suite wired into root `npm test` |
 
 **Tests:** 402 unit (incl. relay) · **E2E:** 10/10 · **Typecheck:** clean · **Build:** pass
 
@@ -131,7 +131,7 @@
 ### Critical (4)
 
 **SEC-01: MCP Server — Zero Authentication** — `mcp-server.ts` — CWE-306
-- Any local process can discover port (in `~/.contex/mcp-server.json`) and invoke all 17 tools
+- Any local process can discover port (in `~/.codesurf/mcp-server.json`) and invoke all 17 tools
 - **Fix:** Per-session bearer token, restricted file permissions, consider Unix domain socket
 
 **SEC-02: Terminal Injection via /inject** — `mcp-server.ts:655-670` — CWE-78

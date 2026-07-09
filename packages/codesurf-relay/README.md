@@ -1,6 +1,6 @@
-# @contex/relay
+# @codesurf/relay
 
-Local-first agent messaging and coordination for Contex workspaces.
+Local-first agent messaging and coordination for CodeSurf workspaces.
 
 ## What it does
 
@@ -13,7 +13,7 @@ Local-first agent messaging and coordination for Contex workspaces.
   - impacts on humans / other agents / systems
 - supports direct messages and shared channels
 - BCCs every relay message into a central workspace archive
-- mirrors direct mail into tile-local `.contex/<tileId>/messages/*` mailboxes when a participant is attached to a tile
+- mirrors direct mail into tile-local `.codesurf/<tileId>/messages/*` mailboxes when a participant is attached to a tile
 - computes relationship hints from overlapping files, branches, worktrees, impacts, and shared channels
 - supports autonomous agent loops via an injected executor
 
@@ -22,7 +22,7 @@ Local-first agent messaging and coordination for Contex workspaces.
 Everything lives under:
 
 ```text
-<workspace>/.contex/relay/
+<workspace>/.codesurf/relay/
   participants/
     <participantId>/
       participant.json
@@ -44,7 +44,7 @@ Everything lives under:
     latest.json
 ```
 
-Messages are markdown with frontmatter plus an optional ```contex-data``` JSON block.
+Messages are markdown with frontmatter plus an optional ```codesurf-data``` JSON block.
 
 ## Main concepts
 
@@ -98,13 +98,13 @@ OpenCode is intentionally left as a follow-up in the runtime executor layer.
 
 ## Current integration points in this repo
 
-- package core: `packages/contex-relay/`
+- package core: `packages/codesurf-relay/`
 - Electron service: `src/main/relay/`
 - IPC: `src/main/ipc/relay.ts`
 - preload bridge: `src/preload/index.ts`
 - workspace sync from canvas: `src/renderer/src/App.tsx`
 - legacy collab DMs mirrored into relay archive: `src/main/ipc/collab.ts`
-- workspace extension dashboard: `.contex/extensions/contex-relay-suite/`
+- workspace extension dashboard: `.codesurf/extensions/codesurf-relay-suite/`
 
 The Relay Suite extension is currently a **hybrid** packaging layer:
 
@@ -119,9 +119,9 @@ See also:
 ## Example
 
 ```ts
-import { ContexRelay, RelayRuntime } from '@contex/relay'
+import { CodesurfRelay, RelayRuntime } from '@codesurf/relay'
 
-const relay = new ContexRelay({ workspacePath: '/repo' })
+const relay = new CodesurfRelay({ workspacePath: '/repo' })
 await relay.init()
 
 await relay.upsertParticipant({

@@ -73,7 +73,7 @@ async function getCanvasSummary(workspaceId) {
     }
   }
 
-  const canvasPath = path.join(CODESURF_HOME, 'workspaces', String(workspaceId), '.contex', 'canvas-state.json')
+  const canvasPath = path.join(CODESURF_HOME, 'workspaces', String(workspaceId), '.codesurf', 'canvas-state.json')
   const state = await readJson(canvasPath)
   const tiles = Array.isArray(state && state.tiles) ? state.tiles : []
   const tileCounts = new Map()

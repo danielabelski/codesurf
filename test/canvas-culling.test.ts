@@ -41,6 +41,30 @@ describe('isTileOffscreen', () => {
   test('tile overlapping the viewport edge is never culled', () => {
     assert.equal(isTileOffscreen({ x: -100, y: -100, width: 200, height: 200 }, vp, SCREEN_W, SCREEN_H), false)
   })
+
+  test('canvas rect smaller than window: tiles under sidebar chrome stay unculled when still in canvas', () => {
+    // Simulate a canvas that is only the right portion of a 1920x1080 window
+    // (sidebar ~280px). Culling must use canvas size (1640), not window size.
+    const canvasW = 1640
+    const canvasH = 1080
+    // Tile fully inside the canvas surface.
+    assert.equal(
+      isTileOffscreen({ x: 100, y: 100, width: 200, height: 200 }, vp, canvasW, canvasH),
+      false,
+    )
+    // Tile whose screen-space right edge is past the canvas width (+margin) is culled
+    // even if it would still be inside a full window width.
+    const m = CULL_MARGIN_PX
+    assert.equal(
+      isTileOffscreen(
+        { x: canvasW + m + 50, y: 100, width: 200, height: 200 },
+        vp,
+        canvasW,
+        canvasH,
+      ),
+      true,
+    )
+  })
 })
 
 describe('isHeavyTileType', () => {

@@ -117,9 +117,9 @@ test('allow: relay-granted extension can call relayHost.install', () => {
   assert.equal(result.ok, true)
 })
 
-test('allow: contex-relay-suite with relay grant can call relayHost', () => {
+test('allow: codesurf-relay-suite with relay grant can call relayHost', () => {
   const gate = { enforced: true, granted: ['relay'] }
-  const result = validateCapabilityCall(gate, 'contex-relay-suite', 'relayHost', 'install')
+  const result = validateCapabilityCall(gate, 'codesurf-relay-suite', 'relayHost', 'install')
   assert.equal(result.ok, true)
 })
 

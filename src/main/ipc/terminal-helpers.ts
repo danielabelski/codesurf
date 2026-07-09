@@ -1,6 +1,6 @@
 import { homedir } from 'os'
 import { join } from 'path'
-import { CONTEX_HOME } from '../paths.ts'
+import { CODESURF_HOME } from '../paths.ts'
 
 // --- Security: binary allowlist for pty spawn (SEC-04) ---
 export const ALLOWED_SHELLS = new Set([
@@ -44,15 +44,15 @@ export function expandHome(arg: string): string {
   const home = homedir()
   if (arg === '~') return home
 
-  // Resolve legacy ~/.contex/ and current ~/.codesurf/ paths to CONTEX_HOME
-  if (arg.startsWith('~/.contex/')) {
-    return join(CONTEX_HOME, arg.slice('~/.contex/'.length))
+  // Resolve legacy ~/.codesurf/ and current ~/.codesurf/ paths to CODESURF_HOME
+  if (arg.startsWith('~/.codesurf/')) {
+    return join(CODESURF_HOME, arg.slice('~/.codesurf/'.length))
   }
-  if (arg.startsWith('~\\.contex\\')) {
-    return join(CONTEX_HOME, arg.slice('~\\.contex\\'.length))
+  if (arg.startsWith('~\\.codesurf\\')) {
+    return join(CODESURF_HOME, arg.slice('~\\.codesurf\\'.length))
   }
   if (arg.startsWith('~/.codesurf/')) {
-    return join(CONTEX_HOME, arg.slice('~/.codesurf/'.length))
+    return join(CODESURF_HOME, arg.slice('~/.codesurf/'.length))
   }
 
   if (arg.startsWith('~/') || arg.startsWith('~\\')) return join(home, arg.slice(2))

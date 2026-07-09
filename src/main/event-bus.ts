@@ -208,13 +208,32 @@ class EventBus {
     if (this.history.size === 0) return
     const now = Date.now()
     const subscribedChannels = new Set<string>()
+    const wildcardPrefixes: string[] = []
+    let hasStarWildcard = false
     for (const sub of this.subscriptions.values()) {
-      if (!sub.isWildcard) subscribedChannels.add(sub.channel)
+      if (!sub.isWildcard) {
+        subscribedChannels.add(sub.channel)
+      } else if (sub.prefix === '' || sub.channel === '*') {
+        // `*` matches every channel — protect all history.
+        hasStarWildcard = true
+      } else {
+        wildcardPrefixes.push(sub.prefix)
+      }
     }
 
-    // Pass 1: drop dormant channels with no live subscribers.
+    const isProtected = (channel: string): boolean => {
+      if (hasStarWildcard) return true
+      if (subscribedChannels.has(channel)) return true
+      for (const prefix of wildcardPrefixes) {
+        if (channel.startsWith(prefix)) return true
+      }
+      return false
+    }
+
+    // Pass 1: drop dormant channels with no live subscribers
+    // (including wildcard matches like tile:* → tile:X).
     for (const channel of [...this.history.keys()]) {
-      if (subscribedChannels.has(channel)) continue
+      if (isProtected(channel)) continue
       const last = this.lastPublishAt.get(channel) ?? 0
       if (now - last > DORMANT_CHANNEL_TTL_MS) this.dropChannel(channel)
     }
@@ -226,7 +245,7 @@ class EventBus {
       .sort((a, b) => a.last - b.last)
     for (const { channel } of byAge) {
       if (this.history.size <= MAX_CHANNELS) break
-      if (subscribedChannels.has(channel)) continue
+      if (isProtected(channel)) continue
       this.dropChannel(channel)
     }
   }

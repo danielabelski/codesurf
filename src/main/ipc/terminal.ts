@@ -4,8 +4,8 @@ import { promises as fsP } from 'fs'
 import { execFileSync } from 'child_process'
 import { join } from 'path'
 import { bus } from '../event-bus'
-import { writeMCPConfigToWorkspace, getTileToken, revokeTileToken } from '../mcp-server'
-import { CONTEX_HOME, workspaceTileDir, legacyWorkspaceTileDir } from '../paths'
+import { writeMCPConfigToWorkspace, writeTileMcpConfig, getTileToken, revokeTileToken } from '../mcp-server'
+import { CODESURF_HOME, workspaceTileDir, legacyWorkspaceTileDir } from '../paths'
 import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
 import { readSettingsSync } from './workspace'
@@ -82,22 +82,22 @@ function getTmuxPath(): string | null {
 }
 
 // Write a minimal tmux config that hides the status bar and avoids prefix conflicts
-const CONTEX_TMUX_CONF = join(CONTEX_HOME, 'tmux.conf')
+const CODESURF_TMUX_CONF = join(CODESURF_HOME, 'tmux.conf')
 function ensureTmuxConf(): void {
   try {
-    if (existsSync(CONTEX_TMUX_CONF)) return
+    if (existsSync(CODESURF_TMUX_CONF)) return
     const conf = [
-      '# contex-managed tmux config — do not edit',
+      '# codesurf-managed tmux config — do not edit',
       'set -g status off',
       'set -g mouse on',
       'set -g history-limit 50000',
       'set -g default-terminal "xterm-256color"',
     ].join('\n') + '\n'
-    require('fs').writeFileSync(CONTEX_TMUX_CONF, conf)
+    require('fs').writeFileSync(CODESURF_TMUX_CONF, conf)
   } catch { /* best effort */ }
 }
 
-const TMUX_PREFIX = 'contex-'
+const TMUX_PREFIX = 'codesurf-'
 
 function tmuxSessionName(tileId: string): string {
   return `${TMUX_PREFIX}${tileId}`
@@ -141,7 +141,7 @@ function tmuxNewSessionArgs(
 ): string[] {
   const tmuxArgs = [
     '-u',  // Force UTF-8 so Nerd Font / Unicode glyphs are not stripped
-    '-f', CONTEX_TMUX_CONF,
+    '-f', CODESURF_TMUX_CONF,
     'new-session', '-d',
     '-s', sessionName,
     '-x', '80', '-y', '24',
@@ -150,7 +150,7 @@ function tmuxNewSessionArgs(
   // Inject env vars via -e (tmux 3.2+)
   for (const [k, v] of Object.entries(env)) {
     if (k === 'PATH' || k === 'HOME' || k === 'SHELL' || k === 'TERM') continue
-    if (k.startsWith('CONTEX_') || k.startsWith('COLLAB_') || k === 'CARD_ID'
+    if (k.startsWith('CODESURF_') || k.startsWith('COLLAB_') || k === 'CARD_ID'
       || k === 'LANG' || k === 'LC_ALL' || k === 'LC_CTYPE') {
       tmuxArgs.push('-e', `${k}=${v}`)
     }
@@ -239,7 +239,7 @@ export function registerTerminalIPC(): void {
     ] as const,
     handler: async (event, tileId, workspaceDir, launchBin, launchArgs) => {
     // Validate workspaceDir against path traversal — the renderer supplies this
-    // and it controls where the PTY spawns, where .contex dirs are created, and
+    // and it controls where the PTY spawns, where .codesurf dirs are created, and
     // where the MCP bearer token (.mcp.json) is written.
     const { validateFsPath } = await import('./fs.ts')
     try {
@@ -275,20 +275,27 @@ export function registerTerminalIPC(): void {
     const isAgent = ALLOWED_AGENT_BINS.includes(launchBase)
     const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ CARD_ID: tileId })
 
-    // Set CONTEX_DIR so agents know where their per-tile .contex folder is
+    // Set CODESURF_DIR so agents know where their per-tile .codesurf folder is
     const contexDir = workspaceTileDir(workspaceDir, tileId)
     const legacyContexDir = legacyWorkspaceTileDir(workspaceDir, tileId)
-    spawnEnv.CONTEX_DIR = contexDir
+    spawnEnv.CODESURF_DIR = contexDir
     spawnEnv.COLLAB_DIR = contexDir
 
     if (isAgent) {
-      const mcpConfigPath = join(CONTEX_HOME, 'mcp-server.json')
-      spawnEnv.CONTEX_MCP_CONFIG = mcpConfigPath
-
       // Per-tile MCP token — limits blast radius if leaked from this terminal
-      spawnEnv.CONTEX_MCP_TILE_TOKEN = getTileToken(tileId)
+      const tileToken = getTileToken(tileId)
+      spawnEnv.CODESURF_MCP_TILE_TOKEN = tileToken
 
-      // Ensure .contex dir exists before reading/spawning
+      // Prefer a tile-scoped config (Bearer = tile token) over the global
+      // mcp-server.json so scope guards from plan 010 actually apply (SEC-05).
+      let mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
+      try {
+        const tileConfig = await writeTileMcpConfig(tileId)
+        if (tileConfig) mcpConfigPath = tileConfig
+      } catch { /* fall back to global config */ }
+      spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
+
+      // Ensure .codesurf dir exists before reading/spawning
       await fsP.mkdir(join(contexDir, 'context'), { recursive: true })
 
       // Inject objective.md via -p if it exists
@@ -298,29 +305,31 @@ export function registerTerminalIPC(): void {
         objective = await fsP.readFile(objectivePath, 'utf8')
       } catch { /* no objective yet */ }
 
-      // Always inject a preamble so the agent knows about its .contex folder
+      // Always inject a preamble so the agent knows about its .codesurf folder
       const preamble = [
-        objective.trim() || '# Objective\n\nAwaiting tasks from the contex drawer.',
+        objective.trim() || '# Objective\n\nAwaiting tasks from the codesurf drawer.',
         '',
-        '## Contex Directory',
+        '## CodeSurf Directory',
         `Your per-block directory is at: ${contexDir}`,
         `Legacy path (if you see old docs): ${legacyContexDir}`,
         `Check ${contexDir}/objective.md for updated objectives.`,
         `Use the reload_objective MCP tool to fetch the latest version.`,
         '',
-        '## Peer Collaboration',
-        'You are part of a linked block group on an infinite canvas. When other blocks are linked to you, you will see [contex] notifications in your terminal.',
+        '## Agent Room (canvas wires)',
+        'Blocks wired to you on the canvas share an agent room. Room traffic is real-time (bus) and durable (ledger).',
+        `Your block ID is $CARD_ID (always set). Per-tile dir: ${contexDir}`,
+        `Room inbox file (updated live): ~/.codesurf/room-inboxes/$CARD_ID/ROOM.md`,
         '',
-        'Collaboration tools (call via MCP):',
-        '- `peer_set_state` — declare your status, current task, and files (DO THIS FIRST when starting work)',
-        '- `peer_get_state` — see what linked peers are working on, their todos, and files',
-        '- `peer_send_message` — send a direct message to a linked peer',
-        '- `peer_read_messages` — read messages from peers',
-        '- `peer_add_todo` — add a todo visible to peers',
-        '- `peer_complete_todo` — mark a todo done (peers get notified)',
+        'Collaboration tools (MCP prefix mcp__codesurf__):',
+        '- `room_status` — room id, members, unread count (start here)',
+        '- `room_post` — post message/task/handoff/summary into the room',
+        '- `room_consume` — drain unread room traffic into your context',
+        '- `peer_set_state` — announce status/task/files to the room',
+        '- `peer_get_state` — snapshot of room members',
+        '- `peer_send_message` — direct message a room member',
         '',
-        'Workflow: When you start a task, call peer_set_state first. Before editing files, call peer_get_state to check if a peer is already working on them. Coordinate via peer_send_message to avoid conflicts.',
-        `Your block ID is available as $CARD_ID. Reference file: ${contexDir}/peers.md`,
+        'Workflow: On start call room_status + peer_set_state(status=working). Use room_consume when you need peer traffic. room_post handoffs when you need another block to act. Do not poll endlessly — room files and MCP stay current.',
+        `Reference: ${contexDir}/peers.md and ~/.codesurf/room-inboxes/$CARD_ID/ROOM.md`,
       ].join('\n')
       args.push('-p', preamble)
 
@@ -334,33 +343,37 @@ export function registerTerminalIPC(): void {
         }
       } catch { /* no skills config */ }
 
-      // Auto-allow contex MCP tools for Claude Code CLI launches
+      // Auto-allow codesurf MCP tools for Claude Code CLI launches
       const isClaude = launchBase === 'claude'
       if (isClaude) {
+        // Point Claude Code at the tile-scoped MCP config (not just workspace
+        // .mcp.json which still carries the global token for human CLI use).
+        args.push('--mcp-config', mcpConfigPath)
         const mcpToolNames = [
-          'mcp__contex__canvas_create_tile', 'mcp__contex__canvas_open_file',
-          'mcp__contex__canvas_pan_to', 'mcp__contex__canvas_list_tiles',
-          'mcp__contex__card_complete', 'mcp__contex__card_update',
-          'mcp__contex__card_error', 'mcp__contex__canvas_event',
-          'mcp__contex__request_input',
-          'mcp__contex__kanban_get_board', 'mcp__contex__kanban_create_card',
-          'mcp__contex__kanban_update_card', 'mcp__contex__kanban_move_card',
-          'mcp__contex__kanban_pause_card', 'mcp__contex__kanban_delete_card',
-          'mcp__contex__kanban_create_column', 'mcp__contex__kanban_rename_column',
-          'mcp__contex__kanban_delete_column',
-          'mcp__contex__update_progress',
-          'mcp__contex__log_activity', 'mcp__contex__create_task',
-          'mcp__contex__update_task', 'mcp__contex__notify',
-          'mcp__contex__ask',
+          'mcp__codesurf__canvas_create_tile', 'mcp__codesurf__canvas_open_file',
+          'mcp__codesurf__canvas_pan_to', 'mcp__codesurf__canvas_list_tiles',
+          'mcp__codesurf__card_complete', 'mcp__codesurf__card_update',
+          'mcp__codesurf__card_error', 'mcp__codesurf__canvas_event',
+          'mcp__codesurf__request_input',
+          'mcp__codesurf__kanban_get_board', 'mcp__codesurf__kanban_create_card',
+          'mcp__codesurf__kanban_update_card', 'mcp__codesurf__kanban_move_card',
+          'mcp__codesurf__kanban_pause_card', 'mcp__codesurf__kanban_delete_card',
+          'mcp__codesurf__kanban_create_column', 'mcp__codesurf__kanban_rename_column',
+          'mcp__codesurf__kanban_delete_column',
+          'mcp__codesurf__update_progress',
+          'mcp__codesurf__log_activity', 'mcp__codesurf__create_task',
+          'mcp__codesurf__update_task', 'mcp__codesurf__notify',
+          'mcp__codesurf__ask',
           // Collab tools
-          'mcp__contex__reload_objective', 'mcp__contex__pause_task',
-          'mcp__contex__get_context',
-          // Peer collaboration tools
-          'mcp__contex__peer_set_state', 'mcp__contex__peer_get_state',
-          'mcp__contex__peer_send_message', 'mcp__contex__peer_read_messages',
-          'mcp__contex__peer_add_todo', 'mcp__contex__peer_complete_todo',
+          'mcp__codesurf__reload_objective', 'mcp__codesurf__pause_task',
+          'mcp__codesurf__get_context',
+          // Agent room + peer tools
+          'mcp__codesurf__room_status', 'mcp__codesurf__room_post', 'mcp__codesurf__room_consume',
+          'mcp__codesurf__peer_set_state', 'mcp__codesurf__peer_get_state',
+          'mcp__codesurf__peer_send_message', 'mcp__codesurf__peer_read_messages',
+          'mcp__codesurf__peer_add_todo', 'mcp__codesurf__peer_complete_todo',
           // Node bridge tools — peer-to-peer interaction with linked tiles
-          ...getAllNodeTools().map(t => `mcp__contex__${t.name}`),
+          ...getAllNodeTools().map(t => `mcp__codesurf__${t.name}`),
         ]
         // Filter out disabled skills from allowed tools
         const filteredTools = skillFilter
@@ -383,7 +396,7 @@ export function registerTerminalIPC(): void {
       })
     }
 
-    // Ensure .mcp.json exists in workspace so Claude Code auto-discovers contex tools
+    // Ensure .mcp.json exists in workspace so Claude Code auto-discovers codesurf tools
     writeMCPConfigToWorkspace(workspaceDir).catch(() => {})
 
     // --- tmux persistence: reattach or create a new tmux session ---------------
@@ -422,7 +435,7 @@ export function registerTerminalIPC(): void {
     let term: PtyInstance
     if (useTmux && tmux) {
       // Attach to the tmux session via node-pty
-      term = pty.spawn(tmux, ['-u', '-f', CONTEX_TMUX_CONF, 'attach-session', '-t', sessName], {
+      term = pty.spawn(tmux, ['-u', '-f', CODESURF_TMUX_CONF, 'attach-session', '-t', sessName], {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,
@@ -488,6 +501,9 @@ export function registerTerminalIPC(): void {
         terminals,
         terminalBuffers,
         publish: (event) => bus.publish(event),
+        // Drop the tmux session with the shell so Enter respawns fresh instead
+        // of reattaching a dead session (M5).
+        killTmuxSession: tmuxKillSession,
       })
     })
 
@@ -581,10 +597,11 @@ export function registerTerminalIPC(): void {
     terminalBuffers.delete(tileId)
   })
 
-  // terminal:update-peers — updates peer-state links and writes peers.md to context dir
+  // terminal:update-peers — sync agent room membership + write peers.md / room status
   ipcMain.handle('terminal:update-peers', async (_, tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>) => {
-    // Update the in-memory peer link registry (triggers notifications to peers)
-    updateLinks(tileId, (peers ?? []).map(p => p.peerId))
+    const tileTypes: Record<string, string> = { [tileId]: 'terminal' }
+    for (const p of peers ?? []) tileTypes[p.peerId] = p.peerType || 'unknown'
+    const room = updateLinks(tileId, (peers ?? []).map(p => p.peerId), tileTypes)
 
     // Also update this tile's own tmux status bar
     const session = terminals.get(tileId)
@@ -601,15 +618,18 @@ export function registerTerminalIPC(): void {
         channel: `tile:${tileId}`,
         type: 'system',
         source: `terminal:${tileId}`,
-        payload: { action: 'peers_updated', count: 0 }
+        payload: { action: 'peers_updated', count: 0, roomId: null }
       })
       return
     }
 
     const lines = [
-      '# Connected Peers',
+      '# Agent Room',
       '',
-      'These blocks are linked to you on the canvas. Use MCP peer bridge tools to interact with them.',
+      room ? `Room id: \`${room.id}\`` : 'Room: (pending)',
+      '',
+      'These blocks share an agent room with you. Prefer MCP `room_status` / `room_post` / `room_consume`.',
+      `Live inbox: ~/.codesurf/room-inboxes/${tileId}/ROOM.md`,
       '',
     ]
     for (const peer of peers) {
@@ -617,7 +637,7 @@ export function registerTerminalIPC(): void {
       if (peer.tools.length > 0) {
         lines.push('Available tools:')
         for (const tool of peer.tools) {
-          lines.push(`- \`mcp__contex__${tool}\` (pass \`tile_id: "${peer.peerId}"\`)`)
+          lines.push(`- \`mcp__codesurf__${tool}\` (pass \`tile_id: "${peer.peerId}"\`)`)
         }
       }
       lines.push('')

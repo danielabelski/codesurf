@@ -1521,7 +1521,7 @@
     var msg = event && event.data
     if (!msg || typeof msg !== 'object') return
 
-    if (msg.type === 'contex-event' && msg.event === 'discovery.peersChanged') {
+    if (msg.type === 'codesurf-event' && msg.event === 'discovery.peersChanged') {
       if (window.contex && window.contex.chat && assistantCardId) {
         window.contex.chat.clearSession(ensureAssistantCardId()).catch(function() {})
       }
@@ -1534,7 +1534,7 @@
       return
     }
 
-    if (msg.type === 'contex-bridge-ready') {
+    if (msg.type === 'codesurf-bridge-ready') {
       window.removeEventListener('message', handleHostEventMessage)
       setTimeout(init, 50)
     }

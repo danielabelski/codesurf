@@ -533,11 +533,11 @@ export function chatClaude(req: ChatRequest): void {
   }
   const thinkingConfig = thinkingMap[req.thinking ?? ''] ?? { type: 'adaptive' }
 
-  // Wire up the contex MCP server (Bearer auth matches mcp-server HTTP checks)
+  // Wire up the codesurf MCP server (Bearer auth matches mcp-server HTTP checks)
   const mcpPort = getMCPPort()
   const mcpServers: Record<string, { type: 'http'; url: string; headers?: Record<string, string> }> = {}
   if (req.mcpEnabled !== false && mcpPort) {
-    mcpServers.contex = {
+    mcpServers.codesurf = {
       type: 'http',
       url: `http://127.0.0.1:${mcpPort}/mcp`,
       headers: { Authorization: `Bearer ${getMCPToken()}` },
@@ -555,8 +555,13 @@ export function chatClaude(req: ChatRequest): void {
     log('Peer data:', JSON.stringify(req.peers.map(p => ({ id: p.peerId, type: p.peerType, tools: p.tools.length, actions: p.actions?.length ?? 0 }))))
   }
   let systemPrompt = buildPeerSystemPrompt(req.peers)
+  if (req.roomContext?.trim()) {
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${req.roomContext.trim()}`
+      : req.roomContext.trim()
+  }
   if (systemPrompt) {
-    log('systemPrompt built for', req.peers?.length ?? 0, 'peers, contex tools:', contexToolNames.length)
+    log('systemPrompt built for', req.peers?.length ?? 0, 'peers, codesurf tools:', contexToolNames.length, 'room=', Boolean(req.roomContext))
   }
   // Resolved AgentMode (selected agent definition): persona → system prompt,
   // tools allow-list → SDK tool restriction. The shared builder FAILS CLOSED
@@ -682,9 +687,9 @@ export function chatClaude(req: ChatRequest): void {
     log('calling query()...')
     // Inject system prompt via named agent definition if we have peer context
     if (systemPrompt) {
-      options.agent = 'contex'
+      options.agent = 'codesurf'
       options.agents = {
-        contex: {
+        codesurf: {
           description: 'CodeSurf canvas AI agent with peer block awareness',
           prompt: systemPrompt,
           ...(agentTools !== undefined ? { tools: agentTools } : {}),

@@ -27,9 +27,9 @@ export function useChatTileWorkspaceSkills(workspaceDir: string) {
     let cancelled = false
     const workspacePath = workspaceDir?.trim() || null
     const homePath = window.electron.homedir ?? ''
-    const skillsPath = workspacePath ? `${workspacePath}/.contex/customisation/skills.json` : null
-    const locationsPath = workspacePath ? `${workspacePath}/.contex/customisation/locations-skills.json` : null
-    const promptLocationsPath = workspacePath ? `${workspacePath}/.contex/customisation/locations-prompts.json` : null
+    const skillsPath = workspacePath ? `${workspacePath}/.codesurf/customisation/skills.json` : null
+    const locationsPath = workspacePath ? `${workspacePath}/.codesurf/customisation/locations-skills.json` : null
+    const promptLocationsPath = workspacePath ? `${workspacePath}/.codesurf/customisation/locations-prompts.json` : null
 
     ;(async () => {
       const discovered = new Map<string, SkillDefinition>()

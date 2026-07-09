@@ -296,4 +296,21 @@ describe('EventBus — channel eviction', () => {
     // The subscribed channel must still be present with its history.
     assert.equal(bus.getHistory('keep:me').length, 1)
   })
+
+  it('never evicts channels matched by a live wildcard subscriber (tile:*)', async () => {
+    const bus = new EventBus()
+    bus.subscribe('tile:*', 'wildcard-sub', () => {})
+    bus.publish(makeEvent({ channel: 'tile:alpha' }))
+    bus.publish(makeEvent({ channel: 'tile:beta' }))
+
+    for (let i = 0; i < 1100; i++) {
+      bus.publish(makeEvent({ channel: `noise:${i}` }))
+    }
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    assert.equal(bus.getHistory('tile:alpha').length, 1)
+    assert.equal(bus.getHistory('tile:beta').length, 1)
+  })
 })

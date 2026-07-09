@@ -36,12 +36,12 @@ permission posture**.
 What already exists (from read-only investigations this session):
 
 - **`AgentMode` + authoritative main resolver** — `src/main/chat/agent-mode-resolver.ts`;
-  `chat:send` re-resolves from trusted `.contex/customisation/agents.json`, overrides the
+  `chat:send` re-resolves from trusted `.codesurf/customisation/agents.json`, overrides the
   renderer, fails closed. (PR #8) Injected into all engines via
   `src/main/chat/providers/agent-mode-payloads.ts`.
 - **Folder-scan discovery (ephemeral)** — Customisation tile scans `~/.claude/agents`,
   `$WS/.claude/agents`, `.cursor/agents`, `.opencode/agents`, `~/.config/opencode/agents`,
-  `.continue/agents`; editable list at `.contex/customisation/locations-agents.json`;
+  `.continue/agents`; editable list at `.codesurf/customisation/locations-agents.json`;
   parses `.json`→`Partial<AgentMode>`, `.md`/`.txt`→systemPrompt+frontmatter. `discovered-*`
   entries are filtered from persistence. (`CustomisationTile.tsx:328,1104,1152,1157`)
 - **Uniform model plumbing** — `model`/`provider` are scalars on `ChatRequest`

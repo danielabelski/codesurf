@@ -33,6 +33,8 @@ export type CanvasAnchorPoint = {
 type CanvasDragEngine = {
   viewport: CanvasViewport
   setViewport: Dispatch<SetStateAction<CanvasViewport>>
+  /** Live gesture viewport (includes uncommitted zoom from wheel mid-pan). */
+  pendingViewportRef: MutableRefObject<CanvasViewport>
   panVelocityRef: MutableRefObject<{ vx: number, vy: number }>
   panLastPos: MutableRefObject<{ x: number, y: number, t: number }>
   startPanInertia: () => void
@@ -60,6 +62,7 @@ export type UseCanvasDragSyncOptions = {
     CanvasDragEngine,
     | 'viewport'
     | 'setViewport'
+    | 'pendingViewportRef'
     | 'panVelocityRef'
     | 'panLastPos'
     | 'startPanInertia'
@@ -114,7 +117,7 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
     getMinTileHeight,
   } = options
 
-  const { viewport, setViewport, panVelocityRef, panLastPos, startPanInertia, screenToWorld, saveCanvas, nextZIndex, applyViewportGesture } = engine
+  const { viewport, setViewport, pendingViewportRef, panVelocityRef, panLastPos, startPanInertia, screenToWorld, saveCanvas, nextZIndex, applyViewportGesture } = engine
 
   const snapGuideRafRef = useRef<number | null>(null)
   /**
@@ -178,12 +181,17 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
 
     const onMove = (e: MouseEvent) => {
       if (dragState.type === null) return
+      // Live viewport (incl. mid-gesture zoom) — never spread closed-over
+      // `viewport` state for pan/zoom math or a wheel zoom mid-pan gets stomped.
+      const liveVp = pendingViewportRef.current
+
       if (dragState.type === 'select') {
         scheduleDragUpdate(() => {
           const rect = canvasRef.current?.getBoundingClientRect()
           if (!rect) return
-          const curWx = (e.clientX - rect.left - viewport.tx) / viewport.zoom
-          const curWy = (e.clientY - rect.top - viewport.ty) / viewport.zoom
+          const vp = pendingViewportRef.current
+          const curWx = (e.clientX - rect.left - vp.tx) / vp.zoom
+          const curWy = (e.clientY - rect.top - vp.ty) / vp.zoom
           setDragState(prev => prev.type === 'select' ? { ...prev, curWx, curWy } : prev)
         })
         return
@@ -202,13 +210,17 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           }
         }
         panLastPos.current = { x: e.clientX, y: e.clientY, t: now }
-        // With the imperative-pan flag on this writes the world transform
-        // directly and commits state on a throttle; off, it's a plain set.
-        applyViewportGesture({ ...viewport, tx: dragState.initTx + dx, ty: dragState.initTy + dy })
+        // Keep live zoom; only pan translation comes from the drag delta.
+        applyViewportGesture({
+          ...liveVp,
+          tx: dragState.initTx + dx,
+          ty: dragState.initTy + dy,
+        })
       } else if (dragState.type === 'group-resize') {
         scheduleDragUpdate(() => {
-          const wdx = dx / viewport.zoom
-          const wdy = dy / viewport.zoom
+          const vp = pendingViewportRef.current
+          const wdx = dx / vp.zoom
+          const wdy = dy / vp.zoom
           const { dir, initBounds: ib, snapshots: snaps } = dragState
 
           let nx = ib.x, ny = ib.y, nw = ib.w, nh = ib.h
@@ -244,8 +256,9 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
         })
       } else if (dragState.type === 'group') {
         scheduleDragUpdate(() => {
-          const wdx = dx / viewport.zoom
-          const wdy = dy / viewport.zoom
+          const vp = pendingViewportRef.current
+          const wdx = dx / vp.zoom
+          const wdy = dy / vp.zoom
           if (dragState.initLayoutBounds) {
             const lb = dragState.initLayoutBounds
             setGroups(prev => prev.map(g => g.id === dragState.groupId ? {
@@ -268,8 +281,8 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           setDragState(prev => prev.type === 'connection' ? { ...prev, current, targetTileId } : prev)
         })
       } else if (dragState.type === 'tile') {
-        const wdx = dx / viewport.zoom
-        const wdy = dy / viewport.zoom
+        const wdx = dx / liveVp.zoom
+        const wdy = dy / liveVp.zoom
         const newX = snapValue(dragState.initX + wdx)
         const newY = snapValue(dragState.initY + wdy)
         const ddx = newX - dragState.initX
@@ -327,8 +340,9 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
         })
       } else if (dragState.type === 'resize') {
         scheduleDragUpdate(() => {
-          const wdx = dx / viewport.zoom
-          const wdy = dy / viewport.zoom
+          const vp = pendingViewportRef.current
+          const wdx = dx / vp.zoom
+          const wdy = dy / vp.zoom
           const dir = dragState.dir
           setTiles(prev => prev.map(t => {
             if (t.id !== dragState.tileId) return t

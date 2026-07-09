@@ -20,7 +20,7 @@ export const adapters: ExtensionAdapter[] = [
 ]
 
 /**
- * Try to detect and convert a directory to a contex extension manifest
+ * Try to detect and convert a directory to a codesurf extension manifest
  * using one of the registered adapters.
  * Returns null if no adapter recognises the format.
  */

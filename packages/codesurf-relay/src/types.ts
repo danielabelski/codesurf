@@ -68,7 +68,7 @@ export interface RelayChannel {
 }
 
 export interface RelayMessageMeta {
-  protocol: 'contex-relay/v1'
+  protocol: 'codesurf-relay/v1'
   id: string
   threadId: string
   scope: RelayScope

@@ -504,7 +504,7 @@
       if (window.contex && window.contex.bus) {
         await window.contex.bus.subscribe('morph')
         window.addEventListener('message', function(e) {
-          if (!e.data || e.data.type !== 'contex-event') return
+          if (!e.data || e.data.type !== 'codesurf-event') return
           if (e.data.event !== 'bus.event.morph') return
           onBusEvent(e.data.data)
         })
@@ -523,7 +523,7 @@
     }
 
     window.addEventListener('message', function(e) {
-      if (e.data && e.data.type === 'contex-bridge-ready') init()
+      if (e.data && e.data.type === 'codesurf-bridge-ready') init()
     })
     if (window.contex) init()
   </script>

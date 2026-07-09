@@ -2421,8 +2421,8 @@ async function init() {
 
 window.addEventListener('message', function(e) {
   if (!e.data) return
-  if (e.data.type === 'contex-bridge-ready') init()
-  else if (e.data.type === 'contex-event' && e.data.event === 'bus.event.code-index') {
+  if (e.data.type === 'codesurf-bridge-ready') init()
+  else if (e.data.type === 'codesurf-event' && e.data.event === 'bus.event.code-index') {
     var d = e.data.data
     if (d && d.type === 'activity') {
       activityList.unshift(d.data || d)

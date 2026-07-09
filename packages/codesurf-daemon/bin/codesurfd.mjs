@@ -1607,7 +1607,7 @@ function assertSafeId(id) {
 
 function workspaceContexDir(workspaceId) {
   assertSafeId(workspaceId)
-  return join(HOME, 'workspaces', workspaceId, '.contex')
+  return join(HOME, 'workspaces', workspaceId, '.codesurf')
 }
 
 function canvasStatePath(workspaceId) {
@@ -1854,7 +1854,7 @@ function moveFileToDeleted(filePath) {
 function cleanupOldDeletedFiles(maxAgeDays = 30) {
   const cutoff = Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
   
-  // Clean ~/.contex/deleted
+  // Clean ~/.codesurf/deleted
   const homeDeleted = join(HOME, 'deleted')
   if (existsSync(homeDeleted)) {
     try {
@@ -1874,7 +1874,7 @@ function cleanupOldDeletedFiles(maxAgeDays = 30) {
     }
   }
   
-  // Clean ~/.contex/jobs/deleted
+  // Clean ~/.codesurf/jobs/deleted
   const jobsDeleted = join(HOME, 'jobs', 'deleted')
   if (existsSync(jobsDeleted)) {
     try {
@@ -1894,7 +1894,7 @@ function cleanupOldDeletedFiles(maxAgeDays = 30) {
     }
   }
   
-  // Clean ~/.contex/timelines/deleted
+  // Clean ~/.codesurf/timelines/deleted
   const timelinesDeleted = join(HOME, 'timelines', 'deleted')
   if (existsSync(timelinesDeleted)) {
     try {
@@ -1914,12 +1914,12 @@ function cleanupOldDeletedFiles(maxAgeDays = 30) {
     }
   }
   
-  // Clean workspace .contex/deleted directories
+  // Clean workspace .codesurf/deleted directories
   const workspacesDir = join(HOME, 'workspaces')
   if (existsSync(workspacesDir)) {
     try {
       for (const workspaceId of readDirNames(workspacesDir)) {
-        const workspaceDeleted = join(workspacesDir, workspaceId, '.contex', 'deleted')
+        const workspaceDeleted = join(workspacesDir, workspaceId, '.codesurf', 'deleted')
         if (existsSync(workspaceDeleted)) {
           try {
             for (const name of readDirNames(workspaceDeleted)) {
