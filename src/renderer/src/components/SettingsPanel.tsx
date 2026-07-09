@@ -153,8 +153,8 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     setDaemonLoading(true)
     setDaemonError(null)
     try {
-      const next = await window.electron.system.daemonStatus()
-      setDaemonStatus(next)
+      const next = await window.electron?.system?.daemonStatus?.()
+      setDaemonStatus(next ?? { running: false, info: null })
     } catch (e) {
       setDaemonError(e instanceof Error ? e.message : String(e))
       setDaemonStatus(null)
@@ -224,8 +224,8 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
     setDaemonRestarting(true)
     setDaemonError(null)
     try {
-      const next = await window.electron.system.restartDaemon()
-      setDaemonStatus(next)
+      const next = await window.electron?.system?.restartDaemon?.()
+      setDaemonStatus(next ?? { running: false, info: null })
     } catch (e) {
       setDaemonError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -239,9 +239,9 @@ export function SettingsPanel({ onClose, settings: initialSettings, onSettingsCh
 
     const refresh = async () => {
       try {
-        const next = await window.electron.system.daemonStatus()
+        const next = await window.electron?.system?.daemonStatus?.()
         if (!cancelled) {
-          setDaemonStatus(next)
+          setDaemonStatus(next ?? { running: false, info: null })
           setDaemonError(null)
         }
       } catch (e) {

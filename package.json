@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs && npm run test:relay",
+    "test": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs && npm run test:relay",
     "test:daemon": "node --test test/daemon/*.test.mjs",
     "test:relay": "npm --prefix packages/codesurf-relay test",
     "test:all": "npm test && npm run test:relay",
@@ -32,6 +32,15 @@
     "typecheck:go:watch": "tsgo -p tsconfig.tsgo.json --noEmit --watch --pretty false",
     "dev": "node scripts/dev.js",
     "dev:go": "node scripts/dev-go.js",
+    "web:dev": "node scripts/web-dev.mjs",
+    "web:vite": "vite --config vite.web.config.ts",
+    "web:host": "node scripts/web-host.mjs",
+    "web:preview": "vite preview --config vite.web.config.ts",
+    "web:pwa": "CODESURF_PWA_DEV=1 node scripts/web-dev.mjs",
+    "build:web": "vite build --config vite.web.config.ts",
+    "desktop:dev": "node scripts/desktop-dev.mjs",
+    "desktop:build": "node scripts/desktop-build.mjs",
+    "desktop:dist": "node scripts/desktop-build.mjs",
     "perf:render": "node scripts/measure-render.js",
     "build:main": "cross-env EV_BUILD_TARGET=main electron-vite build",
     "build:preload": "cross-env EV_BUILD_TARGET=preload electron-vite build",
@@ -54,9 +63,9 @@
     "acceptance:electrobun": "npm run build:electrobun && node scripts/accept-electrobun.mjs",
     "validate-extension": "node scripts/validate-extension.mjs",
     "ensure-electron": "node scripts/ensure-electron.js",
-    "rebuild": "node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty",
-    "postinstall": "node scripts/ensure-electron.js && node scripts/patch-node-pty-win.js && electron-rebuild -f -o better-sqlite3 && electron-rebuild -f -o node-pty",
-    "test:unit": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs"
+    "rebuild": "node scripts/rebuild-natives.mjs",
+    "postinstall": "node scripts/ensure-electron.js && node scripts/rebuild-natives.mjs",
+    "test:unit": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs"
   },
   "keywords": [],
   "author": "Jason",
@@ -79,12 +88,14 @@
     "electron": "41.3.0",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
+    "node-gyp": "^11.5.0",
     "postcss": "^8.5.8",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vite-plugin-pwa": "^1.3.0"
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.176",

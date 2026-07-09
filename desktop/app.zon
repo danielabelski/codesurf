@@ -1,0 +1,49 @@
+.{
+    .id = "inc.codesurf.app",
+    .name = "codesurf",
+    .display_name = "CodeSurf",
+    .version = "0.1.0",
+    .icons = .{ "assets/icon.png" },
+    .platforms = .{ "macos", "linux", "windows" },
+    .permissions = .{ "dialog", "network" },
+    .capabilities = .{ "webview", "js_bridge", "dialog" },
+    .frontend = .{
+        // Production assets: root Vite web build (`npm run build:web` → ../dist).
+        // Electron still uses dist-electron/renderer; Native/web share ../dist.
+        .dist = "../dist",
+        .entry = "index.html",
+        .spa_fallback = true,
+        .dev = .{
+            .url = "http://127.0.0.1:5173/",
+            .command = .{ "npm", "--prefix", "..", "run", "web:vite", "--", "--host", "127.0.0.1", "--port", "5173", "--strictPort" },
+            .ready_path = "/",
+            .timeout_ms = 90000,
+        },
+    },
+    .security = .{
+        .navigation = .{
+            .allowed_origins = .{
+                "zero://app",
+                "zero://inline",
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+            },
+            .external_links = .{ .action = "open_system_browser" },
+        },
+    },
+    .web_engine = "system",
+    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+    .windows = .{
+        .{
+            .label = "main",
+            .title = "CodeSurf",
+            .width = 1440,
+            .height = 920,
+            .min_width = 900,
+            .min_height = 640,
+            .restore_state = true,
+            // macOS 26 (Tahoe): tall hidden titlebar → larger system corner radius.
+            .titlebar = "hidden_inset_tall",
+        },
+    },
+}

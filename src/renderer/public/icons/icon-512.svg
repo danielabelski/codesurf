@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="CodeSurf">
+  <rect width="512" height="512" rx="96" fill="#0c0c0c"/>
+  <rect x="40" y="40" width="432" height="432" rx="72" fill="#12141a" stroke="#2a3344" stroke-width="8"/>
+  <path d="M120 300 L200 190 L270 270 L350 140 L400 190" fill="none" stroke="#7dd3fc" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="200" cy="190" r="20" fill="#38bdf8"/>
+  <circle cx="350" cy="140" r="20" fill="#38bdf8"/>
+  <text x="256" y="430" text-anchor="middle" font-family="system-ui,sans-serif" font-size="56" font-weight="700" fill="#94a3b8">CodeSurf</text>
+</svg>

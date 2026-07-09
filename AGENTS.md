@@ -75,10 +75,19 @@ All providers stream via NDJSON/SSE parsed in `src/main/ipc/stream.ts`.
 ## Build Commands
 
 ```bash
-npm run dev          # electron-vite dev (hot reload)
-npm run build        # full build (main + preload + renderer)
-npm run rebuild      # native rebuild (node-pty)
+npm run dev            # Electron full product (hot reload) — default
+npm run web:dev        # Browser UI + web-host + codesurfd (Agensis-style web)
+npm run web:preview    # Serve production web build (PWA installable)
+npm run web:pwa        # web:dev with service worker enabled for install testing
+npm run desktop:dev    # Native SDK WebView shell + same web stack
+npm run build          # Electron build (main + preload + renderer)
+npm run build:web      # Renderer-only → dist/ (browser + Native + PWA assets)
+npm run desktop:build  # Package Native shell
+npm run rebuild        # native rebuild (node-pty) for Electron
 ```
+
+Multi-target details: `docs/multi-target.md`. Electron is never removed; web/Native
+share the renderer and talk to `codesurfd` via `scripts/web-host.mjs`.
 
 ## Style Conventions
 

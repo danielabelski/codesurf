@@ -2,7 +2,9 @@
 
 ## Overview
 
-CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat) live on a 2D canvas. AI agents connect via MCP and collaborate with humans asynchronously. Internal config paths and some legacy variable names still use `contex` / `window.contex` / `~/.codesurf/` — do not rename these.
+CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat) live on a 2D canvas. AI agents connect via MCP and collaborate with humans asynchronously. Internal config paths and legacy variable names still use `contex` / `window.contex` / `~/.codesurf/` — do not rename these.
+
+A multi-target migration is actively in flight: the renderer is now shared across Electron, a browser PWA, and a Native (electrobun/Bun WebView) shell. As of 2026-07-09 the Native migration is an uncommitted working-tree change on `main`, and the local checkout is ~44 commits behind `origin/main`.
 
 ---
 
@@ -24,6 +26,8 @@ CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles
 - `src/renderer/src/components/` — tile components, all lazy-loaded via `React.lazy` + `Suspense`
 - `src/renderer/src/hooks/` — `useDetectedAgents`, `useMCPServers`
 - `src/shared/types.ts` — shared TypeScript types, `TileType` union
+- `scripts/web-host.mjs` — `codesurfd` daemon; web and Native targets talk to this instead of Electron IPC
+- `docs/multi-target.md` — multi-target architecture reference (Electron / web / Native)
 
 ### Persistence (file-based, no cloud)
 - Canvas state: `~/.codesurf/workspaces/{id}/canvas.json` — auto-saved, 500ms debounce
@@ -43,14 +47,20 @@ CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles
 | Provider | Integration |
 |---|---|
 | Claude | `@anthropic-ai/claude-agent-sdk` — session resumption, adaptive thinking |
-| Codex | codex CLI subprocess |
+| Codex | codex CLI subprocess; models seen in active use: gpt-5.5, gpt-5.6, gpt-5.6-terra, gpt-5.6-sol |
 | OpenCode | `@opencode-ai/sdk` HTTP server |
 
 All providers stream via `src/main/ipc/stream.ts`.
 
-### Build Commands
-- `npm run dev` — electron-vite dev with hot reload
-- `npm run build` — full build (main + preload + renderer)
+### Build Commands (current multi-target set)
+- `npm run dev` — Electron full product, hot reload (default)
+- `npm run web:dev` — browser UI + web-host + codesurfd (Agensis-style web)
+- `npm run web:preview` — serve production web build (PWA installable)
+- `npm run web:pwa` — web:dev with service worker enabled for install testing
+- `npm run desktop:dev` — Native SDK WebView shell + same web stack
+- `npm run build` — full Electron build (main + preload + renderer)
+- `npm run build:web` — renderer-only → dist/ (browser + Native + PWA assets)
+- `npm run desktop:build` — package Native shell
 - `npm run rebuild` — native rebuild for node-pty (required after dep changes)
 
 ### Style Conventions
@@ -70,8 +80,10 @@ All providers stream via `src/main/ipc/stream.ts`.
 - **Canvas undo** — holds full snapshots (max 50); don't push to undo stack in hot paths
 - **tsc baseline is dirty** — ~145 pre-existing errors; measure regressions per-file, not by exit code
 - **Electron binary footgun** — `npm install` can wipe electron dist binary; fix by extracting cached zip
-- **Peer bridge tools not always ToolSearch-loadable** — `chat_send_message` and `chat_acknowledge` are declared in session context but ToolSearch may not surface their schemas; fallback is direct HTTP call to the local MCP server
-- **Codex sandbox blocks `~/.cache/uv/`** — `uv` commands that touch `~/.cache/uv/sdists-v6/.git` fail with `Operation not permitted (os error 1)`; don't rely on uv in Codex tasks without verifying sandbox policy first
+- **Native migration is WIP/uncommitted** — the local checkout is on `main`, ~44 commits behind `origin/main`; review working-tree changes separately from HEAD when auditing
+- **Terminal transport for web/Native mode** — requires a CORS proxy hosted externally; the Electron path and web path diverge at the transport layer; trace via `scripts/web-host.mjs` + the proxy boundary before assuming IPC parity
+- **Peer bridge tools not always ToolSearch-loadable** — `chat_send_message` and `chat_acknowledge` may not surface via ToolSearch; fallback is direct HTTP call to the local MCP server
+- **Codex sandbox blocks `~/.cache/uv/`** — `uv` commands touching `~/.cache/uv/sdists-v6/.git` fail with `Operation not permitted`; don't rely on uv in Codex tasks without verifying sandbox policy first
 
 ---
 
@@ -93,6 +105,13 @@ All providers stream via `src/main/ipc/stream.ts`.
 
 ## Active Subsystems
 
+### Multi-Target Architecture (In Flight)
+- Renderer is shared across Electron, browser PWA, and Native (electrobun/Bun WebView) shell
+- Web/Native targets communicate with `codesurfd` (`scripts/web-host.mjs`) instead of Electron IPC
+- Terminal tile for web/browser mode requires a remotely hosted CORS proxy — in active development
+- Architecture reference: `docs/multi-target.md`
+- **Status as of 2026-07-09:** uncommitted working-tree change on `main`; full code review sessions active
+
 ### Plugin / Extension Platform
 - Rebuild in progress: `docs/plugins/00-architecture.md`; P0, P2, P3 landed; P1+ pending
 - Extension SDK: bridge API, RPC flow, actions/context systems, chat integration
@@ -112,8 +131,7 @@ All providers stream via `src/main/ipc/stream.ts`.
 - 3-layer subsystem: `src/main/ipc/webview-paint.ts`, `src/renderer/src/lib/webviewPaint.ts`, `src/shared/webview-paint-bridge.ts`
 
 ### Pets Subsystem
-- New files: `src/main/ipc/pets-path.ts`, `electrobun/bun/runtime-pets.ts`, companion tests
-- In active expansion; not yet fully committed
+- Files: `src/main/ipc/pets-path.ts`, `electrobun/bun/runtime-pets.ts`, companion tests; in active expansion
 
 ### Activity Cap (PERF-01)
 - `activity-cap.ts` has a companion test file; in-flight, nearing ready
@@ -140,6 +158,19 @@ All providers stream via `src/main/ipc/stream.ts`.
 
 ---
 
+## Image / Asset Generation Status (2026-07-09)
+
+| Source | Status |
+|---|---|
+| OpenAI `gpt-image-1` | billing_hard_limit_reached — do not attempt |
+| Google Image Generation API | 403 — unavailable |
+| DGX image endpoint | Down — fallback `image_generate` tool in use |
+| Gemini image generator (`~/.claude/skills/threejs-image-generator/scripts/generate_image.py`) | Working — confirmed via `uv run` |
+
+- `assets/duck-codex.png` generated 2026-07-09 via Gemini script, 3.95 MB
+
+---
+
 ## OpenClaw / Automation Health (as of 2026-07-09)
 
 | Gateway / Cron | Status |
@@ -147,31 +178,32 @@ All providers stream via `src/main/ipc/stream.ts`.
 | Lead gateway (`lead-c3f78d0c-…`) | HEARTBEAT_OK |
 | MC gateway (`mc-gateway-894a3d5b-…`) | HEARTBEAT_FAILED — persistent ~145+ hours; assistant turns fail before producing content; needs root-cause |
 | Urgent Email Alert cron | HEARTBEAT_OK |
-| Tom Doerr Tweet Tracker cron | Degraded — Twitter/X blocking automated access to `x.com/search` even via Chrome profile; state at `/Users/jkneen/clawd/memory/tom-doerr-seen.json` |
-| VibeClaw Article Generator cron | Running — 3-source verification requirement limits throughput when web search unavailable; DGX fallback active |
+| Tom Doerr Tweet Tracker cron | Degraded — Twitter/X blocking automated access to `x.com/search` via Chrome profile; state at `/Users/jkneen/clawd/memory/tom-doerr-seen.json` |
+| VibeClaw Article Generator cron | Running — 3-source verification limits throughput when web search unavailable; DGX fallback active |
 | VibeClaw Skills Scout cron | Running — successfully adding new skills/tools to explore page |
-| Google Image Generation API | 403 — not available |
-| OpenAI Image API (`gpt-image-1`) | billing_hard_limit_reached — do not attempt until billing resolved |
-| DGX image endpoint | Down — fallback `image_generate` tool in use |
 
 ---
 
 ## Sibling Projects
 
-- **grok-cli** — `~/Documents/GitHub/grok-cli`; model list must mirror `src/renderer/src/config/providers.ts` DEFAULT_MODELS; edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array; permission system blocked in daemon mode (needs CodeSurf Desktop UI)
-- **Voxel Poser avatar** — canonical file: `~/Downloads/voxel-poser_20_patched.html` (~4500 LOC, Three.js, no build); backup at `voxel-poser_20_patched.BACKUP.html`; all capabilities verified: walk, run, jump, sit, crawl, crate-step-up, climb (both walls) + mantle + walk-on-top, grappling-hook abseil, LLM-only agent brain (`claude-sonnet-4-6`), procedural voxel textures, island-world sea, head-tracking off-axis parallax; serve via `python3 -m http.server 8765`; always cache-bust with `?v=N`; never `file://`
+- **grok-cli** — `~/Documents/GitHub/grok-cli`; model list must mirror `src/renderer/src/config/providers.ts` DEFAULT_MODELS; edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array; permission system blocked in daemon mode — needs UI in CodeSurf Desktop
 
 ---
 
-## Open Threads
+## Voxel Poser Avatar (Side Project)
 
-- MC gateway persistent failure — root-cause diagnosis needed
-- Google Cloud Image Generation API 403 — needs API enablement or provider switch
-- OpenAI Image API billing blocked — resolve before retrying `gpt-image-1`
-- DGX spark endpoint down — needs restart or substitution in article generator
-- Tom Doerr Tweet Tracker — needs alternative to blocked `x.com/search` automation
-- Pets subsystem — working tree, not yet committed
-- PERF-01 activity-cap companion test — in-flight
-- Plugin platform P1+ phases — not yet landed
-- grok-cli permission system in daemon mode — needs UI in CodeSurf Desktop
-- Voxel Poser: character swimming/sinking when walking into water — deferred
+File: `~/Downloads/voxel-poser_20_patched.html` — single canonical version (~4500 LOC, Three.js, no build)
+
+**Verified capabilities (all passing):** walk, run, jump, sit, crawl, crate-step-up, climb (both walls) + mantle + walk-on-top, grappling-hook abseil
+
+**Key architecture facts:**
+- Pose targets in global `T` (voxel units × V=0.07 → world); `locoStep()` = LOCO state machine; `actStep()`/`CLIPS` = keyframe action clips
+- Clips END HELD — `endAct()` resets `ACT.kind` but leaves `T`; idle path does not yank a held low pose to standing; WASD from a held pose re-engages LOCO naturally
+- `solvePose` clamps `CEFF.y` — currently set to `220*V`; raise again if taller walls are added
+- LLM-only agent (`INSTINCTS[]` + `buildSys()` + `llmDecide`); no fallback brain; active model: `claude-sonnet-4-6`
+
+**Verify loop:** serve via `python3 -m http.server 8765` in `~/Downloads`; open `http://localhost:8765/voxel-poser_20_patched.html?v=N` in claude-in-chrome (NOT file://, NOT headless); bump `?v=N` after every edit (hard browser cache); rAF throttles when tab not foreground — drive deterministic checks from JS with `actStep(1/120)` loop
+
+**Two-renderer gotcha:** EYE PiP uses a second WebGLRenderer; `onBeforeCompile` compiles once per context; use a shared uniform object (`const uT={value:0}; sh.uniforms.uTime = uT`) so both contexts animate
+
+**Carry/capture:** `carryPose()` is additive and MUST be restored via `carryPoseRestore()` after `solvePose` or the character drifts; gizmo-hide for screenshots: set `.visible=false` AFTER `present()` (present re-shows stalks), before `render()`

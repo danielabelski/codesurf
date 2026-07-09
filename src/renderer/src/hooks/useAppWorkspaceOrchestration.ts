@@ -189,7 +189,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     // preventing A's tiles from being written into B's canvas.json.
     const saved = await window.electron.canvas.load(targetWorkspaceId)
     const savedTiles = saved?.tiles ?? []
-    void window.electron.collab.pruneOrphanedTileDirs(ws.path, savedTiles.map(tile => tile.id))
+    void window.electron?.collab?.pruneOrphanedTileDirs?.(ws.path, savedTiles.map(tile => tile.id))
     if (saved) {
       clearHistory()
       applySavedCanvasState(saved, buildCanvasLoadAppliers())

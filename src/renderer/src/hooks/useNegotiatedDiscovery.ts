@@ -290,13 +290,13 @@ export function useNegotiatedDiscovery(params: UseNegotiatedDiscoveryParams) {
       newMap.set(tile.id, key)
 
       if (previousKey !== key) {
-        window.electron.terminal.updatePeers(tile.id, workspacePath, peers)
+        void window.electron?.terminal?.updatePeers?.(tile.id, workspacePath, peers)
       }
     }
 
     for (const [tileId] of prevPeerLinksRef.current) {
       if (!newMap.has(tileId)) {
-        window.electron.terminal.updatePeers(tileId, workspacePath, [])
+        void window.electron?.terminal?.updatePeers?.(tileId, workspacePath, [])
       }
     }
 

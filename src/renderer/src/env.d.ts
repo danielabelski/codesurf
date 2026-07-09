@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+/// <reference types="vite-plugin-pwa/client" />
+/// <reference types="vite-plugin-pwa/react" />
 
  import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
  import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'

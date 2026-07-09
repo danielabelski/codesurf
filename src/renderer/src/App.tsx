@@ -592,7 +592,7 @@ function App(): JSX.Element {
       if (targetWorkspace) {
         const saved: CanvasState | null = await window.electron.canvas.load(targetWorkspace.id)
         const savedTiles = saved?.tiles ?? []
-        void window.electron.collab.pruneOrphanedTileDirs(targetWorkspace.path, savedTiles.map(tile => tile.id))
+        void window.electron?.collab?.pruneOrphanedTileDirs?.(targetWorkspace.path, savedTiles.map(tile => tile.id))
         if (saved) {
           applyLoadedCanvasState(saved)
         } else {

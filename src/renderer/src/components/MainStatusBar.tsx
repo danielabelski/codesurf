@@ -239,7 +239,8 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
     let cancelled = false
 
     const load = () => {
-      window.electron.system.memStats().then(next => {
+      // Optional: web/Native bridge or older preload may omit system.*
+      void window.electron?.system?.memStats?.().then(next => {
         if (!cancelled) setStats(next)
       }).catch(() => {})
     }
@@ -260,7 +261,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
     let cancelled = false
 
     const load = () => {
-      window.electron.system.daemonStatus().then(next => {
+      void window.electron?.system?.daemonStatus?.().then(next => {
         if (!cancelled) setDaemon(next)
       }).catch(() => {
         if (!cancelled) setDaemon({ running: false, info: null })
@@ -283,7 +284,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
     let cancelled = false
 
     const load = () => {
-      window.electron.system.daemonSummary().then(next => {
+      void window.electron?.system?.daemonSummary?.().then(next => {
         if (!cancelled) setDaemonSummary(next)
       }).catch(() => {
         if (!cancelled) setDaemonSummary(null)
@@ -435,11 +436,11 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
           <button
             type="button"
             onMouseEnter={() => {
-              window.electron.system.daemonSummary().then(setDaemonSummary).catch(() => {})
+              void window.electron?.system?.daemonSummary?.().then(setDaemonSummary).catch(() => {})
             }}
             onClick={() => {
               if (!showDaemonSummary) {
-                window.electron.system.daemonSummary().then(setDaemonSummary).catch(() => {})
+                void window.electron?.system?.daemonSummary?.().then(setDaemonSummary).catch(() => {})
               }
               if (showDaemonSummary) setDaemonRestartConfirm(false)
               setShowDaemonSummary(current => !current)
@@ -546,9 +547,9 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                       if (!daemonRestartConfirm) { setDaemonRestartConfirm(true); return }
                       setDaemonRestartConfirm(false)
                       setDaemonRestarting(true)
-                      window.electron.system.restartDaemon()
-                        .then(next => { setDaemon(next); return window.electron.system.daemonSummary() })
-                        .then(setDaemonSummary)
+                      void window.electron?.system?.restartDaemon?.()
+                        .then(next => { setDaemon(next); return window.electron?.system?.daemonSummary?.() })
+                        .then(next => { if (next) setDaemonSummary(next) })
                         .catch(() => {})
                         .finally(() => setDaemonRestarting(false))
                     }}
@@ -567,7 +568,7 @@ export function MainStatusBar({ onOpenDaemonTask, health = 'compact' }: MainStat
                   </button>
                   <button
                     type="button"
-                    onClick={() => { window.electron.system.daemonSummary().then(setDaemonSummary).catch(() => {}) }}
+                    onClick={() => { void window.electron?.system?.daemonSummary?.().then(setDaemonSummary).catch(() => {}) }}
                     style={{
                       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                       width: 22, height: 22, borderRadius: 6,

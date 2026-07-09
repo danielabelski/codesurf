@@ -96,12 +96,12 @@ export function useTileMounting({
     if (tile?.type === 'media') {
       disposeMediaTile(tileId)
     }
-    void window.electron.system.cleanupTile(tileId)
+    void window.electron?.system?.cleanupTile?.(tileId)
     if (workspace?.id) {
       void Promise.allSettled([
         window.electron.canvas.deleteTileArtifacts(workspace.id, tileId),
         window.electron.activity.clearTile(workspace.id, tileId),
-        workspace.path ? window.electron.collab.removeTileDir(workspace.path, tileId) : Promise.resolve(true),
+        workspace.path ? window.electron?.collab?.removeTileDir?.(workspace.path, tileId) : Promise.resolve(true),
       ])
     }
   }, [tilesRef, workspace?.id, workspace?.path])

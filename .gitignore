@@ -1,5 +1,9 @@
 node_modules
 dist-electron
+/dist
+desktop/.zig-cache
+desktop/zig-out
+.vite/
 autoresearch.sh
 autoresearch.md
 autoresearch.ideas.md

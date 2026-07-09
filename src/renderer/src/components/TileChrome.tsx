@@ -1102,10 +1102,10 @@ function TileChromeComponent({
         skills: data.skills,
         context: data.context,
       })
-      window.electron?.collab?.writeObjective(workspaceDir, tile.id, md)
+      void window.electron?.collab?.writeObjective?.(workspaceDir, tile.id, md)
 
       // Also sync state.json
-      window.electron?.collab?.writeState(workspaceDir, tile.id, {
+      void window.electron?.collab?.writeState?.(workspaceDir, tile.id, {
         tasks: data.tasks.map(t => ({
           id: t.id,
           title: t.title,
@@ -1117,7 +1117,7 @@ function TileChromeComponent({
       })
 
       // Sync skills.json
-      window.electron?.collab?.writeSkills(workspaceDir, tile.id, {
+      void window.electron?.collab?.writeSkills?.(workspaceDir, tile.id, {
         enabled: data.skills.filter(s => s.enabled).map(s => s.id),
         disabled: data.skills.filter(s => !s.enabled).map(s => s.id),
       })
@@ -1153,17 +1153,18 @@ function TileChromeComponent({
   // ── Collab: ensure per-tile protocol dirs; state watcher only for drawer tiles ──
   useEffect(() => {
     if (!workspaceDir) return
-    window.electron?.collab?.ensureDir(workspaceDir, tile.id)
+    // Optional call: web/Native bridge may partially implement collab
+    void window.electron?.collab?.ensureDir?.(workspaceDir, tile.id)
     if (!hasDrawer) return
-    window.electron?.collab?.watchState(workspaceDir, tile.id)
-    return () => { window.electron?.collab?.unwatchState(workspaceDir, tile.id) }
+    void window.electron?.collab?.watchState?.(workspaceDir, tile.id)
+    return () => { void window.electron?.collab?.unwatchState?.(workspaceDir, tile.id) }
   }, [workspaceDir, tile.id, hasDrawer])
 
   // ── Collab: listen for external state.json changes ─────────────────────
   useEffect(() => {
     if (!hasDrawer) return
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- collab state crosses IPC as `unknown`; the drawer reads a known-but-loose task shape
-    const unsub = window.electron?.collab?.onStateChanged((change: any) => {
+    const unsub = window.electron?.collab?.onStateChanged?.((change: any) => {
       if (change.tileId !== tile.id) return
       const state = change.state
       if (!state?.tasks) return
@@ -1214,7 +1215,7 @@ function TileChromeComponent({
     setData(prev => ({ ...prev, context: [...prev.context, item] }))
     // Persist to .collab context folder
     if (workspaceDir) {
-      window.electron?.collab?.addContext(workspaceDir, tile.id, 'notes.md',
+      void window.electron?.collab?.addContext?.(workspaceDir, tile.id, 'notes.md',
         [...data.context.filter(c => c.type === 'note').map(c => c.content), text].join('\n\n'))
     }
   }, [workspaceDir, tile.id, data.context])
@@ -1223,7 +1224,7 @@ function TileChromeComponent({
     const item = data.context.find(c => c.id === id)
     setData(prev => ({ ...prev, context: prev.context.filter(c => c.id !== id) }))
     if (item?.type === 'file' && item.name && workspaceDir) {
-      window.electron?.collab?.removeContext(workspaceDir, tile.id, item.name)
+      void window.electron?.collab?.removeContext?.(workspaceDir, tile.id, item.name)
     }
   }, [workspaceDir, tile.id, data.context])
 
@@ -1273,8 +1274,8 @@ function TileChromeComponent({
     loadMessages()
     const interval = setInterval(() => { loadMessages() }, 15000)
 
-    window.electron?.collab?.watchMessages(workspaceDir, tile.id)
-    const unsubscribeMessageChanges = window.electron?.collab?.onMessageChanged((change: { workspacePath: string; tileId: string; mailbox: string; filename: string; event: string; message?: unknown }) => {
+    void window.electron?.collab?.watchMessages?.(workspaceDir, tile.id)
+    const unsubscribeMessageChanges = window.electron?.collab?.onMessageChanged?.((change: { workspacePath: string; tileId: string; mailbox: string; filename: string; event: string; message?: unknown }) => {
       if (change?.workspacePath && change.workspacePath !== workspaceDir) return
       if (change.tileId !== tile.id) return
       if (change.mailbox === 'inbox' || change.mailbox === 'sent') {
@@ -1284,7 +1285,7 @@ function TileChromeComponent({
 
     return () => {
       clearInterval(interval)
-      window.electron?.collab?.unwatchMessages(workspaceDir, tile.id)
+      void window.electron?.collab?.unwatchMessages?.(workspaceDir, tile.id)
       unsubscribeMessageChanges?.()
     }
   }, [hasDrawer, workspaceDir, tile.id, loadMessages, peerIds.join(',')])
@@ -1292,7 +1293,7 @@ function TileChromeComponent({
   // ── Load skills from MCP config on mount ───────────────────────────────
   useEffect(() => {
     if (!hasDrawer || !workspaceId) return
-    window.electron?.mcp?.getMergedConfig(workspaceId).then((raw: unknown) => {
+    void window.electron?.mcp?.getMergedConfig?.(workspaceId).then((raw: unknown) => {
       const cfg = raw as { mcpServers?: Record<string, unknown> } | null
       if (!cfg?.mcpServers) return
       const skills: SkillConfig[] = []

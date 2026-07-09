@@ -17,7 +17,7 @@ export function useChatTileDreamPolling(
 
     const poll = async () => {
       try {
-        const summary = await window.electron.system.daemonSummary()
+        const summary = await window.electron?.system?.daemonSummary?.()
         if (cancelled) return
         const lastRun = summary?.dreaming?.lastRun
         if (!lastRun) return
