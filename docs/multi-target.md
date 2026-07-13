@@ -8,9 +8,9 @@ CodeSurf runs on **three hosts** with **one React renderer** and **one shared da
 | Command | Shell | Backend | Capability |
 | --- | --- | --- | --- |
 | `npm run dev` | Electron | Electron main IPC + `codesurfd` | **Full** (terminals, extensions, node-pty, MCP…) |
-| `npm run web:dev` | Browser (Vite `:5173`) | `web-host` `:4177` → `codesurfd` | Core (workspace, canvas, chat jobs, sessions, basic fs) |
-| `npm run web:preview` / `build:web` | Installed PWA (Chrome app / Safari Dock) | same host stack | Installable standalone desktop web app |
-| `npm run desktop:dev` | Vercel Native WebView | same as web | same as web + native dialogs / openUrl |
+| `npm run web:dev` | Browser (Vite `:5173`) | loopback `web-host` `:4177` + terminal gateway `:4178` | Core plus a scoped local terminal |
+| `npm run web:preview` / `build:web` | Installed PWA (Chrome app / Safari Dock) | same local stack or a hosted sandbox ingress | Installable web app; terminal depends on its configured sandbox |
+| `npm run desktop:dev` | Vercel Native WebView | Native-owned loopback sidecars | Core plus scoped terminal and native dialogs / openUrl |
 
 Production:
 
@@ -50,10 +50,21 @@ electron.vite.config.ts    Electron (unchanged)
 │ Native WebView│ ───────────►       ▲         │        │
 └──────────────┘              Vite proxy /host │        ▼
                               and /d/*         │   ~/.codesurf/
+                                      │
+                                      │ session POST + WebSocket attach
+                                      ▼
+                          ┌─────────────────────┐
+                          │ terminal gateway     │
+                          │ :4178 / loopback     │
+                          └─────────┬───────────┘
+                                    │
+                      local PTY (Native/dev) or Docker sandbox (hosted)
 ```
 
 - Browser never sees the daemon bearer token. `web-host` injects `Authorization` on `/d/*`.
-- Canvas/settings for web live under the same `~/.codesurf/` trees Electron uses.
+- `web-host` is **loopback-only**, has an exact-origin CORS policy, requires a per-launch host token for stateful routes, and limits filesystem access to registered project roots. It is not a public CORS proxy.
+- The terminal gateway is a distinct capability boundary: a bearer creates a short-lived session, then an attach token is used once in the first WebSocket message. Neither credential is put in a URL.
+- Canvas/settings for web live under the same `~/.codesurf/` trees Electron uses; settings writes are routed through daemon canonical settings APIs.
 - Platform bridge (`src/renderer/src/platform`) installs `window.electron` only when preload did not.
 
 ## Capability matrix
@@ -66,7 +77,7 @@ electron.vite.config.ts    Electron (unchanged)
 | Sessions / checkpoints | ✅ | ✅ (daemon) |
 | Settings | ✅ | ✅ (web-host) |
 | Basic fs read/write | ✅ | ✅ (web-host, local only) |
-| Terminals (node-pty) | ✅ | ❌ stub (use Electron) |
+| Terminals | ✅ | ✅ when a terminal gateway is configured; otherwise a visible unavailable state |
 | Extensions / tiles | ✅ | ❌ stub |
 | MCP HTTP tools | ✅ | partial (daemon paths) |
 | Folder picker | native dialog | Native: `window.zero`; Web: OS dialog via `web-host` `/host/dialog/openFolder` (no `window.prompt`). Browser File System Access API is fallback for permission UX only. |
@@ -82,8 +93,7 @@ Web builds include `vite-plugin-pwa`:
 
 ```bash
 npm run build:web
-npm run web:host          # terminal 1 — daemon API
-npm run web:preview       # terminal 2 — serves dist/ with SW
+npm run web:preview       # starts loopback host + terminal broker + preview
 # open http://127.0.0.1:4173 and install
 ```
 
@@ -105,7 +115,41 @@ Service worker **never** caches `/host/*` or `/d/*` (always network to local dae
 | `CODESURF_HOME` | `~/.codesurf` | State root |
 | `CODESURF_WEB_HOST_PORT` | `4177` | web-host bind port |
 | `CODESURF_WEB_HOST_URL` / `VITE_CODESURF_HOST` | `http://127.0.0.1:4177` | Renderer → host |
+| `CODESURF_WEB_HOST_TOKEN` | generated per launch | Required by local `/host/*` and `/d/*` routes; never put in a URL |
+| `CODESURF_TERMINAL_ENDPOINT` | `http://127.0.0.1:4178` in dev/preview | Terminal gateway base URL |
+| `CODESURF_TERMINAL_TOKEN` | generated per launch | Terminal gateway bearer; runtime-injected only |
+| `CODESURF_TERMINAL_TENANTS_JSON` | required by gateway | Tenant roots/workspace mapping and bearer configuration |
+| `CODESURF_DESKTOP_WORKSPACE_ROOT` | `~/.codesurf/workspaces` for packaged Native | Explicit root granted to the Native terminal sidecar; use it for arbitrary project folders |
 | `NATIVE_SDK_PATH` | auto-discovered | Zig Native SDK |
+
+Never provide either token through a `VITE_*` build variable. Development injects
+them into the live HTML response; Native reads a 0600 runtime file through an
+origin-restricted bridge. A hosted deployment should use an authenticated,
+`Cache-Control: no-store` runtime configuration response for endpoint metadata
+only and keep its long-lived tenant bearer in the proxy/backend.
+
+## Hosted browser sandboxes
+
+The hosted model is **one authenticated tenant per sandbox runtime**, not a
+shared public proxy:
+
+1. Serve the renderer and reverse-proxy `/host/*`, `/d/*`, and
+   `/v1/terminal/*` from the same HTTPS origin.
+2. Keep `web-host`, `codesurfd`, and the terminal gateway on loopback inside
+   that tenant runtime. The ingress authenticates the user before proxying.
+3. Configure a precise `CODESURF_TERMINAL_ALLOWED_ORIGINS` value, tenant roots,
+   and session limits. The authenticated backend/reverse proxy forwards the
+   browser's session request and injects the tenant bearer server-side; the
+   browser receives only the single-use attach token.
+4. Run local PTYs only inside an already-isolated tenant container/VM, or use
+   the Docker adapter on a trusted worker. Do not mount a Docker socket into an
+   Internet-facing gateway: it is effectively host-root access.
+
+The terminal gateway Docker adapter disables network access, uses a read-only
+container root, a small tmpfs, dropped capabilities, `no-new-privileges`, and
+PID/CPU/memory limits; each terminal session gets its own container. See
+[`packages/codesurf-terminal-gateway`](../packages/codesurf-terminal-gateway)
+for the deployable gateway contract.
 
 ## What “nothing lost” means
 
@@ -114,9 +158,12 @@ Service worker **never** caches `/host/*` or `/d/*` (always network to local dae
 3. **Daemon is the shared brain** for multi-host collaboration (TUI already used it).
 4. **Gaps are explicit stubs**, not silent deletions — terminal/extension code still ships in Electron.
 
-## Next increments (not required for foundation)
+## Remaining platform limits
 
-- PTY-over-WebSocket for web/Native terminals
-- Broader fs sandbox policy on web-host
-- Hosted remote backend (Agensis Fly-style) with auth
-- Parity tests for each `window.electron` namespace
+- Electron remains the only target with extension-host parity and arbitrary
+  local filesystem/terminal capabilities.
+- Native terminal access is intentionally root-scoped. macOS/Linux package a
+  Node sidecar supervisor; Windows packaging fails explicitly until it has a
+  signed `.exe` supervisor instead of producing a misleading terminal build.
+- A multi-user hosted daemon needs identity/session ACL work beyond the
+  single-tenant sandbox boundary described here.

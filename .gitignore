@@ -3,6 +3,10 @@ dist-electron
 /dist
 desktop/.zig-cache
 desktop/zig-out
+desktop/frontend
+desktop/.native-sidecar
+desktop/.native-package-frontend
+desktop/.native-package-oversized-assets.json
 .vite/
 autoresearch.sh
 autoresearch.md

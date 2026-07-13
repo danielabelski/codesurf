@@ -91,11 +91,25 @@ function dispatchWebviewCompatEvent(target: EventTarget, type: string, detail: u
   target.dispatchEvent(event)
 }
 
+type EmbeddedPreviewWebview = HTMLIFrameElement & Electron.WebviewTag & { __codesurfFallbackWebview?: true }
+
+/**
+ * The web and Native shell use a sandboxed iframe when no real guest-webview
+ * implementation is available. It is intentionally only an embedded preview,
+ * not a replacement for Electron's browser surface.
+ */
+export function isEmbeddedPreviewWebview(webview: Electron.WebviewTag | null | undefined): boolean {
+  return Boolean((webview as EmbeddedPreviewWebview | null | undefined)?.__codesurfFallbackWebview)
+}
+
 function createFallbackWebview(src: string, bgColor = '#111317'): Electron.WebviewTag {
-  const frame = document.createElement('iframe') as HTMLIFrameElement & Electron.WebviewTag & { __codesurfFallbackWebview?: true }
+  const frame = document.createElement('iframe') as EmbeddedPreviewWebview
   frame.__codesurfFallbackWebview = true
-  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads')
-  frame.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen; microphone; camera')
+  // Scripts and forms are sufficient for a basic public-page preview. Keeping
+  // the iframe opaque prevents a guest page from becoming the host renderer.
+  frame.setAttribute('sandbox', 'allow-scripts allow-forms')
+  frame.referrerPolicy = 'no-referrer'
+  frame.title = 'Embedded web preview'
   frame.style.cssText =
     `position: absolute; top: 0; left: 0; right: 0; bottom: 0; width: 100%; height: 100%; border: none; background: ${bgColor};`
 
@@ -109,7 +123,13 @@ function createFallbackWebview(src: string, bgColor = '#111317'): Electron.Webvi
     frame.src = url
   }
   frame.getURL = () => currentUrl || frame.src
-  frame.getTitle = () => frame.contentDocument?.title || currentUrl || 'Browser'
+  frame.getTitle = () => {
+    try {
+      return frame.contentDocument?.title || currentUrl || 'Browser'
+    } catch {
+      return currentUrl || 'Browser'
+    }
+  }
   frame.canGoBack = () => false
   frame.canGoForward = () => false
   frame.isLoading = () => loading

@@ -54,7 +54,16 @@ interface ElectronAPI {
   stream?: {
     start(req: { cardId: string; agentId: string; url: string; method?: string; headers?: Record<string, string>; body?: string }): Promise<void>
     stop(cardId: string): Promise<void>
-    onChunk(cb: (event: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => void): () => void
+    onChunk(cb: (event: {
+      cardId: string
+      jobId?: string
+      sequence?: number
+      type: string
+      text?: string
+      toolName?: string
+      error?: string
+      [key: string]: unknown
+    }) => void): () => void
   }
   mcp?: {
     getPort(): Promise<number>
@@ -655,6 +664,22 @@ declare global {
   const __VERSION__: string
   interface Window {
     electron: ElectronAPI
+    /** Native SDK bridge; present only in the Native WebView shell. */
+    zero?: {
+      invoke?: (name: string, args?: unknown) => Promise<unknown>
+    }
+    /** Runtime-injected host/sandbox configuration. Never derive tokens from URLs. */
+    __CODESURF_PLATFORM__?: 'electron' | 'native' | 'web'
+    __CODESURF_HOST__?: string
+    __CODESURF_HOST_TOKEN__?: string
+    __CODESURF_TERMINAL_ENDPOINT__?: string
+    __CODESURF_TERMINAL_TOKEN__?: string
+    __CODESURF_CAPABILITIES__?: Record<string, boolean>
+  }
+
+  interface ImportMetaEnv {
+    readonly VITE_CODESURF_HOST?: string
+    readonly VITE_CODESURF_TERMINAL_ENDPOINT?: string
   }
 
   // Global `JSX` namespace shim → React.JSX.

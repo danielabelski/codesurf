@@ -4,6 +4,7 @@
  * Electron packaging (`npm run dist:mac` etc.) is unchanged.
  */
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { requireNativeSdkPath } from './resolve-native-sdk.mjs'
@@ -11,7 +12,7 @@ import { requireNativeSdkPath } from './resolve-native-sdk.mjs'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const desktopDir = path.join(root, 'desktop')
 const isWindows = process.platform === 'win32'
-const npmCmd = isWindows ? 'npm.cmd' : 'npm'
+const zigCommand = process.env.ZIG_BINARY?.trim() || (existsSync('/opt/homebrew/bin/zig') ? '/opt/homebrew/bin/zig' : 'zig')
 
 function packageTarget() {
   const flag = process.argv.find(arg => arg.startsWith('--target='))
@@ -39,14 +40,21 @@ function run(cmd, args, { cwd = root, env = {} } = {}) {
 }
 
 const target = packageTarget()
+if (target === 'windows') {
+  console.error('[desktop:build] Native terminal sidecar packaging is not implemented for Windows yet.')
+  console.error('[desktop:build] A Windows .exe supervisor is required; refusing to produce a package that advertises a non-working terminal.')
+  process.exit(2)
+}
 const nativeSdk = requireNativeSdkPath()
+const packageSuffix = target === 'macos' ? '.app' : ''
+const packageOutput = path.join(desktopDir, 'zig-out', 'package', `codesurf-0.1.0-${target}-ReleaseFast${packageSuffix}`)
 console.log(`[desktop:build] package target=${target}`)
 console.log(`[desktop:build] NATIVE_SDK_PATH=${nativeSdk}`)
 
-// 1. web bundle (renderer-only, shared with browser)
-run(npmCmd, ['run', 'build:web'])
-// 2. native package
-run('zig', [
+// `zig build package` is the single owner of the release sequence: it builds
+// and stages the frontend, validates app.zon, stages the sidecar, installs the
+// compiled launcher once, asserts the layout, then signs/verifies the bundle.
+run(zigCommand, [
   'build',
   'package',
   `-Dpackage-target=${target}`,
@@ -54,4 +62,4 @@ run('zig', [
   '-Doptimize=ReleaseFast',
 ], { cwd: desktopDir, env: { NATIVE_SDK_PATH: nativeSdk } })
 
-console.log('\n[desktop:build] done — output in desktop/zig-out/package/')
+console.log(`\n[desktop:build] done — output at ${packageOutput}`)

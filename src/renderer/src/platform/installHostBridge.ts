@@ -8,6 +8,8 @@
 import { detectPlatform, type CodesurfPlatform } from './detect'
 import { createDaemonBackedElectronApi } from './daemonBridge'
 import { resolveHostBase } from './hostConfig'
+import { hydrateNativeRuntimeConfig } from './nativeRuntimeConfig'
+import { isTerminalTransportAvailable } from './terminalTransport'
 
 export interface InstallResult {
   platform: CodesurfPlatform
@@ -17,6 +19,9 @@ export interface InstallResult {
 
 export async function installHostBridge(): Promise<InstallResult> {
   const platform = detectPlatform()
+  // Native sidecars inject per-launch host and terminal capabilities through a
+  // bridge command. This must happen before resolveHostBase()/hostFetch use.
+  if (platform === 'native') await hydrateNativeRuntimeConfig()
   const hostBase = resolveHostBase()
 
   const w = window as Window & {
@@ -46,7 +51,7 @@ export async function installHostBridge(): Promise<InstallResult> {
     chatJobs: true,
     sessions: true,
     fs: true,
-    terminal: false,
+    terminal: isTerminalTransportAvailable(),
     extensions: false,
     nodePty: false,
   }

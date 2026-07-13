@@ -6,21 +6,22 @@
  *
  * Capability matrix (see docs/multi-target.md):
  *  ✅ workspace, canvas, settings, chat jobs, sessions, basic fs
- *  ⚠️ terminals / node-pty / extensions: stubbed (full path remains Electron)
+ *  ✅ terminal gateway sessions when a local or hosted sandbox is configured
+ *  ⚠️ node-pty / extensions: Electron-only
  */
 
-import { hostUrl } from './hostConfig'
+import { createHostHeaders, hostUrl } from './hostConfig.ts'
+import { createTerminalTransport, TerminalUnavailableError } from './terminalTransport.ts'
 
 type Json = unknown
 
 async function hostFetch<T = Json>(path: string, init?: RequestInit): Promise<T> {
+  const headers = createHostHeaders(init?.headers)
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json')
+  if (init?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const res = await fetch(hostUrl(path), {
     ...init,
-    headers: {
-      Accept: 'application/json',
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers || {}),
-    },
+    headers,
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
@@ -64,6 +65,10 @@ function softNamespace<T extends object>(ns: string, base: T): T {
         return typeof value === 'function' ? value.bind(target) : value
       }
       const name = String(prop)
+      // Raw settings editing is intentionally Electron-only. Returning an
+      // async no-op makes callers believe the capability exists and can lead
+      // to a later write against the wrong persistence contract.
+      if (ns === 'settings' && (name === 'getRawJson' || name === 'setRawJson')) return undefined
       // Event-style APIs: onFoo(cb) / subscribe → return unsubscribe
       if (name.startsWith('on') || name === 'subscribe' || name === 'watch' || name.startsWith('watch')) {
         return (..._args: unknown[]) => {
@@ -115,6 +120,111 @@ function softElectronApi<T extends object>(base: T): T {
  */
 export function createDaemonBackedElectronApi(): typeof window.electron {
   const busListeners = new Map<string, Set<(event: { channel: string; payload: unknown }) => void>>()
+  const terminalTransport = createTerminalTransport()
+  const streamListeners = new Set<(event: Record<string, unknown>) => void>()
+  const activeJobStreams = new Map<string, { jobId: string, controller: AbortController }>()
+  const maxSseBufferBytes = 1024 * 1024
+
+  const emitStreamEvent = (event: Record<string, unknown>) => {
+    for (const listener of streamListeners) {
+      try {
+        listener(event)
+      } catch (error) {
+        console.error('[codesurf-platform] stream listener error', error)
+      }
+    }
+  }
+
+  const stopJobStream = (cardId: string) => {
+    const active = activeJobStreams.get(cardId)
+    if (!active) return
+    activeJobStreams.delete(cardId)
+    active.controller.abort()
+  }
+
+  const drainSseEvents = (buffer: string): { events: Record<string, unknown>[], remaining: string } => {
+    const events: Record<string, unknown>[] = []
+    let remaining = buffer
+    let boundary = remaining.search(/\r?\n\r?\n/)
+    while (boundary >= 0) {
+      const frame = remaining.slice(0, boundary)
+      const separatorLength = remaining.startsWith('\r\n\r\n', boundary) ? 4 : 2
+      remaining = remaining.slice(boundary + separatorLength)
+      const data = frame
+        .split(/\r?\n/)
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trim())
+        .join('\n')
+      if (data) {
+        try {
+          const event = JSON.parse(data)
+          if (event && typeof event === 'object' && !Array.isArray(event)) {
+            events.push(event as Record<string, unknown>)
+          }
+        } catch {
+          // Ignore one malformed SSE frame; the next framed event is still
+          // independently parseable and sequence-deduplicated by the UI.
+        }
+      }
+      boundary = remaining.search(/\r?\n\r?\n/)
+    }
+    return { events, remaining }
+  }
+
+  const subscribeToJobEvents = async (cardId: string, jobId: string, since = 0): Promise<void> => {
+    stopJobStream(cardId)
+    const controller = new AbortController()
+    activeJobStreams.set(cardId, { jobId, controller })
+    const query = new URLSearchParams({ jobId, since: String(Math.max(0, Math.floor(since))) })
+
+    try {
+      const response = await fetch(hostUrl(`/d/chat/job/events?${query.toString()}`), {
+        headers: createHostHeaders({ Accept: 'text/event-stream' }),
+        // Hosted same-origin proxies retain their session cookie. Local Vite
+        // and Native bridges authenticate explicitly with X-Codesurf-Host, so
+        // this must not turn into a credentialed cross-origin CORS request.
+        credentials: 'same-origin',
+        signal: controller.signal,
+      })
+      if (!response.ok || !response.body) {
+        const detail = (await response.text().catch(() => '')).trim().slice(0, 300)
+        throw new Error(detail || `Daemon event stream failed (${response.status})`)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        if (buffer.length > maxSseBufferBytes) {
+          throw new Error('Daemon event stream exceeded its buffered-event limit')
+        }
+        const parsed = drainSseEvents(buffer)
+        buffer = parsed.remaining
+        for (const event of parsed.events) {
+          emitStreamEvent({
+            ...event,
+            cardId,
+            jobId: typeof event.jobId === 'string' ? event.jobId : jobId,
+          })
+        }
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        emitStreamEvent({
+          cardId,
+          jobId,
+          type: 'error',
+          error: error instanceof Error ? error.message : 'Daemon event stream failed',
+        })
+      }
+    } finally {
+      const active = activeJobStreams.get(cardId)
+      if (active?.controller === controller) activeJobStreams.delete(cardId)
+    }
+  }
 
   const api = {
     appearance: {
@@ -281,10 +391,12 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     },
 
     settings: {
-      get: () => hostFetch('/host/settings'),
+      // Settings are daemon-owned. Going through /d preserves its versioned
+      // `{ version, settings }` file contract instead of treating the raw file
+      // as an AppSettings object in the web host.
+      get: () => daemonFetch('/settings'),
       set: async (next: unknown) => {
-        await hostFetch('/host/settings', { method: 'POST', body: JSON.stringify(next) })
-        return next
+        return daemonFetch('/settings', { method: 'POST', body: JSON.stringify({ settings: next }) })
       },
     },
 
@@ -338,10 +450,66 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
           method: 'POST',
           body: JSON.stringify({ request: req }),
         })
-        return { ok: true, jobId: state.jobId || state.id, detached: true }
+        const jobId = state.jobId || state.id
+        const request = req && typeof req === 'object' ? req as Record<string, unknown> : {}
+        const cardId = typeof request.cardId === 'string' ? request.cardId : ''
+        const detached = request.runMode === 'background'
+        if (jobId && cardId && !detached) {
+          void subscribeToJobEvents(cardId, jobId)
+        }
+        return { ok: true, jobId, detached }
+      },
+      resumeJob: async (req: unknown) => {
+        const request = req && typeof req === 'object' ? req as Record<string, unknown> : {}
+        const cardId = typeof request.cardId === 'string' ? request.cardId : ''
+        const jobId = typeof request.jobId === 'string' ? request.jobId : ''
+        if (!cardId || !jobId) return { ok: false, resumed: false, jobId: jobId || null }
+
+        const state = await daemonFetch<{
+          status?: string
+          lastSequence?: number
+          error?: string | null
+          sessionId?: string | null
+        }>(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+        const since = typeof request.jobSequence === 'number' && Number.isFinite(request.jobSequence)
+          ? Math.max(0, Math.floor(request.jobSequence))
+          : 0
+        const lastSequence = Number(state.lastSequence ?? 0)
+        const active = state.status === 'queued' || state.status === 'running'
+        if (!active && since >= lastSequence) {
+          if (state.error) emitStreamEvent({ cardId, jobId, sequence: lastSequence, type: 'error', error: state.error })
+          emitStreamEvent({ cardId, jobId, sequence: lastSequence, type: 'done', sessionId: state.sessionId ?? undefined })
+          return { ok: true, resumed: false, jobId }
+        }
+        void subscribeToJobEvents(cardId, jobId, since)
+        return { ok: true, resumed: true, jobId }
+      },
+      stop: async (cardId: string) => {
+        const active = activeJobStreams.get(cardId)
+        stopJobStream(cardId)
+        if (!active) return
+        await daemonFetch('/chat/job/cancel', {
+          method: 'POST',
+          body: JSON.stringify({ jobId: active.jobId }),
+        }).catch(() => {})
       },
       answerToolPermission: async (args: unknown) =>
         daemonFetch('/chat/job/permission/answer', { method: 'POST', body: JSON.stringify(args) }),
+    },
+
+    stream: {
+      // The web bridge has one allowed stream shape: daemon job events. It
+      // intentionally does not proxy arbitrary renderer-selected URLs.
+      start: async () => {
+        throw new Error('stream.start is unavailable outside Electron; chat jobs subscribe automatically')
+      },
+      stop: async (cardId: string) => {
+        stopJobStream(cardId)
+      },
+      onChunk: (callback: (event: Record<string, unknown>) => void) => {
+        streamListeners.add(callback)
+        return () => streamListeners.delete(callback)
+      },
     },
 
     // MainStatusBar + SettingsPanel require this on every host.
@@ -477,28 +645,50 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
       onGcRequested: () => noopUnsub(),
     },
 
-    // Terminals need node-pty (Electron). Soft stubs keep discovery/UI alive on web.
+    // The gateway owns PTYs/sandboxes. The renderer only speaks the bounded
+    // session + WebSocket protocol implemented by TerminalTransport.
     terminal: {
-      create: async (_tileId: string, _workspaceDir: string) => ({
-        ok: false,
-        buffer: '',
-        error: 'terminal.create requires Electron (use npm run dev)',
-      }),
-      write: async () => ({ ok: false }),
-      cd: async () => ({ ok: false }),
-      resize: async () => ({ ok: false }),
-      destroy: async () => ({ ok: true }),
-      dispose: async () => ({ ok: true }),
-      detach: async () => ({ ok: true }),
-      // Peer wiring for negotiated discovery — no PTY on web; accept and ignore.
+      create: async (
+        tileId: string,
+        workspaceDir: string,
+        launchBin?: string,
+        launchArgs?: string[],
+        options?: { workspaceId?: string, cols?: number, rows?: number },
+      ) => {
+        // The public gateway protocol deliberately does not accept an arbitrary
+        // executable. Sandboxes select an allowlisted shell/server-side image.
+        if (launchBin || launchArgs?.length) {
+          throw new TerminalUnavailableError('Remote terminals only support the configured sandbox shell')
+        }
+        const session = await terminalTransport.create(tileId, {
+          cwd: workspaceDir,
+          workspaceId: options?.workspaceId,
+          cols: options?.cols,
+          rows: options?.rows,
+        })
+        return { cols: session.cols, rows: session.rows, buffer: session.buffer }
+      },
+      write: (tileId: string, data: string) => terminalTransport.write(tileId, data),
+      cd: (tileId: string, dir: string) => {
+        // Hosted sandboxes are POSIX shells. Quote the path rather than adding
+        // a privileged server-side `cd` endpoint.
+        const escaped = dir.replace(/'/g, "'\\''")
+        return terminalTransport.write(tileId, `\x15cd '${escaped}'\r`)
+      },
+      resize: (tileId: string, cols: number, rows: number) => terminalTransport.resize(tileId, cols, rows),
+      destroy: (tileId: string) => terminalTransport.close(tileId),
+      dispose: (tileId: string) => terminalTransport.close(tileId),
+      detach: (tileId: string) => terminalTransport.close(tileId),
+      // Agent-room metadata is an Electron/tmux concern. It never grants a
+      // remote terminal new capabilities, so retain the harmless renderer hook.
       updatePeers: async (
         _tileId: string,
         _workspaceDir: string,
         _peers: Array<{ peerId: string; peerType: string; tools: string[] }>,
-      ) => ({ ok: true }),
-      onData: (_tileId: string, _callback: (data: string) => void) => noopUnsub(),
-      onActive: (_tileId: string, _callback: () => void) => noopUnsub(),
-      onExit: (_tileId: string, _callback: (exitCode: number) => void) => noopUnsub(),
+      ) => undefined,
+      onData: (tileId: string, callback: (data: string) => void) => terminalTransport.onData(tileId, callback),
+      onActive: (tileId: string, callback: () => void) => terminalTransport.onActive(tileId, callback),
+      onExit: (tileId: string, callback: (exitCode: number) => void) => terminalTransport.onExit(tileId, callback),
     },
     agents: {
       detect: async () => [],

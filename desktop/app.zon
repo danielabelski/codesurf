@@ -8,9 +8,10 @@
     .permissions = .{ "dialog", "network" },
     .capabilities = .{ "webview", "js_bridge", "dialog" },
     .frontend = .{
-        // Production assets: root Vite web build (`npm run build:web` → ../dist).
-        // Electron still uses dist-electron/renderer; Native/web share ../dist.
-        .dist = "../dist",
+        // Production assets are staged into this Native package directory by
+        // `scripts/desktop-sidecar.mjs`. Native manifests deliberately reject
+        // parent paths, so never point this at the root `../dist` build.
+        .dist = "frontend",
         .entry = "index.html",
         .spa_fallback = true,
         .dev = .{

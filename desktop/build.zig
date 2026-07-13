@@ -2,7 +2,7 @@ const std = @import("std");
 
 const PlatformOption = enum {
     auto,
-    @"null",
+    null,
     macos,
     linux,
     windows,
@@ -44,9 +44,12 @@ pub fn build(b: *std.Build) void {
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
     const package_target = b.option(PackageTarget, "package-target", "Package target: macos, windows, linux") orelse .macos;
     const native_sdk_path = b.option([]const u8, "native-sdk-path", "Path to the Native SDK framework checkout") orelse default_native_sdk_path;
+    if (package_target == .windows) {
+        @panic("Native terminal sidecar packaging is not implemented for Windows: a signed .exe supervisor is required, so this build refuses to emit a misleading terminal-capable package.");
+    }
     const optimize_name = @tagName(optimize);
     const selected_platform: PlatformOption = switch (platform_option) {
-        .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .@"null",
+        .auto => if (target.result.os.tag == .macos) .macos else if (target.result.os.tag == .linux) .linux else if (target.result.os.tag == .windows) .windows else .null,
         else => platform_option,
     };
     if (selected_platform == .macos and target.result.os.tag != .macos) {
@@ -66,11 +69,12 @@ pub fn build(b: *std.Build) void {
         @panic("-Dweb-engine=chromium currently requires -Dplatform=macos");
     }
 
-    const native_sdk_mod = nativeSdkModule(b, target, optimize, native_sdk_path);
+    const json_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/json/root.zig");
+    const native_sdk_mod = nativeSdkModule(b, target, optimize, native_sdk_path, json_mod);
     const options = b.addOptions();
     options.addOption([]const u8, "platform", switch (selected_platform) {
         .auto => unreachable,
-        .@"null" => "null",
+        .null => "null",
         .macos => "macos",
         .linux => "linux",
         .windows => "windows",
@@ -90,6 +94,7 @@ pub fn build(b: *std.Build) void {
     const app_mod = localModule(b, target, optimize, "src/main.zig");
     app_mod.addImport("native_sdk", native_sdk_mod);
     app_mod.addImport("runner", runner_mod);
+    app_mod.addImport("json", json_mod);
     const exe = b.addExecutable(.{
         .name = app_exe_name,
         .root_module = app_mod,
@@ -97,18 +102,31 @@ pub fn build(b: *std.Build) void {
     linkPlatform(b, target, app_mod, exe, selected_platform, web_engine, native_sdk_path, cef_dir, cef_auto_install);
     b.installArtifact(exe);
 
+    // The package entry must be a compiled executable: macOS strict signing
+    // does not accept a shell script in Contents/MacOS. The launcher starts
+    // the loopback sidecar then the real Native executable, which packaging
+    // renames to codesurf-native.
+    const launcher_mod = localModule(b, target, optimize, "src/sidecar_launcher.zig");
+    const launcher = b.addExecutable(.{
+        .name = "codesurf-sidecar-launcher",
+        .root_module = launcher_mod,
+    });
+
     const frontend_install = b.addSystemCommand(&.{ "sh", "-c", "test -d ../node_modules || npm --prefix .. install" });
     const frontend_install_step = b.step("frontend-install", "Install frontend dependencies");
     frontend_install_step.dependOn(&frontend_install.step);
 
-    // Web/Native share dist/ — never run Electron's full `npm run build` here.
+    // Web/Native share the root dist build, but Native manifests may only name
+    // app-relative paths. Stage it under desktop/frontend before validate/package.
     const frontend_build = b.addSystemCommand(&.{ "npm", "--prefix", "..", "run", "build:web" });
     frontend_build.step.dependOn(&frontend_install.step);
-    const frontend_step = b.step("frontend-build", "Build the web frontend (dist/)");
-    frontend_step.dependOn(&frontend_build.step);
+    const frontend_stage = b.addSystemCommand(&.{ "node", "../scripts/desktop-sidecar.mjs", "stage-frontend" });
+    frontend_stage.step.dependOn(&frontend_build.step);
+    const frontend_step = b.step("frontend-build", "Build and stage the Native web frontend");
+    frontend_step.dependOn(&frontend_stage.step);
 
     const run = b.addRunArtifact(exe);
-    run.step.dependOn(&frontend_build.step);
+    run.step.dependOn(&frontend_stage.step);
     addCefRuntimeRunFiles(b, target, run, exe, web_engine, cef_dir);
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run.step);
@@ -120,31 +138,41 @@ pub fn build(b: *std.Build) void {
     const dev_step = b.step("dev", "Run the frontend dev server and native shell");
     dev_step.dependOn(&dev.step);
 
+    const manifest_validate = b.addSystemCommand(&.{ "native", "validate", "app.zon" });
+    manifest_validate.step.dependOn(&frontend_stage.step);
+    const sidecar_stage = b.addSystemCommand(&.{ "node", "../scripts/desktop-sidecar.mjs", "stage-sidecar" });
+    sidecar_stage.step.dependOn(&manifest_validate.step);
+    const package_output = b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) });
     const package = b.addSystemCommand(&.{
-        "native",
-        "package",
-        "--target",
+        "node",
+        "../scripts/desktop-sidecar.mjs",
+        "package-native",
+        package_output,
         @tagName(package_target),
-        "--manifest",
-        "app.zon",
-        "--assets", "../dist",
-        "--optimize",
         optimize_name,
-        "--output",
-        b.fmt("zig-out/package/{s}-0.1.0-{s}-{s}{s}", .{ app_exe_name, @tagName(package_target), optimize_name, packageSuffix(package_target) }),
-        "--binary",
+        @tagName(web_engine),
+        cef_dir,
     });
     package.addFileArg(exe.getEmittedBin());
-    package.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
     if (cef_auto_install) package.addArg("--cef-auto-install");
     package.step.dependOn(&exe.step);
-    package.step.dependOn(&frontend_build.step);
+    package.step.dependOn(&sidecar_stage.step);
+    const sidecar_install = b.addSystemCommand(&.{ "node", "../scripts/desktop-sidecar.mjs", "install", package_output, @tagName(package_target) });
+    sidecar_install.addFileArg(launcher.getEmittedBin());
+    sidecar_install.step.dependOn(&package.step);
+    sidecar_install.step.dependOn(&launcher.step);
+    const sidecar_assert = b.addSystemCommand(&.{ "node", "../scripts/desktop-sidecar.mjs", "assert", package_output, @tagName(package_target) });
+    sidecar_assert.step.dependOn(&sidecar_install.step);
+    const sidecar_resign = b.addSystemCommand(&.{ "node", "../scripts/desktop-sidecar.mjs", "resign", package_output, @tagName(package_target) });
+    sidecar_resign.step.dependOn(&sidecar_assert.step);
     const package_step = b.step("package", "Create a local package artifact");
-    package_step.dependOn(&package.step);
+    package_step.dependOn(&sidecar_resign.step);
 
     const tests = b.addTest(.{ .root_module = app_mod });
+    const launcher_tests = b.addTest(.{ .root_module = launcher_mod });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    test_step.dependOn(&b.addRunArtifact(launcher_tests).step);
 }
 
 fn nativeSdkTarget(b: *std.Build) std.Build.ResolvedTarget {
@@ -191,7 +219,7 @@ fn nativeSdkPath(b: *std.Build, native_sdk_path: []const u8, sub_path: []const u
     return .{ .cwd_relative = b.pathJoin(&.{ native_sdk_path, sub_path }) };
 }
 
-fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native_sdk_path: []const u8) *std.Build.Module {
+fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, native_sdk_path: []const u8, json_mod: *std.Build.Module) *std.Build.Module {
     const geometry_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/geometry/root.zig");
     const assets_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/assets/root.zig");
     const app_dirs_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/app_dirs/root.zig");
@@ -199,7 +227,6 @@ fn nativeSdkModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const app_manifest_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/app_manifest/root.zig");
     const diagnostics_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/diagnostics/root.zig");
     const platform_info_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/platform_info/root.zig");
-    const json_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/json/root.zig");
     const canvas_mod = externalModule(b, target, optimize, native_sdk_path, "src/primitives/canvas/root.zig");
     canvas_mod.addImport("geometry", geometry_mod);
     canvas_mod.addImport("json", json_mod);
@@ -301,7 +328,7 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
         if (web_engine == .chromium) app_mod.linkSystemLibrary("stdc++", .{});
     } else if (platform == .windows) {
         switch (web_engine) {
-            .system => app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{ "-std=c++17" } }),
+            .system => app_mod.addCSourceFile(.{ .file = nativeSdkPath(b, native_sdk_path, "src/platform/windows/webview2_host.cpp"), .flags = &.{"-std=c++17"} }),
             .chromium => {
                 const cef_check = addCefCheck(b, target, cef_dir);
                 if (cef_auto_install) {
@@ -337,20 +364,23 @@ fn linkPlatform(b: *std.Build, target: std.Build.ResolvedTarget, app_mod: *std.B
 fn addCefRuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *std.Build.Step.Run, exe: *std.Build.Step.Compile, web_engine: WebEngineOption, cef_dir: []const u8) void {
     if (web_engine != .chromium) return;
     if (target.result.os.tag != .macos) return;
-    const copy = b.addSystemCommand(&.{ "sh", "-c", b.fmt(
-        \\set -e
-        \\exe="$0"
-        \\exe_dir="$(dirname "$exe")"
-        \\rm -rf "zig-out/Frameworks/Chromium Embedded Framework.framework" "zig-out/bin/Frameworks/Chromium Embedded Framework.framework" ".zig-cache/o/Frameworks/Chromium Embedded Framework.framework" &&
-        \\mkdir -p "zig-out/Frameworks" "zig-out/bin/Frameworks" ".zig-cache/o/Frameworks" "$exe_dir" &&
-        \\cp -R "{s}/Release/Chromium Embedded Framework.framework" "zig-out/Frameworks/" &&
-        \\cp -R "{s}/Release/Chromium Embedded Framework.framework" "zig-out/bin/Frameworks/" &&
-        \\cp -R "{s}/Release/Chromium Embedded Framework.framework" ".zig-cache/o/Frameworks/" &&
-        \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libEGL.dylib" "$exe_dir/" &&
-        \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libGLESv2.dylib" "$exe_dir/" &&
-        \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libvk_swiftshader.dylib" "$exe_dir/" &&
-        \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/vk_swiftshader_icd.json" "$exe_dir/"
-    , .{ cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir }) });
+    const copy = b.addSystemCommand(&.{
+        "sh", "-c",
+        b.fmt(
+            \\set -e
+            \\exe="$0"
+            \\exe_dir="$(dirname "$exe")"
+            \\rm -rf "zig-out/Frameworks/Chromium Embedded Framework.framework" "zig-out/bin/Frameworks/Chromium Embedded Framework.framework" ".zig-cache/o/Frameworks/Chromium Embedded Framework.framework" &&
+            \\mkdir -p "zig-out/Frameworks" "zig-out/bin/Frameworks" ".zig-cache/o/Frameworks" "$exe_dir" &&
+            \\cp -R "{s}/Release/Chromium Embedded Framework.framework" "zig-out/Frameworks/" &&
+            \\cp -R "{s}/Release/Chromium Embedded Framework.framework" "zig-out/bin/Frameworks/" &&
+            \\cp -R "{s}/Release/Chromium Embedded Framework.framework" ".zig-cache/o/Frameworks/" &&
+            \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libEGL.dylib" "$exe_dir/" &&
+            \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libGLESv2.dylib" "$exe_dir/" &&
+            \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/libvk_swiftshader.dylib" "$exe_dir/" &&
+            \\cp "{s}/Release/Chromium Embedded Framework.framework/Libraries/vk_swiftshader_icd.json" "$exe_dir/"
+        , .{ cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir }),
+    });
     copy.addFileArg(exe.getEmittedBin());
     run.step.dependOn(&copy.step);
 }
@@ -358,37 +388,37 @@ fn addCefRuntimeRunFiles(b: *std.Build, target: std.Build.ResolvedTarget, run: *
 fn addCefCheck(b: *std.Build, target: std.Build.ResolvedTarget, cef_dir: []const u8) *std.Build.Step.Run {
     const script = switch (target.result.os.tag) {
         .macos => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -d "{s}/Release/Chromium Embedded Framework.framework" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Expected:" >&2
-        \\  echo "  {s}/include/cef_app.h" >&2
-        \\  echo "  {s}/Release/Chromium Embedded Framework.framework" >&2
-        \\  echo "  {s}/libcef_dll_wrapper/libcef_dll_wrapper.a" >&2
-        \\  echo "Fix with: native cef install --dir {s}" >&2
-        \\  echo "Or rerun with: -Dcef-auto-install=true" >&2
-        \\  echo "Pass -Dcef-dir=/path/to/cef if your bundle lives elsewhere." >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -d "{s}/Release/Chromium Embedded Framework.framework" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Expected:" >&2
+            \\  echo "  {s}/include/cef_app.h" >&2
+            \\  echo "  {s}/Release/Chromium Embedded Framework.framework" >&2
+            \\  echo "  {s}/libcef_dll_wrapper/libcef_dll_wrapper.a" >&2
+            \\  echo "Fix with: native cef install --dir {s}" >&2
+            \\  echo "Or rerun with: -Dcef-auto-install=true" >&2
+            \\  echo "Pass -Dcef-dir=/path/to/cef if your bundle lives elsewhere." >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir, cef_dir }),
         .linux => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -f "{s}/Release/libcef.so" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Fix with: native cef install --dir {s}" >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -f "{s}/Release/libcef.so" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.a" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Fix with: native cef install --dir {s}" >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir }),
         .windows => b.fmt(
-        \\test -f "{s}/include/cef_app.h" &&
-        \\test -f "{s}/Release/libcef.dll" &&
-        \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib" || {{
-        \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
-        \\  echo "Fix with: native cef install --dir {s}" >&2
-        \\  exit 1
-        \\}}
+            \\test -f "{s}/include/cef_app.h" &&
+            \\test -f "{s}/Release/libcef.dll" &&
+            \\test -f "{s}/libcef_dll_wrapper/libcef_dll_wrapper.lib" || {{
+            \\  echo "missing CEF dependency for -Dweb-engine=chromium" >&2
+            \\  echo "Fix with: native cef install --dir {s}" >&2
+            \\  exit 1
+            \\}}
         , .{ cef_dir, cef_dir, cef_dir, cef_dir }),
         else => "echo unsupported CEF target >&2; exit 1",
     };

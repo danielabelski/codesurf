@@ -1,0 +1,32 @@
+{
+  "name": "@codesurf/terminal-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authenticated, tenant-scoped terminal broker for CodeSurf web and native clients.",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./config": "./src/config.js"
+  },
+  "bin": {
+    "codesurf-terminal-gateway": "./bin/codesurf-terminal-gateway.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "deploy/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node ./bin/codesurf-terminal-gateway.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.15.0"
+  },
+  "dependencies": {
+    "node-pty": "1.1.0",
+    "ws": "^8.18.3"
+  }
+}

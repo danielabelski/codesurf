@@ -13,7 +13,7 @@
  * Never uses window.prompt.
  */
 
-import { hostUrl } from './hostConfig'
+import { createHostHeaders, hostUrl } from './hostConfig'
 
 export interface PickFolderResult {
   path: string | null
@@ -45,7 +45,7 @@ async function pickViaHostDialog(prompt = 'Choose project folder'): Promise<stri
   try {
     const res = await fetch(hostUrl('/host/dialog/openFolder'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: createHostHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
       body: JSON.stringify({ prompt }),
       signal: AbortSignal.timeout(300_000), // dialog can sit open a long time
     })
@@ -124,10 +124,9 @@ export async function pickProjectFolderPath(prompt = 'Choose project folder'): P
   if (fsa) {
     // Store handle for future browser-side FS work
     try {
-      ;(window as Window & { __CODESURF_DIR_HANDLES__?: Map<string, FileSystemDirectoryHandle> })
-        .__CODESURF_DIR_HANDLES__ ??= new Map()
-      ;(window as Window & { __CODESURF_DIR_HANDLES__: Map<string, FileSystemDirectoryHandle> })
-        .__CODESURF_DIR_HANDLES__.set(fsa.name, fsa.handle)
+      const w = window as Window & { __CODESURF_DIR_HANDLES__?: Map<string, FileSystemDirectoryHandle> }
+      w.__CODESURF_DIR_HANDLES__ ??= new Map()
+      w.__CODESURF_DIR_HANDLES__.set(fsa.name, fsa.handle)
     } catch {
       // ignore
     }

@@ -4,10 +4,12 @@ import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
+import { isDaemonBackedHost } from '../platform/detect'
 import { getDroppedPaths, shellEscapePath } from '../utils/dnd'
 
 interface Props {
   tileId: string
+  workspaceId?: string
   workspaceDir: string
   width: number
   height: number
@@ -17,7 +19,20 @@ interface Props {
   launchArgs?: string[]
 }
 
-export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 13, fontFamily, launchBin, launchArgs }: Props): JSX.Element {
+type RemoteTerminalCreate = (
+  tileId: string,
+  workspaceDir: string,
+  launchBin?: string,
+  launchArgs?: string[],
+  options?: { workspaceId?: string, cols?: number, rows?: number },
+) => Promise<{ cols: number, rows: number, buffer?: string }>
+
+function terminalErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
+  return String(error || 'Terminal service is unavailable')
+}
+
+export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height, fontSize = 13, fontFamily, launchBin, launchArgs }: Props): JSX.Element {
   const appFonts = useAppFonts()
   const theme = useTheme()
   // Ensure a Nerd Font variant is in the stack so PUA glyphs (icons) render.
@@ -31,18 +46,22 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
   const fitRef = useRef<FitAddon | null>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
   const mountedRef = useRef(false)
+  const ptyReadyRef = useRef(false)
+  const unavailableRef = useRef(false)
+  const terminalFailureRef = useRef<(error: unknown) => void>(() => {})
   // Track fontSize in a ref so the async font-load path reads the current
   // value (not the mount-time prop captured by the effect closure).
   const fontSizeRef = useRef(fontSize)
   const [isDropTarget, setIsDropTarget] = useState(false)
+  const [terminalUnavailable, setTerminalUnavailable] = useState<string | null>(null)
 
   const doFit = () => {
     if (!fitRef.current || !termRef.current) return
     try {
       fitRef.current.fit()
       const dims = fitRef.current.proposeDimensions()
-      if (dims?.cols && dims?.rows) {
-        window.electron?.terminal?.resize(tileId, dims.cols, dims.rows)
+      if (dims?.cols && dims?.rows && ptyReadyRef.current && !unavailableRef.current) {
+        void window.electron?.terminal?.resize(tileId, dims.cols, dims.rows).catch(terminalFailureRef.current)
       }
     } catch { /* ignore */ }
   }
@@ -53,6 +72,9 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
   useEffect(() => {
     if (!containerRef.current || mountedRef.current) return
     mountedRef.current = true
+    ptyReadyRef.current = false
+    unavailableRef.current = false
+    setTerminalUnavailable(null)
     const container = containerRef.current
     let cancelled = false
     let ro: ResizeObserver | null = null
@@ -114,6 +136,17 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
       termRef.current = term
       fitRef.current = fitAddon
 
+      const showTerminalUnavailable = (error: unknown) => {
+        if (cancelled || unavailableRef.current) return
+        const message = terminalErrorMessage(error)
+        unavailableRef.current = true
+        ptyReadyRef.current = false
+        term.options.disableStdin = true
+        setTerminalUnavailable(message)
+        term.write(`\r\n\x1b[31mTerminal unavailable: ${message}\x1b[0m\r\n`)
+      }
+      terminalFailureRef.current = showTerminalUnavailable
+
       // ResizeObserver so fit runs whenever the container actually changes size
       ro = new ResizeObserver(() => doFit())
       ro.observe(container)
@@ -130,11 +163,16 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
 
       // Shift+Enter → send escaped newline so shells continue on next line
       // and TUI apps (Claude CLI) treat it as multi-line input.
+      const writeToTerminal = (data: string) => {
+        if (!ptyReady || unavailableRef.current) return
+        void window.electron.terminal.write(tileId, data).catch(showTerminalUnavailable)
+      }
+
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         if (ev.key === 'Enter' && ev.shiftKey && ev.type === 'keydown') {
-          if (ptyReady) {
+          if (ptyReady && !unavailableRef.current) {
             // Send backslash + carriage return — universal shell line continuation
-            window.electron.terminal.write(tileId, '\\\r')
+            writeToTerminal('\\\r')
             return false
           }
         }
@@ -142,9 +180,29 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
       })
 
       const startPty = () => {
-        window.electron.terminal.create(tileId, workspaceDir, launchBin, launchArgs).then(({ buffer }) => {
-          if (cancelled) return
+        if (unavailableRef.current) return
+        let initialDimensions: { cols?: number, rows?: number } = {}
+        try {
+          fitAddon.fit()
+          const proposed = fitAddon.proposeDimensions()
+          initialDimensions = { cols: proposed?.cols, rows: proposed?.rows }
+        } catch {
+          // The gateway has safe 80x24 defaults when xterm cannot measure yet.
+        }
+
+        const create = window.electron.terminal.create as unknown as RemoteTerminalCreate
+        const request = isDaemonBackedHost()
+          ? create(tileId, workspaceDir, launchBin, launchArgs, { workspaceId, ...initialDimensions })
+          : create(tileId, workspaceDir, launchBin, launchArgs)
+
+        request.then(({ buffer }) => {
+          if (cancelled) {
+            const detach = window.electron?.terminal?.detach?.(tileId)
+            void detach?.catch(() => {})
+            return
+          }
           ptyReady = true
+          ptyReadyRef.current = true
           exited = false
           respawning = false
           if (buffer) term.write(buffer)
@@ -153,6 +211,7 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
           })
           const exitCleanup = window.electron.terminal.onExit(tileId, (exitCode: number) => {
             ptyReady = false
+            ptyReadyRef.current = false
             exited = true
             term.write(`\r\n\x1b[33m[process exited (code ${exitCode})] — press Enter to restart\x1b[0m\r\n`)
           })
@@ -165,11 +224,12 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
           doFit()
         }).catch(err => {
           respawning = false
-          term.write(`\r\n\x1b[31mFailed to start terminal: ${err?.message ?? err}\x1b[0m\r\n`)
+          showTerminalUnavailable(err)
         })
       }
 
       term.onData((data: string) => {
+        if (unavailableRef.current) return
         if (exited) {
           if (!respawning && (data === '\r' || data === '\n')) {
             respawning = true
@@ -179,7 +239,7 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
           }
           return
         }
-        window.electron.terminal.write(tileId, data)
+        writeToTerminal(data)
       })
 
       startPty()
@@ -188,13 +248,19 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
     return () => {
       cancelled = true
       mountedRef.current = false
+      ptyReadyRef.current = false
       ro?.disconnect()
       cleanupRef.current?.()
+      cleanupRef.current = null
       // Detach (not destroy) so tmux sessions survive unmount/reload
-      window.electron?.terminal?.detach?.(tileId)
+      const detach = window.electron?.terminal?.detach?.(tileId)
+      void detach?.catch(() => {})
       termRef.current?.dispose()
+      termRef.current = null
+      fitRef.current = null
+      terminalFailureRef.current = () => {}
     }
-  }, [tileId, workspaceDir, launchBin, launchArgs])
+  }, [tileId, workspaceId, workspaceDir, launchBin, launchArgs])
 
   // Also refit when tile width/height props change (drag resize)
   useEffect(() => {
@@ -267,7 +333,8 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
     const payload = droppedPaths.map(shellEscapePath).join(' ')
     if (!payload) return
     termRef.current?.focus()
-    window.electron?.terminal?.write(tileId, `${payload} `)
+    if (!ptyReadyRef.current || unavailableRef.current) return
+    void window.electron?.terminal?.write(tileId, `${payload} `).catch(terminalFailureRef.current)
   }, [tileId])
 
   return (
@@ -285,6 +352,29 @@ export function TerminalTile({ tileId, workspaceDir, width, height, fontSize = 1
         ref={containerRef}
         style={{ width: '100%', height: '100%', background: theme.terminal.background, overflow: 'hidden' }}
       />
+      {terminalUnavailable && (
+        <div
+          role="alert"
+          style={{
+            position: 'absolute', inset: 12, zIndex: 3,
+            display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 7,
+            padding: '16px 18px', borderRadius: 10,
+            border: `1px solid ${theme.status.danger}`,
+            background: theme.surface.panelElevated,
+            boxShadow: '0 12px 34px rgba(0,0,0,0.38)',
+            color: theme.text.primary,
+            pointerEvents: 'auto',
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Terminal unavailable</div>
+          <div style={{ fontSize: 12, lineHeight: 1.45, color: theme.text.secondary, overflowWrap: 'anywhere' }}>
+            {terminalUnavailable}
+          </div>
+          <div style={{ fontSize: 11, lineHeight: 1.4, color: theme.text.muted }}>
+            Check the terminal sandbox connection or open this workspace in the desktop runtime.
+          </div>
+        </div>
+      )}
       {isDropTarget && (
         <div style={{
           position: 'absolute', inset: 12, zIndex: 2,

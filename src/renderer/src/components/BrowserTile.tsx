@@ -27,11 +27,13 @@ import {
   createBusBridgeScript,
   createClusoInjectScript,
   createClusoSetActiveScript,
+  isEmbeddedPreviewWebview,
   isAllowedBrowserUrl,
   shouldInjectHostBridge,
   normalizeUrl,
 } from './browser/webviewManager'
 import { ToolbarButton } from './browser/ToolbarButton'
+import { isElectronHost } from '../platform'
 import clusoEmbedJs from '../assets/cluso/cluso-embed.js?raw'
 import clusoEmbedCss from '../assets/cluso/cluso-embed.css?raw'
 
@@ -121,6 +123,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const [mode, setMode] = useState<BrowserMode>('desktop')
   const [isClusoReady, setIsClusoReady] = useState(false)
   const [isClusoActive, setIsClusoActive] = useState(false)
+  const [isEmbeddedPreview, setIsEmbeddedPreview] = useState(() => !isElectronHost())
   const [isToolbarHovered, setIsToolbarHovered] = useState(false)
   const [isAddressFocused, setIsAddressFocused] = useState(false)
   const [stateLoaded, setStateLoaded] = useState(!workspaceId)
@@ -448,9 +451,11 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     if (!container) return
 
     const { webview, reused } = getOrCreateManagedWebview(tileId, initialSrc.current, browserBackground)
+    const embeddedPreview = isEmbeddedPreviewWebview(webview)
 
     wvRef.current = webview
     wvReadyRef.current = false
+    setIsEmbeddedPreview(embeddedPreview)
 
     // Sync webview background with current theme so it doesn't flash white
     webview.style.background = browserBackground
@@ -498,7 +503,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     // ---- event handlers -------------------------------------------------
     const onDomReady = () => {
       wvReadyRef.current = true
-      injectDarkBackground()
+      if (!embeddedPreview) injectDarkBackground()
       updateNav()
     }
 
@@ -510,6 +515,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       // Reset cluso state and re-inject after each page load
       setIsClusoReadyRef.current(false)
       setIsClusoActiveRef.current(false)
+      if (embeddedPreview) return
       injectCluso()
       // Inject bus bridge so webview content can publish to the EventBus
       if (shouldInjectHostBridge(webview.getURL())) {
@@ -687,7 +693,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       container.appendChild(webview)
     }
 
-    if (reused) {
+    if (reused && !embeddedPreview) {
       requestAnimationFrame(() => {
         if (!mountedRef.current || wvRef.current !== webview) return
         wvReadyRef.current = true
@@ -826,12 +832,13 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
   // Switch mobile / desktop UA and reload
   const switchMode = useCallback((next: BrowserMode) => {
+    if (isEmbeddedPreview) return
     setMode(next)
     if (wvReadyRef.current && wvRef.current) {
       wvRef.current.setUserAgent(next === 'mobile' ? MOBILE_UA : DESKTOP_UA)
       wvRef.current.reload()
     }
-  }, [])
+  }, [isEmbeddedPreview])
 
   const captureEvidenceSnapshot = useCallback(() => {
     publishEvidenceSnapshot('user-capture')
@@ -922,6 +929,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   //  - the attempts counter always increments
   //  - the timer is cleaned up if the component unmounts mid-polling
   const handleToggleCluso = useCallback(() => {
+    if (isEmbeddedPreview) return
     const MAX_ATTEMPTS = 30
     const RETRY_DELAY_MS = 100
     const nextActive = !isClusoActive
@@ -955,7 +963,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     // have happened yet. Retry it here before polling for the host bridge.
     if (!isClusoReady) injectCluso()
     tryToggle(0)
-  }, [injectCluso, executeInWebview, isClusoReady, isClusoActive])
+  }, [injectCluso, executeInWebview, isClusoReady, isClusoActive, isEmbeddedPreview])
 
   const focusAddressInput = useCallback(() => {
     requestAnimationFrame(() => {
@@ -1061,31 +1069,54 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
       {/* Viewport mode + cluso indicator */}
       <div style={{ display: 'flex', gap: 4, flexShrink: 0, alignItems: 'center' }}>
-        <ToolbarButton
-          label="Desktop"
-          title="Desktop mode"
-          active={mode === 'desktop'}
-          onClick={() => switchMode('desktop')}
-        >
-          <Monitor size={12} />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Mobile"
-          title="Mobile mode"
-          active={mode === 'mobile'}
-          onClick={() => switchMode('mobile')}
-        >
-          <Smartphone size={12} />
-        </ToolbarButton>
-        <ToolbarButton
-          label="Cluso"
-          title={isClusoActive ? 'Finish selection' : isClusoReady ? 'Select elements for chat context' : 'Load selector'}
-          active={isClusoActive}
-          disabled={!isClusoReady && !currentUrl}
-          onClick={handleToggleCluso}
-        >
-          <Crosshair size={12} />
-        </ToolbarButton>
+        {isEmbeddedPreview ? (
+          <span
+            role="status"
+            aria-label="Embedded preview only. Sites that block embedding cannot load here, and full browser controls are unavailable."
+            title="Embedded preview only. Sites that block embedding cannot load here, and full browser controls are unavailable."
+            style={{
+              maxWidth: 126,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              padding: '3px 6px',
+              borderRadius: 999,
+              border: `1px solid ${theme.border.default}`,
+              color: theme.text.muted,
+              fontSize: fonts.secondarySize - 1,
+            }}
+          >
+            Embedded preview only
+          </span>
+        ) : (
+          <>
+            <ToolbarButton
+              label="Desktop"
+              title="Desktop mode"
+              active={mode === 'desktop'}
+              onClick={() => switchMode('desktop')}
+            >
+              <Monitor size={12} />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Mobile"
+              title="Mobile mode"
+              active={mode === 'mobile'}
+              onClick={() => switchMode('mobile')}
+            >
+              <Smartphone size={12} />
+            </ToolbarButton>
+            <ToolbarButton
+              label="Cluso"
+              title={isClusoActive ? 'Finish selection' : isClusoReady ? 'Select elements for chat context' : 'Load selector'}
+              active={isClusoActive}
+              disabled={!isClusoReady && !currentUrl}
+              onClick={handleToggleCluso}
+            >
+              <Crosshair size={12} />
+            </ToolbarButton>
+          </>
+        )}
         <ToolbarButton
           label="Browser evidence"
           title={`Browser evidence: ${browserPageHealth.label}`}
@@ -1135,6 +1166,28 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
           zIndex: 2,
         }}>
           {toolbar}
+        </div>
+      )}
+
+      {isEmbeddedPreview && hideNavbar && (
+        <div
+          role="status"
+          style={{
+            position: 'absolute',
+            top: 8,
+            left: 8,
+            right: 8,
+            zIndex: 3,
+            pointerEvents: 'none',
+            padding: '5px 8px',
+            borderRadius: 6,
+            background: theme.surface.panelElevated,
+            border: `1px solid ${theme.border.default}`,
+            color: theme.text.muted,
+            fontSize: fonts.secondarySize - 1,
+          }}
+        >
+          Embedded preview only — sites that block embedding cannot load here.
         </div>
       )}
 

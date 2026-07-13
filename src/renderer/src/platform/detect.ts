@@ -10,12 +10,15 @@ export type CodesurfPlatform = 'electron' | 'native' | 'web'
 
 export function detectPlatform(): CodesurfPlatform {
   if (typeof window === 'undefined') return 'web'
-  // Electron preload always wins — never replace full IPC with daemon bridge.
-  if (window.electron) return 'electron'
   const w = window as Window & { zero?: unknown; __CODESURF_PLATFORM__?: CodesurfPlatform }
+  // installHostBridge marks a daemon-backed facade after detection. Respect
+  // that explicit marker on later calls instead of mistaking the facade for an
+  // Electron preload.
   if (w.__CODESURF_PLATFORM__ === 'electron' || w.__CODESURF_PLATFORM__ === 'native' || w.__CODESURF_PLATFORM__ === 'web') {
     return w.__CODESURF_PLATFORM__
   }
+  // Electron preload wins whenever no explicit renderer marker is present.
+  if (window.electron) return 'electron'
   if (w.zero) return 'native'
   return 'web'
 }

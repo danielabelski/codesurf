@@ -11,10 +11,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 // (renderer TS is compiled by Vite; this locks the contract).
 function detectPlatform(win) {
   if (!win) return 'web'
-  if (win.electron) return 'electron'
   if (win.__CODESURF_PLATFORM__ === 'electron' || win.__CODESURF_PLATFORM__ === 'native' || win.__CODESURF_PLATFORM__ === 'web') {
     return win.__CODESURF_PLATFORM__
   }
+  if (win.electron) return 'electron'
   if (win.zero) return 'native'
   return 'web'
 }
@@ -35,6 +35,7 @@ describe('platform detect contract', () => {
 
   it('honors explicit platform marker', () => {
     assert.equal(detectPlatform({ __CODESURF_PLATFORM__: 'web', zero: {} }), 'web')
+    assert.equal(detectPlatform({ __CODESURF_PLATFORM__: 'native', electron: {} }), 'native')
   })
 })
 

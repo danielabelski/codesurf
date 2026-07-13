@@ -2,7 +2,8 @@
  * Standalone Vite config for browser + Native shell (not Electron).
  *
  * Electron continues to use electron.vite.config.ts → dist-electron/.
- * Web/Native share dist/ so desktop/app.zon frontend.dist = "../dist".
+ * Web builds dist/; Native stages those assets under its app-relative
+ * desktop/frontend directory before manifest validation and packaging.
  *
  * PWA: vite-plugin-pwa enables Chrome/Edge install + Safari Add to Dock.
  */
@@ -23,8 +24,34 @@ const packageJson = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 
   description?: string
 }
 const hostBase = process.env.VITE_CODESURF_HOST || 'http://127.0.0.1:4177'
+const runtimeConfigProxyTarget = process.env.CODESURF_RUNTIME_CONFIG_PROXY_TARGET?.trim()
 
-export default defineConfig({
+/**
+ * Development-only credentials are delivered with the HTML response rather
+ * than compiled into the production JavaScript bundle. Native obtains the
+ * same fields through its origin-scoped bridge; deployed web hosts should
+ * provide an equivalent authenticated runtime-config response.
+ */
+function runtimeCredentialsPlugin({ enabled }: { enabled: boolean }) {
+  const runtimeConfig = {
+    __CODESURF_HOST_TOKEN__: process.env.CODESURF_WEB_HOST_TOKEN || undefined,
+    __CODESURF_TERMINAL_ENDPOINT__: process.env.CODESURF_TERMINAL_ENDPOINT || undefined,
+    __CODESURF_TERMINAL_TOKEN__: process.env.CODESURF_TERMINAL_TOKEN || undefined,
+  }
+  const hasCredentials = Object.values(runtimeConfig).some(Boolean)
+
+  return {
+    name: 'codesurf-runtime-credentials',
+    transformIndexHtml(html: string) {
+      if (!enabled || !hasCredentials) return html
+      // Escape `<` so a token can never terminate this inline script.
+      const json = JSON.stringify(runtimeConfig).replace(/</g, '\\u003c')
+      return html.replace('</head>', `<script>Object.assign(window, ${json})</script></head>`)
+    },
+  }
+}
+
+export default defineConfig(({ command }) => ({
   root: resolve(__dirname, 'src/renderer'),
   cacheDir: resolve(__dirname, '.vite/web-cache'),
   publicDir: resolve(__dirname, 'src/renderer/public'),
@@ -44,6 +71,11 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    runtimeCredentialsPlugin({
+      // Never inject credentials into `vite build`, even if a deployment
+      // environment accidentally exports a development token.
+      enabled: command === 'serve' && process.env.CODESURF_RUNTIME_CONFIG_INJECT === '1',
+    }),
     VitePWA({
       // Prompt (not autoUpdate) so desktop installs don't silently reload mid-session.
       registerType: 'prompt',
@@ -192,6 +224,9 @@ export default defineConfig({
     proxy: {
       '/host': { target: hostBase, changeOrigin: true },
       '/d': { target: hostBase, changeOrigin: true },
+      ...(runtimeConfigProxyTarget
+        ? { '/codesurf-runtime-config.js': { target: runtimeConfigProxyTarget, changeOrigin: true } }
+        : {}),
     },
   },
   build: {
@@ -203,4 +238,4 @@ export default defineConfig({
   optimizeDeps: {
     include: ['react', 'react-dom', 'react-dom/client'],
   },
-})
+}))

@@ -133,6 +133,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
         return (
           <LazyTerminalTile
             tileId={tile.id}
+            workspaceId={workspace?.id}
             workspaceDir={workspace?.path ?? ''}
             width={tile.width}
             height={tile.height}

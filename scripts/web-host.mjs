@@ -6,7 +6,7 @@
  *  - Serves canvas/settings/workspace helpers under `/host/*`
  *  - CORS for Vite (5173) and same-origin production
  *
- * Port: CODESURF_WEB_HOST_PORT (default 4177)
+ * Port: CODESURF_WEB_HOST_PORT (default 4177, 0 is allowed for a sidecar)
  */
 import { createServer } from 'node:http'
 import { spawn, spawnSync } from 'node:child_process'
@@ -14,30 +14,73 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
   renameSync,
   readdirSync,
   statSync,
   rmSync,
 } from 'node:fs'
-import { dirname, join, resolve, basename, extname, normalize } from 'node:path'
+import { dirname, join, resolve, basename, extname, normalize, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir, platform as osPlatform } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
 const HOME = process.env.CODESURF_HOME?.trim() || join(homedir(), '.codesurf')
 const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'pid.json')
 const HOST_PORT = Number(process.env.CODESURF_WEB_HOST_PORT || 4177)
-const HOST_BIND = process.env.CODESURF_WEB_HOST_BIND || '127.0.0.1'
-const CORS_ORIGINS = new Set([
+const requestedBind = process.env.CODESURF_WEB_HOST_BIND || '127.0.0.1'
+const HOST_BIND = requestedBind === 'localhost' ? '127.0.0.1' : requestedBind
+const MAX_BODY_BYTES = Number(process.env.CODESURF_WEB_HOST_MAX_BODY_BYTES || 1_048_576)
+const RUNTIME_CONFIG_PATH = process.env.CODESURF_RUNTIME_CONFIG_PATH?.trim() || null
+const TERMINAL_ENDPOINT = process.env.CODESURF_TERMINAL_GATEWAY_URL?.trim()
+  || process.env.CODESURF_TERMINAL_ENDPOINT?.trim()
+  || null
+const TERMINAL_TOKEN = process.env.CODESURF_TERMINAL_TOKEN?.trim() || null
+const HOST_TOKEN = process.env.CODESURF_WEB_HOST_TOKEN?.trim() || randomBytes(32).toString('base64url')
+const DEFAULT_CORS_ORIGINS = [
   'http://127.0.0.1:5173',
   'http://localhost:5173',
   'http://127.0.0.1:4177',
   'http://localhost:4177',
-  'null', // file / some WebView cases
+  'http://127.0.0.1:4173',
+  'http://localhost:4173',
+  'zero://app',
+]
+const CORS_ORIGINS = new Set([
+  ...DEFAULT_CORS_ORIGINS,
+  ...(process.env.CODESURF_WEB_HOST_ORIGINS || '')
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean),
 ])
+
+for (const origin of CORS_ORIGINS) {
+  if (origin === 'zero://app') continue
+  let parsed
+  try { parsed = new URL(origin) } catch { throw new Error(`Invalid CORS origin: ${origin}`) }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== origin) {
+    throw new Error(`CORS origins must be explicit http(s) origins: ${origin}`)
+  }
+}
+
+if (!Number.isInteger(HOST_PORT) || HOST_PORT < 0 || HOST_PORT > 65535) {
+  throw new Error(`CODESURF_WEB_HOST_PORT must be a TCP port, got ${HOST_PORT}`)
+}
+
+if (!['127.0.0.1', '::1'].includes(HOST_BIND)) {
+  throw new Error('web-host is local-only: CODESURF_WEB_HOST_BIND must be 127.0.0.1 or ::1')
+}
+
+if (!Number.isInteger(MAX_BODY_BYTES) || MAX_BODY_BYTES < 1 || MAX_BODY_BYTES > 16 * 1024 * 1024) {
+  throw new Error('CODESURF_WEB_HOST_MAX_BODY_BYTES must be between 1 byte and 16 MiB')
+}
+
+let boundPort = HOST_PORT
+let ownedDaemon = null
+let daemonStartPromise = null
 
 function ensureDir(dir) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -58,6 +101,193 @@ function atomicWriteJson(path, value) {
   renameSync(tmp, path)
 }
 
+function hostBase() {
+  const authority = HOST_BIND.includes(':') ? `[${HOST_BIND}]` : HOST_BIND
+  return `http://${authority}:${boundPort}`
+}
+
+function writeRuntimeConfig() {
+  if (!RUNTIME_CONFIG_PATH) return
+  atomicWriteJson(RUNTIME_CONFIG_PATH, {
+    hostBase: hostBase(),
+    hostToken: HOST_TOKEN,
+    terminal: {
+      endpoint: TERMINAL_ENDPOINT,
+      token: TERMINAL_TOKEN,
+    },
+  })
+}
+
+function requestOrigin(req) {
+  const value = req.headers.origin
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function isAllowedOrigin(origin) {
+  // A non-browser client has no Origin header. It must still supply the
+  // per-launch host token, and the listener is pinned to loopback.
+  return !origin || CORS_ORIGINS.has(origin)
+}
+
+function setCors(req, res) {
+  const origin = requestOrigin(req)
+  if (!origin || !isAllowedOrigin(origin)) return
+  res.setHeader('Vary', 'Origin')
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin)
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Codesurf-Host')
+  res.setHeader('Access-Control-Max-Age', '600')
+}
+
+function tokenMatches(candidate, expected) {
+  if (!candidate || !expected) return false
+  const left = Buffer.from(candidate)
+  const right = Buffer.from(expected)
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function hasHostAccess(req) {
+  const value = req.headers['x-codesurf-host']
+  const token = Array.isArray(value) ? value[0] : value
+  return typeof token === 'string' && tokenMatches(token, HOST_TOKEN)
+}
+
+function isPublicHostRoute(pathname) {
+  return pathname === '/' || pathname === '/health' || pathname === '/host/health'
+}
+
+// `/d/*` carries the daemon's private bearer. It is a deliberately small
+// browser-facing capability surface, not a transparent proxy: in particular
+// it must never expose daemon host records, raw settings, PID state, or MCP
+// credentials that happen to be available on localhost.
+const DAEMON_ROUTE_POLICY = new Set([
+  'GET /workspace/list',
+  'GET /workspace/projects',
+  'GET /workspace/active',
+  'POST /workspace/create',
+  'POST /workspace/create-with-path',
+  'POST /workspace/create-from-folder',
+  'POST /workspace/add-project-folder',
+  'POST /workspace/remove-project-folder',
+  'POST /workspace/project/rename',
+  'POST /workspace/project/worktree',
+  'POST /workspace/set-active',
+  'GET /session/local/list',
+  'GET /session/local/state',
+  'POST /session/local/delete',
+  'POST /session/local/rename',
+  'POST /checkpoint/list',
+  'POST /checkpoint/restore',
+  'GET /settings',
+  'POST /settings',
+  'POST /chat/job/start',
+  'GET /chat/job/state',
+  'GET /chat/job/events',
+  'POST /chat/job/permission/answer',
+  'POST /chat/job/cancel',
+  'GET /dashboard/api/jobs',
+])
+
+function daemonRouteIsAllowed(method, pathname) {
+  if (DAEMON_ROUTE_POLICY.has(`${method} ${pathname}`)) return true
+  // Workspace IDs are opaque daemon identifiers, never a path. Keep this
+  // pattern narrow so encoded slashes or arbitrary daemon routes cannot pass.
+  return method === 'DELETE' && /^\/workspace\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(pathname)
+}
+
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.status = status
+  }
+}
+
+async function readBuffer(req, maxBytes = MAX_BODY_BYTES) {
+  const declaredLength = Number(req.headers['content-length'])
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new HttpError(413, `request body exceeds ${maxBytes} byte limit`)
+  }
+
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > maxBytes) {
+      throw new HttpError(413, `request body exceeds ${maxBytes} byte limit`)
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks, size)
+}
+
+function configuredProjectRoots() {
+  const projectDoc = readJson(join(HOME, 'projects.json'), { projects: [] })
+  const projectRoots = Array.isArray(projectDoc?.projects)
+    ? projectDoc.projects
+      .map(project => typeof project?.path === 'string' ? project.path.trim() : '')
+      .filter(Boolean)
+    : []
+  const explicitRoots = (process.env.CODESURF_WEB_HOST_ALLOWED_ROOTS || '')
+    .split(',')
+    .map(root => root.trim())
+    .filter(Boolean)
+
+  // Host metadata can be read/written only below workspaces; sensitive daemon
+  // credentials live beside it, not inside it.
+  return [...new Set([
+    join(HOME, 'workspaces'),
+    ...projectRoots,
+    ...explicitRoots,
+  ].map(root => resolve(root)))]
+}
+
+function pathIsInside(root, candidate) {
+  const rel = relative(root, candidate)
+  // path.relative yields a single native separator (`..\x` on Windows,
+  // `../x` elsewhere). The Windows branch previously matched `..\\` (two
+  // backslashes) and never fired, so escaping paths were treated as inside.
+  return rel === '' || (!rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && rel !== '..' && !isAbsolute(rel))
+}
+
+function realPathIfPresent(value) {
+  try {
+    return realpathSync(value)
+  } catch {
+    return null
+  }
+}
+
+function resolveAllowedFsPath(input, { allowMissing = true } = {}) {
+  if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'path required')
+  const candidate = resolve(input)
+  const candidateReal = realPathIfPresent(candidate)
+
+  for (const root of configuredProjectRoots()) {
+    const rootReal = realPathIfPresent(root)
+    if (!rootReal) continue
+    if (!pathIsInside(rootReal, candidate)) continue
+
+    if (candidateReal && !pathIsInside(rootReal, candidateReal)) {
+      continue
+    }
+
+    // For a new file, verify the nearest existing parent to prevent a symlink
+    // placed between the root and target from escaping the allowlisted root.
+    let parent = candidate
+    while (!existsSync(parent)) {
+      const next = dirname(parent)
+      if (next === parent) break
+      parent = next
+    }
+    const parentReal = realPathIfPresent(parent)
+    if (parentReal && !pathIsInside(rootReal, parentReal)) continue
+    return candidate
+  }
+
+  if (!allowMissing && !existsSync(candidate)) throw new HttpError(404, 'path not found')
+  throw new HttpError(403, 'path is outside registered CodeSurf workspace roots')
+}
+
 function safeId(id) {
   const s = String(id ?? '').trim()
   if (!s || /[\/\\]|\.\./.test(s)) throw new Error(`Unsafe id: ${id}`)
@@ -72,16 +302,15 @@ function tileStatePath(workspaceId, tileId) {
   return join(HOME, 'workspaces', safeId(workspaceId), '.codesurf', `tile-state-${safeId(tileId)}.json`)
 }
 
-function settingsPath() {
-  return join(HOME, 'settings.json')
-}
-
 function readDaemonInfo() {
   const parsed = readJson(PID_PATH, null)
   if (
     !parsed
-    || typeof parsed.port !== 'number'
+    || !Number.isInteger(parsed.port)
+    || parsed.port < 1
+    || parsed.port > 65535
     || typeof parsed.token !== 'string'
+    || parsed.token.length < 24
   ) {
     return null
   }
@@ -107,19 +336,16 @@ async function daemonHealth(info) {
   }
 }
 
-async function ensureDaemon() {
-  let info = readDaemonInfo()
-  if (info && await daemonHealth(info)) return info
-
+async function startOwnedDaemon() {
   const daemonScript = resolve(ROOT, 'packages/codesurf-daemon/bin/codesurfd.mjs')
   if (!existsSync(daemonScript)) {
     throw new Error(`codesurfd not found at ${daemonScript}`)
   }
 
   ensureDir(join(HOME, 'daemon'))
-  const child = spawn(process.execPath, [daemonScript], {
+  ownedDaemon = spawn(process.execPath, [daemonScript], {
     cwd: ROOT,
-    detached: true,
+    detached: false,
     stdio: 'ignore',
     env: {
       ...process.env,
@@ -127,26 +353,24 @@ async function ensureDaemon() {
       CODESURF_APP_VERSION: process.env.CODESURF_APP_VERSION || '0.1.0-web',
     },
   })
-  child.unref()
+  ownedDaemon.once('exit', () => { ownedDaemon = null })
 
   const start = Date.now()
   while (Date.now() - start < 20_000) {
-    info = readDaemonInfo()
+    const info = readDaemonInfo()
     if (info && await daemonHealth(info)) return info
-    await new Promise(r => setTimeout(r, 150))
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 150))
   }
   throw new Error('Timed out waiting for codesurfd')
 }
 
-function setCors(req, res) {
-  const origin = req.headers.origin || ''
-  if (!origin || CORS_ORIGINS.has(origin) || origin.startsWith('http://127.0.0.1:') || origin.startsWith('http://localhost:')) {
-    res.setHeader('Access-Control-Allow-Origin', origin || '*')
-    res.setHeader('Vary', 'Origin')
+async function ensureDaemon() {
+  const existing = readDaemonInfo()
+  if (existing && await daemonHealth(existing)) return existing
+  if (!daemonStartPromise) {
+    daemonStartPromise = startOwnedDaemon().finally(() => { daemonStartPromise = null })
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Codesurf-Host')
-  res.setHeader('Access-Control-Max-Age', '86400')
+  return daemonStartPromise
 }
 
 function sendJson(res, status, body) {
@@ -159,10 +383,7 @@ function sendJson(res, status, body) {
 }
 
 async function readBody(req) {
-  const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
-  if (chunks.length === 0) return null
-  const raw = Buffer.concat(chunks).toString('utf8')
+  const raw = (await readBuffer(req)).toString('utf8')
   if (!raw) return null
   try {
     return JSON.parse(raw)
@@ -173,9 +394,9 @@ async function readBody(req) {
 
 async function proxyDaemon(req, res, daemonPath) {
   const info = await ensureDaemon()
-  const target = new URL(daemonPath + (req.url?.includes('?') ? '' : ''), `http://127.0.0.1:${info.port}`)
+  const target = new URL(daemonPath, `http://127.0.0.1:${info.port}`)
   // Preserve query from original URL if present
-  const incoming = new URL(req.url || '/', `http://${HOST_BIND}:${HOST_PORT}`)
+  const incoming = new URL(req.url || '/', hostBase())
   for (const [k, v] of incoming.searchParams) target.searchParams.set(k, v)
 
   const method = req.method || 'GET'
@@ -185,33 +406,80 @@ async function proxyDaemon(req, res, daemonPath) {
   }
   let body
   if (method !== 'GET' && method !== 'HEAD') {
-    const chunks = []
-    for await (const chunk of req) chunks.push(chunk)
-    body = Buffer.concat(chunks)
+    body = await readBuffer(req)
     if (body.length > 0) {
       headers['Content-Type'] = req.headers['content-type'] || 'application/json'
       headers['Content-Length'] = String(body.length)
     }
   }
 
-  const upstream = await fetch(target, {
-    method,
-    headers,
-    body: body && body.length > 0 ? body : undefined,
-    signal: AbortSignal.timeout(120_000),
-  })
+  const controller = new AbortController()
+  const headerTimeout = setTimeout(() => controller.abort(), 15_000)
+  const abortForDisconnect = () => {
+    if (!res.writableEnded) controller.abort()
+  }
+  req.once('aborted', abortForDisconnect)
+  res.once('close', abortForDisconnect)
 
-  const buf = Buffer.from(await upstream.arrayBuffer())
+  let upstream
+  try {
+    upstream = await fetch(target, {
+      method,
+      headers,
+      body: body && body.length > 0 ? body : undefined,
+      signal: controller.signal,
+      redirect: 'error',
+    })
+  } finally {
+    clearTimeout(headerTimeout)
+  }
+
   const outHeaders = {
     'Content-Type': upstream.headers.get('content-type') || 'application/json',
-    'Content-Length': String(buf.length),
   }
   if (upstream.headers.get('content-type')?.includes('text/event-stream')) {
     outHeaders['Cache-Control'] = 'no-cache'
     outHeaders['Connection'] = 'keep-alive'
+    outHeaders['X-Accel-Buffering'] = 'no'
   }
   res.writeHead(upstream.status, outHeaders)
-  res.end(buf)
+  if (!upstream.body) {
+    res.end()
+    return
+  }
+  try {
+    for await (const chunk of upstream.body) {
+      if (res.destroyed) break
+      if (!res.write(chunk)) {
+        await new Promise(resolveDrain => res.once('drain', resolveDrain))
+      }
+    }
+    if (!res.writableEnded) res.end()
+  } finally {
+    req.removeListener('aborted', abortForDisconnect)
+    res.removeListener('close', abortForDisconnect)
+  }
+}
+
+async function daemonJson(path, { method = 'GET', body = undefined } = {}) {
+  const info = await ensureDaemon()
+  const headers = {
+    Authorization: `Bearer ${info.token}`,
+    Accept: 'application/json',
+  }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const res = await fetch(new URL(path, `http://127.0.0.1:${info.port}`), {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+    redirect: 'error',
+  })
+  const text = await res.text()
+  let payload = null
+  try { payload = text ? JSON.parse(text) : null } catch { payload = { error: text } }
+  if (!res.ok) throw new HttpError(res.status, typeof payload?.error === 'string' ? payload.error : `daemon request failed: ${res.status}`)
+  return payload
 }
 
 function listDirSafe(dirPath) {
@@ -234,23 +502,15 @@ async function handleHost(req, res, url) {
     return sendJson(res, 200, {
       ok: true,
       host: 'codesurf-web-host',
-      port: HOST_PORT,
-      home: HOME,
       platform: 'web-host',
-      daemon: daemonOk
-        ? { running: true, port: daemon.port, pid: daemon.pid, protocolVersion: daemon.protocolVersion }
-        : { running: false },
+      daemon: { running: daemonOk },
     })
   }
 
   if (method === 'GET' && path === '/host/config') {
-    const daemon = await ensureDaemon()
+    await ensureDaemon()
     return sendJson(res, 200, {
-      hostBase: `http://${HOST_BIND}:${HOST_PORT}`,
-      daemonPort: daemon.port,
-      // Token is NOT sent to the browser; browser always uses /d/* proxy.
-      protocolVersion: daemon.protocolVersion,
-      home: HOME,
+      hostBase: hostBase(),
       capabilities: {
         workspace: true,
         canvas: true,
@@ -258,7 +518,8 @@ async function handleHost(req, res, url) {
         chatJobs: true,
         sessions: true,
         fs: true,
-        terminal: false,
+        terminal: Boolean(TERMINAL_ENDPOINT && TERMINAL_TOKEN),
+        terminalWorkspaceRootConfigured: process.env.CODESURF_TERMINAL_WORKSPACE_ROOT_CONFIGURED !== '0',
         extensions: false,
         nodePty: false,
       },
@@ -266,14 +527,16 @@ async function handleHost(req, res, url) {
   }
 
   if (method === 'GET' && path === '/host/settings') {
-    return sendJson(res, 200, readJson(settingsPath(), {}))
+    return sendJson(res, 200, await daemonJson('/settings'))
   }
 
   if (method === 'POST' && path === '/host/settings') {
     const body = await readBody(req)
     if (!body || typeof body !== 'object') return sendJson(res, 400, { error: 'expected object' })
-    atomicWriteJson(settingsPath(), body)
-    return sendJson(res, 200, body)
+    return sendJson(res, 200, await daemonJson('/settings', {
+      method: 'POST',
+      body: { settings: body.settings && typeof body.settings === 'object' ? body.settings : body },
+    }))
   }
 
   if (method === 'GET' && path === '/host/canvas/load') {
@@ -312,9 +575,9 @@ async function handleHost(req, res, url) {
     const dir = url.searchParams.get('path')
     if (!dir) return sendJson(res, 400, { error: 'path required' })
     try {
-      return sendJson(res, 200, listDirSafe(resolve(dir)))
+      return sendJson(res, 200, listDirSafe(resolveAllowedFsPath(dir, { allowMissing: false })))
     } catch (err) {
-      return sendJson(res, 400, { error: String(err?.message || err) })
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err) })
     }
   }
 
@@ -322,7 +585,7 @@ async function handleHost(req, res, url) {
     const filePath = url.searchParams.get('path')
     if (!filePath) return sendJson(res, 400, { error: 'path required' })
     try {
-      const abs = resolve(filePath)
+      const abs = resolveAllowedFsPath(filePath)
       if (!existsSync(abs)) {
         // Missing optional config files are normal (skills.json, etc.)
         return sendJson(res, 200, { content: null, missing: true })
@@ -332,7 +595,7 @@ async function handleHost(req, res, url) {
     } catch (err) {
       const code = err?.code || ''
       if (code === 'ENOENT') return sendJson(res, 200, { content: null, missing: true })
-      return sendJson(res, 400, { error: String(err?.message || err), code })
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err), code })
     }
   }
 
@@ -341,20 +604,24 @@ async function handleHost(req, res, url) {
     if (!body?.path || typeof body.content !== 'string') {
       return sendJson(res, 400, { error: 'path and content required' })
     }
-    const filePath = resolve(body.path)
-    ensureDir(dirname(filePath))
-    writeFileSync(filePath, body.content, 'utf8')
-    return sendJson(res, 200, { ok: true })
+    try {
+      const filePath = resolveAllowedFsPath(body.path)
+      ensureDir(dirname(filePath))
+      writeFileSync(filePath, body.content, { encoding: 'utf8', mode: 0o600 })
+      return sendJson(res, 200, { ok: true })
+    } catch (err) {
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err) })
+    }
   }
 
   if (method === 'POST' && path === '/host/fs/mkdir') {
     const body = await readBody(req)
     if (!body?.path) return sendJson(res, 400, { error: 'path required' })
     try {
-      ensureDir(resolve(body.path))
+      ensureDir(resolveAllowedFsPath(body.path))
       return sendJson(res, 200, { ok: true })
     } catch (err) {
-      return sendJson(res, 400, { error: String(err?.message || err) })
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err) })
     }
   }
 
@@ -362,10 +629,10 @@ async function handleHost(req, res, url) {
     const body = await readBody(req)
     if (!body?.path) return sendJson(res, 400, { error: 'path required' })
     try {
-      rmSync(resolve(body.path), { recursive: true, force: true })
+      rmSync(resolveAllowedFsPath(body.path, { allowMissing: false }), { recursive: true, force: true })
       return sendJson(res, 200, { ok: true })
     } catch (err) {
-      return sendJson(res, 400, { error: String(err?.message || err) })
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err) })
     }
   }
 
@@ -373,14 +640,15 @@ async function handleHost(req, res, url) {
     const filePath = url.searchParams.get('path')
     if (!filePath) return sendJson(res, 400, { error: 'path required' })
     try {
-      const st = statSync(resolve(filePath))
+      const st = statSync(resolveAllowedFsPath(filePath, { allowMissing: false }))
       return sendJson(res, 200, {
         size: st.size,
         mtimeMs: st.mtimeMs,
         isFile: st.isFile(),
         isDir: st.isDirectory(),
       })
-    } catch {
+    } catch (err) {
+      if (err?.status) return sendJson(res, err.status, { error: String(err.message || err) })
       return sendJson(res, 200, null)
     }
   }
@@ -394,8 +662,7 @@ async function handleHost(req, res, url) {
   function collabTileDir(workspacePath, tileId) {
     const safeTile = String(tileId || '').trim()
     if (!safeTile || /[\/\\]|\.\./.test(safeTile)) throw new Error(`Unsafe tileId: ${tileId}`)
-    const root = resolve(String(workspacePath || ''))
-    if (!root) throw new Error('workspacePath required')
+    const root = resolveAllowedFsPath(String(workspacePath || ''), { allowMissing: false })
     return join(root, '.codesurf', safeTile)
   }
 
@@ -404,7 +671,7 @@ async function handleHost(req, res, url) {
     const rel = String(relativeFile || '').replace(/^\/+/, '')
     if (!rel || rel.includes('..')) throw new Error(`Unsafe file path: ${relativeFile}`)
     const abs = normalize(join(tileDir, rel))
-    if (!abs.startsWith(tileDir)) throw new Error('Path escape blocked')
+    if (!pathIsInside(tileDir, abs)) throw new Error('Path escape blocked')
     return abs
   }
 
@@ -664,18 +931,27 @@ async function main() {
   await ensureDaemon()
 
   const server = createServer(async (req, res) => {
+    const origin = requestOrigin(req)
+    if (origin && !isAllowedOrigin(origin)) {
+      return sendJson(res, 403, { error: 'origin is not allowed' })
+    }
     setCors(req, res)
     if (req.method === 'OPTIONS') {
+      if (!origin) return sendJson(res, 400, { error: 'Origin is required for CORS preflight' })
       res.writeHead(204)
       res.end()
       return
     }
 
     try {
-      const url = new URL(req.url || '/', `http://${HOST_BIND}:${HOST_PORT}`)
+      const url = new URL(req.url || '/', hostBase())
+
+      if (!isPublicHostRoute(url.pathname) && !hasHostAccess(req)) {
+        return sendJson(res, 401, { error: 'missing or invalid CodeSurf host token' })
+      }
 
       if (url.pathname === '/' || url.pathname === '/health') {
-        return sendJson(res, 200, { ok: true, service: 'codesurf-web-host', port: HOST_PORT })
+        return sendJson(res, 200, { ok: true, service: 'codesurf-web-host' })
       }
 
       if (url.pathname.startsWith('/host/')) {
@@ -686,6 +962,9 @@ async function main() {
         const daemonPath = url.pathname.slice(2) // keep leading /
         // /d/workspace/list → /workspace/list
         const pathOnly = daemonPath.startsWith('/') ? daemonPath : `/${daemonPath}`
+        if (!daemonRouteIsAllowed(req.method || 'GET', pathOnly)) {
+          return sendJson(res, 404, { error: 'daemon route is not available to web clients' })
+        }
         // Reattach query: proxyDaemon reads req.url
         req.url = pathOnly + url.search
         return await proxyDaemon(req, res, pathOnly)
@@ -693,8 +972,11 @@ async function main() {
 
       sendJson(res, 404, { error: 'not found', hint: 'use /host/* or /d/*' })
     } catch (err) {
-      console.error('[web-host]', err)
-      sendJson(res, 500, { error: String(err?.message || err) })
+      const status = err instanceof HttpError ? err.status : 500
+      if (status >= 500) console.error('[web-host]', err)
+      if (!res.destroyed && !res.writableEnded) {
+        sendJson(res, status, { error: String(err?.message || err) })
+      }
     }
   })
 
@@ -703,11 +985,35 @@ async function main() {
     server.listen(HOST_PORT, HOST_BIND, () => resolveListen())
   })
 
-  console.log(`[web-host] listening on http://${HOST_BIND}:${HOST_PORT}`)
-  console.log(`[web-host] daemon proxy: /d/*  host APIs: /host/*  home=${HOME}`)
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('web-host did not expose a TCP listen address')
+  boundPort = address.port
+  writeRuntimeConfig()
+
+  let shuttingDown = false
+  const shutdown = () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    if (ownedDaemon && !ownedDaemon.killed) {
+      try { ownedDaemon.kill('SIGTERM') } catch { /* best effort */ }
+    }
+    if (RUNTIME_CONFIG_PATH) {
+      try { rmSync(RUNTIME_CONFIG_PATH, { force: true }) } catch { /* best effort */ }
+    }
+    server.close(() => process.exit(0))
+    setTimeout(() => process.exit(0), 2_000).unref()
+  }
+  process.once('SIGINT', shutdown)
+  process.once('SIGTERM', shutdown)
+
+  console.log(`[web-host] listening on ${hostBase()}`)
+  console.log('[web-host] daemon proxy: /d/*  host APIs: /host/*  loopback-only')
 }
 
 main().catch((err) => {
   console.error('[web-host] failed to start', err)
+  if (ownedDaemon && !ownedDaemon.killed) {
+    try { ownedDaemon.kill('SIGTERM') } catch { /* best effort */ }
+  }
   process.exit(1)
 })
