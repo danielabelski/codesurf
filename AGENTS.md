@@ -47,7 +47,7 @@ src/
 
 ## Key Patterns
 
-**Canvas engine** — All 2D physics (pan/zoom, drag, resize, snapping, groups, undo/redo) lives in App.tsx. World coords = screen coords adjusted for zoom + pan offset. Group movement recurses through nested groups. Undo snapshots full state (max 50).
+**Canvas engine** — App.tsx owns the canvas state and delegates interaction composition to `hooks/useAppCanvasInteraction.ts`; focused hooks own pan/zoom, drag, resize, snapping, groups, undo/redo, context menus, and connection locks. World coords = screen coords adjusted for zoom + pan offset. Group movement recurses through nested groups. Undo snapshots full state (max 50).
 
 **Tiles are lazy-loaded** — `React.lazy` + `Suspense` wraps every tile component.
 
@@ -98,7 +98,7 @@ share the renderer and talk to `codesurfd` via `scripts/web-host.mjs`.
 
 ## Watch Out For
 
-- App.tsx is ~1944 LOC — be surgical; changes ripple widely
+- App.tsx is still a large orchestration surface — be surgical and prefer focused hooks; changes ripple widely
 - node-pty requires native rebuild after dependency changes (`npm run rebuild`)
 - MCP server port is random — always read from config file, never hardcode
 - Canvas undo state holds full snapshots — don't accidentally push to undo stack in hot paths

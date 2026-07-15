@@ -130,7 +130,7 @@ export function MCPPanel({ onClose }: Props): JSX.Element {
   const save = useCallback(async (updatedServers: MCPServer[]) => {
     const userServers: Record<string, Omit<MCPServer, 'name' | 'enabled'> > = {}
     for (const s of updatedServers) {
-      if (s.name === 'codesurf' || name === 'contex') continue
+      if (s.name === 'codesurf' || s.name === 'contex') continue
       const entry: Omit<MCPServer, 'name' | 'enabled'> = {
         ...(s.type || s.url ? { type: s.type || (s.url ? 'http' : 'stdio') } : {}),
         ...(s.url ? { url: s.url } : {}),

@@ -1,4 +1,13 @@
 export { detectPlatform, isElectronHost, isDaemonBackedHost, type CodesurfPlatform } from './detect'
+export {
+  defaultCapabilitiesFor,
+  hasCapability,
+  normalizeCapabilities,
+  readInstalledCapabilities,
+  PLATFORM_CAPABILITY_KEYS,
+  type PlatformCapabilities,
+  type PlatformCapabilityKey,
+} from './capabilities'
 export { resolveHostBase, resolveHostToken, createHostHeaders, hostUrl } from './hostConfig'
 export { installHostBridge, type InstallResult } from './installHostBridge'
 export { createDaemonBackedElectronApi } from './daemonBridge'

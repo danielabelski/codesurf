@@ -44,17 +44,19 @@ export function expandHome(arg: string): string {
   const home = homedir()
   if (arg === '~') return home
 
-  // Resolve legacy ~/.codesurf/ and current ~/.codesurf/ paths to CODESURF_HOME
+  // Resolve legacy ~/.contex/ and current ~/.codesurf/ paths to CODESURF_HOME.
+  if (arg.startsWith('~/.contex/')) {
+    return join(CODESURF_HOME, arg.slice('~/.contex/'.length))
+  }
+  if (arg.startsWith('~\\.contex\\')) {
+    return join(CODESURF_HOME, arg.slice('~\\.contex\\'.length))
+  }
   if (arg.startsWith('~/.codesurf/')) {
     return join(CODESURF_HOME, arg.slice('~/.codesurf/'.length))
   }
   if (arg.startsWith('~\\.codesurf\\')) {
     return join(CODESURF_HOME, arg.slice('~\\.codesurf\\'.length))
   }
-  if (arg.startsWith('~/.codesurf/')) {
-    return join(CODESURF_HOME, arg.slice('~/.codesurf/'.length))
-  }
-
   if (arg.startsWith('~/') || arg.startsWith('~\\')) return join(home, arg.slice(2))
   return arg
 }

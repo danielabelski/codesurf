@@ -1,5 +1,5 @@
 import { useEffect, type MutableRefObject } from 'react'
-import { isEditableTarget } from '../utils/editableTarget'
+import { isEditableTarget } from '../utils/editableTarget.ts'
 
 type UseCanvasKeyboardOptions = {
   selectedTileIds: Set<string>
@@ -9,6 +9,35 @@ type UseCanvasKeyboardOptions = {
   redoCanvas: () => void
   onEscape: () => void
   spaceHeldRef: MutableRefObject<boolean>
+}
+
+export type CanvasKeyboardCommand = 'group' | 'undo' | 'redo' | null
+
+export function resolveCanvasKeyboardCommand(event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey'>): CanvasKeyboardCommand {
+  const mod = event.metaKey || event.ctrlKey
+  if (!mod) return null
+  if (event.key === 'g') return 'group'
+  if (event.key === 'z' && !event.shiftKey) return 'undo'
+  if ((event.key === 'z' && event.shiftKey) || event.key === 'y') return 'redo'
+  return null
+}
+
+export function executeCanvasKeyboardCommand(
+  command: Exclude<CanvasKeyboardCommand, null>,
+  options: {
+    selectedTileCount: number
+    groupSelectedTiles: () => void
+    undoCanvas: () => void
+    redoCanvas: () => void
+  },
+): boolean {
+  if (command === 'group') {
+    if (options.selectedTileCount >= 2) options.groupSelectedTiles()
+    return true
+  }
+  if (command === 'undo') options.undoCanvas()
+  else options.redoCanvas()
+  return true
 }
 
 export function useCanvasKeyboard({
@@ -23,19 +52,16 @@ export function useCanvasKeyboard({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (isEditableTarget(event.target)) return
-      const mod = event.metaKey || event.ctrlKey
-      if (mod && event.key === 'g') {
-        event.preventDefault()
-        if (selectedTileIds.size >= 2) groupSelectedTiles()
-        return
-      }
-      if (!mod) return
-      const isUndo = event.key === 'z' && !event.shiftKey
-      const isRedo = (event.key === 'z' && event.shiftKey) || event.key === 'y'
-      if (!isUndo && !isRedo) return
+      const command = resolveCanvasKeyboardCommand(event)
+      if (!command) return
+      const handled = executeCanvasKeyboardCommand(command, {
+        selectedTileCount: selectedTileIds.size,
+        groupSelectedTiles,
+        undoCanvas,
+        redoCanvas,
+      })
+      if (!handled) return
       event.preventDefault()
-      if (isUndo) undoCanvas()
-      else redoCanvas()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

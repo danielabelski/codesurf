@@ -20,6 +20,6 @@ describe('useNegotiatedDiscovery extraction', () => {
     expect(HOOK_SOURCE).toContain('negotiatedDiscoveryState')
     expect(HOOK_SOURCE).toContain('manualConnectionRenderRoutes')
     expect(HOOK_SOURCE).toContain('ambientDiscoveryRenderRoutes')
-    expect(HOOK_SOURCE).toContain('window.electron.terminal.updatePeers')
+    expect(HOOK_SOURCE).toContain('window.electron?.terminal?.updatePeers')
   })
 })

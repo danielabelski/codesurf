@@ -282,11 +282,11 @@ test('claude SDK: AgentMode.systemPrompt + tools reach the query options', async
   // tools allow-list → SDK top-level `tools` restriction (governs with no custom agent)...
   assert.deepEqual(capturedOptions.tools, ['Read', 'Glob', 'Grep'])
   // systemPrompt → custom agent prompt, which makes `agent` active...
-  assert.equal(capturedOptions.agent, 'contex')
-  assert.ok(capturedOptions.agents?.contex?.prompt?.includes('PERSONA-TOKEN-7788'), 'persona must reach the claude agent prompt')
+  assert.equal(capturedOptions.agent, 'codesurf')
+  assert.ok(capturedOptions.agents?.codesurf?.prompt?.includes('PERSONA-TOKEN-7788'), 'persona must reach the claude agent prompt')
   // ...and the allow-list MUST also be on the active agent definition, since the
   // active agent's own `tools` field governs its toolset when `agent` is set.
-  assert.deepEqual(capturedOptions.agents?.contex?.tools, ['Read', 'Glob', 'Grep'])
+  assert.deepEqual(capturedOptions.agents?.codesurf?.tools, ['Read', 'Glob', 'Grep'])
 })
 
 test('claude SDK: no agentMode leaves tools unrestricted', async t => {
@@ -1151,9 +1151,9 @@ test('renderer: ChatTile wires a LIFECYCLED agentModesLoaded into useChatTileMes
   // default — reopening the race while the other four tests stay green. This guard
   // closes that vector: the flag must start false, flip true ONLY after the load
   // resolves, and be passed through as the state variable (never a literal true).
-  const src = readFileSync(join(ROOT_DIR, 'src/renderer/src/components/ChatTile.tsx'), 'utf8')
+  const src = readFileSync(join(ROOT_DIR, 'src/renderer/src/hooks/useChatTileAgentModes.ts'), 'utf8')
   assert.match(src, /const \[agentModesLoaded, setAgentModesLoaded\] = useState\(false\)/, 'agentModesLoaded must initialize false')
-  assert.match(src, /setAgentModes\(list\);\s*setAgentModesLoaded\(true\)/, 'loaded flag must flip true only after loadAgentModes resolves')
+  assert.match(src, /setAgentModes\(list\);?\s*setAgentModesLoaded\(true\)/, 'loaded flag must flip true only after persona loading resolves')
   assert.match(src, /\n\s*agentModesLoaded,\n/, 'agentModesLoaded must be passed through to the messaging hook as the state var')
   assert.doesNotMatch(src, /agentModesLoaded=\{true\}|agentModesLoaded:\s*true/, 'must NOT hardcode the loaded flag true (would reopen the load race)')
 })
@@ -1468,7 +1468,7 @@ test('daemon runJob adds gated defense-in-depth re-resolution (#root-fix daemon)
   assert.match(src, /resolveAuthoritativeAgentMode\(/, 'runJob must re-resolve authoritatively (defense in depth)')
   // Gated on a PRESENT local agents.json so the cloud (no .codesurf) trusts main's
   // shipped value rather than failing closed on a custom id.
-  assert.match(src, /existsSync\(join\(workspaceDir, '\.contex', 'customisation', 'agents\.json'\)\)/, 'must gate re-resolution on a present local agents.json')
+  assert.match(src, /existsSync\(join\(workspaceDir, '\.codesurf', 'customisation', 'agents\.json'\)\)/, 'must gate re-resolution on a present local agents.json')
   assert.match(src, /request = \{ \.\.\.request, agentMode: authoritative\.agentMode \}/, 'must override request.agentMode with the re-resolved value')
 })
 

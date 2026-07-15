@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { describe, test } from 'node:test'
+import { afterEach, describe, test } from 'node:test'
 import { join } from 'path'
 import {
   buildCheckpointLabel,
@@ -7,8 +7,11 @@ import {
   buildRuntimeSessionEntryId,
   createRuntimeCheckpoint,
   displayPathForCheckpoint,
+  setRuntimeCheckpointIoForTests,
   shouldSkipRuntimeCheckpoint,
 } from '../src/main/chat/runtime-checkpoints.ts'
+
+afterEach(() => setRuntimeCheckpointIoForTests(null))
 
 describe('runtime-checkpoints pure helpers', () => {
   test('buildRuntimeSessionEntryId is stable for a given cardId', () => {
@@ -85,6 +88,88 @@ describe('runtime-checkpoints pure helpers', () => {
       ['/tmp/ws/file.ts'],
     )
     assert.deepEqual(result, { ok: true, skipped: true })
+  })
+
+  test('createRuntimeCheckpoint persists metadata and emits a saved chip', async () => {
+    const createCalls: unknown[][] = []
+    const streamCalls: unknown[][] = []
+    setRuntimeCheckpointIoForTests({
+      createCheckpoint: async (...args) => {
+        createCalls.push(args)
+        return { ok: true, checkpoint: { id: 'checkpoint-1' } }
+      },
+      sendStream: (...args) => streamCalls.push(args),
+      log: () => {},
+    })
+
+    const result = await createRuntimeCheckpoint(
+      {
+        cardId: 'card-1',
+        workspaceId: 'workspace-1',
+        workspaceDir: '/tmp/ws',
+        provider: 'claude',
+        model: 'claude-test',
+      },
+      'Write',
+      ['/tmp/ws/src/app.ts'],
+      { toolUseId: 'tool-1' },
+    )
+
+    assert.deepEqual(result, { ok: true, checkpointId: 'checkpoint-1' })
+    assert.deepEqual(createCalls, [[
+      'workspace-1',
+      'codesurf-runtime:card-1',
+      {
+        label: join('Before Write src', 'app.ts'),
+        reason: 'tool:Write',
+        files: ['/tmp/ws/src/app.ts'],
+        metadata: {
+          provider: 'claude',
+          model: 'claude-test',
+          toolName: 'Write',
+          cardId: 'card-1',
+          toolUseId: 'tool-1',
+        },
+        source: 'main-ipc-chat',
+      },
+    ]])
+    assert.deepEqual(streamCalls, [
+      ['card-1', {
+        type: 'tool_start',
+        toolId: 'codesurf-checkpoint-checkpoint-1',
+        toolName: 'Checkpoint saved',
+      }],
+      ['card-1', {
+        type: 'tool_summary',
+        toolId: 'codesurf-checkpoint-checkpoint-1',
+        toolName: 'Checkpoint saved',
+        text: 'Saved checkpoint before Write for src/app.ts',
+      }],
+    ])
+  })
+
+  test('createRuntimeCheckpoint returns daemon failures without emitting a chip', async () => {
+    const streamCalls: unknown[][] = []
+    setRuntimeCheckpointIoForTests({
+      createCheckpoint: async () => ({ ok: false, error: 'checkpoint unavailable' }),
+      sendStream: (...args) => streamCalls.push(args),
+      log: () => {},
+    })
+
+    const result = await createRuntimeCheckpoint(
+      {
+        cardId: 'card-1',
+        workspaceId: 'workspace-1',
+        workspaceDir: '/tmp/ws',
+        provider: 'codex',
+        model: 'codex-test',
+      },
+      'Edit',
+      ['/tmp/ws/app.ts'],
+    )
+
+    assert.deepEqual(result, { ok: false, error: 'checkpoint unavailable' })
+    assert.deepEqual(streamCalls, [])
   })
 
   test('buildCheckpointSavedSummary mentions tool and paths', () => {

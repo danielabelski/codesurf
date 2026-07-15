@@ -10,6 +10,7 @@ import { ChatTileLatestChangeDrawer, type LatestChangeDrawerState } from './Chat
 import { ChatTileQueuedTurnsDrawer } from './ChatTileQueuedTurnsDrawer'
 import { CHAT_MESSAGE_MAX_WIDTH } from './chatTileLayout'
 import type { QueuedChatTurn } from './chatTileTypes'
+import { useTileTranscriptMessages } from '../../hooks/useTileTranscriptMessages'
 
 const NON_SELECTABLE_UI_STYLE = {
   userSelect: 'none' as const,
@@ -17,8 +18,10 @@ const NON_SELECTABLE_UI_STYLE = {
 }
 
 export interface ChatTileTranscriptColumnProps {
+  tileId: string
   isStartScreen: boolean
   messagesRef: React.RefObject<HTMLDivElement | null>
+  stickToBottomRef: React.RefObject<boolean>
   handleMessagesScroll: () => void
   handleMessagesWheel: (event: React.WheelEvent<HTMLDivElement>) => void
   handleMessagesKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => void
@@ -75,8 +78,10 @@ export interface ChatTileTranscriptColumnProps {
 }
 
 export function ChatTileTranscriptColumn({
+  tileId,
   isStartScreen,
   messagesRef,
+  stickToBottomRef,
   handleMessagesScroll,
   handleMessagesWheel,
   handleMessagesKeyDown,
@@ -128,6 +133,12 @@ export function ChatTileTranscriptColumn({
 }: ChatTileTranscriptColumnProps): JSX.Element {
   const theme = useTheme()
   const terminalActive = activeView === 'terminal'
+  const liveRenderedMessages = useTileTranscriptMessages({
+    tileId,
+    renderedMessages,
+    messagesRef,
+    stickToBottomRef,
+  })
 
   return (
     <div style={{
@@ -200,7 +211,7 @@ export function ChatTileTranscriptColumn({
               fontSize: 11,
               textAlign: 'center',
             }}>
-              Showing the latest {renderedMessages.length} messages. Scroll up to reveal older pages; {hiddenMessageCount} older message{hiddenMessageCount === 1 ? '' : 's'} are preserved but not mounted.
+              Showing the latest {liveRenderedMessages.length} messages. Scroll up to reveal older pages; {hiddenMessageCount} older message{hiddenMessageCount === 1 ? '' : 's'} are preserved but not mounted.
             </div>
           )}
 
@@ -220,7 +231,7 @@ export function ChatTileTranscriptColumn({
           )}
 
           <ChatTileTranscriptMessages
-            renderedMessages={renderedMessages}
+            renderedMessages={liveRenderedMessages}
             isStreaming={isStreaming}
             toolCollapseTick={toolCollapseTick}
             explodedChipGroups={explodedChipGroups}

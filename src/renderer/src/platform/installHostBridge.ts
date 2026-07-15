@@ -6,6 +6,7 @@
  */
 
 import { detectPlatform, type CodesurfPlatform } from './detect'
+import { defaultCapabilitiesFor } from './capabilities'
 import { createDaemonBackedElectronApi } from './daemonBridge'
 import { resolveHostBase } from './hostConfig'
 import { hydrateNativeRuntimeConfig } from './nativeRuntimeConfig'
@@ -35,26 +36,23 @@ export async function installHostBridge(): Promise<InstallResult> {
   if (hostBase) w.__CODESURF_HOST__ = hostBase
 
   if (platform === 'electron') {
+    // Publish full capability matrix even when preload owns the bridge so
+    // feature gates can use one API across all three hosts.
+    w.__CODESURF_CAPABILITIES__ = defaultCapabilitiesFor('electron')
     return { platform, hostBase, installedBridge: false }
   }
 
   // Never clobber a real preload bridge
   if (w.electron) {
+    w.__CODESURF_PLATFORM__ = 'electron'
+    w.__CODESURF_CAPABILITIES__ = defaultCapabilitiesFor('electron')
     return { platform: 'electron', hostBase, installedBridge: false }
   }
 
   w.electron = createDaemonBackedElectronApi()
-  w.__CODESURF_CAPABILITIES__ = {
-    workspace: true,
-    canvas: true,
-    settings: true,
-    chatJobs: true,
-    sessions: true,
-    fs: true,
-    terminal: isTerminalTransportAvailable(),
-    extensions: false,
-    nodePty: false,
-  }
+  w.__CODESURF_CAPABILITIES__ = defaultCapabilitiesFor(platform, {
+    terminalAvailable: isTerminalTransportAvailable(),
+  })
 
   // Warm host / daemon connectivity (non-fatal)
   try {

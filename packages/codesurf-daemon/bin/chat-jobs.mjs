@@ -2,7 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -55,44 +55,47 @@ function ensureDir(dirPath) {
 // handed over after a provider switch, or a stale id — makes the SDK return
 // num_turns:0 with zero assistant content, surfacing as an empty reply.
 //
-// Defense-in-depth guard: confirm a real transcript exists before we set the
-// SDK `resume` option. We scan every project dir for `<sessionId>.jsonl`
-// (size > 0) rather than reconstruct the encoded-cwd key, which sidesteps the
-// SDK's realpath + NFC + hash-suffix encoding entirely. Foreign ids have no
-// transcript anywhere → returns null → caller starts a fresh turn (model runs
-// normally) instead of resuming a non-existent session. A valid same-provider
-// Claude id always has its transcript on disk → resume is preserved.
+// Defense-in-depth guard: confirm the transcript belongs to this exact cwd
+// before setting the SDK `resume` option. This mirrors the SDK project-key
+// algorithm, avoiding a synchronous/unbounded scan of every historical project
+// and preventing a same-id transcript from another workspace from being used.
 function claudeProjectsDir() {
   const configDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
   return join(configDir, 'projects')
 }
 
-function findClaudeResumeTranscript(sessionId) {
+function claudeProjectKeyForResolvedCwd(resolvedCwd) {
+  const normalized = resolvedCwd.normalize('NFC')
+  const sanitized = normalized.replace(/[^a-zA-Z0-9]/g, '-')
+  if (sanitized.length <= 200) return sanitized
+  let hash = 0
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0
+  }
+  return `${sanitized.slice(0, 200)}-${Math.abs(hash).toString(36)}`
+}
+
+async function findClaudeResumeTranscript(sessionId, workspaceDir) {
   if (typeof sessionId !== 'string') return null
   const id = sessionId.trim()
-  if (!id) return null
+  if (!id || typeof workspaceDir !== 'string' || !workspaceDir.trim()) return null
   // Reject anything that could escape the projects tree; real Claude session
   // ids are UUIDs and never contain path separators.
   if (id.includes('/') || id.includes('\\') || id.includes('..')) return null
 
-  const projectsDir = claudeProjectsDir()
-  const fileName = `${id}.jsonl`
-  let entries
+  let resolvedCwd
   try {
-    entries = readdirSync(projectsDir, { withFileTypes: true })
+    resolvedCwd = await fs.realpath(resolve(workspaceDir))
+  } catch {
+    resolvedCwd = resolve(workspaceDir)
+  }
+  const projectKey = claudeProjectKeyForResolvedCwd(resolvedCwd)
+  const candidate = join(claudeProjectsDir(), projectKey, `${id}.jsonl`)
+  try {
+    return (await fs.stat(candidate)).size > 0 ? candidate : null
   } catch {
     return null
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const candidate = join(projectsDir, entry.name, fileName)
-    try {
-      if (statSync(candidate).size > 0) return candidate
-    } catch {
-      // not in this project dir — keep scanning
-    }
-  }
-  return null
 }
 
 function readPermissionGrants(homeDir) {
@@ -1379,7 +1382,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     // after a provider switch) would otherwise make the SDK return num_turns:0
     // with no assistant content — an empty reply. When there's no transcript we
     // omit `resume` so the model runs a fresh turn instead.
-    const resumeTranscriptPath = findClaudeResumeTranscript(request.sessionId)
+    const resumeTranscriptPath = await findClaudeResumeTranscript(request.sessionId, workspaceDir)
     const willResume = Boolean(resumeTranscriptPath)
     if (request.sessionId && !willResume) {
       console.warn(`[chat-jobs] claude job ${job.id}: no transcript for session ${request.sessionId}; starting fresh instead of resuming`)

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createChatJobManager } from '../../bin/chat-jobs.mjs'
 
@@ -33,9 +33,21 @@ async function waitForCompletedJob(manager, jobId) {
 
 // Drive a single Claude turn with an injected claudeQuery that records the
 // `resume` option the daemon handed the SDK, then yields a successful result.
-async function runClaudeTurn({ homeDir, sessionId }) {
+function claudeProjectKeyForTest(cwd) {
+  const normalized = resolve(cwd).normalize('NFC')
+  const sanitized = normalized.replace(/[^a-zA-Z0-9]/g, '-')
+  if (sanitized.length <= 200) return sanitized
+  let hash = 0
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0
+  }
+  return `${sanitized.slice(0, 200)}-${Math.abs(hash).toString(36)}`
+}
+
+async function runClaudeTurn({ homeDir, sessionId, prepareWorkspace }) {
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
+  await prepareWorkspace?.(workspaceDir)
 
   const captured = { resume: 'UNSET', promptSeen: null, queryRan: false }
   const manager = createChatJobManager({
@@ -107,9 +119,42 @@ test('daemon Claude job resumes when the sessionId has a real on-disk transcript
   })
 
   const sessionId = 'claude-thread-existing-abc123'
-  // The guard scans every project dir for `<sessionId>.jsonl` (size > 0), so the
-  // project dir name need not match any particular cwd encoding.
-  const projectDir = join(claudeConfigDir, 'projects', '-some-encoded-workspace')
+  const { captured, completed } = await runClaudeTurn({
+    homeDir,
+    sessionId,
+    prepareWorkspace: async workspaceDir => {
+      const projectDir = join(claudeConfigDir, 'projects', claudeProjectKeyForTest(workspaceDir))
+      await mkdir(projectDir, { recursive: true })
+      await writeFile(
+        join(projectDir, `${sessionId}.jsonl`),
+        JSON.stringify({ type: 'user', uuid: 'u1', sessionId }) + '\n',
+        'utf8',
+      )
+    },
+  })
+
+  assert.equal(captured.queryRan, true)
+  assert.equal(captured.resume, sessionId, 'resume must be set when the transcript exists')
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.error, null)
+})
+
+test('daemon Claude job does not resume a transcript owned by another workspace', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-claude-resume-wrong-workspace-')
+  const claudeConfigDir = await makeTestTempDir('chat-jobs-claude-config-wrong-workspace-')
+  const prevConfigDir = process.env.CLAUDE_CONFIG_DIR
+  process.env.CLAUDE_CONFIG_DIR = claudeConfigDir
+  t.after(async () => {
+    if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = prevConfigDir
+    await rm(homeDir, { recursive: true, force: true })
+    await rm(claudeConfigDir, { recursive: true, force: true })
+  })
+
+  const sessionId = 'claude-thread-other-workspace'
+  const otherWorkspace = join(homeDir, 'other-workspace')
+  await mkdir(otherWorkspace, { recursive: true })
+  const projectDir = join(claudeConfigDir, 'projects', claudeProjectKeyForTest(otherWorkspace))
   await mkdir(projectDir, { recursive: true })
   await writeFile(
     join(projectDir, `${sessionId}.jsonl`),
@@ -118,9 +163,6 @@ test('daemon Claude job resumes when the sessionId has a real on-disk transcript
   )
 
   const { captured, completed } = await runClaudeTurn({ homeDir, sessionId })
-
-  assert.equal(captured.queryRan, true)
-  assert.equal(captured.resume, sessionId, 'resume must be set when the transcript exists')
+  assert.equal(captured.resume, undefined)
   assert.equal(completed.status, 'completed')
-  assert.equal(completed.error, null)
 })

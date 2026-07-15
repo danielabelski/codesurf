@@ -5,6 +5,8 @@ import {
   computeThinkingElapsedSec,
   finalizeThinkingElapsedSec,
   resolveThinkingDisplayedElapsed,
+  subscribeThinkingClock,
+  tickThinkingClockForTests,
 } from '../src/renderer/src/components/chat/thinkingClock.ts'
 
 describe('thinkingClock pure helpers', () => {
@@ -36,5 +38,18 @@ describe('thinkingClock pure helpers', () => {
   test('tick interval constant is the shared clock period', () => {
     assert.equal(THINKING_CLOCK_TICK_MS, 250)
   })
-})
 
+  test('inactive subscribers receive no shared clock ticks', () => {
+    let inactiveTicks = 0
+    let activeTicks = 0
+    const unsubscribeInactive = subscribeThinkingClock(false, () => { inactiveTicks += 1 })
+    const unsubscribeActive = subscribeThinkingClock(true, () => { activeTicks += 1 })
+
+    tickThinkingClockForTests()
+
+    assert.equal(inactiveTicks, 0)
+    assert.equal(activeTicks, 1)
+    unsubscribeInactive()
+    unsubscribeActive()
+  })
+})

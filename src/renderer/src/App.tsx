@@ -11,6 +11,7 @@ import { useAutoHideScrollbars } from './hooks/useAutoHideScrollbars'
 import { useTitleTooltips } from './hooks/useTitleTooltips'
 import { useScrollFadeIndicators } from './hooks/useScrollFadeIndicators'
 import { useAppShellChrome } from './hooks/useAppShellChrome'
+import { useAppCanvasDerivedState } from './hooks/useAppCanvasDerivedState'
 import { readMiniChatOptions } from './lib/miniChatWindow'
 import { MiniChatWindow } from './components/MiniChatWindow'
 import { AppSidebarRegion } from './components/AppSidebarRegion'
@@ -28,22 +29,12 @@ import { resolveFileTileType } from './lib/fileTileType'
 import { useNegotiatedDiscovery } from './hooks/useNegotiatedDiscovery'
 import {
   useCanvasEngine,
-  useCanvasDragSync,
-  useCanvasPointerHandlers,
-  useCanvasExpandedGroup,
-  useConnectionHandleHover,
-  useCanvasContextMenu,
-  useTileContextMenu,
   useLockConnection,
-  useEnforceTileMinimumSizes,
-  useLockedConnectionHelpers,
   type CanvasDragState,
 } from './hooks/useCanvasEngine'
+import { useAppCanvasInteraction } from './hooks/useAppCanvasInteraction'
 import { useTileMounting } from './hooks/useTileMounting'
 import { useTileClipboard } from './hooks/useTileClipboard'
-import { useCanvasTileShortcuts } from './hooks/useCanvasTileShortcuts'
-import { useCanvasGroupManager } from './hooks/useCanvasGroupManager'
-import { useCanvasKeyboard } from './hooks/useCanvasKeyboard'
 import { useCanvasGlow } from './hooks/useCanvasGlow'
 import { useRenderTileBody } from './hooks/useRenderTileBody'
 import { useAutoAgentProximity } from './hooks/useAutoAgentProximity'
@@ -71,15 +62,11 @@ import {
   getTileCenter,
 } from './lib/connectionRoutes'
 
-import { getMinTileHeight, getMinTileWidth } from './utils/tilePlacement'
-
-
 import { FontProvider, FontTokenProvider, MONO_DEFAULT } from './FontContext'
 import { ThemeProvider } from './ThemeContext'
 import { DEFAULT_THEME_ID, registerCustomTheme, unregisterCustomTheme } from './theme'
 import type { PanelLeaf, PanelNode } from './components/panelLayoutTree'
 import {
-  getAllTileIds,
   findLeafById,
   findFirstLeafId,
   findLeafIdContainingTile,
@@ -866,16 +853,6 @@ function App(): JSX.Element {
     return () => window.removeEventListener(CODESURF_OPEN_LINK_EVENT, handleOpenLink as EventListener)
   }, [addTile, settings.linkOpenMode])
 
-  useEnforceTileMinimumSizes({
-    tiles,
-    viewport,
-    nextZIndex,
-    saveCanvas,
-    setTiles,
-    getMinTileWidth,
-    getMinTileHeight,
-  })
-
   // ─── MCP canvas tool handlers (must be after addTile) ────────────────────
   useEffect(() => {
     const el = (window as any).electron?.mcp
@@ -1011,67 +988,6 @@ function App(): JSX.Element {
     return () => window.removeEventListener(CODESURF_OPEN_CHAT_SURFACE_EVENT, handleOpenChatSurfaceRequest as EventListener)
   }, [activeChatTileId, addTile, bringToFront, tiles])
 
-  const { handleCanvasMouseDown, handleConnectionMouseDown, handleResizeMouseDown, handleCanvasDoubleClick, handleTileMouseDown } = useCanvasPointerHandlers({
-    canvasRef,
-    viewport,
-    setDragState,
-    setSelectedTileId,
-    setSelectedTileIds,
-    panLastPos,
-    cancelPanInertia,
-    screenToWorld,
-    spaceHeld,
-    bringToFront,
-    getConnectionHandlePoint: (tile, side) => getConnectionHandlePoint(tile, side),
-    panelLayout,
-    addTile,
-  })
-
-  const { showConnectionHandleForSide, scheduleConnectionHandleHide } = useConnectionHandleHover({
-    setHoveredConnectionHandle,
-  })
-
-  const handleCanvasContextMenu = useCanvasContextMenu({
-    screenToWorld,
-    panelLayout,
-    groups,
-    groupBoundsRef,
-    addTile,
-    pinnedCanvasExtensionTiles,
-    clipboardRef,
-    pasteAt: (pos, groupId) => pasteTilesRef.current(pos, groupId),
-    selectedTileIds,
-    groupSelectedTiles: () => groupSelectedTilesRef.current(),
-    setCtxMenu,
-  })
-
-  useCanvasDragSync({
-    canvasRef,
-    dragState,
-    setDragState,
-    engine: canvasEngine,
-    tilesRef,
-    groupsRef,
-    groups,
-    setTiles,
-    setGroups,
-    setGuides,
-    setCanvasPointerWorld,
-    setSelectedTileIds,
-    setSuppressedConnections,
-    suppressedConnectionsRef,
-    panelTileIdsRef,
-    groupBoundsRef,
-    snapValue,
-    resolveManualConnectionTarget: (sourceTileId, point) => (
-      findManualConnectionTarget(sourceTileId, point, tilesRef.current, panelTileIdsRef.current, getTileCenter)
-    ),
-    lockConnection,
-    triggerDiscoveryPulse,
-    getMinTileWidth,
-    getMinTileHeight,
-  })
-
   const {
     handleOpenFile,
     openSessionInChat,
@@ -1139,6 +1055,15 @@ function App(): JSX.Element {
   }, [workspace?.id])
 
   const {
+    handleCanvasMouseDown,
+    handleConnectionMouseDown,
+    handleResizeMouseDown,
+    handleCanvasDoubleClick,
+    handleTileMouseDown,
+    showConnectionHandleForSide,
+    scheduleConnectionHandleHide,
+    handleCanvasContextMenu,
+    handleTileContextMenu,
     groupSelectedTiles,
     ungroupTiles,
     ungroupAll,
@@ -1146,26 +1071,97 @@ function App(): JSX.Element {
     collectGroupTileIds,
     convertGroupToLayout,
     revertLayoutGroup,
-  } = useCanvasGroupManager({
-    tiles,
-    groups,
-    selectedTileIds,
-    viewport,
-    nextZIndex,
-    setTiles,
-    setGroups,
-    setSelectedTileIds,
-    saveCanvas,
-  })
-
-  useCanvasKeyboard({
-    selectedTileIds,
-    groupSelectedTiles,
-    setCommandPaletteOpen,
-    undoCanvas,
-    redoCanvas,
-    onEscape: handleCanvasEscape,
-    spaceHeldRef: spaceHeld,
+    expandLayoutGroup,
+    enterCanvasExpanded,
+    exitCanvasExpanded,
+    isConnectionLocked,
+    toggleConnectionLock,
+    deleteConnection,
+  } = useAppCanvasInteraction({
+    engine: {
+      canvasRef,
+      canvasEngine,
+      viewport,
+      setViewport,
+      viewportRef,
+      nextZIndex,
+      nextZIndexRef,
+      panLastPos,
+      cancelPanInertia,
+      screenToWorld,
+      spaceHeld,
+      snapValue,
+      saveCanvas,
+      persistCanvasState,
+      undoCanvas,
+      redoCanvas,
+    },
+    state: {
+      tiles,
+      groups,
+      setTiles,
+      setGroups,
+      tilesRef,
+      groupsRef,
+      selectedTileId,
+      selectedTileIds,
+      setSelectedTileId,
+      setSelectedTileIds,
+      dragState,
+      setDragState,
+      setGuides,
+      setCanvasPointerWorld,
+      setHoveredConnectionHandle,
+      setCtxMenu,
+      setCommandPaletteOpen,
+    },
+    panel: {
+      panelLayout,
+      panelTileIdsRef,
+      setPanelLayout,
+      setActivePanelId,
+      setExpandedTileId,
+      setExpandLayoutGroupId,
+      expandLayoutGroupIdRef,
+      setExpandedCanvasGroupId,
+      expandedCanvasGroupIdRef,
+      expandedCanvasPriorViewportRef,
+      exitCanvasExpandedRef,
+    },
+    connections: {
+      lockedConnections,
+      lockedConnectionsRef,
+      setLockedConnections,
+      setSuppressedConnections,
+      suppressedConnectionsRef,
+      lockConnection,
+      triggerDiscoveryPulse,
+      findManualConnectionTarget,
+      getTileCenter,
+      getConnectionHandlePoint: (tile, side) => getConnectionHandlePoint(tile, side),
+    },
+    tileActions: {
+      clipboardRef,
+      pasteTiles,
+      copyTiles,
+      duplicateTiles,
+      closeTile,
+      addTile,
+      bringToFront,
+      pinnedCanvasExtensionTiles,
+      workspacePath: workspace?.path,
+      importFileToWorkspace: (filePath, tileId) => importFileToWorkspace(filePath, tileId),
+      handleCanvasEscape,
+    },
+    actionRefs: {
+      pasteTilesRef,
+      duplicateTilesRef,
+      copyTilesRef,
+      groupSelectedTilesRef,
+      groupBoundsRef,
+      ungroupTilesRef,
+      ungroupAllRef,
+    },
   })
 
   useEffect(() => {
@@ -1263,74 +1259,6 @@ function App(): JSX.Element {
     }
   }, [updateAppSettings])
 
-  const handleTileContextMenu = useTileContextMenu({
-    viewport,
-    nextZIndex,
-    groups,
-    workspacePath: workspace?.path,
-    saveCanvas,
-    setTiles,
-    setSelectedTileId,
-    setSelectedTileIds,
-    setCtxMenu,
-    clipboardRef,
-    duplicateTiles,
-    copyTiles,
-    pasteTiles,
-    ungroupTiles,
-    ungroupAll,
-    closeTile,
-    importFileToWorkspace,
-  })
-
-  const expandLayoutGroup = useCallback((groupId: string) => {
-    const g = groupsRef.current.find(gr => gr.id === groupId)
-    if (!g?.layout) return
-    const layout = g.layout as PanelNode
-    setExpandLayoutGroupId(groupId)
-    expandLayoutGroupIdRef.current = groupId
-    setPanelLayout(layout)
-    const firstLeafId = findFirstLeafId(layout)
-    setActivePanelId(firstLeafId)
-    setExpandedTileId(null)
-  }, [])
-
-  const { enterCanvasExpanded, exitCanvasExpanded } = useCanvasExpandedGroup({
-    canvasRef,
-    viewportRef,
-    expandedCanvasPriorViewportRef,
-    expandedCanvasGroupIdRef,
-    groupsRef,
-    setViewport,
-    setExpandedCanvasGroupId,
-    setExpandedTileId,
-    groupBounds,
-  })
-  exitCanvasExpandedRef.current = exitCanvasExpanded
-
-  // Keep action refs in sync so early-defined callbacks can call them safely
-  pasteTilesRef.current = pasteTiles
-  duplicateTilesRef.current = duplicateTiles
-  copyTilesRef.current = copyTiles
-  groupSelectedTilesRef.current = groupSelectedTiles
-  groupBoundsRef.current = groupBounds
-  ungroupTilesRef.current = ungroupTiles
-  ungroupAllRef.current = ungroupAll
-
-  useCanvasTileShortcuts({
-    selectedTileId,
-    selectedTileIds,
-    viewport,
-    nextZIndex,
-    setTiles,
-    setSelectedTileId,
-    setSelectedTileIds,
-    saveCanvas,
-    copyTiles,
-    pasteTiles,
-    duplicateTiles,
-  })
-
   // ─── Arrange handler ──────────────────────────────────────────────────────
   const handleArrange = useCallback((updated: TileState[]) => {
     const getArrangeWidth = (tile: TileState) => tile.width + ((tile.type === 'terminal' || tile.type === 'chat') ? 272 : 0)
@@ -1358,40 +1286,17 @@ function App(): JSX.Element {
     })
   }, [viewport, nextZIndex, saveCanvas, sidebarCollapsed, sidebarWidth, zoomToFitArrangedTiles])
 
-  // Set of tile IDs that should not render on canvas (in fullscreen panel OR in a layout group)
-  const panelTileIds = React.useMemo(() => {
-    const ids = new Set<string>()
-    if (panelLayout) getAllTileIds(panelLayout).forEach(id => ids.add(id))
-    for (const g of groups) {
-      if (g.layoutMode) {
-        tiles.filter(t => t.groupId === g.id).forEach(t => ids.add(t.id))
-      }
-    }
-    return ids
-  }, [panelLayout, groups, tiles])
-
-  useEffect(() => {
-    panelTileIdsRef.current = panelTileIds
-  }, [panelTileIds])
-
-  const tileByIdMap = React.useMemo(() => new Map(tiles.map(tile => [tile.id, tile])), [tiles])
-
-  // ─── Canvas-expand membership ─────────────────────────────────────────────
-  // When a non-layout group is expanded as a fullscreen sub-canvas, only its
-  // members (recursively) are visible. Mirrors `groupBounds`/`collectGroupTileIds`
-  // recursion semantics — descendants via parentGroupId chain count as members.
-  const expandedCanvasMembership = React.useMemo<{ tileIds: Set<string>; groupIds: Set<string> } | null>(() => {
-    if (!expandedCanvasGroupId) return null
-    const groupIds = new Set<string>()
-    const walk = (gid: string) => {
-      if (groupIds.has(gid)) return
-      groupIds.add(gid)
-      for (const child of groups) if (child.parentGroupId === gid) walk(child.id)
-    }
-    walk(expandedCanvasGroupId)
-    const tileIds = new Set(tiles.filter(t => t.groupId && groupIds.has(t.groupId)).map(t => t.id))
-    return { tileIds, groupIds }
-  }, [expandedCanvasGroupId, tiles, groups])
+  const {
+    panelTileIds,
+    tileByIdMap,
+    expandedCanvasMembership,
+  } = useAppCanvasDerivedState({
+    panelLayout,
+    groups,
+    tiles,
+    expandedCanvasGroupId,
+    panelTileIdsRef,
+  })
 
   const {
     discoveryFocusTileId,
@@ -1456,18 +1361,6 @@ function App(): JSX.Element {
     onAddTile: addTile,
     onExtensionActionsChanged: handleExtensionActionsChanged,
     getExtensionActions,
-  })
-
-  const { isConnectionLocked, toggleConnectionLock, deleteConnection } = useLockedConnectionHelpers({
-    lockedConnections,
-    persistCanvasState,
-    tilesRef,
-    groupsRef,
-    viewportRef,
-    nextZIndexRef,
-    lockedConnectionsRef,
-    setLockedConnections,
-    setSuppressedConnections,
   })
 
   const isDraggingCanvas = dragState.type === 'pan'

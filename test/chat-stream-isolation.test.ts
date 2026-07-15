@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, test, beforeEach } from 'node:test'
 import type { ChatMessage } from '../src/shared/chat-types.ts'
 import { applyChatStreamEvent } from '../src/renderer/src/hooks/chatStreamReducer.ts'
+import { mergeLiveTranscriptMessages } from '../src/renderer/src/hooks/useTileTranscriptMessages.ts'
 import {
   appendStreamingAssistantText,
   clearAllTileMessages,
@@ -123,5 +124,19 @@ describe('chat messages store isolation', () => {
     assert.ok((msgs.at(-1)?.thinkingBlocks?.length ?? 0) >= 1)
     assert.ok((msgs.at(-1)?.toolBlocks?.length ?? 0) >= 1)
     assert.ok(getTileChromeSnapshot(TILE).revision > chrome0.revision)
+  })
+
+  test('transcript projection refreshes live text without changing the structural window', () => {
+    const structural = [
+      { id: 'u1', role: 'user' as const, content: 'go', timestamp: 0 },
+      streamingAssistant(''),
+    ]
+    const live = [structural[0], streamingAssistant('streamed text')]
+
+    const merged = mergeLiveTranscriptMessages(structural, live)
+
+    assert.equal(merged.length, structural.length)
+    assert.equal(merged[0], structural[0])
+    assert.equal(merged[1]?.content, 'streamed text')
   })
 })

@@ -18,8 +18,8 @@ import {
 } from '../config/providers'
 import { getChatTileRuntimeState } from '../components/chatTileRuntimeState'
 import {
+  getTileChromeSnapshot,
   getTileMessages,
-  getTileMessagesSnapshot,
   replaceTileMessages,
   subscribeTileMessages,
   updateTileMessages,
@@ -157,12 +157,14 @@ export function useChatTileCoreState({
     }
   }
 
-  const messagesSnapshot = useSyncExternalStore(
+  useSyncExternalStore(
     (listener) => subscribeTileMessages(tileId, listener),
-    () => getTileMessagesSnapshot(tileId),
-    () => getTileMessagesSnapshot(tileId),
+    () => getTileChromeSnapshot(tileId),
+    () => getTileChromeSnapshot(tileId),
   )
-  const messages = messagesSnapshot.messages as ChatMessage[]
+  // Structural/chrome updates rerender ChatTile. Pure text growth is consumed
+  // directly by ChatTileTranscriptColumn so shell/send-path hooks stay still.
+  const messages = getTileMessages(tileId)
   const setMessages = useCallback<Dispatch<SetStateAction<ChatMessage[]>>>((updater) => {
     updateTileMessages(tileId, updater)
   }, [tileId])

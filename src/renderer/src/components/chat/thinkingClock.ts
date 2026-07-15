@@ -6,7 +6,7 @@
  * setInterval instead of N independent 250ms timers.
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 
 export const THINKING_CLOCK_TICK_MS = 250
 
@@ -64,10 +64,15 @@ function maybeClearInterval(): void {
   intervalId = null
 }
 
-function subscribeSharedClock(listener: Listener): () => void {
+export function subscribeThinkingClock(active: boolean, listener: Listener): () => void {
+  if (!active) return () => {}
   listeners.add(listener)
+  subscriberCount += 1
+  ensureInterval()
   return () => {
     listeners.delete(listener)
+    subscriberCount = Math.max(0, subscriberCount - 1)
+    maybeClearInterval()
   }
 }
 
@@ -81,27 +86,20 @@ function getSharedNowMs(): number {
  * Inactive chips do not hold the global interval open.
  */
 export function useSharedThinkingClock(active: boolean): number {
-  const [enabled, setEnabled] = useState(active)
-  // Keep enabled in sync without re-subscribing thrash mid-tick
-  useEffect(() => {
-    setEnabled(active)
-  }, [active])
-
-  useEffect(() => {
-    if (!enabled) return
-    subscriberCount += 1
-    ensureInterval()
-    return () => {
-      subscriberCount -= 1
-      maybeClearInterval()
-    }
-  }, [enabled])
+  const subscribe = useCallback(
+    (listener: Listener) => subscribeThinkingClock(active, listener),
+    [active],
+  )
 
   return useSyncExternalStore(
-    subscribeSharedClock,
+    subscribe,
     getSharedNowMs,
     getSharedNowMs,
   )
+}
+
+export function tickThinkingClockForTests(): void {
+  emit()
 }
 
 /** Test helpers */

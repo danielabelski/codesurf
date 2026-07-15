@@ -103,8 +103,8 @@ test('dispatch path builds req.model/provider from LIVE state, never from defaul
   // req.model / req.provider come from activeModel / activeProvider...
   assert.match(src, /model:\s*activeModel/, 'req.model must be the live activeModel')
   assert.match(src, /provider:\s*activeProvider/, 'req.provider must be the live activeProvider')
-  assert.match(src, /const activeModel\s*=\s*state\?\.model\s*\?\?\s*model/, 'activeModel reads the live composer model state')
-  assert.match(src, /const activeProvider\s*=\s*state\?\.provider\s*\?\?\s*provider/, 'activeProvider reads the live composer provider state')
+  assert.match(src, /const activeModel\s*=\s*model\s*\|\|\s*state\?\.model/, 'activeModel prefers the live composer model state')
+  assert.match(src, /const activeProvider\s*=\s*provider\s*\|\|\s*state\?\.provider/, 'activeProvider prefers the live composer provider state')
   // ...and the binding is NEVER consulted at dispatch (that would re-couple model
   // to identity and silently break user override).
   assert.doesNotMatch(src, /defaultBinding/, 'the dispatch path must NOT read persona.defaultBinding')
@@ -336,7 +336,8 @@ test('locked => the model + provider pills are disabled (ChatTileComposer wiring
 
 test('ChatTile computes the lock from the active persona + workspace skills and threads it to the composer', () => {
   const src = readFileSync(join(ROOT_DIR, 'src/renderer/src/components/ChatTile.tsx'), 'utf8')
-  assert.match(src, /resolveSkillModelLock\(resolvedAgentMode,\s*workspaceSkills\)/, 'must compute the lock from the active persona + workspace skills')
+  const agentModesSrc = readFileSync(join(ROOT_DIR, 'src/renderer/src/hooks/useChatTileAgentModes.ts'), 'utf8')
+  assert.match(agentModesSrc, /resolveSkillModelLock\(resolvedAgentMode,\s*workspaceSkills\)/, 'must compute the lock from the active persona + workspace skills')
   assert.match(src, /modelLocked=\{Boolean\(modelLock\)\}/, 'must thread modelLocked to the composer')
   assert.match(src, /lockReason=\{modelLock\?\.reason\}/, 'must thread the lock reason to the composer')
 })

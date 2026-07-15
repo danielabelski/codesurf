@@ -9,9 +9,9 @@ import {
   type SetStateAction,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
-import type { TileState, GroupState } from '../../../shared/types'
-import type { PanelNode } from '../components/panelLayoutTree'
-import type { CanvasViewport, SaveCanvasFn } from './canvasEngineMath'
+import type { TileState, GroupState } from '../../../shared/types.ts'
+import type { PanelNode } from '../components/panelLayoutTree.ts'
+import type { CanvasViewport, SaveCanvasFn } from './canvasEngineMath.ts'
 
 export type CanvasContextMenuItem = {
   label: string
@@ -32,6 +32,55 @@ export type UseCanvasContextMenuOptions = {
   selectedTileIds: Set<string>
   groupSelectedTiles: () => void
   setCtxMenu: Dispatch<SetStateAction<{ x: number; y: number; items: CanvasContextMenuItem[] } | null>>
+}
+
+export function buildCanvasContextMenuItems(options: {
+  world: { x: number; y: number }
+  hitGroupId?: string
+  pinnedCanvasExtensionTiles: Array<{ type: string; label: string }>
+  hasClipboard: boolean
+  selectedTileCount: number
+  addTile: UseCanvasContextMenuOptions['addTile']
+  pasteAt: UseCanvasContextMenuOptions['pasteAt']
+  groupSelectedTiles: UseCanvasContextMenuOptions['groupSelectedTiles']
+}): CanvasContextMenuItem[] {
+  const {
+    world,
+    hitGroupId,
+    pinnedCanvasExtensionTiles,
+    hasClipboard,
+    selectedTileCount,
+    addTile,
+    pasteAt,
+    groupSelectedTiles,
+  } = options
+  const items: CanvasContextMenuItem[] = [
+    { label: 'New Terminal', action: () => addTile('terminal', undefined, world) },
+    { label: 'New Note', action: () => addTile('note', undefined, world) },
+    { label: 'New Browser', action: () => addTile('browser', undefined, world) },
+    { label: 'New Board', action: () => addTile('kanban', undefined, world) },
+  ]
+  if (pinnedCanvasExtensionTiles.length > 0) {
+    items.push({ label: '', action: () => {}, divider: true })
+    for (const ext of pinnedCanvasExtensionTiles) {
+      items.push({
+        label: ext.label,
+        action: () => addTile(ext.type as TileState['type'], undefined, world),
+      })
+    }
+  }
+  if (hasClipboard) {
+    items.push({ label: '', action: () => {}, divider: true })
+    items.push({ label: 'Paste', action: () => pasteAt(world) })
+    if (hitGroupId) {
+      items.push({ label: 'Paste into group', action: () => pasteAt(world, hitGroupId) })
+    }
+  }
+  if (selectedTileCount >= 2) {
+    items.push({ label: '', action: () => {}, divider: true })
+    items.push({ label: `Group ${selectedTileCount} blocks`, action: groupSelectedTiles })
+  }
+  return items
 }
 
 export function useCanvasContextMenu(options: UseCanvasContextMenuOptions) {
@@ -57,32 +106,16 @@ export function useCanvasContextMenu(options: UseCanvasContextMenuOptions) {
       const b = groupBoundsRef.current(g.id)
       return b && world.x >= b.x && world.x <= b.x + b.w && world.y >= b.y && world.y <= b.y + b.h
     })
-    const items: CanvasContextMenuItem[] = [
-      { label: 'New Terminal', action: () => addTile('terminal', undefined, world) },
-      { label: 'New Note', action: () => addTile('note', undefined, world) },
-      { label: 'New Browser', action: () => addTile('browser', undefined, world) },
-      { label: 'New Board', action: () => addTile('kanban', undefined, world) },
-    ]
-    if (pinnedCanvasExtensionTiles.length > 0) {
-      items.push({ label: '', action: () => {}, divider: true })
-      for (const ext of pinnedCanvasExtensionTiles) {
-        items.push({
-          label: ext.label,
-          action: () => addTile(ext.type as TileState['type'], undefined, world),
-        })
-      }
-    }
-    if (clipboardRef.current.length > 0) {
-      items.push({ label: '', action: () => {}, divider: true })
-      items.push({ label: 'Paste', action: () => pasteAt(world) })
-      if (hitGroup) {
-        items.push({ label: 'Paste into group', action: () => pasteAt(world, hitGroup.id) })
-      }
-    }
-    if (selectedTileIds.size >= 2) {
-      items.push({ label: '', action: () => {}, divider: true })
-      items.push({ label: `Group ${selectedTileIds.size} blocks`, action: () => groupSelectedTiles() })
-    }
+    const items = buildCanvasContextMenuItems({
+      world,
+      hitGroupId: hitGroup?.id,
+      pinnedCanvasExtensionTiles,
+      hasClipboard: clipboardRef.current.length > 0,
+      selectedTileCount: selectedTileIds.size,
+      addTile,
+      pasteAt,
+      groupSelectedTiles,
+    })
     setCtxMenu({ x: e.clientX, y: e.clientY, items })
   }, [
     screenToWorld,

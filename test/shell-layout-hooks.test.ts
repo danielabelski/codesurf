@@ -7,6 +7,7 @@ const ROOT_DIR = process.cwd()
 const APP_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/App.tsx'), 'utf8')
 const SCROLL_FADE_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/hooks/useScrollFadeIndicators.ts'), 'utf8')
 const SHELL_LAYOUT_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/hooks/useShellLayoutMetrics.ts'), 'utf8')
+const SHELL_CHROME_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/hooks/useAppShellChrome.ts'), 'utf8')
 
 describe('wave 20 shell layout extractions', () => {
   test('App delegates scroll-fade tracking to useScrollFadeIndicators', () => {
@@ -22,8 +23,10 @@ describe('wave 20 shell layout extractions', () => {
   })
 
   test('App delegates shell layout metrics to useShellLayoutMetrics', () => {
-    expect(APP_SOURCE).toContain("from './hooks/useShellLayoutMetrics'")
-    expect(APP_SOURCE).toContain('useShellLayoutMetrics({')
+    expect(APP_SOURCE).toContain("from './hooks/useAppShellChrome'")
+    expect(APP_SOURCE).toContain('useAppShellChrome({')
+    expect(SHELL_CHROME_SOURCE).toContain("from './useShellLayoutMetrics'")
+    expect(SHELL_CHROME_SOURCE).toContain('useShellLayoutMetrics({')
     expect(APP_SOURCE).not.toContain('const mainPanelInsetEdgeShadow = theme.mode')
     expect(APP_SOURCE).not.toContain('function withAlpha(color: string, alpha: number)')
   })

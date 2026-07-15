@@ -26,5 +26,11 @@
     }
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "packages/**/*.ts"],
-  "exclude": ["node_modules", "dist", "out"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "out",
+    "packages/codesurf-relay/src/**/*.test.ts",
+    "packages/codesurf-relay/vitest.config.ts"
+  ]
 }

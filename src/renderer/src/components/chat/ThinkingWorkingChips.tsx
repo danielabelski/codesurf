@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { startTransition, useState, useEffect, useRef } from 'react'
 // useState still used by ThinkingBlockView expand + WorkingChip internals
 import { Brain, Check, ChevronRight, Cog } from 'lucide-react'
 import type { ThinkingBlock, ChatMessage, ToolBlock } from '../../../../shared/chat-types'
@@ -86,7 +86,9 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
         minWidth: 0,
       }}>
         <button
-          onClick={() => hasContent && setExpanded(e => !e)}
+          onClick={() => {
+            if (hasContent) startTransition(() => setExpanded(e => !e))
+          }}
           style={{
             background: 'none',
             border: 'none',
@@ -305,4 +307,3 @@ export const StreamingLivenessIndicator = React.memo(function StreamingLivenessI
     </div>
   )
 })
-

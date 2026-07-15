@@ -3,10 +3,10 @@ import {
   type Dispatch,
   type SetStateAction,
 } from 'react'
-import type { GroupState, TileState } from '../../../shared/types'
-import { createLeaf } from '../components/panelLayoutTree'
-import { tilesToPanelNode } from '../lib/layoutSnap'
-import type { SaveCanvasFn, CanvasViewport } from './useCanvasEngine'
+import type { GroupState, TileState } from '../../../shared/types.ts'
+import { createLeaf } from '../components/panelLayoutTree.ts'
+import { tilesToPanelNode } from '../lib/layoutSnap.ts'
+import type { SaveCanvasFn, CanvasViewport } from './useCanvasEngine.ts'
 
 export type UseCanvasGroupManagerOptions = {
   tiles: TileState[]
@@ -18,6 +18,39 @@ export type UseCanvasGroupManagerOptions = {
   setGroups: Dispatch<SetStateAction<GroupState[]>>
   setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
   saveCanvas: SaveCanvasFn
+}
+
+export function collectCanvasGroupTileIds(
+  tiles: TileState[],
+  groups: GroupState[],
+  groupId: string,
+): string[] {
+  const direct = tiles.filter(tile => tile.groupId === groupId).map(tile => tile.id)
+  const childGroups = groups.filter(group => group.parentGroupId === groupId)
+  return [
+    ...direct,
+    ...childGroups.flatMap(group => collectCanvasGroupTileIds(tiles, groups, group.id)),
+  ]
+}
+
+export function computeCanvasGroupBounds(
+  tiles: TileState[],
+  groups: GroupState[],
+  groupId: string,
+): { x: number; y: number; w: number; h: number } | null {
+  const group = groups.find(candidate => candidate.id === groupId)
+  if (group?.layoutMode && group.layoutBounds) {
+    return group.layoutBounds as { x: number; y: number; w: number; h: number }
+  }
+  const ids = new Set(collectCanvasGroupTileIds(tiles, groups, groupId))
+  const members = tiles.filter(tile => ids.has(tile.id))
+  if (members.length === 0) return null
+  const padding = 20
+  const minX = Math.min(...members.map(tile => tile.x)) - padding
+  const minY = Math.min(...members.map(tile => tile.y)) - padding
+  const maxX = Math.max(...members.map(tile => tile.x + tile.width)) + padding
+  const maxY = Math.max(...members.map(tile => tile.y + tile.height)) + padding
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
 }
 
 export function useCanvasGroupManager({
@@ -110,30 +143,11 @@ export function useCanvasGroupManager({
   }, [viewport, nextZIndex, saveCanvas, setGroups, setTiles])
 
   const groupBounds = useCallback((groupId: string): { x: number, y: number, w: number, h: number } | null => {
-    const group = groups.find(candidate => candidate.id === groupId)
-    if (group?.layoutMode && group.layoutBounds) {
-      return group.layoutBounds as { x: number, y: number, w: number, h: number }
-    }
-    const collectTileIds = (gid: string): string[] => {
-      const direct = tiles.filter(tile => tile.groupId === gid).map(tile => tile.id)
-      const childGroups = groups.filter(candidate => candidate.parentGroupId === gid)
-      return [...direct, ...childGroups.flatMap(candidate => collectTileIds(candidate.id))]
-    }
-    const ids = new Set(collectTileIds(groupId))
-    const members = tiles.filter(tile => ids.has(tile.id))
-    if (members.length === 0) return null
-    const PAD = 20
-    const minX = Math.min(...members.map(tile => tile.x)) - PAD
-    const minY = Math.min(...members.map(tile => tile.y)) - PAD
-    const maxX = Math.max(...members.map(tile => tile.x + tile.width)) + PAD
-    const maxY = Math.max(...members.map(tile => tile.y + tile.height)) + PAD
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY }
+    return computeCanvasGroupBounds(tiles, groups, groupId)
   }, [tiles, groups])
 
   const collectGroupTileIds = useCallback((groupId: string): string[] => {
-    const direct = tiles.filter(tile => tile.groupId === groupId).map(tile => tile.id)
-    const childGroups = groups.filter(group => group.parentGroupId === groupId)
-    return [...direct, ...childGroups.flatMap(group => collectGroupTileIds(group.id))]
+    return collectCanvasGroupTileIds(tiles, groups, groupId)
   }, [tiles, groups])
 
   const convertGroupToLayout = useCallback((groupId: string) => {

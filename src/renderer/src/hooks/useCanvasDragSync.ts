@@ -91,6 +91,47 @@ export type UseCanvasDragSyncOptions = {
   getMinTileHeight: (tileOrType: TileState | TileState['type']) => number
 }
 
+export function computeTileDragPosition(options: {
+  dragState: Extract<CanvasDragState, { type: 'tile' }>
+  clientX: number
+  clientY: number
+  zoom: number
+  snapValue: (value: number) => number
+}): { x: number; y: number; dx: number; dy: number } {
+  const { dragState, clientX, clientY, zoom, snapValue } = options
+  const x = snapValue(dragState.initX + (clientX - dragState.startX) / zoom)
+  const y = snapValue(dragState.initY + (clientY - dragState.startY) / zoom)
+  return { x, y, dx: x - dragState.initX, dy: y - dragState.initY }
+}
+
+export function applyResizeDragToTile(options: {
+  tile: TileState
+  dragState: Extract<CanvasDragState, { type: 'resize' }>
+  clientX: number
+  clientY: number
+  zoom: number
+  snapValue: (value: number) => number
+  minWidth: number
+  minHeight: number
+}): TileState {
+  const { tile, dragState, clientX, clientY, zoom, snapValue, minWidth, minHeight } = options
+  const wdx = (clientX - dragState.startX) / zoom
+  const wdy = (clientY - dragState.startY) / zoom
+  const { dir } = dragState
+  let { x, y, width, height } = tile
+  if (dir.includes('e')) width = Math.max(minWidth, snapValue(dragState.initW + wdx))
+  if (dir.includes('s')) height = Math.max(minHeight, snapValue(dragState.initH + wdy))
+  if (dir.includes('w')) {
+    width = Math.max(minWidth, snapValue(dragState.initW - wdx))
+    x = snapValue(dragState.initX + wdx)
+  }
+  if (dir.includes('n')) {
+    height = Math.max(minHeight, snapValue(dragState.initH - wdy))
+    y = snapValue(dragState.initY + wdy)
+  }
+  return { ...tile, x, y, width, height }
+}
+
 export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
   const {
     canvasRef,
@@ -281,12 +322,13 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           setDragState(prev => prev.type === 'connection' ? { ...prev, current, targetTileId } : prev)
         })
       } else if (dragState.type === 'tile') {
-        const wdx = dx / liveVp.zoom
-        const wdy = dy / liveVp.zoom
-        const newX = snapValue(dragState.initX + wdx)
-        const newY = snapValue(dragState.initY + wdy)
-        const ddx = newX - dragState.initX
-        const ddy = newY - dragState.initY
+        const { x: newX, y: newY, dx: ddx, dy: ddy } = computeTileDragPosition({
+          dragState,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          zoom: liveVp.zoom,
+          snapValue,
+        })
         const dragging = tilesRef.current.find(t => t.id === dragState.tileId)
         if (!dragging) return
 
@@ -341,19 +383,18 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
       } else if (dragState.type === 'resize') {
         scheduleDragUpdate(() => {
           const vp = pendingViewportRef.current
-          const wdx = dx / vp.zoom
-          const wdy = dy / vp.zoom
-          const dir = dragState.dir
           setTiles(prev => prev.map(t => {
             if (t.id !== dragState.tileId) return t
-            const minW = getMinTileWidth(t)
-            const minH = getMinTileHeight(t)
-            let { x, y, width: w, height: h } = t
-            if (dir.includes('e')) w = Math.max(minW, snapValue(dragState.initW + wdx))
-            if (dir.includes('s')) h = Math.max(minH, snapValue(dragState.initH + wdy))
-            if (dir.includes('w')) { w = Math.max(minW, snapValue(dragState.initW - wdx)); x = snapValue(dragState.initX + wdx) }
-            if (dir.includes('n')) { h = Math.max(minH, snapValue(dragState.initH - wdy)); y = snapValue(dragState.initY + wdy) }
-            return { ...t, x, y, width: w, height: h }
+            return applyResizeDragToTile({
+              tile: t,
+              dragState,
+              clientX: e.clientX,
+              clientY: e.clientY,
+              zoom: vp.zoom,
+              snapValue,
+              minWidth: getMinTileWidth(t),
+              minHeight: getMinTileHeight(t),
+            })
           }))
         })
       }

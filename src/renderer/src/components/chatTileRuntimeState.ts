@@ -1,3 +1,5 @@
+import { clearTileMessages } from './chat/chatMessagesStore.ts'
+
 const chatTileRuntimeState = new Map<string, unknown>()
 const disposedChatTileIds = new Set<string>()
 // The tombstone set only needs to reject late async writes that race a recent
@@ -18,6 +20,7 @@ export function setChatTileRuntimeState<T>(tileId: string, state: T): void {
 export function disposeChatTileRuntimeState(tileId: string): void {
   disposedChatTileIds.add(tileId)
   chatTileRuntimeState.delete(tileId)
+  clearTileMessages(tileId)
   if (disposedChatTileIds.size > DISPOSED_TOMBSTONE_CAP) {
     // Sets preserve insertion order; evict the oldest tombstone.
     const oldest = disposedChatTileIds.values().next().value
