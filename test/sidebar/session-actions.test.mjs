@@ -26,9 +26,10 @@ test('conversation archive action is not tiny', () => {
   assert.ok(getSessionRowExtraWidth(1, true) > getSessionRowExtraWidth(1))
 })
 
-test('Sidebar declares archive mutation callback before menu actions that capture it', async () => {
-  const sidebarPath = join(ROOT_DIR, 'src/renderer/src/components/Sidebar.tsx')
-  const source = await readFile(sidebarPath, 'utf8')
+test('Sidebar controller declares archive mutation callback before menu actions that capture it', async () => {
+  // Session model lives in useSidebarController after the Sidebar split.
+  const controllerPath = join(ROOT_DIR, 'src/renderer/src/components/sidebar/useSidebarController.tsx')
+  const source = await readFile(controllerPath, 'utf8')
   const archiveCallbackIndex = source.indexOf('const setSessionArchived = useCallback(')
   const menuCallbackIndex = source.indexOf('const sessionContextMenuItems = useCallback(')
 
