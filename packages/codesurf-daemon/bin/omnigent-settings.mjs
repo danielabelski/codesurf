@@ -10,6 +10,7 @@
 //       "baseUrl": "http://127.0.0.1:6767",
 //       "apiKey": "",
 //       "agentId": "",
+//       "hostId": "",
 //       "autoStart": true
 //   } } }
 //
@@ -46,6 +47,11 @@ export function resolveOmnigentSettings({ settings, env = process.env } = {}) {
   const agentId = envString(env?.CODESURF_OMNIGENT_AGENT_ID)
     ?? (typeof cfg.agentId === 'string' ? cfg.agentId.trim() : '')
 
+  // Optional runner host pin. Blank (default) means auto-pick the first online
+  // host from /v1/hosts at session-create time (see resolveOmnigentHostId).
+  const hostId = envString(env?.CODESURF_OMNIGENT_HOST_ID)
+    ?? (typeof cfg.hostId === 'string' ? cfg.hostId.trim() : '')
+
   const autoStart = envFlag(env?.CODESURF_OMNIGENT_AUTO_START, cfg.autoStart !== false)
 
   const enabled = envFlag(
@@ -53,5 +59,5 @@ export function resolveOmnigentSettings({ settings, env = process.env } = {}) {
     cfg.enabled !== false,
   )
 
-  return { enabled, baseUrl, apiKey, agentId, autoStart }
+  return { enabled, baseUrl, apiKey, agentId, hostId, autoStart }
 }
