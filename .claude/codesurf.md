@@ -1,48 +1,42 @@
 <!-- codesurf-managed -->
 # CodeSurf Canvas Agent
 
-You are running inside CodeSurf, an infinite canvas workspace where multiple AI agents collaborate.
-Your block ID is available as the environment variable `CARD_ID`.
+You are running inside CodeSurf, an infinite canvas workspace where multiple AI agents share agent rooms.
+Your block ID is the environment variable `CARD_ID`. Wires on the canvas put you in a room with other blocks.
 
 ## MANDATORY: First Action on Every Session
 
-Before doing ANYTHING else, you MUST run these two commands:
-
 ```
-1. mcp__codesurf__peer_set_state(tile_id=$CARD_ID, tile_type="terminal", status="idle", task="Ready")
-2. mcp__codesurf__peer_get_state(tile_id=$CARD_ID)
+1. mcp__codesurf__room_status(tile_id=$CARD_ID)
+2. mcp__codesurf__peer_set_state(tile_id=$CARD_ID, tile_type="terminal", status="idle", task="Ready")
+3. mcp__codesurf__room_consume(tile_id=$CARD_ID)   # if unconsumed > 0
 ```
 
-This registers you with the collaboration system and shows you who else is working.
+Also read `~/.codesurf/room-inboxes/$CARD_ID/ROOM.md` for a live inbox dump.
 
-## Peer Collaboration Protocol
+## Agent Room Protocol
 
 **When you receive a task:**
-1. Call `peer_set_state` with status "working" and describe your task
-2. Call `peer_get_state` to check what linked peers are doing
-3. If a peer lists the same files in their state, call `peer_send_message` to coordinate BEFORE editing
+1. `peer_set_state` status=working with a short task description
+2. `room_status` / `peer_get_state` to see room members
+3. `room_post` kind=task|handoff when another block should act
+4. Prefer room traffic over guessing what peers are doing
 
 **During work:**
-- Call `peer_set_state` whenever you switch files or tasks
-- Call `peer_read_messages` to check for incoming messages from peers
-- Use `peer_add_todo` for work you need a peer to handle
-- When you see a `[codesurf]` notification, call `peer_read_messages` immediately
+- `room_consume` when you need pending peer traffic
+- `room_post` for findings, blockers, questions
+- `peer_set_state` when files/tasks change
 
 **On completion:**
-- Call `peer_set_state` with status "done" and a summary
-- Call `peer_complete_todo` for any todos you finished
+- `peer_set_state` status=done
+- `room_post` kind=summary with what you finished
 
 **File conflict rule:**
-NEVER edit a file that a linked peer lists in their `files` array. Send them a `peer_send_message` first and wait for coordination.
+NEVER edit a file another room member lists in their files without `room_post` / `peer_send_message` coordination first.
 
-## Available Tool Prefixes
+## Tool prefix
 
-All codesurf tools use the prefix `mcp__codesurf__`. Examples:
-- `mcp__codesurf__peer_set_state` — declare your state
-- `mcp__codesurf__peer_get_state` — read peer states
-- `mcp__codesurf__peer_send_message` — message a peer
-- `mcp__codesurf__peer_read_messages` — read your messages
-- `mcp__codesurf__peer_add_todo` / `peer_complete_todo` — shared todos
-- `mcp__codesurf__canvas_create_tile` — create blocks on the canvas
-- `mcp__codesurf__terminal_send_input` — type into a peer terminal block
-- `mcp__codesurf__chat_send_message` — message a peer chat block
+All tools: `mcp__codesurf__*`
+- room_status / room_post / room_consume
+- peer_set_state / peer_get_state / peer_send_message
+- canvas_* / terminal_send_input / chat_send_message
