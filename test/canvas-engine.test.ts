@@ -13,7 +13,7 @@ import {
   SNAP_THRESHOLD,
   HISTORY_MAX_ENTRIES,
   shouldSpawnTileOnCanvasDoubleClick,
-} from '../src/renderer/src/hooks/useCanvasEngine.ts'
+} from '../src/renderer/src/hooks/canvasEngineMath.ts'
 import type { TileState } from '../src/shared/types.ts'
 
 describe('clampCanvasZoom', () => {

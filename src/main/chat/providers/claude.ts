@@ -13,10 +13,10 @@ import { formatClaudeSdkError } from '../output-sanitizers'
 import { buildAsyncExecutionPrompt, buildPeerSystemPrompt } from '../prompt-builders'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import { buildClaudeAgentModeOptions } from './agent-mode-payloads'
-import { daemonClient } from '../../daemon/client'
 import { getDisconnectedPeerBridgeMcpToolNames } from '../../../shared/nodeTools'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
+import { createRuntimeCheckpoint } from '../runtime-checkpoints'
 import type {
   ChatImageAttachment,
   ChatRequest,
@@ -131,10 +131,7 @@ export function cancelPendingAskUserQuestionsForCard(cardId: string, reason: str
 }
 
 // --- Runtime checkpoints (Anthropic Edit/Write tools) ---------------------------
-
-function buildRuntimeSessionEntryId(req: ChatRequest): string {
-  return `codesurf-runtime:${req.cardId}`
-}
+// createRuntimeCheckpoint is shared (../runtime-checkpoints). Path extractors stay Claude-specific.
 
 function displayPathForWorkspace(absPath: string, workspaceDir: string | null | undefined): string {
   if (!absPath) return ''
@@ -148,12 +145,6 @@ function displayPathForWorkspace(absPath: string, workspaceDir: string | null | 
 function resolveAnthropicFilePath(filePath: string, workspaceDir?: string): string {
   if (workspaceDir && !filePath.startsWith('/')) return resolve(workspaceDir, filePath)
   return resolve(filePath)
-}
-
-function buildCheckpointLabel(toolName: string, filePaths: string[], workspaceDir?: string): string {
-  if (filePaths.length === 0) return `Before ${toolName}`
-  if (filePaths.length === 1) return `Before ${toolName} ${displayPathForWorkspace(filePaths[0], workspaceDir)}`
-  return `Before ${toolName} (${filePaths.length} files)`
 }
 
 function extractAnthropicCheckpointPaths(toolName: string, input: Record<string, unknown>, workspaceDir?: string): string[] {
@@ -173,57 +164,6 @@ function extractAnthropicCheckpointPaths(toolName: string, input: Record<string,
   }
 
   return []
-}
-
-function emitCheckpointSaved(
-  req: ChatRequest,
-  toolName: string,
-  filePaths: string[],
-  checkpointId: string,
-): void {
-  const displayPaths = filePaths.slice(0, 2).map(filePath => displayPathForWorkspace(filePath, req.workspaceDir))
-  const suffix = filePaths.length > 2 ? ` +${filePaths.length - 2} more` : ''
-  const summary = `Saved checkpoint before ${toolName}${displayPaths.length > 0 ? ` for ${displayPaths.join(', ')}${suffix}` : ''}`
-  const toolId = `codesurf-checkpoint-${checkpointId}`
-  sendStream(req.cardId, { type: 'tool_start', toolId, toolName: 'Checkpoint saved' })
-  sendStream(req.cardId, { type: 'tool_summary', toolId, toolName: 'Checkpoint saved', text: summary })
-}
-
-async function createRuntimeCheckpoint(
-  req: ChatRequest,
-  toolName: string,
-  filePaths: string[],
-  metadata: Record<string, unknown> = {},
-): Promise<{ ok: boolean; checkpointId?: string; skipped?: boolean; error?: string }> {
-  if (filePaths.length === 0) return { ok: true, skipped: true }
-  if (!req.workspaceId) return { ok: true, skipped: true }
-
-  try {
-    const response = await daemonClient.createCheckpoint(req.workspaceId, buildRuntimeSessionEntryId(req), {
-      label: buildCheckpointLabel(toolName, filePaths, req.workspaceDir),
-      reason: `tool:${toolName}`,
-      files: filePaths,
-      metadata: {
-        provider: req.provider,
-        model: req.model,
-        toolName,
-        cardId: req.cardId,
-        ...metadata,
-      },
-      source: 'main-ipc-chat',
-    })
-    if (!response.ok) {
-      return { ok: false, error: response.error ?? `Failed to create checkpoint for ${toolName}` }
-    }
-    if (response.checkpoint?.id) {
-      emitCheckpointSaved(req, toolName, filePaths, response.checkpoint.id)
-    }
-    return { ok: true, checkpointId: response.checkpoint?.id }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    log('createRuntimeCheckpoint error', req.cardId, toolName, message)
-    return { ok: false, error: message }
-  }
 }
 
 type ToolCheckpointPermissionResult =

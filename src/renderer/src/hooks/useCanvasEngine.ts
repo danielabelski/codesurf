@@ -3,6 +3,9 @@
  *
  * Extracted from App.tsx (TASK-W4-A). Owns canvas viewport state, world/screen
  * transforms, debounced persistence, and history stacks.
+ *
+ * Pointer/menu/lock helpers live in sibling modules and are re-exported here
+ * so existing App imports keep working.
  */
 
 import {
@@ -15,12 +18,10 @@ import {
   type Dispatch,
   type SetStateAction,
   type MutableRefObject,
-  type MouseEvent as ReactMouseEvent,
   type WheelEvent as ReactWheelEvent,
 } from 'react'
 import type { TileState, GroupState, CanvasState, Workspace } from '../../../shared/types'
 import type { PanelNode } from '../components/panelLayoutTree'
-import type { CanvasAnchorPoint, CanvasAnchorSide, CanvasDragState } from './useCanvasDragSync.ts'
 import {
   applyCanvasHistoryRedo,
   applyCanvasHistoryUndo,
@@ -29,51 +30,54 @@ import {
   type CanvasHistoryEntry,
 } from './canvasHistory.ts'
 import { perfFlags } from '../perfFlags.ts'
+import {
+  DEFAULT_CANVAS_VIEWPORT,
+  type CanvasViewport,
+  clampCanvasZoom,
+  connectionSnapPadding,
+  zoomAtPoint,
+  computeFitViewport,
+  computeArrangeFitViewport,
+  computePanToTileViewport,
+  screenToWorldPoint,
+  worldToScreenPoint,
+  worldToScreenRect,
+  type PersistCanvasStateFn,
+  type SaveCanvasFn,
+  ZOOM_WHEEL_FACTOR_IN,
+  ZOOM_WHEEL_FACTOR_OUT,
+  CANVAS_SAVE_DEBOUNCE_MS,
+  HISTORY_MAX_ENTRIES,
+} from './canvasEngineMath'
 
-// ─── Canvas constants ───────────────────────────────────────────────────────
-
-/** Screen-space snap padding for manual connection targets (divided by zoom at runtime). */
-export const SNAP_THRESHOLD = 34
-
-export const MIN_CANVAS_ZOOM = 0.25
-export const MAX_CANVAS_ZOOM = 2
-export const ZOOM_WHEEL_FACTOR_IN = 1.08
-export const ZOOM_WHEEL_FACTOR_OUT = 0.92
-export const CANVAS_SAVE_DEBOUNCE_MS = 500
-export const HISTORY_MAX_ENTRIES = 50
-export const FIT_VIEWPORT_PAD_PX = 48
-export const FIT_VIEWPORT_MAX_ZOOM = 1.5
-export const ARRANGE_FIT_PAD_PX = 60
-export const ARRANGE_FIT_ZOOM_SCALE = 0.9
-
-/** True when double-click should spawn a tile on empty canvas (BUG-13). */
-export function shouldSpawnTileOnCanvasDoubleClick(target: { closest: (selector: string) => Element | null }): boolean {
-  if (target.closest('[data-tile-chrome]')) return false
-  if (target.closest('[data-canvas-group-frame]')) return false
-  return true
-}
-
-export type CanvasViewport = { tx: number; ty: number; zoom: number }
-
-export const DEFAULT_CANVAS_VIEWPORT: CanvasViewport = { tx: 0, ty: 0, zoom: 1 }
+export {
+  SNAP_THRESHOLD,
+  MIN_CANVAS_ZOOM,
+  MAX_CANVAS_ZOOM,
+  ZOOM_WHEEL_FACTOR_IN,
+  ZOOM_WHEEL_FACTOR_OUT,
+  CANVAS_SAVE_DEBOUNCE_MS,
+  HISTORY_MAX_ENTRIES,
+  FIT_VIEWPORT_PAD_PX,
+  FIT_VIEWPORT_MAX_ZOOM,
+  ARRANGE_FIT_PAD_PX,
+  ARRANGE_FIT_ZOOM_SCALE,
+  DEFAULT_CANVAS_VIEWPORT,
+  shouldSpawnTileOnCanvasDoubleClick,
+  clampCanvasZoom,
+  connectionSnapPadding,
+  zoomAtPoint,
+  computeFitViewport,
+  computeArrangeFitViewport,
+  computePanToTileViewport,
+  screenToWorldPoint,
+  worldToScreenPoint,
+  worldToScreenRect,
+  type CanvasViewport,
+} from './canvasEngineMath'
 
 export type { CanvasHistoryEntry } from './canvasHistory.ts'
-
-export type PersistCanvasStateFn = (
-  tileList: TileState[],
-  vp: CanvasViewport,
-  nz: number,
-  grps?: GroupState[],
-) => void
-
-export type SaveCanvasFn = (
-  tileList: TileState[],
-  vp: CanvasViewport,
-  nz: number,
-  grps?: GroupState[],
-  /** Pre-drag snapshot — pass when tilesRef already holds final positions (H-11 fix). */
-  beforeTiles?: TileState[],
-) => void
+export type { PersistCanvasStateFn, SaveCanvasFn } from './canvasEngineMath'
 
 export type CanvasEnginePersistRefs = {
   tilesRef: MutableRefObject<TileState[]>
@@ -104,112 +108,6 @@ export type UseCanvasEngineOptions = {
   initialNextZIndex?: number
 }
 
-// ─── Pure helpers ─────────────────────────────────────────────────────────────
-
-export function clampCanvasZoom(zoom: number): number {
-  return Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, zoom))
-}
-
-export function connectionSnapPadding(zoom: number): number {
-  return SNAP_THRESHOLD / Math.max(MIN_CANVAS_ZOOM, zoom)
-}
-
-export function zoomAtPoint(
-  viewport: CanvasViewport,
-  mx: number,
-  my: number,
-  newZoom: number,
-): CanvasViewport {
-  const clamped = clampCanvasZoom(newZoom)
-  const wx = (mx - viewport.tx) / viewport.zoom
-  const wy = (my - viewport.ty) / viewport.zoom
-  return {
-    tx: mx - wx * clamped,
-    ty: my - wy * clamped,
-    zoom: clamped,
-  }
-}
-
-export function computeFitViewport(
-  bounds: { x: number; y: number; w: number; h: number },
-  screen: { w: number; h: number },
-): CanvasViewport {
-  const availW = Math.max(1, screen.w - FIT_VIEWPORT_PAD_PX * 2)
-  const availH = Math.max(1, screen.h - FIT_VIEWPORT_PAD_PX * 2)
-  const zoom = Math.min(FIT_VIEWPORT_MAX_ZOOM, availW / bounds.w, availH / bounds.h)
-  const tx = (screen.w - bounds.w * zoom) / 2 - bounds.x * zoom
-  const ty = (screen.h - bounds.h * zoom) / 2 - bounds.y * zoom
-  return { tx, ty, zoom }
-}
-
-export function computeArrangeFitViewport(
-  tiles: TileState[],
-  screen: { w: number; h: number },
-  sidebarOffset: number,
-  getArrangeWidth: (tile: TileState) => number,
-): CanvasViewport | null {
-  if (tiles.length === 0) return null
-  const availableWidth = screen.w - sidebarOffset
-  const minX = Math.min(...tiles.map(t => t.x))
-  const minY = Math.min(...tiles.map(t => t.y))
-  const maxX = Math.max(...tiles.map(t => t.x + getArrangeWidth(t)))
-  const maxY = Math.max(...tiles.map(t => t.y + t.height))
-  const fitZoom = Math.min(
-    availableWidth / (maxX - minX + ARRANGE_FIT_PAD_PX * 2),
-    screen.h / (maxY - minY + ARRANGE_FIT_PAD_PX * 2),
-    MAX_CANVAS_ZOOM,
-  )
-  const newZoom = fitZoom * ARRANGE_FIT_ZOOM_SCALE
-  const centerX = sidebarOffset + availableWidth / 2
-  const tx = centerX - ((minX + maxX) / 2) * newZoom
-  const ty = screen.h / 2 - ((minY + maxY) / 2) * newZoom
-  return { tx, ty, zoom: newZoom }
-}
-
-export function computePanToTileViewport(
-  tile: Pick<TileState, 'x' | 'y' | 'width' | 'height'>,
-  screen: { w: number; h: number },
-  currentZoom: number,
-): Pick<CanvasViewport, 'tx' | 'ty'> {
-  return {
-    tx: screen.w / 2 - (tile.x + tile.width / 2) * currentZoom,
-    ty: screen.h / 2 - (tile.y + tile.height / 2) * currentZoom,
-  }
-}
-
-export function screenToWorldPoint(
-  sx: number,
-  sy: number,
-  rect: DOMRect,
-  viewport: CanvasViewport,
-): { x: number; y: number } {
-  return {
-    x: (sx - rect.left - viewport.tx) / viewport.zoom,
-    y: (sy - rect.top - viewport.ty) / viewport.zoom,
-  }
-}
-
-export function worldToScreenPoint(
-  point: { x: number; y: number },
-  viewport: CanvasViewport,
-): { x: number; y: number } {
-  return {
-    x: point.x * viewport.zoom + viewport.tx,
-    y: point.y * viewport.zoom + viewport.ty,
-  }
-}
-
-export function worldToScreenRect(
-  tile: TileState,
-  viewport: CanvasViewport,
-): { left: number; top: number; width: number; height: number } {
-  return {
-    left: tile.x * viewport.zoom + viewport.tx,
-    top: tile.y * viewport.zoom + viewport.ty,
-    width: tile.width * viewport.zoom,
-    height: tile.height * viewport.zoom,
-  }
-}
 
 function buildCanvasStatePayload(
   tileList: TileState[],
@@ -865,6 +763,32 @@ export function useCanvasEngine(options: UseCanvasEngineOptions): UseCanvasEngin
   }
 }
 
+
+// Sibling modules (split from this file) — stable public surface for App.tsx
+export {
+  useCanvasPointerHandlers,
+  useConnectionHandleHover,
+  type UseCanvasPointerHandlersOptions,
+  type UseConnectionHandleHoverOptions,
+} from './useCanvasPointerHandlers'
+export {
+  useCanvasContextMenu,
+  useTileContextMenu,
+  type CanvasContextMenuItem,
+  type UseCanvasContextMenuOptions,
+  type UseTileContextMenuOptions,
+} from './useCanvasContextMenus'
+export {
+  useCanvasExpandedGroup,
+  useLockConnection,
+  useEnforceTileMinimumSizes,
+  useLockedConnectionHelpers,
+  type UseCanvasExpandedGroupOptions,
+  type UseLockConnectionOptions,
+  type UseEnforceTileMinimumSizesOptions,
+  type UseLockedConnectionHelpersOptions,
+} from './useCanvasConnectionLock'
+
 export {
   ALIGN_GUIDE_THRESH,
   computeAlignmentGuides,
@@ -876,611 +800,3 @@ export {
   type UseCanvasDragSyncOptions,
 } from './useCanvasDragSync.ts'
 
-// ─── Canvas surface mouse handlers ───────────────────────────────────────────
-
-export type UseCanvasPointerHandlersOptions = {
-  canvasRef: RefObject<HTMLDivElement | null>
-  viewport: CanvasViewport
-  setDragState: Dispatch<SetStateAction<CanvasDragState>>
-  setSelectedTileId: Dispatch<SetStateAction<string | null>>
-  setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
-  panLastPos: MutableRefObject<{ x: number; y: number; t: number }>
-  cancelPanInertia: () => void
-  screenToWorld: (sx: number, sy: number) => { x: number; y: number }
-  spaceHeld: MutableRefObject<boolean>
-  bringToFront: (id: string) => void
-  getConnectionHandlePoint: (tile: TileState, side: CanvasAnchorSide) => CanvasAnchorPoint
-  panelLayout: PanelNode | null
-  addTile: (type: TileState['type'], filePath?: string, pos?: { x: number; y: number }) => string
-}
-
-export function useCanvasPointerHandlers(options: UseCanvasPointerHandlersOptions) {
-  const {
-    canvasRef,
-    viewport,
-    setDragState,
-    setSelectedTileId,
-    setSelectedTileIds,
-    panLastPos,
-    cancelPanInertia,
-    screenToWorld,
-    spaceHeld,
-    bringToFront,
-    getConnectionHandlePoint,
-    panelLayout,
-    addTile,
-  } = options
-
-  const handleCanvasMouseDown = useCallback((e: ReactMouseEvent) => {
-    const t = e.target as HTMLElement
-    if (t.closest('[data-tile-chrome]')) return
-    e.preventDefault()
-    const isPan = e.button === 1 || (e.button === 0 && (e.metaKey || spaceHeld.current))
-    if (isPan) {
-      cancelPanInertia()
-      panLastPos.current = { x: e.clientX, y: e.clientY, t: performance.now() }
-      setDragState({ type: 'pan', startX: e.clientX, startY: e.clientY, initTx: viewport.tx, initTy: viewport.ty })
-      setSelectedTileId(null)
-      return
-    }
-    if (e.button === 0) {
-      const rect = canvasRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const wx = (e.clientX - rect.left - viewport.tx) / viewport.zoom
-      const wy = (e.clientY - rect.top - viewport.ty) / viewport.zoom
-      setDragState({ type: 'select', startWx: wx, startWy: wy, curWx: wx, curWy: wy })
-      setSelectedTileIds(new Set())
-      setSelectedTileId(null)
-    }
-  }, [canvasRef, viewport, setDragState, setSelectedTileId, setSelectedTileIds, panLastPos, cancelPanInertia, spaceHeld])
-
-  const handleConnectionMouseDown = useCallback((
-    e: ReactMouseEvent,
-    tile: TileState,
-    side: CanvasAnchorSide,
-  ) => {
-    e.stopPropagation()
-    e.preventDefault()
-    bringToFront(tile.id)
-    const anchor = getConnectionHandlePoint(tile, side)
-    setDragState({
-      type: 'connection',
-      sourceTileId: tile.id,
-      startX: e.clientX,
-      startY: e.clientY,
-      side,
-      anchor,
-      current: screenToWorld(e.clientX, e.clientY),
-      targetTileId: null,
-    })
-  }, [bringToFront, getConnectionHandlePoint, screenToWorld, setDragState])
-
-  const handleResizeMouseDown = useCallback((
-    e: ReactMouseEvent,
-    tile: TileState,
-    dir: 'e' | 's' | 'se' | 'w' | 'n' | 'nw' | 'ne' | 'sw',
-  ) => {
-    e.stopPropagation()
-    e.preventDefault()
-    setDragState({
-      type: 'resize',
-      tileId: tile.id,
-      dir,
-      startX: e.clientX,
-      startY: e.clientY,
-      initX: tile.x,
-      initY: tile.y,
-      initW: tile.width,
-      initH: tile.height,
-    })
-  }, [setDragState])
-
-  const handleCanvasDoubleClick = useCallback((e: ReactMouseEvent) => {
-    if (panelLayout) return
-    const target = e.target as HTMLElement
-    if (!shouldSpawnTileOnCanvasDoubleClick(target)) return
-    const world = screenToWorld(e.clientX, e.clientY)
-    addTile('terminal', undefined, world)
-  }, [panelLayout, screenToWorld, addTile])
-
-  const handleTileMouseDown = useCallback((e: ReactMouseEvent, tile: TileState) => {
-    e.stopPropagation()
-    bringToFront(tile.id)
-    setDragState({
-      type: 'tile',
-      tileId: tile.id,
-      startX: e.clientX,
-      startY: e.clientY,
-      initX: tile.x,
-      initY: tile.y,
-      groupSnapshots: [],
-    })
-  }, [bringToFront, setDragState])
-
-  return {
-    handleCanvasMouseDown,
-    handleConnectionMouseDown,
-    handleResizeMouseDown,
-    handleCanvasDoubleClick,
-    handleTileMouseDown,
-  }
-}
-
-export type UseConnectionHandleHoverOptions = {
-  setHoveredConnectionHandle: Dispatch<SetStateAction<{ tileId: string; side: CanvasAnchorSide } | null>>
-}
-
-export function useConnectionHandleHover(options: UseConnectionHandleHoverOptions) {
-  const { setHoveredConnectionHandle } = options
-  const connectionHandleHideTimerRef = useRef<number | null>(null)
-
-  const showConnectionHandleForSide = useCallback((tileId: string, side: CanvasAnchorSide) => {
-    if (connectionHandleHideTimerRef.current !== null) {
-      window.clearTimeout(connectionHandleHideTimerRef.current)
-      connectionHandleHideTimerRef.current = null
-    }
-    setHoveredConnectionHandle({ tileId, side })
-  }, [setHoveredConnectionHandle])
-
-  const scheduleConnectionHandleHide = useCallback((tileId: string, side: CanvasAnchorSide) => {
-    if (connectionHandleHideTimerRef.current !== null) {
-      window.clearTimeout(connectionHandleHideTimerRef.current)
-    }
-    connectionHandleHideTimerRef.current = window.setTimeout(() => {
-      connectionHandleHideTimerRef.current = null
-      setHoveredConnectionHandle(prev => prev?.tileId === tileId && prev.side === side ? null : prev)
-    }, 140)
-  }, [setHoveredConnectionHandle])
-
-  useEffect(() => () => {
-    if (connectionHandleHideTimerRef.current !== null) {
-      window.clearTimeout(connectionHandleHideTimerRef.current)
-      connectionHandleHideTimerRef.current = null
-    }
-  }, [])
-
-  return { showConnectionHandleForSide, scheduleConnectionHandleHide }
-}
-
-export type CanvasContextMenuItem = {
-  label: string
-  action: () => void
-  divider?: boolean
-  danger?: boolean
-}
-
-export type UseCanvasContextMenuOptions = {
-  screenToWorld: (sx: number, sy: number) => { x: number; y: number }
-  panelLayout: PanelNode | null
-  groups: GroupState[]
-  groupBoundsRef: MutableRefObject<(id: string) => { x: number; y: number; w: number; h: number } | null>
-  addTile: (type: TileState['type'], filePath?: string, pos?: { x: number; y: number }) => string
-  pinnedCanvasExtensionTiles: Array<{ type: string; label: string }>
-  clipboardRef: MutableRefObject<TileState[]>
-  pasteAt: (pos: { x: number; y: number }, groupId?: string) => void
-  selectedTileIds: Set<string>
-  groupSelectedTiles: () => void
-  setCtxMenu: Dispatch<SetStateAction<{ x: number; y: number; items: CanvasContextMenuItem[] } | null>>
-}
-
-export function useCanvasContextMenu(options: UseCanvasContextMenuOptions) {
-  const {
-    screenToWorld,
-    panelLayout,
-    groups,
-    groupBoundsRef,
-    addTile,
-    pinnedCanvasExtensionTiles,
-    clipboardRef,
-    pasteAt,
-    selectedTileIds,
-    groupSelectedTiles,
-    setCtxMenu,
-  } = options
-
-  return useCallback((e: ReactMouseEvent) => {
-    e.preventDefault()
-    if (panelLayout) return
-    const world = screenToWorld(e.clientX, e.clientY)
-    const hitGroup = groups.find(g => {
-      const b = groupBoundsRef.current(g.id)
-      return b && world.x >= b.x && world.x <= b.x + b.w && world.y >= b.y && world.y <= b.y + b.h
-    })
-    const items: CanvasContextMenuItem[] = [
-      { label: 'New Terminal', action: () => addTile('terminal', undefined, world) },
-      { label: 'New Note', action: () => addTile('note', undefined, world) },
-      { label: 'New Browser', action: () => addTile('browser', undefined, world) },
-      { label: 'New Board', action: () => addTile('kanban', undefined, world) },
-    ]
-    if (pinnedCanvasExtensionTiles.length > 0) {
-      items.push({ label: '', action: () => {}, divider: true })
-      for (const ext of pinnedCanvasExtensionTiles) {
-        items.push({
-          label: ext.label,
-          action: () => addTile(ext.type as TileState['type'], undefined, world),
-        })
-      }
-    }
-    if (clipboardRef.current.length > 0) {
-      items.push({ label: '', action: () => {}, divider: true })
-      items.push({ label: 'Paste', action: () => pasteAt(world) })
-      if (hitGroup) {
-        items.push({ label: 'Paste into group', action: () => pasteAt(world, hitGroup.id) })
-      }
-    }
-    if (selectedTileIds.size >= 2) {
-      items.push({ label: '', action: () => {}, divider: true })
-      items.push({ label: `Group ${selectedTileIds.size} blocks`, action: () => groupSelectedTiles() })
-    }
-    setCtxMenu({ x: e.clientX, y: e.clientY, items })
-  }, [
-    screenToWorld,
-    panelLayout,
-    groups,
-    groupBoundsRef,
-    addTile,
-    pinnedCanvasExtensionTiles,
-    clipboardRef,
-    pasteAt,
-    selectedTileIds,
-    groupSelectedTiles,
-    setCtxMenu,
-  ])
-}
-
-export type UseTileContextMenuOptions = {
-  viewport: CanvasViewport
-  nextZIndex: number
-  groups: GroupState[]
-  workspacePath: string | null | undefined
-  saveCanvas: SaveCanvasFn
-  setTiles: Dispatch<SetStateAction<TileState[]>>
-  setSelectedTileId: Dispatch<SetStateAction<string | null>>
-  setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
-  setCtxMenu: Dispatch<SetStateAction<{ x: number; y: number; items: CanvasContextMenuItem[] } | null>>
-  clipboardRef: MutableRefObject<TileState[]>
-  duplicateTiles: (ids: string[]) => void
-  copyTiles: (cut: boolean) => void
-  pasteTiles: (pos?: { x: number; y: number }, groupId?: string) => void
-  ungroupTiles: (groupId: string) => void
-  ungroupAll: (groupId: string) => void
-  closeTile: (id: string) => void
-  importFileToWorkspace: (filePath: string, tileId: string) => void | Promise<unknown>
-}
-
-export function useTileContextMenu(options: UseTileContextMenuOptions) {
-  const {
-    viewport,
-    nextZIndex,
-    groups,
-    workspacePath,
-    saveCanvas,
-    setTiles,
-    setSelectedTileId,
-    setSelectedTileIds,
-    setCtxMenu,
-    clipboardRef,
-    duplicateTiles,
-    copyTiles,
-    pasteTiles,
-    ungroupTiles,
-    ungroupAll,
-    closeTile,
-    importFileToWorkspace,
-  } = options
-
-  return useCallback((e: ReactMouseEvent, tile: TileState) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const items: CanvasContextMenuItem[] = [
-      { label: 'Duplicate', action: () => duplicateTiles([tile.id]) },
-      { label: 'Copy', action: () => { setSelectedTileId(tile.id); setSelectedTileIds(new Set()); copyTiles(false) } },
-      { label: 'Cut', action: () => { setSelectedTileId(tile.id); setSelectedTileIds(new Set()); copyTiles(true) } },
-    ]
-    if (clipboardRef.current.length > 0) {
-      items.push({ label: '', action: () => {}, divider: true })
-      items.push({ label: 'Paste', action: () => pasteTiles() })
-      if (tile.groupId) {
-        items.push({ label: 'Paste into this group', action: () => pasteTiles(undefined, tile.groupId) })
-      }
-    }
-    items.push({ label: '', action: () => {}, divider: true })
-    if (tile.groupId) {
-      items.push({ label: 'Remove from group', action: () => {
-        setTiles(prev => {
-          const updated = prev.map(t => t.id === tile.id ? { ...t, groupId: undefined } : t)
-          saveCanvas(updated, viewport, nextZIndex)
-          return updated
-        })
-      } })
-      items.push({ label: 'Ungroup', action: () => ungroupTiles(tile.groupId!) })
-      items.push({ label: 'Ungroup All', action: () => ungroupAll(tile.groupId!) })
-      items.push({ label: '', action: () => {}, divider: true })
-    }
-    const availableGroups = groups.filter(g => g.id !== tile.groupId)
-    if (availableGroups.length > 0) {
-      availableGroups.forEach(g => {
-        items.push({
-          label: `Add to ${g.label ?? g.id.slice(-6)}`,
-          action: () => {
-            setTiles(prev => {
-              const updated = prev.map(t => t.id === tile.id ? { ...t, groupId: g.id } : t)
-              saveCanvas(updated, viewport, nextZIndex)
-              return updated
-            })
-          },
-        })
-      })
-      items.push({ label: '', action: () => {}, divider: true })
-    }
-    if (tile.type === 'file' && tile.filePath && workspacePath && !tile.filePath.startsWith(workspacePath)) {
-      items.push({
-        label: 'Add to workspace',
-        action: () => { void importFileToWorkspace(tile.filePath!, tile.id) },
-      })
-      items.push({ label: '', action: () => {}, divider: true })
-    }
-    const currentlyChromeless = !!tile.hideTitlebar || !!tile.hideNavbar
-    items.push({
-      label: currentlyChromeless ? 'Show Controls' : 'Hide Controls',
-      action: () => {
-        setTiles(prev => {
-          const updated = prev.map(t => t.id === tile.id
-            ? { ...t, hideTitlebar: !currentlyChromeless, hideNavbar: !currentlyChromeless }
-            : t)
-          saveCanvas(updated, viewport, nextZIndex)
-          return updated
-        })
-      },
-    })
-    items.push({ label: '', action: () => {}, divider: true })
-    items.push({ label: 'Close', action: () => closeTile(tile.id), danger: true })
-    setCtxMenu({ x: e.clientX, y: e.clientY, items })
-  }, [
-    viewport,
-    nextZIndex,
-    groups,
-    workspacePath,
-    saveCanvas,
-    setTiles,
-    setSelectedTileId,
-    setSelectedTileIds,
-    setCtxMenu,
-    clipboardRef,
-    duplicateTiles,
-    copyTiles,
-    pasteTiles,
-    ungroupTiles,
-    ungroupAll,
-    closeTile,
-    importFileToWorkspace,
-  ])
-}
-
-export type UseCanvasExpandedGroupOptions = {
-  canvasRef: RefObject<HTMLDivElement | null>
-  viewportRef: MutableRefObject<CanvasViewport>
-  expandedCanvasPriorViewportRef: MutableRefObject<CanvasViewport | null>
-  expandedCanvasGroupIdRef: MutableRefObject<string | null>
-  groupsRef: MutableRefObject<GroupState[]>
-  setViewport: Dispatch<SetStateAction<CanvasViewport>>
-  setExpandedCanvasGroupId: Dispatch<SetStateAction<string | null>>
-  setExpandedTileId: Dispatch<SetStateAction<string | null>>
-  groupBounds: (groupId: string) => { x: number; y: number; w: number; h: number } | null
-}
-
-export function useCanvasExpandedGroup(options: UseCanvasExpandedGroupOptions) {
-  const {
-    canvasRef,
-    viewportRef,
-    expandedCanvasPriorViewportRef,
-    expandedCanvasGroupIdRef,
-    groupsRef,
-    setViewport,
-    setExpandedCanvasGroupId,
-    setExpandedTileId,
-    groupBounds,
-  } = options
-
-  const enterCanvasExpanded = useCallback((groupId: string) => {
-    const g = groupsRef.current.find(gr => gr.id === groupId)
-    if (!g || g.layoutMode) return
-    const bounds = groupBounds(groupId)
-    if (!bounds) return
-    const rect = canvasRef.current?.getBoundingClientRect()
-    if (!rect) return
-    expandedCanvasPriorViewportRef.current = { ...viewportRef.current }
-    const fit = computeFitViewport(bounds, { w: rect.width, h: rect.height })
-    setViewport(fit)
-    viewportRef.current = fit
-    setExpandedCanvasGroupId(groupId)
-    expandedCanvasGroupIdRef.current = groupId
-    setExpandedTileId(null)
-  }, [
-    canvasRef,
-    viewportRef,
-    expandedCanvasPriorViewportRef,
-    expandedCanvasGroupIdRef,
-    groupsRef,
-    setViewport,
-    setExpandedCanvasGroupId,
-    setExpandedTileId,
-    groupBounds,
-  ])
-
-  const exitCanvasExpanded = useCallback(() => {
-    const prior = expandedCanvasPriorViewportRef.current
-    setExpandedCanvasGroupId(null)
-    expandedCanvasGroupIdRef.current = null
-    if (prior) {
-      setViewport(prior)
-      viewportRef.current = prior
-    }
-    expandedCanvasPriorViewportRef.current = null
-  }, [
-    expandedCanvasPriorViewportRef,
-    expandedCanvasGroupIdRef,
-    setViewport,
-    viewportRef,
-    setExpandedCanvasGroupId,
-  ])
-
-  return { enterCanvasExpanded, exitCanvasExpanded }
-}
-
-export type UseLockConnectionOptions = {
-  persistCanvasState: PersistCanvasStateFn
-  tilesRef: MutableRefObject<TileState[]>
-  groupsRef: MutableRefObject<GroupState[]>
-  viewportRef: MutableRefObject<CanvasViewport>
-  nextZIndexRef: MutableRefObject<number>
-  lockedConnectionsRef: MutableRefObject<Array<{ sourceTileId: string; targetTileId: string }>>
-  setLockedConnections: Dispatch<SetStateAction<Array<{ sourceTileId: string; targetTileId: string }>>>
-  setSuppressedConnections: Dispatch<SetStateAction<Set<string>>>
-}
-
-export function useLockConnection(options: UseLockConnectionOptions) {
-  const {
-    persistCanvasState,
-    tilesRef,
-    groupsRef,
-    viewportRef,
-    nextZIndexRef,
-    lockedConnectionsRef,
-    setLockedConnections,
-    setSuppressedConnections,
-  } = options
-
-  return useCallback((tileA: string, tileB: string) => {
-    const [a, b] = [tileA, tileB].sort()
-    if (a === b) return
-    setSuppressedConnections(prev => {
-      const next = new Set(prev)
-      next.delete(`${a}::${b}`)
-      return next
-    })
-    setLockedConnections(prev => {
-      const alreadyLocked = prev.some(lc => {
-        const [la, lb] = [lc.sourceTileId, lc.targetTileId].sort()
-        return la === a && lb === b
-      })
-      if (alreadyLocked) return prev
-      const next = [...prev, { sourceTileId: a, targetTileId: b }]
-      lockedConnectionsRef.current = next
-      setTimeout(() => persistCanvasState(tilesRef.current, viewportRef.current, nextZIndexRef.current, groupsRef.current), 0)
-      return next
-    })
-  }, [
-    persistCanvasState,
-    tilesRef,
-    groupsRef,
-    viewportRef,
-    nextZIndexRef,
-    lockedConnectionsRef,
-    setLockedConnections,
-    setSuppressedConnections,
-  ])
-}
-
-export type UseEnforceTileMinimumSizesOptions = {
-  tiles: TileState[]
-  viewport: CanvasViewport
-  nextZIndex: number
-  saveCanvas: SaveCanvasFn
-  setTiles: Dispatch<SetStateAction<TileState[]>>
-  getMinTileWidth: (tileOrType: TileState | TileState['type']) => number
-  getMinTileHeight: (tileOrType: TileState | TileState['type']) => number
-}
-
-export function useEnforceTileMinimumSizes(options: UseEnforceTileMinimumSizesOptions): void {
-  const { tiles, viewport, nextZIndex, saveCanvas, setTiles, getMinTileWidth, getMinTileHeight } = options
-
-  useEffect(() => {
-    if (!tiles.some(tile => tile.width < getMinTileWidth(tile) || tile.height < getMinTileHeight(tile))) return
-    setTiles(prev => {
-      let changed = false
-      const updated = prev.map(tile => {
-        const minW = getMinTileWidth(tile)
-        const minH = getMinTileHeight(tile)
-        if (tile.width >= minW && tile.height >= minH) return tile
-        changed = true
-        return {
-          ...tile,
-          width: Math.max(tile.width, minW),
-          height: Math.max(tile.height, minH),
-        }
-      })
-      if (!changed) return prev
-      saveCanvas(updated, viewport, nextZIndex)
-      return updated
-    })
-  }, [tiles, viewport, nextZIndex, saveCanvas, setTiles, getMinTileWidth, getMinTileHeight])
-}
-
-export type UseLockedConnectionHelpersOptions = {
-  lockedConnections: Array<{ sourceTileId: string; targetTileId: string }>
-  persistCanvasState: PersistCanvasStateFn
-  tilesRef: MutableRefObject<TileState[]>
-  groupsRef: MutableRefObject<GroupState[]>
-  viewportRef: MutableRefObject<CanvasViewport>
-  nextZIndexRef: MutableRefObject<number>
-  lockedConnectionsRef: MutableRefObject<Array<{ sourceTileId: string; targetTileId: string }>>
-  setLockedConnections: Dispatch<SetStateAction<Array<{ sourceTileId: string; targetTileId: string }>>>
-  setSuppressedConnections: Dispatch<SetStateAction<Set<string>>>
-}
-
-export function useLockedConnectionHelpers(options: UseLockedConnectionHelpersOptions) {
-  const {
-    lockedConnections,
-    persistCanvasState,
-    tilesRef,
-    groupsRef,
-    viewportRef,
-    nextZIndexRef,
-    lockedConnectionsRef,
-    setLockedConnections,
-    setSuppressedConnections,
-  } = options
-
-  const isConnectionLocked = useCallback((tileA: string, tileB: string) => {
-    const [a, b] = [tileA, tileB].sort()
-    return lockedConnections.some(lc => {
-      const [la, lb] = [lc.sourceTileId, lc.targetTileId].sort()
-      return la === a && lb === b
-    })
-  }, [lockedConnections])
-
-  const toggleConnectionLock = useCallback((tileA: string, tileB: string) => {
-    const [a, b] = [tileA, tileB].sort()
-    setLockedConnections(prev => {
-      const idx = prev.findIndex(lc => {
-        const [la, lb] = [lc.sourceTileId, lc.targetTileId].sort()
-        return la === a && lb === b
-      })
-      const next = idx >= 0
-        ? prev.filter((_, i) => i !== idx)
-        : [...prev, { sourceTileId: a, targetTileId: b }]
-      lockedConnectionsRef.current = next
-      console.log('[Lock]', idx >= 0 ? 'Unlocked' : 'Locked', a, b, 'total:', next.length)
-      setTimeout(() => persistCanvasState(tilesRef.current, viewportRef.current, nextZIndexRef.current, groupsRef.current), 0)
-      return next
-    })
-  }, [persistCanvasState, tilesRef, groupsRef, viewportRef, nextZIndexRef, lockedConnectionsRef, setLockedConnections])
-
-  const deleteConnection = useCallback((tileA: string, tileB: string) => {
-    const [a, b] = [tileA, tileB].sort()
-    const key = `${a}::${b}`
-    setLockedConnections(prev => {
-      const next = prev.filter(lc => {
-        const [la, lb] = [lc.sourceTileId, lc.targetTileId].sort()
-        return !(la === a && lb === b)
-      })
-      lockedConnectionsRef.current = next
-      setTimeout(() => persistCanvasState(tilesRef.current, viewportRef.current, nextZIndexRef.current, groupsRef.current), 0)
-      return next
-    })
-    setSuppressedConnections(prev => new Set(prev).add(key))
-  }, [persistCanvasState, tilesRef, groupsRef, viewportRef, nextZIndexRef, lockedConnectionsRef, setLockedConnections, setSuppressedConnections])
-
-  return { isConnectionLocked, toggleConnectionLock, deleteConnection }
-}

@@ -9,15 +9,14 @@ import { dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
-import { daemonClient } from '../../daemon/client'
 import { writeMCPConfigToWorkspace, writeTileMcpConfig, tileMcpConfigPath, getTileToken } from '../../mcp-server'
 import { CODESURF_HOME } from '../../paths'
 import { buildPeerSystemPrompt } from '../prompt-builders'
 import { sanitizeToolOutputText } from '../output-sanitizers'
+import { createRuntimeCheckpoint } from '../runtime-checkpoints'
 import { buildCodexSpawnArgs } from './agent-mode-payloads'
 import type { ChatRequest, RuntimeChatSessionState } from '../types'
 import {
-  log,
   sendStream,
   cloneChatMessages,
   getPreparedMessages,
@@ -245,66 +244,7 @@ async function summarizeCodexFileChanges(
   return mergeFileChanges(fileChanges)
 }
 
-function buildRuntimeSessionEntryId(req: ChatRequest): string {
-  return `codesurf-runtime:${req.cardId}`
-}
-
-function buildCheckpointLabel(toolName: string, filePaths: string[], workspaceDir?: string): string {
-  if (filePaths.length === 0) return `Before ${toolName}`
-  if (filePaths.length === 1) return `Before ${toolName} ${getDisplayPath(filePaths[0], workspaceDir)}`
-  return `Before ${toolName} (${filePaths.length} files)`
-}
-
-function emitCheckpointSaved(
-  req: ChatRequest,
-  toolName: string,
-  filePaths: string[],
-  checkpointId: string,
-): void {
-  const displayPaths = filePaths.slice(0, 2).map(filePath => getDisplayPath(filePath, req.workspaceDir))
-  const suffix = filePaths.length > 2 ? ` +${filePaths.length - 2} more` : ''
-  const summary = `Saved checkpoint before ${toolName}${displayPaths.length > 0 ? ` for ${displayPaths.join(', ')}${suffix}` : ''}`
-  const toolId = `codesurf-checkpoint-${checkpointId}`
-  sendStream(req.cardId, { type: 'tool_start', toolId, toolName: 'Checkpoint saved' })
-  sendStream(req.cardId, { type: 'tool_summary', toolId, toolName: 'Checkpoint saved', text: summary })
-}
-
-async function createRuntimeCheckpoint(
-  req: ChatRequest,
-  toolName: string,
-  filePaths: string[],
-  metadata: Record<string, unknown> = {},
-): Promise<{ ok: boolean; checkpointId?: string; skipped?: boolean; error?: string }> {
-  if (filePaths.length === 0) return { ok: true, skipped: true }
-  if (!req.workspaceId) return { ok: true, skipped: true }
-
-  try {
-    const response = await daemonClient.createCheckpoint(req.workspaceId, buildRuntimeSessionEntryId(req), {
-      label: buildCheckpointLabel(toolName, filePaths, req.workspaceDir),
-      reason: `tool:${toolName}`,
-      files: filePaths,
-      metadata: {
-        provider: req.provider,
-        model: req.model,
-        toolName,
-        cardId: req.cardId,
-        ...metadata,
-      },
-      source: 'main-ipc-chat',
-    })
-    if (!response.ok) {
-      return { ok: false, error: response.error ?? `Failed to create checkpoint for ${toolName}` }
-    }
-    if (response.checkpoint?.id) {
-      emitCheckpointSaved(req, toolName, filePaths, response.checkpoint.id)
-    }
-    return { ok: true, checkpointId: response.checkpoint?.id }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    log('createRuntimeCheckpoint error', req.cardId, toolName, message)
-    return { ok: false, error: message }
-  }
-}
+// createRuntimeCheckpoint is shared (../runtime-checkpoints). getDisplayPath stays for Codex diffs.
 
 export function chatCodex(req: ChatRequest): void {
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
