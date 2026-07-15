@@ -1,61 +1,31 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, Suspense } from 'react'
-import type { AppSettings, Persona } from '../../../shared/types'
-import { loadPersonas, DEFAULT_PERSONAS } from '../config/agentModes'
+import type { AppSettings } from '../../../shared/types'
 import { resolvePersonaModelSeed, resolveSkillModelLock } from '../hooks/personaModelBinding'
 import { MONO_DEFAULT } from '../FontContext'
 
 const LazyTerminalTile = React.lazy(() => import('./TerminalTile').then(m => ({ default: m.TerminalTile })))
 
-import { useChatGitState } from '../hooks/useChatGitState'
-import { useAutoSpeak, bargeIn } from '../hooks/useAutoSpeak'
-import { ttsPlayer, type TtsPlayerState } from '../utils/ttsPlayer'
-import { useChatDictation } from '../hooks/useChatDictation'
-import { useChatExecutionHosts } from '../hooks/useChatExecutionHosts'
-import { useChatTileCoreState } from '../hooks/useChatTileCoreState'
-import { useChatTileProviders } from '../hooks/useChatTileProviders'
-import { useChatTilePersistence } from '../hooks/useChatTilePersistence'
-import { useChatTileMessaging } from '../hooks/useChatTileMessaging'
-import { useChatTileTranscript } from '../hooks/useChatTileTranscript'
-import { useChatTileBlockNotes } from '../hooks/useChatTileBlockNotes'
-import { useChatTileLatestChangeDrawer } from '../hooks/useChatTileLatestChangeDrawer'
-import { useChatTileComposerMenus } from '../hooks/useChatTileComposerMenus'
-import { useChatTileLiveComposerActivity } from '../hooks/useChatTileLiveComposerActivity'
+import { bargeIn } from '../hooks/useAutoSpeak'
 import { useChatTileThemeFonts } from '../hooks/useChatTileThemeFonts'
-import { useChatTilePeerContext } from '../hooks/useChatTilePeerContext'
-import { useChatTileInventories } from '../hooks/useChatTileInventories'
-import { useChatTileWorkspaceSkills } from '../hooks/useChatTileWorkspaceSkills'
-import { useChatTileStreamBuffer } from '../hooks/useChatTileStreamBuffer'
-import { useChatTileLifecycleEffects } from '../hooks/useChatTileLifecycleEffects'
-import { useChatTileContextUsage } from '../hooks/useChatTileContextUsage'
-import { useChatTileGitMenus } from '../hooks/useChatTileGitMenus'
-import { useChatTileSurfaces } from '../hooks/useChatTileSurfaces'
+import { useChatTileSessionCore } from '../hooks/useChatTileSessionCore'
+import { useChatTileShellModel } from '../hooks/useChatTileShellModel'
+import { useChatTileSendPath } from '../hooks/useChatTileSendPath'
 
 import { ChatTileTranscriptColumn } from './chat/ChatTileTranscriptColumn'
-import { useChatStreamHandler } from '../hooks/useChatStreamHandler'
-import { useTileTodos } from '../state/tileTodosStore'
 import { PlanPane } from './chat/PlanPane'
 import { ChatTileComposer } from './chat/ChatTileComposer'
 import { ToolPermissionProvider } from './ai-elements/ToolPermission'
-import { useChatAutocomplete } from '../hooks/useChatAutocomplete'
-import { useChatTileDreamPolling } from '../hooks/useChatTileDreamPolling'
-import { useChatTileComposerKeys } from '../hooks/useChatTileComposerKeys'
-import { useChatTileAttachments } from '../hooks/useChatTileAttachments'
-import { useChatAutocompleteSelection } from '../hooks/useChatAutocompleteSelection'
-import { useContributions } from '../hooks/useContributions'
-import { type PaletteCommand } from '../lib/commandRegistry'
 import {
   AskUserQuestionContext,
   AskUserQuestionFontsContext,
 } from './chat/AskUserQuestionForm'
-import { ensureChatMdStyle } from './chat/ChatTileViews'
-import { CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT } from './chat/chatTileLayout'
 import {
   FontCtx,
   CheckpointRestoreContext,
   ChatDispatchProvider,
   type ChatDispatchValue,
 } from './chat/chatTileContexts'
-import { canUsePagedLinkedHistory, type DiscoveryPeer } from './chat/chatTileUtils'
+import { type DiscoveryPeer } from './chat/chatTileUtils'
 
 export {
   hasVisibleFileChangeStats,
@@ -105,47 +75,138 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     fontCtxValue,
   } = useChatTileThemeFonts(settings)
   const {
-    initialRuntimeStateRef, initialMode, initialJobSequence,
+    initialRuntimeStateRef, initialMode,
     messages, setMessages, input, setInput, isStreaming, setIsStreaming,
     executionTarget, setExecutionTarget, cloudHostId, setCloudHostId,
     provider, setProvider, model, setModel, mcpEnabled, setMcpEnabled,
     mode, setMode, thinking, setThinking, agentId, setAgentId, autoAgentMode, setAutoAgentMode,
     attachments, setAttachments, queuedTurns, setQueuedTurns,
     openChatSurfaces, setOpenChatSurfaces, activeChatSurfaceId, setActiveChatSurfaceId,
-    sessionId, setSessionId, sessionIdsByProvider, setSessionIdsByProvider, commitSessionId, swapProviderSession,
+    sessionId, setSessionId, sessionIdsByProvider, setSessionIdsByProvider, swapProviderSession,
     jobId, setJobId, jobSequence, setJobSequence,
     linkedSessionEntryId, setLinkedSessionEntryId, linkedSessionHint, setLinkedSessionHint,
     preserveSessionSummary, setPreserveSessionSummary, hasEarlierMessages, setHasEarlierMessages,
     activeView, setActiveView,
     lastActivityAtRef, toolCollapseTick, setToolCollapseTick, explodedChipGroups, toggleExplodedChipGroup,
-    pendingToolPermissions, setPendingToolPermissions, resolvedToolPermissions, setResolvedToolPermissions,
+    pendingToolPermissions, resolvedToolPermissions,
     handleToolPermissionDecision, toolCompletedAtRef,
-  } = useChatTileCoreState({ tileId, settings })
-  const { workspaceSkills } = useChatTileWorkspaceSkills(_workspaceDir)
-  const { peerContextRef, peerContextVersion, implicitPeerImageAttachments } = useChatTilePeerContext({
-    tileId,
-    workspaceId,
-    connectedPeers,
-  })
-  const { mcpServers, peerToolNames } = useChatTileInventories({
-    tileId,
-    provider,
-    model,
-    mcpEnabled,
-    connectedPeers,
-    workspaceSkills,
-  })
-  const [disabledServers, setDisabledServers] = useState<Set<string>>(new Set())
-  // Tracks the permission mode we last pushed to the running Claude query so
-  // user-initiated mid-stream mode switches (Default -> Bypass etc.) propagate
-  // into the active canUseTool closure via chat:setPermissionMode.
-  const lastPushedModeRef = useRef<string>(initialMode)
-  const effectiveAgentMode = Boolean(isConnected || isAutoConnected || autoAgentMode)
+    pagedLinkedHistoryEnabled,
+    hasStreamingContent,
+    isStreamingRef,
+    setMessagesSafe,
+    lastJobSequenceRef,
+    resumedJobKeyRef,
+    messagesRef,
+    stickToBottomRef,
+    historicalMessages,
+    setHistoricalMessages,
+    allMessages,
+    renderedMessages,
+    hiddenMessageCount,
+    loadingEarlier,
+    earlierLoadError,
+    showScrollToLatest,
+    scrollToLatest,
+    reviewLatestChanges,
+    handleMessagesScroll,
+    handleMessagesWheel,
+    handleMessagesKeyDown,
+    setAnnotationComposerActive,
+  } = useChatTileSessionCore({ tileId, workspaceId, settings })
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const acRef = useRef<HTMLDivElement>(null)
-  const closeProviderMenuRef = useRef<() => void>(() => {})
-  const closeAutocompleteRef = useRef<() => void>(() => {})
+
+  const shell = useChatTileShellModel({
+    tileId,
+    workspaceId,
+    workspaceDir: _workspaceDir,
+    reloadToken,
+    settings,
+    connectedPeers,
+    isConnected,
+    isAutoConnected,
+    initialRuntimeStateRef,
+    initialMode,
+    messages,
+    setMessages,
+    input,
+    setInput,
+    isStreaming,
+    setIsStreaming,
+    executionTarget,
+    setExecutionTarget,
+    cloudHostId,
+    setCloudHostId,
+    provider,
+    setProvider,
+    model,
+    setModel,
+    mcpEnabled,
+    setMcpEnabled,
+    mode,
+    setMode,
+    thinking,
+    setThinking,
+    agentId,
+    setAgentId,
+    autoAgentMode,
+    setAutoAgentMode,
+    attachments,
+    setAttachments,
+    queuedTurns,
+    setQueuedTurns,
+    openChatSurfaces,
+    setOpenChatSurfaces,
+    activeChatSurfaceId,
+    setActiveChatSurfaceId,
+    sessionId,
+    setSessionId,
+    sessionIdsByProvider,
+    setSessionIdsByProvider,
+    swapProviderSession,
+    jobId,
+    setJobId,
+    jobSequence,
+    setJobSequence,
+    linkedSessionEntryId,
+    setLinkedSessionEntryId,
+    linkedSessionHint,
+    setLinkedSessionHint,
+    preserveSessionSummary,
+    setPreserveSessionSummary,
+    hasEarlierMessages,
+    setHasEarlierMessages,
+    activeView,
+    setActiveView,
+    lastActivityAtRef,
+    toolCollapseTick,
+    setToolCollapseTick,
+    toolCompletedAtRef,
+    pagedLinkedHistoryEnabled,
+    hasStreamingContent,
+    isStreamingRef,
+    setMessagesSafe,
+    lastJobSequenceRef,
+    resumedJobKeyRef,
+    historicalMessages,
+    setHistoricalMessages,
+    allMessages,
+    renderedMessages,
+    chatSurfaceThemeColors,
+    chatSurfaceThemeVars,
+    textareaRef,
+    acRef,
+  })
+
   const {
+    workspaceSkills,
+    peerContextRef,
+    implicitPeerImageAttachments,
+    mcpServers,
+    peerToolNames,
+    disabledServers,
+    setDisabledServers,
+    effectiveAgentMode,
     providerEntries,
     providerEntryById,
     currentProviderEntry,
@@ -155,27 +216,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     currentModel,
     thinkingOptions,
     handleProviderChange,
-  } = useChatTileProviders({
-    provider,
-    setProvider,
-    model,
-    setModel,
-    mode,
-    setMode,
-    thinking,
-    setThinking,
-    settings,
-    connectedPeers,
-    peerContextRef,
-    peerContextVersion,
-    onProviderChanged: () => closeProviderMenuRef.current(),
-    swapProviderSession,
-  })
-  const {
     showModelMenu,
     setShowModelMenu,
     showProviderMenu,
-    setShowProviderMenu,
     showInsertMenu,
     setShowInsertMenu,
     showModeMenu,
@@ -185,7 +228,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     showLocationMenu,
     setShowLocationMenu,
     showBranchMenu,
-    setShowBranchMenu,
     showContextMenu,
     showAgentMenu,
     setShowAgentMenu,
@@ -203,60 +245,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     contextMenuRef,
     agentMenuRef,
     toggleMenu,
-  } = useChatTileComposerMenus({
-    textareaRef,
-    acRef,
-    onCloseAutocomplete: () => closeAutocompleteRef.current(),
-  })
-  closeProviderMenuRef.current = () => setShowProviderMenu(false)
-
-  // Agent definitions (built-ins + workspace agents.json) selectable from the
-  // composer toolbar. Refreshed on mount and whenever the agent menu opens, so a
-  // freshly-authored agent in CustomisationTile shows up without a tile reload.
-  // Seed with the built-in modes so a restored built-in agentId resolves
-  // synchronously (no fail-closed window for Agent/Ask/Plan). Only user-authored
-  // agents — which live in agents.json and load asynchronously below — can briefly
-  // be unresolved, and the dispatch guard + provider safety net cover that window.
-  const [agentModes, setAgentModes] = useState<Persona[]>(DEFAULT_PERSONAS)
-  // Definitive "agents.json has been read for this workspace" flag. The composer
-  // seeds built-ins synchronously for UX, but a SEND must reflect any agents.json
-  // override — until this is true, dispatchMessageContent re-resolves the agent
-  // from disk (or fails closed) instead of trusting the looser seeded built-in.
-  const [agentModesLoaded, setAgentModesLoaded] = useState(false)
-  // Reset on workspace change so a send can't dispatch against the previous
-  // workspace's agent definitions.
-  useEffect(() => { setAgentModesLoaded(false) }, [_workspaceDir])
-  useEffect(() => {
-    let cancelled = false
-    void loadPersonas(_workspaceDir).then(list => {
-      if (!cancelled) { setAgentModes(list); setAgentModesLoaded(true) }
-    })
-    return () => { cancelled = true }
-  }, [_workspaceDir, showAgentMenu])
-  const resolvedAgentMode = useMemo(
-    () => agentModes.find(a => a.id === agentId) ?? null,
-    [agentModes, agentId],
-  )
-  // Precedence LAYER 1 (P1b-2): a linked skill's `requiredModel` HARD-locks the
-  // composer. Computed from the active persona + discovered workspace skills; when
-  // non-null the model/provider pills are disabled and the live state is pinned.
-  const modelLock = useMemo(
-    () => resolveSkillModelLock(resolvedAgentMode, workspaceSkills),
-    [resolvedAgentMode, workspaceSkills],
-  )
-  // Keep the live composer state pinned while a lock is active. This closes the
-  // gap onSelectAgent can't: an async skill load or a restored `agentId` (where
-  // the click handler never fires) would otherwise leave a stale model behind a
-  // disabled pill. Early-return when unlocked so layer 3 (user pick) is untouched.
-  // This effect only forces the HARD lock — the soft seed (layer 2) still happens
-  // exclusively in the onSelectAgent click handler, never in an effect.
-  useEffect(() => {
-    if (!modelLock) return
-    if (modelLock.provider) setProvider(modelLock.provider)
-    if (modelLock.model) setModel(modelLock.model)
-  }, [modelLock?.provider, modelLock?.model])
-
-  const {
+    agentModes,
+    agentModesLoaded,
+    resolvedAgentMode,
+    modelLock,
     chatSurfaceMenu,
     activeChatSurface,
     activeChatSurfaceRef,
@@ -267,237 +259,32 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     openChatSurface,
     openBuilderFromSketch,
     closeChatSurface,
-  } = useChatTileSurfaces({
-    tileId,
-    workspaceId,
-    workspaceDir: _workspaceDir,
-    openChatSurfaces,
-    setOpenChatSurfaces,
-    activeChatSurfaceId,
-    setActiveChatSurfaceId,
-    setShowInsertMenu,
-    chatSurfaceThemeColors,
-    chatSurfaceThemeVars,
-  })
-  const pagedLinkedHistoryEnabled = canUsePagedLinkedHistory(linkedSessionEntryId, linkedSessionHint, sessionId)
-  const lastStreamingAssistantMessage = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m.role !== 'assistant') continue
-      if (m.isStreaming) return true
-      if ((m.toolBlocks ?? []).some(tb => tb.status === 'running')) return true
-      if (m.thinking && !m.thinking.done) return true
-      if ((m.thinkingBlocks ?? []).some(tb => !tb.done)) return true
-      return false
-    }
-    return false
-  }, [messages])
-  const hasStreamingContent = isStreaming || lastStreamingAssistantMessage
-  const { isStreamingRef, setMessagesSafe, queueStreamText, flushPendingStreamText } = useChatTileStreamBuffer({
-    setMessages,
-    pagedLinkedHistoryEnabled,
-    isStreaming: hasStreamingContent,
-  })
-  const { localExecutionLabel, remoteHosts, activeCloudHost, executionDisplayLabel, executionDisplayDetail } = useChatExecutionHosts({
-    executionPreference: settings?.execution ?? null,
-    executionTarget,
-    cloudHostId,
-  })
-  const hasSendableDraft = input.trim().length > 0 || attachments.length > 0 || implicitPeerImageAttachments.length > 0
-  // Drag-reorder state for the queued-turn list. A row can be dropped above
-  // ('before'), below ('after'), or onto ('into') another row — the last case
-  // nests it as a child of that row, rendered indented underneath.
-  const [draggingTurnId, setDraggingTurnId] = useState<string | null>(null)
-  const [dragOverTurn, setDragOverTurn] = useState<{ id: string; mode: 'before' | 'after' | 'into' } | null>(null)
-  // Collapse the queue into a single summary row once it grows past a few
-  // items. Keeps the composer area quiet when a batch of queued prompts
-  // stacks up. Auto-collapses on the cross-over, but the user can manually
-  // expand / re-collapse via the header.
-  const [queueCollapsed, setQueueCollapsed] = useState(true)
-  const { gitStatus, gitBranches, refreshGitState } = useChatGitState(_workspaceDir)
-  const lastJobSequenceRef = useRef<number>(initialJobSequence)
-  const resumedJobKeyRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    lastJobSequenceRef.current = jobSequence
-  }, [jobSequence])
-
-  useEffect(() => {
-    if (!jobId) {
-      resumedJobKeyRef.current = null
-    }
-  }, [jobId])
-
-  const { latestStateRef, stateLoadedRef, persistLatestState } = useChatTilePersistence({
-    tileId,
-    workspaceId,
-    reloadToken,
-    initialRuntimeStateRef,
-    fallbackProvider: provider,
-    messages,
-    input,
-    attachments,
-    queuedTurns,
-    openChatSurfaces,
-    activeChatSurfaceId,
-    executionTarget,
-    provider,
-    model,
-    mcpEnabled,
-    mode,
-    thinking,
-    agentId,
-    effectiveAgentMode,
-    autoAgentMode,
-    preserveSessionSummary,
-    linkedSessionEntryId,
-    linkedSessionHint,
-    hasEarlierMessages,
-    sessionId,
-    sessionIdsByProvider,
-    jobId,
-    jobSequence,
-    cloudHostId,
-    isStreaming,
-    activeView,
-    setMessagesSafe,
-    setInput,
-    setAttachments,
-    setQueuedTurns,
-    setOpenChatSurfaces,
-    setActiveChatSurfaceId,
-    setActiveView,
-    setProvider,
-    setModel,
-    setExecutionTarget,
-    setMcpEnabled,
-    setMode,
-    setThinking,
-    setAgentId,
-    setAutoAgentMode,
-    setPreserveSessionSummary,
-    setLinkedSessionEntryId,
-    setLinkedSessionHint,
-    setHasEarlierMessages,
-    setSessionId,
-    setSessionIdsByProvider,
-    setJobId,
-    setJobSequence,
-    setCloudHostId,
-    setIsStreaming,
-    lastJobSequenceRef,
-  })
-
-  const {
-    messagesRef,
-    stickToBottomRef,
-    historicalMessages,
-    setHistoricalMessages,
-    allMessages,
-    renderedMessages,
-    hiddenMessageCount,
-    loadingEarlier,
-    earlierLoadError,
-    showScrollToLatest,
-    scrollToLatest,
-    reviewLatestChanges,
-    handleMessagesScroll,
-    handleMessagesWheel,
-    handleMessagesKeyDown,
-    setAnnotationComposerActive,
-  } = useChatTileTranscript({
-    workspaceId,
-    sessionId,
-    linkedSessionEntryId,
-    linkedSessionHint,
-    hasEarlierMessages,
-    setHasEarlierMessages,
-    messages,
-    setMessages,
-    pagedLinkedHistoryEnabled,
-    isStreaming,
-  })
-
-  const {
+    localExecutionLabel,
+    remoteHosts,
+    activeCloudHost,
+    hasSendableDraft,
+    draggingTurnId,
+    setDraggingTurnId,
+    dragOverTurn,
+    setDragOverTurn,
+    queueCollapsed,
+    setQueueCollapsed,
+    gitStatus,
+    latestStateRef,
+    persistLatestState,
     updateBlockNote,
     exportNotesToClipboard,
-  } = useChatTileBlockNotes({
-    allMessages,
-    setMessagesSafe,
-    setHistoricalMessages,
-  })
-
-  // ─── TTS auto-speak (last-message-only, sentence-streamed) ──────────
-  // Voice config comes from the persisted AppSettings.voice block (edited
-  // via Settings → Voice). The ChatTile receives `settings` as a prop, so
-  // any update from the settings panel re-flows here automatically.
-  const voiceSettings = settings?.voice ?? {
-    sttProvider: 'openai' as const,
-    sttLang: 'en',
-    ttsProvider: 'cartesia' as const,
-    spokifyModel: 'claude-haiku-4-5-20251001',
-    autoSpeak: 'off' as const,
-    bargeIn: true,
-  }
-
-  // Voice dictation — extracted to useChatDictation hook.
-  const dictation = useChatDictation({ voiceSettings })
-  const { isDictating, dictationText, dictationError, toggleDictation } = dictation
-  const autoSpeakEnabled = voiceSettings.autoSpeak === 'last-message'
-  // Track the most recent assistant message id + final text for auto-speak.
-  // We need its id (for deduping in the hook) and its text (after stream
-  // completion). isStreaming gates: don't speak until the agent has finished.
-  // ─── Subscribe to TTS player state for the visual indicator ─────────
-  const [ttsState, setTtsState] = useState<TtsPlayerState>(() => ttsPlayer.state)
-  useEffect(() => ttsPlayer.subscribe(setTtsState), [])
-
-  // Find the most-recent assistant message (excluding streaming-in-progress).
-  // This is what auto-speak watches.
-  const lastAssistantMessage = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m.role === 'assistant') return m
-    }
-    return null
-  }, [messages])
-
-  useAutoSpeak({
-    enabled: autoSpeakEnabled,
-    messageId: lastAssistantMessage?.id ?? null,
-    text: lastAssistantMessage?.content ?? null,
-    isStreaming: Boolean(lastAssistantMessage?.isStreaming) || hasStreamingContent,
-    ttsProvider: voiceSettings.ttsProvider,
-    ttsVoice: voiceSettings.ttsVoice,
-    spokifyModel: voiceSettings.spokifyModel,
-  })
-
-  // Plan pane (right-docked inline plan panel). Subscribes to the per-tile
-  // todos store so the pane, the composer chip, and the transcript's inline
-  // PlanCard all share one source of truth (latest TodoWrite/update_plan block).
-  const planTodos = useTileTodos(tileId)
-  const [isPlanOpen, setIsPlanOpen] = useState(false)
-  // Auto-close when the plan goes away (conversation cleared / new chat).
-  useEffect(() => {
-    if (!planTodos || planTodos.length === 0) setIsPlanOpen(false)
-  }, [planTodos])
-  const [planUpdatedAt, setPlanUpdatedAt] = useState<number | null>(null)
-  useEffect(() => {
-    if (planTodos && planTodos.length > 0) setPlanUpdatedAt(Date.now())
-  }, [planTodos])
-
-  // Plugin-contributed commands that expose a slash trigger surface in the chat
-  // composer's `/` menu (point 3 — plugins appear in the chat area).
-  const pluginCommands = useContributions('commands') as PaletteCommand[]
-  const pluginSlashCommands = useMemo(
-    () =>
-      pluginCommands
-        .filter(c => typeof c.slash === 'string' && c.slash.trim())
-        .map(c => ({ slash: c.slash as string, title: c.title })),
-    [pluginCommands],
-  )
-
-  // Autocomplete state (extracted to hook)
-  const {
+    voiceSettings,
+    isDictating,
+    dictationText,
+    dictationError,
+    toggleDictation,
+    ttsState,
+    planTodos,
+    isPlanOpen,
+    setIsPlanOpen,
+    planUpdatedAt,
+    pluginCommands,
     acType,
     setAcType,
     acQuery,
@@ -506,18 +293,6 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setAcIndex,
     acItems,
     handleComposerInputChange,
-  } = useChatAutocomplete({
-    workspaceDir: _workspaceDir,
-    connectedPeers,
-    workspaceSkills,
-    pluginSlashCommands,
-  })
-  closeAutocompleteRef.current = () => {
-    setAcType(null)
-    setAcQuery('')
-  }
-
-  const {
     latestChangeDrawer,
     latestChangeDrawerHasStats,
     latestChangeDrawerExpanded,
@@ -528,65 +303,14 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     toggleLatestChangeDrawerFile,
     restoreLatestCheckpoint,
     checkpointRestoreContextValue,
-  } = useChatTileLatestChangeDrawer({
-    workspaceId,
-    tileId,
-    messages,
-    setMessagesSafe,
-  })
-
-  const liveComposerActivityChip = useChatTileLiveComposerActivity({
-    isStreaming,
-    renderedMessages,
-  })
-
-  useChatTileDreamPolling(workspaceId, setMessagesSafe)
-
-  useEffect(() => { ensureChatMdStyle() }, [])
-
-  useChatTileLifecycleEffects({
-    tileId,
-    sessionId,
-    linkedSessionEntryId,
-    provider,
-    model,
-    mode,
-    workspaceDir: _workspaceDir,
-    executionTarget,
-    cloudHostId,
-    settingsExecution: settings?.execution ?? null,
-    jobId,
-    jobSequence,
-    isStreaming,
-    isStreamingRef,
-    messages,
-    historicalMessages,
-    allMessages,
-    queuedTurnsLength: queuedTurns.length,
-    pagedLinkedHistoryEnabled,
-    stateLoadedRef,
-    lastActivityAtRef,
-    lastPushedModeRef,
-    toolCompletedAtRef,
-    toolCollapseTick,
-    setToolCollapseTick,
-    setMessages,
-    setMessagesSafe,
-    setQueueCollapsed,
-    resumedJobKeyRef,
-  })
-
-  const {
+    liveComposerActivityChip,
     contextWindowLimit,
     systemOverheadTokens,
     readAttachmentPaths,
     estimatedContextTokens,
     contextUsageRatio,
     contextUsagePercent,
-  } = useChatTileContextUsage({ provider, model, messages, input })
-
-  const locationLabel = executionDisplayLabel
-  const {
+    locationLabel,
     isGitRepo,
     branchMenuCreateEnabled,
     normalizedRepoRoot,
@@ -597,56 +321,9 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     handleProjectFolderSwitch,
     handleBranchSelect,
     handleCreateBranch,
-  } = useChatTileGitMenus({
-    workspaceDir: _workspaceDir,
-    workspaceId,
-    executionTarget,
-    executionTargetCloud: executionTarget === 'cloud',
-    executionDisplayDetail,
-    gitStatus,
-    gitBranches,
-    refreshGitState,
-    branchFilter,
-    setBranchFilter,
-    setShowBranchMenu,
-    remoteHosts,
-    cloudHostId,
-    setCloudHostId,
-    setMessages,
-  })
+  } = shell
 
-  // ─── Voice dictation (via useChatDictation hook) ────────────────────
-  // Wire transcriptions into the input state.
-  useEffect(() => {
-    dictation.onTranscription((text: string) => {
-      setInput(prev => prev + (prev && !prev.endsWith(' ') ? ' ' : '') + text)
-    })
-  }, [dictation])
-
-  // Stream listener -- handles all rich event types from Claude Agent SDK
-  useChatStreamHandler({
-    tileId,
-    setMessagesSafe,
-    setSessionId: commitSessionId,
-    setIsStreaming,
-    setJobId,
-    setJobSequence,
-    flushPendingStreamText,
-    queueStreamText,
-    lastJobSequenceRef,
-    setPendingToolPermissions,
-    setResolvedToolPermissions,
-  })
-
-  const focusComposer = useCallback(() => {
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current
-      if (!ta) return
-      ta.focus()
-      const pos = ta.value.length
-      ta.setSelectionRange(pos, pos)
-    })
-  }, [])
+  // Stream listener lives in useChatTileSessionCore (chatStreamHub demux).
 
   const {
     dispatchMessageContent,
@@ -656,7 +333,17 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     logQueueEvent,
     stopStreaming,
     handleQueuedTurnSteer,
-  } = useChatTileMessaging({
+    isDropTarget,
+    openAttachmentPicker,
+    removeAttachment,
+    handleTileDragOver,
+    handleTileDragLeave,
+    handleTileDrop,
+    selectAcItem,
+    handleKeyDown,
+    handleKeyUp,
+    handleInputChange,
+  } = useChatTileSendPath({
     tileId,
     workspaceId,
     workspaceDir: _workspaceDir,
@@ -709,64 +396,19 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     setPreserveSessionSummary,
     setAcType,
     setAcQuery,
-    focusComposer,
     getChatSurfaceIframe,
     postToChatSurface,
     exportNotesToClipboard,
     pluginCommands,
-  })
-
-  const syncComposerHeight = useCallback(() => {
-    const ta = textareaRef.current
-    if (!ta) return
-    ta.style.height = 'auto'
-    ta.style.height = `${Math.max(CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT, Math.min(ta.scrollHeight, 134))}px`
-  }, [])
-
-  const {
-    isDropTarget,
-    openAttachmentPicker,
-    removeAttachment,
-    handleTileDragOver,
-    handleTileDragLeave,
-    handleTileDrop,
-  } = useChatTileAttachments({
-    textareaRef,
-    syncComposerHeight,
-    setAttachments,
-    setAcType,
-    setAcQuery,
-    setShowInsertMenu,
-  })
-
-  const { selectAcItem } = useChatAutocompleteSelection({
-    input,
-    acType,
-    textareaRef,
-    syncComposerHeight,
-    setInput,
-    setAttachments,
-    setAcType,
-    setAcQuery,
-  })
-
-  const { handleKeyDown, handleKeyUp } = useChatTileComposerKeys({
-    input,
-    isDictating,
-    toggleDictation,
     acType,
     acItems,
     acIndex,
     setAcIndex,
-    setAcType,
-    setAcQuery,
-    selectAcItem,
-    sendMessage,
+    isDictating,
+    toggleDictation,
+    handleComposerInputChange,
+    setShowInsertMenu,
   })
-
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    handleComposerInputChange(e, setInput, syncComposerHeight)
-  }, [handleComposerInputChange, syncComposerHeight])
 
   const isStartScreen = messages.length === 0 && !isStreaming
 

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+// useState still used by ThinkingBlockView expand + WorkingChip internals
 import { Brain, Check, ChevronRight, Cog } from 'lucide-react'
 import type { ThinkingBlock, ChatMessage, ToolBlock } from '../../../../shared/chat-types'
 import { useTheme } from '../../ThemeContext'
@@ -8,6 +9,11 @@ import {
   TOOL_BLOCK_MAX_WIDTH,
 } from './chatTileContexts'
 import { getToolDisplayName } from './chatTileUtils'
+import {
+  finalizeThinkingElapsedSec,
+  resolveThinkingDisplayedElapsed,
+  useSharedThinkingClock,
+} from './thinkingClock'
 
 function getToolBlockDisplayName(block: ToolBlock): string {
   return block.displayName ?? getToolDisplayName(block.name)
@@ -20,37 +26,31 @@ export const ThinkingBlockView = React.memo(function ThinkingBlockView({ thinkin
   const isActive = !thinking.done
   const hasContent = thinking.content.length > 0
 
-  // Track elapsed thinking time so the chip can show just the duration.
+  // Shared clock: N active thinking chips → one interval, not N.
+  const nowMs = useSharedThinkingClock(isActive)
   const startTimeRef = useRef<number | null>(null)
   const finalElapsedRef = useRef<number | null>(null)
-  const [elapsedSec, setElapsedSec] = useState(0)
 
   if (startTimeRef.current == null && isActive) {
     startTimeRef.current = Date.now()
   }
 
   useEffect(() => {
-    if (!isActive) return
-    const id = setInterval(() => {
-      if (startTimeRef.current != null) {
-        setElapsedSec(Math.floor((Date.now() - startTimeRef.current) / 1000))
-      }
-    }, 250)
-    return () => clearInterval(id)
-  }, [isActive])
-
-  useEffect(() => {
     if (thinking.done && finalElapsedRef.current == null) {
       const start = startTimeRef.current ?? Date.now()
-      const finalSec = Math.max(1, Math.round((Date.now() - start) / 1000))
-      finalElapsedRef.current = finalSec
-      setElapsedSec(finalSec)
+      finalElapsedRef.current = finalizeThinkingElapsedSec(start, Date.now())
     }
   }, [thinking.done])
 
   // No auto-expand — user opens thinking content on demand only
 
-  const displayedElapsed = finalElapsedRef.current ?? elapsedSec
+  const displayedElapsed = resolveThinkingDisplayedElapsed(
+    startTimeRef.current,
+    nowMs,
+    thinking.done,
+    finalElapsedRef.current,
+  )
+  const elapsedSec = displayedElapsed
 
   // Styled to mirror the tool chip (CollapsedToolGroup / ToolBlockView) so it
   // can sit inline in the same chip row without breaking the visual rhythm.
@@ -264,16 +264,10 @@ export const StreamingLivenessIndicator = React.memo(function StreamingLivenessI
 }): JSX.Element {
   const fonts = useFonts()
   const theme = useTheme()
-  const [, setTick] = useState(0)
+  // Share the global UI clock with thinking chips (no per-indicator setInterval).
+  const nowMs = useSharedThinkingClock(true)
 
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      setTick(t => (t + 1) & 0xffff)
-    }, 500)
-    return () => window.clearInterval(id)
-  }, [])
-
-  const quietMs = Math.max(0, Date.now() - lastActivityAtMs)
+  const quietMs = Math.max(0, nowMs - lastActivityAtMs)
   const showCounter = quietMs > 2500
   const elapsedSec = Math.floor(quietMs / 1000)
 

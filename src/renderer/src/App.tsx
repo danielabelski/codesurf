@@ -10,8 +10,7 @@ import { useLayoutTemplates } from './hooks/useLayoutTemplates'
 import { useAutoHideScrollbars } from './hooks/useAutoHideScrollbars'
 import { useTitleTooltips } from './hooks/useTitleTooltips'
 import { useScrollFadeIndicators } from './hooks/useScrollFadeIndicators'
-import { useShellLayoutMetrics } from './hooks/useShellLayoutMetrics'
-import { useBrandWordmarkPrefs } from './hooks/useBrandWordmarkPrefs'
+import { useAppShellChrome } from './hooks/useAppShellChrome'
 import { readMiniChatOptions } from './lib/miniChatWindow'
 import { MiniChatWindow } from './components/MiniChatWindow'
 import { AppSidebarRegion } from './components/AppSidebarRegion'
@@ -47,7 +46,6 @@ import { useCanvasGroupManager } from './hooks/useCanvasGroupManager'
 import { useCanvasKeyboard } from './hooks/useCanvasKeyboard'
 import { useCanvasGlow } from './hooks/useCanvasGlow'
 import { useRenderTileBody } from './hooks/useRenderTileBody'
-import { useAppThemeCssVars } from './hooks/useAppThemeCssVars'
 import { useAutoAgentProximity } from './hooks/useAutoAgentProximity'
 import { useDiscoveryPulses } from './hooks/useDiscoveryPulses'
 import { usePanelTileChrome } from './hooks/usePanelTileChrome'
@@ -76,9 +74,9 @@ import {
 import { getMinTileHeight, getMinTileWidth } from './utils/tilePlacement'
 
 
-import { FontProvider, FontTokenProvider, SANS_DEFAULT, MONO_DEFAULT } from './FontContext'
+import { FontProvider, FontTokenProvider, MONO_DEFAULT } from './FontContext'
 import { ThemeProvider } from './ThemeContext'
-import { applyContrast, DEFAULT_THEME_ID, getThemeById, resolveEffectiveThemeId, registerCustomTheme, unregisterCustomTheme } from './theme'
+import { DEFAULT_THEME_ID, registerCustomTheme, unregisterCustomTheme } from './theme'
 import type { PanelLeaf, PanelNode } from './components/panelLayoutTree'
 import {
   getAllTileIds,
@@ -180,7 +178,6 @@ function App(): JSX.Element {
     const hidden = new Set(settings.hiddenFromSidebarExtIds ?? [])
     return extensionEntries.filter(entry => entry.enabled !== false && !hidden.has(entry.id))
   }, [settings.extensionsDisabled, settings.hiddenFromSidebarExtIds, extensionEntries])
-  const [systemPrefersDark, setSystemPrefersDark] = useState(true)
   const [showWorkspacePickerTab, setShowWorkspacePickerTab] = useState(false)
   const [workspacePickerReturnWorkspaceId, setWorkspacePickerReturnWorkspaceId] = useState<string | null>(null)
   const latestSettingsSaveRef = useRef(0)
@@ -1475,56 +1472,11 @@ function App(): JSX.Element {
 
   const isDraggingCanvas = dragState.type === 'pan'
 
-  const appFonts = React.useMemo(() => {
-    const p = settings.fonts?.primary ?? settings.primaryFont
-    const s = settings.fonts?.secondary ?? settings.secondaryFont
-    const m = settings.fonts?.mono ?? settings.monoFont
-    return {
-      primary: p?.family ?? SANS_DEFAULT,
-      secondary: s?.family ?? SANS_DEFAULT,
-      mono: m?.family ?? MONO_DEFAULT,
-      size: p?.size ?? 13,
-      lineHeight: p?.lineHeight ?? 1.5,
-      weight: p?.weight ?? 400,
-      secondarySize: s?.size ?? 11,
-      secondaryLineHeight: s?.lineHeight ?? 1.4,
-      secondaryWeight: s?.weight ?? 400,
-      monoSize: m?.size ?? 13,
-      monoLineHeight: m?.lineHeight ?? 1.5,
-      monoWeight: m?.weight ?? 400,
-    }
-  }, [settings.fonts, settings.primaryFont, settings.secondaryFont, settings.monoFont])
-
-  useEffect(() => {
-    void window.electron?.window?.setSidebarCollapsed?.(sidebarCollapsed).catch(() => {})
-  }, [sidebarCollapsed])
-
-  const fontTokens = React.useMemo(() => settings.fonts, [settings.fonts])
-
-  useEffect(() => {
-    void window.electron?.appearance?.shouldUseDark?.().then(setSystemPrefersDark).catch(() => {})
-    const unsub = window.electron?.appearance?.onUpdated?.(p => setSystemPrefersDark(p.shouldUseDark))
-    return unsub
-  }, [])
-
-  useEffect(() => {
-    const mode = settings.appearance ?? 'dark'
-    void window.electron?.appearance?.setThemeSource?.(mode)
-  }, [settings.appearance])
-
-  const effectiveThemeId = React.useMemo(
-    () => resolveEffectiveThemeId(settings.appearance, settings.themeId, systemPrefersDark),
-    [settings.appearance, settings.themeId, systemPrefersDark],
-  )
-  const theme = React.useMemo(
-    () => applyContrast(getThemeById(effectiveThemeId), settings.themeContrast ?? 0),
-    [effectiveThemeId, settings.themeContrast],
-  )
-
-  useAppThemeCssVars(theme, appFonts)
-  useBrandWordmarkPrefs(effectiveThemeId, theme.mode)
-
   const {
+    appFonts,
+    fontTokens,
+    theme,
+    systemPrefersDark,
     sidebarFooterBottom,
     sidebarFooterLeft,
     sidebarFooterHeight,
@@ -1562,9 +1514,8 @@ function App(): JSX.Element {
     workspaceTabActiveBottomGap,
     workspaceTabInactiveBottomGap,
     dsc,
-  } = useShellLayoutMetrics({
+  } = useAppShellChrome({
     settings,
-    theme,
     sidebarCollapsed,
     sidebarWidth,
     panelLayout,
@@ -1572,7 +1523,6 @@ function App(): JSX.Element {
     workspaces,
     workspace,
     showWorkspacePickerTab,
-    appFonts,
   })
 
   const appCanvasConnectionProps = useAppCanvasConnectionProps({

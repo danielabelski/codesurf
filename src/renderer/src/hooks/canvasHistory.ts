@@ -17,7 +17,38 @@ function cloneGroup(group: GroupState): GroupState {
   return { ...group }
 }
 
-function tileStateEqual(a: TileState, b: TileState): boolean {
+/** Structural string-array compare (no JSON.stringify). */
+export function stringArrayEqual(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  const left = a ?? []
+  const right = b ?? []
+  if (left.length !== right.length) return false
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false
+  }
+  return true
+}
+
+function layoutBoundsEqual(
+  a: GroupState['layoutBounds'] | undefined,
+  b: GroupState['layoutBounds'] | undefined,
+): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+}
+
+/** Field-level group equality (no JSON.stringify of whole objects). */
+export function groupStateEqual(a: GroupState, b: GroupState): boolean {
+  return a.id === b.id
+    && a.label === b.label
+    && a.color === b.color
+    && a.parentGroupId === b.parentGroupId
+    && a.layoutMode === b.layoutMode
+    && a.layout === b.layout
+    && layoutBoundsEqual(a.layoutBounds, b.layoutBounds)
+}
+
+export function tileStateEqual(a: TileState, b: TileState): boolean {
   return a.type === b.type
     && a.x === b.x
     && a.y === b.y
@@ -31,17 +62,17 @@ function tileStateEqual(a: TileState, b: TileState): boolean {
     && a.hideNavbar === b.hideNavbar
     && a.borderRadius === b.borderRadius
     && a.launchBin === b.launchBin
-    && JSON.stringify(a.launchArgs ?? []) === JSON.stringify(b.launchArgs ?? [])
+    && stringArrayEqual(a.launchArgs, b.launchArgs)
     && a.autoAgentMode === b.autoAgentMode
 }
 
-function groupsEqual(a: GroupState[], b: GroupState[]): boolean {
+export function groupsEqual(a: GroupState[], b: GroupState[]): boolean {
   if (a.length !== b.length) return false
   const byId = new Map(b.map(group => [group.id, group]))
   for (const group of a) {
     const other = byId.get(group.id)
     if (!other) return false
-    if (JSON.stringify(group) !== JSON.stringify(other)) return false
+    if (!groupStateEqual(group, other)) return false
   }
   return true
 }

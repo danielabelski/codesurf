@@ -1,4 +1,12 @@
-import { useState, useRef, useCallback, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
+import {
+  useState,
+  useRef,
+  useCallback,
+  useSyncExternalStore,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from 'react'
 import type { AppSettings } from '../../../shared/types'
 import type { ChatMessage } from '../../../shared/chat-types'
 import type { SessionEntryHint } from '../../../shared/session-types'
@@ -9,6 +17,13 @@ import {
   resolveProviderModeId,
 } from '../config/providers'
 import { getChatTileRuntimeState } from '../components/chatTileRuntimeState'
+import {
+  getTileMessages,
+  getTileMessagesSnapshot,
+  replaceTileMessages,
+  subscribeTileMessages,
+  updateTileMessages,
+} from '../components/chat/chatMessagesStore'
 import type {
   ToolPermissionDecision,
   ToolPermissionRequest,
@@ -132,9 +147,25 @@ export function useChatTileCoreState({
   const initialJobId = initialRuntimeStateRef.current?.jobId ?? null
   const initialJobSequence = initialRuntimeStateRef.current?.jobSequence ?? 0
 
-  const [messages, setMessages] = useState<ChatMessage[]>(
-    () => initialRuntimeStateRef.current?.messages ?? [],
+  // Synchronous seed so the first render already sees restored runtime messages.
+  const seededTileRef = useRef<string | null>(null)
+  if (seededTileRef.current !== tileId) {
+    seededTileRef.current = tileId
+    const restored = initialRuntimeStateRef.current?.messages ?? []
+    if (getTileMessages(tileId).length === 0 && restored.length > 0) {
+      replaceTileMessages(tileId, restored)
+    }
+  }
+
+  const messagesSnapshot = useSyncExternalStore(
+    (listener) => subscribeTileMessages(tileId, listener),
+    () => getTileMessagesSnapshot(tileId),
+    () => getTileMessagesSnapshot(tileId),
   )
+  const messages = messagesSnapshot.messages as ChatMessage[]
+  const setMessages = useCallback<Dispatch<SetStateAction<ChatMessage[]>>>((updater) => {
+    updateTileMessages(tileId, updater)
+  }, [tileId])
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(
     () => (initialRuntimeStateRef.current?.isStreaming && initialJobId) ? true : false,

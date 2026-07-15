@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } fr
 import type { ChatMessage } from '../../../shared/chat-types'
 import { normalizeMessagesForMemory } from '../components/chat/messageNormalization'
 import { CHAT_STREAM_FLUSH_INTERVAL_MS } from '../components/chat/largeContent'
+import { appendStreamingAssistantText } from '../components/chat/chatMessagesStore'
 
 export function useChatTileStreamBuffer(options: {
+  tileId: string
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   pagedLinkedHistoryEnabled: boolean
   isStreaming: boolean
 }) {
-  const { setMessages, pagedLinkedHistoryEnabled, isStreaming } = options
+  const { tileId, setMessages, pagedLinkedHistoryEnabled, isStreaming } = options
   const pagedLinkedHistoryEnabledRef = useRef(pagedLinkedHistoryEnabled)
   pagedLinkedHistoryEnabledRef.current = pagedLinkedHistoryEnabled
   const isStreamingRef = useRef(false)
@@ -32,19 +34,10 @@ export function useChatTileStreamBuffer(options: {
     const text = pendingStreamTextRef.current
     if (!text) return
     pendingStreamTextRef.current = ''
-    setMessagesSafe(prev => {
-      const last = prev[prev.length - 1]
-      if (!last?.isStreaming) return prev
-      const blocks = [...(last.contentBlocks ?? [])]
-      const lastBlock = blocks[blocks.length - 1]
-      if (lastBlock?.type === 'text') {
-        blocks[blocks.length - 1] = { ...lastBlock, text: lastBlock.text + text }
-      } else {
-        blocks.push({ type: 'text', text })
-      }
-      return [...prev.slice(0, -1), { ...last, content: last.content + text, contentBlocks: blocks }]
-    })
-  }, [setMessagesSafe])
+    // Pure-text flush goes through the isolation store so chrome snapshots stay
+    // stable; setMessages is the same store-backed updater from core state.
+    appendStreamingAssistantText(tileId, text)
+  }, [tileId])
 
   const queueStreamText = useCallback((text: string) => {
     if (!text) return

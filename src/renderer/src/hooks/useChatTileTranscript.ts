@@ -14,13 +14,17 @@ import type { SessionEntryHint } from '../../../shared/session-types'
 import { buildChatMessageHistoryFingerprint } from '../../../shared/chat-history'
 import { mergeHistoricalMessages } from '../components/chat/chatTileUtils'
 import {
-  CHAT_RENDER_PAGE_SIZE,
   CHAT_INITIAL_RENDER_WINDOW,
   LINKED_SESSION_LIVE_TAIL_LIMIT,
   LINKED_SESSION_HISTORY_PAGE_SIZE,
   LINKED_SESSION_HISTORY_LOAD_THRESHOLD,
   CHAT_AUTO_SCROLL_THRESHOLD,
 } from '../components/chat/chatTileLayout'
+import {
+  selectTranscriptWindow,
+  expandTranscriptWindow,
+  resetTranscriptWindow,
+} from '../components/chat/transcriptWindow'
 
 export interface UseChatTileTranscriptOptions {
   workspaceId: string
@@ -139,28 +143,10 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
     loadEarlierMessagesRef.current = loadEarlierMessages
   }, [loadEarlierMessages])
 
-  const renderedMessages = useMemo(() => {
-    let combined: ChatMessage[]
-    if (historicalMessages.length > 0) {
-      const liveIds = new Set(messages.map(m => m.id))
-      combined = [
-        ...historicalMessages.filter(m => !liveIds.has(m.id)),
-        ...messages,
-      ]
-    } else {
-      combined = messages
-    }
-
-    if (combined.length <= visibleMessageLimit) return combined
-    return combined.slice(-visibleMessageLimit)
-  }, [historicalMessages, messages, visibleMessageLimit])
-
-  const allMessages = useMemo(
-    () => (historicalMessages.length > 0 ? [...historicalMessages, ...messages] : messages),
-    [historicalMessages, messages],
+  const { rendered: renderedMessages, combined: allMessages, hiddenCount: hiddenMessageCount } = useMemo(
+    () => selectTranscriptWindow(messages, historicalMessages, visibleMessageLimit),
+    [historicalMessages, messages, visibleMessageLimit],
   )
-
-  const hiddenMessageCount = Math.max(0, historicalMessages.length + messages.length - renderedMessages.length)
 
   useEffect(() => {
     if (!pagedLinkedHistoryEnabled || isStreaming) return
@@ -248,7 +234,9 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
     if (isNearLatest(el)) {
       programmaticScrollToLatestRef.current = false
       if (!stickToBottomRef.current) stickToBottomRef.current = true
-      if (visibleMessageLimit !== CHAT_INITIAL_RENDER_WINDOW) setVisibleMessageLimit(CHAT_INITIAL_RENDER_WINDOW)
+      if (visibleMessageLimit !== CHAT_INITIAL_RENDER_WINDOW) {
+        setVisibleMessageLimit(resetTranscriptWindow())
+      }
       syncScrollToLatestVisibility(false)
     } else if (currentTop < prevTop && !programmaticScrollToLatestRef.current) {
       if (stickToBottomRef.current) stickToBottomRef.current = false
@@ -258,7 +246,7 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
     if (el.scrollTop <= LINKED_SESSION_HISTORY_LOAD_THRESHOLD && !loadingEarlier) {
       pendingHistoryPrependRef.current = { previousHeight: el.scrollHeight, previousTop: el.scrollTop }
       if (hiddenMessageCount > 0) {
-        setVisibleMessageLimit(prev => prev + CHAT_RENDER_PAGE_SIZE)
+        setVisibleMessageLimit(prev => expandTranscriptWindow(prev))
       } else if (pagedLinkedHistoryEnabled && hasEarlierMessages) {
         void loadEarlierMessagesRef.current()
       }
@@ -282,7 +270,7 @@ export function useChatTileTranscript(options: UseChatTileTranscriptOptions): Us
 
     pendingHistoryPrependRef.current = { previousHeight: el.scrollHeight, previousTop: el.scrollTop }
     if (hiddenMessageCount > 0) {
-      setVisibleMessageLimit(prev => prev + CHAT_RENDER_PAGE_SIZE)
+      setVisibleMessageLimit(prev => expandTranscriptWindow(prev))
     } else if (pagedLinkedHistoryEnabled && hasEarlierMessages) {
       void loadEarlierMessagesRef.current()
     }

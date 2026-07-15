@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import type { ChatMessage, ToolBlock } from '../../../shared/chat-types'
 import { normalizeToolName } from '../../../shared/tool-normalization.ts'
 import type { ToolPermissionDecision, ToolPermissionRequest } from '../components/ai-elements/ToolPermission'
+import { subscribeChatStream } from '../components/chat/chatStreamHub'
 import { applyChatStreamEvent, mergeToolBlockDuplicate } from './chatStreamReducer'
 
 export interface ChatStreamHandlerArgs {
@@ -65,9 +66,8 @@ export function useChatStreamHandler({
         return prev
       })
 
-    const cleanup = window.electron?.stream?.onChunk((event: any) => {
-      if (event.cardId !== tileId) return
-
+    // Demux: one global IPC subscription, fan-out by cardId (see chatStreamHub).
+    const cleanup = subscribeChatStream(tileId, (event) => {
       if (typeof event.sequence === 'number') {
         if (event.sequence <= lastJobSequenceRef.current) return
         lastJobSequenceRef.current = event.sequence
@@ -81,11 +81,11 @@ export function useChatStreamHandler({
 
       switch (event.type) {
         case 'session':
-          if (event.sessionId) setSessionId(event.sessionId)
+          if (typeof event.sessionId === 'string' && event.sessionId) setSessionId(event.sessionId)
           break
 
         case 'text':
-          if (event.text) queueStreamText(event.text)
+          if (typeof event.text === 'string' && event.text) queueStreamText(event.text)
           break
 
         case 'thinking_start':
@@ -234,7 +234,7 @@ export function useChatStreamHandler({
           break
 
         case 'done':
-          if (event.sessionId) setSessionId(event.sessionId)
+          if (typeof event.sessionId === 'string' && event.sessionId) setSessionId(event.sessionId)
           updateLast(m => applyChatStreamEvent(m, event))
           setIsStreaming(false)
           publishActivity('Assistant responded')
@@ -248,5 +248,17 @@ export function useChatStreamHandler({
       }
     })
     return cleanup
-  }, [tileId, flushPendingStreamText, queueStreamText, setMessagesSafe])
+  }, [
+    tileId,
+    flushPendingStreamText,
+    queueStreamText,
+    setMessagesSafe,
+    setSessionId,
+    setIsStreaming,
+    setJobId,
+    setJobSequence,
+    lastJobSequenceRef,
+    setPendingToolPermissions,
+    setResolvedToolPermissions,
+  ])
 }
