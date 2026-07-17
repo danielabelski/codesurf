@@ -1,5 +1,5 @@
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { assertSafePathSegment } from './security/pathSegments.ts'
 
 export const APP_NAME = 'CodeSurf'
@@ -19,7 +19,13 @@ export const LEGACY_TILE_CONTEXT_DIRNAMES = ['.contex', '.collab'] as const
 /** @deprecated use LEGACY_TILE_CONTEXT_DIRNAMES[1] */
 export const LEGACY_TILE_CONTEXT_DIRNAME = '.collab'
 
-export const CODESURF_HOME = join(homedir(), CODESURF_HOME_DIRNAME)
+// Tests can redirect the app home via CODESURF_HOME so they never touch the
+// real ~/.codesurf (must be set before this module is imported).
+const codesurfHomeOverride = process.env.CODESURF_HOME?.trim()
+
+export const CODESURF_HOME = codesurfHomeOverride
+  ? resolve(codesurfHomeOverride)
+  : join(homedir(), CODESURF_HOME_DIRNAME)
 export const LEGACY_HOME = join(homedir(), LEGACY_HOME_DIRNAME)
 export const WORKSPACES_DIR = join(CODESURF_HOME, 'workspaces')
 export const JOBS_DIR = join(CODESURF_HOME, 'jobs')

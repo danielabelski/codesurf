@@ -1,7 +1,20 @@
 import { register } from 'node:module'
 import assert from 'node:assert/strict'
 import { describe, test, before, after } from 'node:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+
+// Redirect the app home to a throwaway dir BEFORE importing mcp-server:
+// startMCPServer writes mcp-server.json into CODESURF_HOME and drops
+// .mcp.json / CLAUDE.md into every workspace from config.json — without this
+// override the test suite overwrites the live ~/.codesurf configuration.
+const testCodesurfHome = mkdtempSync(join(tmpdir(), 'codesurf-mcp-auth-'))
+process.env.CODESURF_HOME = testCodesurfHome
+process.on('exit', () => {
+  rmSync(testCodesurfHome, { recursive: true, force: true })
+})
 
 // Electron and extensionless relative imports are unavailable under plain
 // node:test; register a tiny resolver before loading mcp-server.

@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import { expect } from './node-expect.ts'
-import { mkdtemp, rm, writeFile } from 'fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { getExternalSessionChatState, isExternalSessionImportableInChat } from '../src/main/session-sources.ts'
@@ -24,8 +24,15 @@ describe('external session chat openability', () => {
   })
 
   test('loads modern Claude JSONL messages from message.content blocks', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'codesurf-claude-session-'))
-    const filePath = join(dir, 'session.jsonl')
+    // Renderer-supplied entry hints are confined to real session roots, so
+    // the fixture must live under a (temp) ~/.claude/projects dir — point
+    // $HOME at a throwaway dir; os.homedir() honors it on POSIX.
+    const home = await mkdtemp(join(tmpdir(), 'codesurf-claude-home-'))
+    const projectDir = join(home, '.claude', 'projects', 'demo')
+    await mkdir(projectDir, { recursive: true })
+    const filePath = join(projectDir, 'session.jsonl')
+    const previousHome = process.env.HOME
+    process.env.HOME = home
     try {
       await writeFile(filePath, [
         JSON.stringify({
@@ -61,7 +68,9 @@ describe('external session chat openability', () => {
         'Because the parser missed nested content.',
       ])
     } finally {
-      await rm(dir, { recursive: true, force: true })
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+      await rm(home, { recursive: true, force: true })
     }
   })
 })

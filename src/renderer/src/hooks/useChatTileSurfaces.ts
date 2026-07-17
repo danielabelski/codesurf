@@ -5,6 +5,18 @@ import { normalizeChatSurfaceMenuEntry } from '../components/chat/ChatTileViews'
 import type { ChatSurfaceMenuEntry } from '../components/chat/ChatComposerMenus'
 import type { ActiveChatSurface } from '../components/chat/chatTileUtils'
 
+// The only origin trusted to talk RPC from a surface iframe: the origin of
+// the URL the iframe was pointed at (codesurf-ext://<extId>). A frame can
+// self-navigate to a remote origin while keeping its contentWindow, so
+// matching event.source alone never proves the sender is still the surface.
+function expectedIframeOrigin(iframe: HTMLIFrameElement | null | undefined): string | null {
+  try {
+    return iframe?.src ? new URL(iframe.src).origin : null
+  } catch {
+    return null
+  }
+}
+
 export function useChatTileSurfaces(options: {
   tileId: string
   workspaceId: string
@@ -54,7 +66,11 @@ export function useChatTileSurfaces(options: {
   ), [])
 
   const postToChatSurface = useCallback((instanceId: string, payload: Record<string, unknown>) => {
-    getChatSurfaceIframe(instanceId)?.contentWindow?.postMessage(payload, '*')
+    const iframe = getChatSurfaceIframe(instanceId)
+    const targetOrigin = expectedIframeOrigin(iframe)
+    // Fail closed: without a known surface origin, don't broadcast.
+    if (!iframe?.contentWindow || !targetOrigin) return
+    iframe.contentWindow.postMessage(payload, targetOrigin)
   }, [getChatSurfaceIframe])
 
   const getChatSurfacePeerEntries = useCallback((surfaceId: string) => (
@@ -188,23 +204,30 @@ export function useChatTileSurfaces(options: {
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
       const sourceWin = e.source as Window | null
-      const sourceIsChatSurface = Object.values(chatSurfaceIframeRefs.current)
-        .some(frame => frame?.contentWindow === sourceWin)
+      const sourceFrame = Object.values(chatSurfaceIframeRefs.current)
+        .find(frame => frame?.contentWindow === sourceWin)
+      const sourceIsChatSurface = Boolean(sourceFrame)
+      // A surface frame can self-navigate to a remote origin while keeping
+      // its contentWindow — only accept messages from the surface's origin.
+      if (sourceIsChatSurface) {
+        const expectedOrigin = expectedIframeOrigin(sourceFrame)
+        if (!expectedOrigin || e.origin !== expectedOrigin) return
+      }
       const reply = (result: unknown, error?: string) => {
-        sourceWin?.postMessage({ type: 'codesurf-rpc-response', id: msg.id, result: error ? undefined : result, error }, '*')
+        sourceWin?.postMessage({ type: 'codesurf-rpc-response', id: msg.id, result: error ? undefined : result, error }, e.origin)
       }
 
       if (msg.type === 'codesurf-bridge-ready' && typeof msg.tileId === 'string') {
         const surface = openChatSurfacesRef.current.find(candidate => candidate.instanceId === msg.tileId)
         if (!surface) return
         if (getChatSurfaceIframe(surface.instanceId)?.contentWindow !== sourceWin) return
-        sourceWin?.postMessage({ type: 'codesurf-theme-vars', vars: chatSurfaceThemeVars }, '*')
+        sourceWin?.postMessage({ type: 'codesurf-theme-vars', vars: chatSurfaceThemeVars }, e.origin)
         for (const [key, value] of Object.entries(surface.context || {})) {
           sourceWin?.postMessage({
             type: 'codesurf-event',
             event: 'context.changed',
             data: { key, value },
-          }, '*')
+          }, e.origin)
         }
         for (const peer of getChatSurfacePeerEntries(surface.instanceId)) {
           for (const entry of peer.contextEntries) {
@@ -212,7 +235,7 @@ export function useChatTileSurfaces(options: {
               type: 'codesurf-event',
               event: 'context.peerChanged',
               data: { peerId: peer.peerId, key: entry.key, value: entry.value },
-            }, '*')
+            }, e.origin)
           }
         }
         return

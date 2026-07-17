@@ -1,4 +1,8 @@
+import { homedir } from 'os'
+import { isAbsolute, join, resolve, sep } from 'path'
+import { realpath } from 'fs/promises'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types.ts'
+import { CODESURF_HOME } from '../paths.ts'
 import { buildChatMessageHistoryFingerprint } from '../../shared/chat-history.ts'
 import {
   type ChatRole,
@@ -21,6 +25,7 @@ import {
   ensureCodeSurfStructure,
   statSafe,
   readTextTailSafe,
+  getProjectCodeSurfDir,
   getCachedExternalSessionChatState,
   getFreshCachedExternalSessionChatState,
   pathScope,
@@ -131,6 +136,68 @@ function buildEntryFromHint(workspacePath: string | null, hint: SessionEntryHint
   }
 }
 
+/**
+ * Session-file roots trusted for renderer-supplied entry hints. Mirrors the
+ * directories each provider's list* scanner reads — keep in sync when a
+ * scanner gains a root. Without this confinement, chat:loadSessionHistory
+ * could be pointed at any file on disk (e.g. ~/.ssh/id_rsa) and its contents
+ * returned as chat messages.
+ */
+function sessionFileRoots(source: SessionEntryHint['source'], workspacePath: string | null): string[] {
+  const home = homedir()
+  switch (source) {
+    case 'codesurf': {
+      const roots = [join(CODESURF_HOME, 'sessions')]
+      if (workspacePath) roots.push(join(getProjectCodeSurfDir(workspacePath), 'sessions'))
+      return roots
+    }
+    case 'claude':
+      return [join(home, '.claude', 'projects'), join(home, '.claude', 'transcripts')]
+    case 'codex':
+      return [join(home, '.codex', 'sessions')]
+    case 'cursor':
+      return [join(home, '.cursor', 'chats')]
+    case 'hermes':
+      return [join(home, '.hermes')]
+    case 'openclaw':
+      return [join(home, '.openclaw', 'agents')]
+    case 'opencode':
+      return [join(home, '.opencode', 'conversations')]
+    case 'csagent':
+      return [join(CODESURF_HOME, 'agent-sessions'), join(home, '.pi', 'agent', 'sessions')]
+    default:
+      return []
+  }
+}
+
+async function isSessionFilePathAllowed(
+  source: SessionEntryHint['source'],
+  workspacePath: string | null,
+  filePath: string,
+): Promise<boolean> {
+  if (!isAbsolute(filePath)) return false
+  const roots = sessionFileRoots(source, workspacePath)
+  if (roots.length === 0) return false
+  // Resolve symlinks on both sides: the file may be a link escaping the root,
+  // and the roots themselves may sit under symlinked dirs (/tmp, $HOME).
+  const resolvedFile = await realpath(filePath).catch(() => resolve(filePath))
+  const rootCandidates = new Set<string>()
+  for (const root of roots) {
+    rootCandidates.add(resolve(root))
+    const real = await realpath(root).catch(() => null)
+    if (real) rootCandidates.add(real)
+  }
+  // APFS/Windows are case-insensitive by default — compare case-folded so a
+  // differently-cased escape can't slip past the prefix check.
+  const foldCase = process.platform === 'darwin' || process.platform === 'win32'
+  const fileCmp = foldCase ? resolvedFile.toLowerCase() : resolvedFile
+  for (const root of rootCandidates) {
+    const rootCmp = foldCase ? root.toLowerCase() : root
+    if (fileCmp === rootCmp || fileCmp.startsWith(rootCmp + sep)) return true
+  }
+  return false
+}
+
 async function resolveSessionEntry(
   workspacePath: string | null,
   id: string,
@@ -138,7 +205,9 @@ async function resolveSessionEntry(
 ): Promise<AggregatedSessionEntry | null> {
   if (entryHint && entryHint.id === id && entryHint.filePath) {
     const stat = await statSafe(entryHint.filePath)
-    if (stat?.isFile()) return buildEntryFromHint(workspacePath, entryHint)
+    if (stat?.isFile() && await isSessionFilePathAllowed(entryHint.source, workspacePath, entryHint.filePath)) {
+      return buildEntryFromHint(workspacePath, entryHint)
+    }
   }
   return findSessionEntryById(workspacePath, id)
 }

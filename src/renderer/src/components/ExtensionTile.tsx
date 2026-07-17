@@ -152,8 +152,25 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
     iframeRef.current?.contentWindow?.postMessage({ type: 'codesurf-event', event: 'theme.change', data: themeColors }, '*')
   }, [themeCssVars, themeColors])
 
+  // The only origin trusted to talk RPC to this tile: the origin of the URL
+  // the iframe was pointed at (codesurf-ext://<extId>). A sandboxed frame can
+  // self-navigate to a remote origin while keeping its contentWindow, so
+  // event.source alone never proves the sender is still the extension.
+  const expectedIframeOrigin = (iframe: HTMLIFrameElement | null): string | null => {
+    try {
+      return iframe?.src ? new URL(iframe.src).origin : null
+    } catch {
+      return null
+    }
+  }
+
   const postToIframe = useCallback((message: Record<string, unknown>) => {
-    iframeRef.current?.contentWindow?.postMessage(message, '*')
+    const iframe = iframeRef.current
+    const targetOrigin = expectedIframeOrigin(iframe)
+    // Fail closed: without a known extension origin, don't broadcast events
+    // (bus/relay traffic can carry workspace data).
+    if (!iframe?.contentWindow || !targetOrigin) return
+    iframe.contentWindow.postMessage(message, targetOrigin)
   }, [])
 
   const cleanupBusSubscriptions = useCallback(() => {
@@ -578,14 +595,18 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       const iframeWindow = iframeRef.current?.contentWindow
       if (!iframeWindow || event.source !== iframeWindow) return
 
+      // The sender must still be on the extension's own origin — see above.
+      const expectedOrigin = expectedIframeOrigin(iframeRef.current)
+      if (!expectedOrigin || event.origin !== expectedOrigin) return
+
       if (message.type === 'codesurf-bridge-ready' && message.tileId === tileId) {
         bridgeReadyRef.current = true
-        iframeWindow.postMessage({ type: 'codesurf-theme-vars', vars: themeCssVarsRef.current }, '*')
+        iframeWindow.postMessage({ type: 'codesurf-theme-vars', vars: themeCssVarsRef.current }, event.origin)
         iframeWindow.postMessage({
           type: 'codesurf-event',
           event: 'tile.resize',
           data: { width: contentWidth, height: contentHeight },
-        }, '*')
+        }, event.origin)
         return
       }
 
@@ -607,13 +628,13 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
       try {
         const result = await rpcHandler(String(message.method ?? ''), message.params)
-        iframeWindow.postMessage({ type: 'codesurf-rpc-response', id: message.id, result }, '*')
+        iframeWindow.postMessage({ type: 'codesurf-rpc-response', id: message.id, result }, event.origin)
       } catch (err) {
         iframeWindow.postMessage({
           type: 'codesurf-rpc-response',
           id: message.id,
           error: err instanceof Error ? err.message : String(err),
-        }, '*')
+        }, event.origin)
       }
     }
 

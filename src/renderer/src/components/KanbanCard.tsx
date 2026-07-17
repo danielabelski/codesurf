@@ -76,7 +76,8 @@ const BUILTIN_TOOLS = ['read', 'write', 'edit', 'bash', 'computer', 'web_search'
 
 function resolveMcpConfigPath(input: string): string {
   if (!input.startsWith('~')) return input
-  const home = (window as any).process?.env?.HOME
+  // contextIsolation removes window.process — the bridge exposes homedir instead.
+  const home = window.electron?.homedir || (window as any).process?.env?.HOME
   if (!home) return input
   if (input === '~') return home
   if (input.startsWith('~/.codesurf/')) {
@@ -88,6 +89,15 @@ function resolveMcpConfigPath(input: string): string {
   return `${home}/${input.slice(2)}`
 }
 
+// POSIX-safe quoting for values interpolated into a shell command line: wrap
+// in single quotes, escaping embedded single quotes as '\''. Inside single
+// quotes nothing expands — the previous double-quote wrapping still allowed
+// $(...), backticks and ${VAR} from card fields, which are settable via MCP
+// (kanban_create_card / kanban_update_card) without a permission prompt.
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
 type Tab = 'overview' | 'progress' | 'notes'
 
 
@@ -96,18 +106,18 @@ type Tab = 'overview' | 'progress' | 'notes'
 export function buildLaunchCmd(card: KanbanCardData, briefPath?: string, agentPath?: string): string {
   if (card.agent === 'shell' || !card.agent) return ''
   const bin = agentPath ?? card.agent
-  const parts: string[] = [bin]
-  if (card.model) parts.push(`--model ${card.model}`)
+  const parts: string[] = [shQuote(bin)]
+  if (card.model) parts.push(`--model ${shQuote(card.model)}`)
   const mcpConfigPath = resolveMcpConfigPath(card.mcpConfig ?? MCP_CONFIG)
-  parts.push(`--mcp-config "${mcpConfigPath}"`)
+  parts.push(`--mcp-config ${shQuote(mcpConfigPath)}`)
   if (briefPath) {
-    if (card.agent === 'claude') parts.push(`--print "$(cat ${briefPath})"`)
-    else if (card.agent === 'codex') parts.push(`exec "$(cat ${briefPath})"`)
+    if (card.agent === 'claude') parts.push(`--print "$(cat ${shQuote(briefPath)})"`)
+    else if (card.agent === 'codex') parts.push(`exec "$(cat ${shQuote(briefPath)})"`)
   } else if (card.instructions) {
-    const esc = card.instructions.replace(/"/g, '\\"').replace(/\n/g, '\\n')
-    if (card.agent === 'claude') parts.push(`--print "${esc}"`)
-    else if (card.agent === 'codex') parts.push(`exec "${esc}"`)
+    if (card.agent === 'claude') parts.push(`--print ${shQuote(card.instructions)}`)
+    else if (card.agent === 'codex') parts.push(`exec ${shQuote(card.instructions)}`)
   }
+  // Hooks are user-authored shell snippets by design — passed through raw.
   if (card.hooks.length) return card.hooks.join(' && ') + ' && ' + parts.join(' ')
   return parts.join(' ')
 }

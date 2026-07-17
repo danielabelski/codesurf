@@ -27,7 +27,22 @@ function indentDepth(line: string): number {
 function extractExposeBlock(source: string): string | null {
   const marker = source.indexOf('contextBridge.exposeInMainWorld')
   if (marker < 0) return null
-  const blockStart = source.indexOf('{', marker)
+
+  // The bridge object may be inline in the call, or held in a named const so
+  // the exposure itself can sit behind a frame guard — resolve the const.
+  const identifierArg = source
+    .slice(marker, marker + 200)
+    .match(/exposeInMainWorld\(\s*['"][^'"]+['"]\s*,\s*([A-Za-z_$][\w$]*)\s*\)/)
+
+  let blockStart: number
+  if (identifierArg) {
+    const escapedName = identifierArg[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const constMatch = new RegExp(`\\bconst\\s+${escapedName}\\s*=\\s*\\{`).exec(source)
+    if (!constMatch) return null
+    blockStart = constMatch.index + constMatch[0].length - 1
+  } else {
+    blockStart = source.indexOf('{', marker)
+  }
   if (blockStart < 0) return null
 
   let depth = 0

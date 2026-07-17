@@ -63,10 +63,24 @@ export function attachBridgeHost(options: BridgeHostOptions): BridgeHostHandle {
   const channelDisposers = new Map<ChannelName, Disposer | void>()
   const patternKeys = Object.keys(channels)
 
+  // The only origin trusted to use the bridge: the origin of the URL the
+  // iframe was pointed at. The frame can self-navigate (or be navigated by a
+  // hijacked local port) to another origin while keeping its contentWindow,
+  // so event.source alone never proves the sender is still the chat app.
+  function expectedIframeOrigin(): string | null {
+    try {
+      return iframe.src ? new URL(iframe.src).origin : null
+    } catch {
+      return null
+    }
+  }
+
   function postToIframe(message: BridgeMessage): void {
     const win = iframe.contentWindow
-    if (!win) return
-    win.postMessage(withNamespace(message), '*')
+    const targetOrigin = expectedIframeOrigin()
+    // Fail closed: without a known frame origin, don't broadcast.
+    if (!win || !targetOrigin) return
+    win.postMessage(withNamespace(message), targetOrigin)
   }
 
   async function handleRequest(id: string, method: RequestMethod, params: unknown): Promise<void> {
@@ -105,6 +119,8 @@ export function attachBridgeHost(options: BridgeHostOptions): BridgeHostHandle {
 
   function listener(event: MessageEvent): void {
     if (event.source !== iframe.contentWindow) return
+    const expectedOrigin = expectedIframeOrigin()
+    if (!expectedOrigin || event.origin !== expectedOrigin) return
     const data = event.data
     if (!isNamespacedBridgeMessage(data)) return
     const message = data as BridgeMessage

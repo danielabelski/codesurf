@@ -59,6 +59,14 @@ export function registerFileProtocol(): void {
         headers.set('content-type', inferMimeType(filePath))
       }
       headers.set('cache-control', 'no-store, no-cache, must-revalidate')
+      // SVG documents execute scripts when loaded as a top-level document (e.g.
+      // a browser tile navigated to the file) — and every codesurf-file:// URL
+      // shares one origin, so that script could same-origin fetch every other
+      // served media file on disk. Loaded via <img> scripts never run anyway,
+      // so banning script execution costs nothing and closes the hole.
+      if (inferMimeType(filePath) === 'image/svg+xml') {
+        headers.set('content-security-policy', "script-src 'none'")
+      }
       // risk-04: do NOT advertise wildcard CORS on a local-file scheme. Media
       // tiles load via <img>/<video>/<audio> src (no-cors) and never needed it;
       // removing it blocks cross-origin fetch()/canvas reads from webview-tile

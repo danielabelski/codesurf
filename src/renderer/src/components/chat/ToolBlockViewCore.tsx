@@ -40,12 +40,45 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
   const rawToolName = block.rawName ?? block.name
   const checkpointRestoreCtx = React.useContext(CheckpointRestoreContext)
 
-  // Intercept tool-permission requests — when the agent needs user approval for
-  // this tool call, show an inline Allow/Deny prompt instead of (or alongside)
-  // the raw tool chip. Mirrors the AskUserQuestion pattern.
   const permissionCtx = useToolPermissionContext()
   const permissionRequest = permissionCtx?.pending.get(block.id) ?? null
   const resolvedDecision = permissionCtx?.resolved.get(block.id) ?? null
+
+  // All hooks must run unconditionally before the early returns below:
+  // permissionRequest/resolvedDecision and block.summary change over the
+  // lifetime of a single mounted chip, so a conditional hook count would
+  // crash React with a "rendered more/fewer hooks" error.
+  const fileChangeSummary = useMemo(() => {
+    const fileChanges = block.fileChanges ?? []
+    return {
+      fileCount: fileChanges.length,
+      additions: fileChanges.reduce((sum, change) => sum + change.additions, 0),
+      deletions: fileChanges.reduce((sum, change) => sum + change.deletions, 0),
+    }
+  }, [block.fileChanges])
+  const [expanded, setExpanded] = useState(isFileChangeBlock)
+  // For file-change blocks default the per-file diff panels to open: the
+  // whole reason we're showing a file-change block is the diff itself. For
+  // regular tool blocks (Bash output, etc.) default to closed — users click
+  // to drill in.
+  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>(() => {
+    if (!isFileChangeBlock) return {}
+    const map: Record<string, boolean> = {}
+    block.fileChanges?.forEach((change, index) => {
+      map[`${change.path}:${index}`] = hasRenderableFileChangeDiff(change)
+    })
+    return map
+  })
+  const toggleFile = useCallback((key: string) => {
+    setExpandedFiles(prev => {
+      const current = prev[key] ?? false
+      return { ...prev, [key]: !current }
+    })
+  }, [])
+
+  // Intercept tool-permission requests — when the agent needs user approval for
+  // this tool call, show an inline Allow/Deny prompt instead of (or alongside)
+  // the raw tool chip. Mirrors the AskUserQuestion pattern.
   if (permissionRequest || resolvedDecision) {
     return (
       <ToolPermissionCard
@@ -74,27 +107,6 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
       )
     }
   }
-  const fileChangeSummary = useMemo(() => {
-    const fileChanges = block.fileChanges ?? []
-    return {
-      fileCount: fileChanges.length,
-      additions: fileChanges.reduce((sum, change) => sum + change.additions, 0),
-      deletions: fileChanges.reduce((sum, change) => sum + change.deletions, 0),
-    }
-  }, [block.fileChanges])
-  const [expanded, setExpanded] = useState(isFileChangeBlock)
-  // For file-change blocks default the per-file diff panels to open: the
-  // whole reason we're showing a file-change block is the diff itself. For
-  // regular tool blocks (Bash output, etc.) default to closed — users click
-  // to drill in.
-  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>(() => {
-    if (!isFileChangeBlock) return {}
-    const map: Record<string, boolean> = {}
-    block.fileChanges?.forEach((change, index) => {
-      map[`${change.path}:${index}`] = hasRenderableFileChangeDiff(change)
-    })
-    return map
-  })
   const isRunning = isLive && block.status === 'running'
   const hasNestedData = (block.fileChanges?.length ?? 0) > 0 || (block.commandEntries?.length ?? 0) > 0
   const isCheckpoint = isCheckpointToolBlock(block)
@@ -106,13 +118,6 @@ export const ToolBlockView = React.memo(function ToolBlockView({ block, isLive =
     checkpointRestoreAction
     && checkpointRestoreCtx?.restoringCheckpointId === checkpointRestoreAction.checkpointId,
   )
-
-  const toggleFile = useCallback((key: string) => {
-    setExpandedFiles(prev => {
-      const current = prev[key] ?? false
-      return { ...prev, [key]: !current }
-    })
-  }, [])
 
   return (
     <div

@@ -117,6 +117,13 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
         const segments = url.pathname.split('/').filter(Boolean).map(s => decodeURIComponent(s))
         const codiconBase = join(__dirname, '..', '..', 'node_modules', '@vscode', 'codicons')
         const candidate = join(codiconBase, ...segments)
+        // Containment check (same pattern as the extension-assets route below):
+        // '..%2f' decodes after URL parsing, so without this any file on disk
+        // is readable via codesurf-ext://__runext_codicons__/../../...
+        const rel = relative(codiconBase, candidate)
+        if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
+          return new Response('Forbidden', { status: 403 })
+        }
         if (existsSync(candidate)) {
           return serveFile(candidate)
         }

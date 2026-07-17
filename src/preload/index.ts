@@ -46,8 +46,9 @@ function dropRendererBusSubscription(subscriberId: string): void {
   rendererBusSubscriptions.delete(subscriberId)
 }
 
-// Expose IPC bridges to the renderer
-contextBridge.exposeInMainWorld('electron', {
+// The full privileged bridge surface. Kept as a plain const so the exposure
+// can be gated on the frame this preload runs in (see below).
+const electronApi = {
   // OS dark/light (Electron nativeTheme) — used when appearance is "system"
   appearance: {
     shouldUseDark: () => ipcRenderer.invoke('appearance:shouldUseDark'),
@@ -794,4 +795,13 @@ contextBridge.exposeInMainWorld('electron', {
       return () => { ipcRenderer.removeListener('pets:gallery-changed', handler) }
     },
   },
-})
+}
+
+// Expose IPC bridges to the renderer — main frame only. This preload runs in
+// EVERY iframe of the window, and the app deliberately frames untrusted
+// content (extension tiles, MCP-UI guest HTML, arbitrary-URL previews). Those
+// frames must not inherit fs/terminal/secrets access. First-party iframes
+// reach the host through their own postMessage RPC bridges instead.
+if (process.isMainFrame) {
+  contextBridge.exposeInMainWorld('electron', electronApi)
+}

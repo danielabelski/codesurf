@@ -549,16 +549,20 @@ export const ChatMessageContent = React.memo(({
     </div>
   ) : null
 
-  if (!bodyText) return attachments ?? null
-
-  // Split body into markdown / insight segments. Insights become styled
-  // blocks rendered with the active accent color; everything else flows
-  // through the normal markdown pipeline.
+  // Hooks must run unconditionally before the early return below: bodyText
+  // flips between empty and non-empty while attachment markers stream in,
+  // and a conditional hook count would crash React.
   const accent = theme.accent.base
   const textColor = theme.text.primary
   const externalAgentSegments = useMemo(() => splitExternalAgentMarkup(bodyText), [bodyText])
   const hasExternalAgentMarkup = externalAgentSegments.some(seg => seg.kind === 'tool')
   const segments = useMemo(() => splitInsightSegments(bodyText), [bodyText])
+
+  if (!bodyText) return attachments ?? null
+
+  // Split body into markdown / insight segments. Insights become styled
+  // blocks rendered with the active accent color; everything else flows
+  // through the normal markdown pipeline.
   const renderedBody = hasExternalAgentMarkup
     ? (
       <div className={className} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
