@@ -1,26 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
+import {
+  makeDaemonTestTempDir as makeTestTempDir,
+  spawnDaemon,
+  spawnManagedChild,
+  waitFor,
+} from './helpers/spawn-daemon.mjs'
 
-const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
-const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
-const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
 const TEST_MAX_REQUEST_BODY_BYTES = 1024 * 1024
-
-async function waitFor(check, timeoutMs = 5_000, intervalMs = 50) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    const value = await check()
-    if (value) return value
-    await new Promise(resolve => setTimeout(resolve, intervalMs))
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms`)
-}
 
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
@@ -29,11 +21,6 @@ async function readJson(filePath) {
 async function writeJson(filePath, value) {
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-async function makeTestTempDir(prefix) {
-  await mkdir(TEST_TMP_ROOT, { recursive: true })
-  return await mkdtemp(join(TEST_TMP_ROOT, prefix))
 }
 
 function git(args, cwd) {
@@ -51,88 +38,11 @@ function git(args, cwd) {
 }
 
 async function startDaemon(options = {}) {
-  const homeDir = await makeTestTempDir('codesurfd-test-')
-  const pidPath = join(homeDir, 'daemon', 'pid.json')
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      CODESURF_HOME: homeDir,
-      CODESURF_DAEMON_PID_PATH: pidPath,
-      CODESURF_APP_VERSION: 'test-suite',
-      ...(options.env ?? {}),
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  return await spawnDaemon({
+    homePrefix: 'codesurfd-test-',
+    appVersion: 'test-suite',
+    env: options.env,
   })
-
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-
-  const pidInfo = await waitFor(async () => {
-    if (!existsSync(pidPath)) return null
-    return await readJson(pidPath)
-  })
-
-  const request = async (path, options = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: options.method ?? (options.body == null ? 'GET' : 'POST'),
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
-      },
-      body: options.body == null ? undefined : JSON.stringify(options.body),
-    })
-    const text = await response.text()
-    const payload = text.trim() ? JSON.parse(text) : null
-    return { status: response.status, payload }
-  }
-
-  const requestText = async (path, options = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: options.method ?? 'GET',
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        ...(options.headers ?? {}),
-      },
-    })
-    return {
-      status: response.status,
-      body: await response.text(),
-      contentType: response.headers.get('content-type') ?? '',
-    }
-  }
-
-  const requestRaw = async (path, options = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: options.method ?? 'POST',
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        'Content-Type': 'application/json',
-        ...(options.headers ?? {}),
-      },
-      body: options.body ?? '',
-    })
-    const text = await response.text()
-    return {
-      status: response.status,
-      payload: text.trim() ? JSON.parse(text) : null,
-    }
-  }
-
-  const stop = async () => {
-    if (!child.killed) child.kill('SIGTERM')
-    await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await rm(homeDir, { recursive: true, force: true })
-    if (stderr.trim()) {
-      assert.fail(`daemon stderr was not empty:\n${stderr}`)
-    }
-  }
-
-  return { child, homeDir, pidInfo, request, requestRaw, requestText, stop }
 }
 
 function makeJsonBodyAtSize(name, size) {
@@ -189,8 +99,9 @@ async function requestChunkedBeforeEnd(daemon, path, chunks) {
 }
 
 async function runDaemonEntrypointOnce(daemon, appVersion) {
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
+  const managed = spawnManagedChild({
+    command: process.execPath,
+    args: [daemon.daemonEntry],
     env: {
       ...process.env,
       HOME: daemon.homeDir,
@@ -198,14 +109,13 @@ async function runDaemonEntrypointOnce(daemon, appVersion) {
       CODESURF_DAEMON_PID_PATH: join(daemon.homeDir, 'daemon', 'pid.json'),
       CODESURF_APP_VERSION: appVersion,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   })
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-  await waitFor(() => child.exitCode !== null || child.signalCode !== null)
-  return { exitCode: child.exitCode, signalCode: child.signalCode, stderr }
+  try {
+    return await managed.waitForExit()
+  } catch (error) {
+    await managed.stop()
+    throw error
+  }
 }
 
 test('daemon health endpoint requires auth and returns metadata', async t => {
@@ -933,44 +843,18 @@ test('daemon migrates legacy config.json into split workspace, project, and sett
     ],
   })
 
-  const pidPath = join(homeDir, 'daemon', 'pid.json')
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      CODESURF_HOME: homeDir,
-      CODESURF_DAEMON_PID_PATH: pidPath,
-      CODESURF_APP_VERSION: 'test-suite',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-
-  const pidInfo = await waitFor(async () => {
-    if (!existsSync(pidPath)) return null
-    return await readJson(pidPath)
+  const daemon = await spawnDaemon({
+    homeDir,
+    appVersion: 'test-suite',
   })
 
   t.after(async () => {
-    if (!child.killed) child.kill('SIGTERM')
-    await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await rm(homeDir, { recursive: true, force: true })
-    if (stderr.trim()) {
-      assert.fail(`daemon stderr was not empty:\n${stderr}`)
-    }
+    await daemon.stop()
   })
 
-  const response = await fetch(`http://127.0.0.1:${pidInfo.port}/workspace/projects`, {
-    headers: { Authorization: `Bearer ${pidInfo.token}` },
-  })
+  const response = await daemon.request('/workspace/projects')
   assert.equal(response.status, 200)
-  const projects = await response.json()
+  const projects = response.payload
   assert.equal(projects.length, 2)
   assert.deepEqual(projects.map(project => project.name), ['one', 'two'])
 
