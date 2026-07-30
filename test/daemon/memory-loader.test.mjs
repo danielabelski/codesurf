@@ -5,7 +5,13 @@ import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { buildMemoryPrompt, describeMemoryContextForTool } from '../../bin/memory-loader.mjs'
+import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } from '../../bin/memory-loader.mjs'
+import {
+  MAX_AGGREGATE_INSTRUCTION_BYTES,
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_IMPORT_DEPTH,
+  MAX_INSTRUCTION_SECTIONS,
+} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
@@ -306,4 +312,177 @@ test('daemon memory loader rejects AGENTS imports that escape the workspace thro
   response = await daemon.request(`/memory/load?workspaceId=${encodeURIComponent(workspaceId)}&executionTarget=local`)
   assert.equal(response.status, 500)
   assert.match(response.payload.error, /outside the workspace root|symlink/i)
+})
+
+test('memory files use UTF-8 byte limits and mark the first byte over the per-file ceiling', async t => {
+  const homeDir = await makeTestTempDir('memory-byte-budget-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const exact = 'é'.repeat(MAX_CONTEXT_FILE_BYTES / 2)
+  await writeFile(join(workspaceDir, 'AGENTS.md'), exact, 'utf8')
+  let context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+  })
+  let section = context.sections.find(entry => entry.displayPath === 'AGENTS.md')
+  assert.equal(section.content, exact)
+  assert.equal(section.originalBytes, MAX_CONTEXT_FILE_BYTES)
+  assert.equal(section.includedBytes, MAX_CONTEXT_FILE_BYTES)
+  assert.equal(section.truncated, false)
+
+  const oneByteOver = `${'a'.repeat(MAX_CONTEXT_FILE_BYTES - 1)}é`
+  await writeFile(join(workspaceDir, 'AGENTS.md'), oneByteOver, 'utf8')
+  context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+  })
+  section = context.sections.find(entry => entry.displayPath === 'AGENTS.md')
+  assert.equal(section.originalBytes, MAX_CONTEXT_FILE_BYTES + 1)
+  assert.equal(section.truncated, true)
+  assert.match(section.content, /maximum context file bytes/)
+  assert.ok(Buffer.byteLength(section.content, 'utf8') <= MAX_CONTEXT_FILE_BYTES)
+  assert.doesNotMatch(section.content, /\uFFFD/)
+})
+
+test('a nine-level import chain stops after depth eight with visible omission metadata', async t => {
+  const homeDir = await makeTestTempDir('memory-import-depth-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const rulesDir = join(workspaceDir, 'rules')
+  await mkdir(rulesDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(workspaceDir, 'AGENTS.md'), '@import ./rules/1.md', 'utf8')
+  for (let depth = 1; depth <= 9; depth += 1) {
+    const next = depth < 9 ? `\n@import ./${depth + 1}.md` : ''
+    await writeFile(join(rulesDir, `${depth}.md`), `depth-${depth}${next}`, 'utf8')
+  }
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+  })
+
+  assert.match(context.prompt, /depth-8/)
+  assert.doesNotMatch(context.prompt, /depth-9/)
+  assert.equal(context.budget.maxImportDepth, MAX_IMPORT_DEPTH)
+  assert.equal(context.budget.omittedByDepth, 1)
+  assert.ok(context.budget.omissions.some(item => item.displayPath === 'rules/9.md' && /maximum import depth/.test(item.truncationReason)))
+  assert.match(context.prompt, /import omitted by maximum import depth/)
+  assert.match(context.contextBuckets.inspect.summary, /omitted by context budgets/)
+})
+
+test('more than 32 unique imports stays bounded and reports the import-count overflow', async t => {
+  const homeDir = await makeTestTempDir('memory-import-count-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const rulesDir = join(workspaceDir, 'rules')
+  await mkdir(rulesDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const imports = []
+  for (let index = 0; index < 40; index += 1) {
+    imports.push(`@import ./rules/${index}.md`)
+    await writeFile(join(rulesDir, `${index}.md`), `rule-${index}`, 'utf8')
+  }
+  await writeFile(join(workspaceDir, 'AGENTS.md'), `root-rule\n${imports.join('\n')}`, 'utf8')
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+  })
+
+  assert.ok(context.includedSections.length <= MAX_INSTRUCTION_SECTIONS)
+  assert.ok(context.budget.omittedByImportCount > 0)
+  assert.match(context.prompt, /maximum included instruction sections/)
+  assert.ok(context.budget.omissions.some(item => /maximum included instruction sections/.test(item.truncationReason)))
+})
+
+test('aggregate allocation protects high-precedence workspace-local instructions', async t => {
+  const homeDir = await makeTestTempDir('memory-precedence-budget-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const userImportsDir = join(homeDir, '.codesurf', 'low')
+  await mkdir(userImportsDir, { recursive: true })
+  await mkdir(join(workspaceDir, '.codesurf'), { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const importLines = []
+  for (let index = 0; index < 5; index += 1) {
+    importLines.push(`@import ./low/${index}.md`)
+    await writeFile(
+      join(userImportsDir, `${index}.md`),
+      `LOW-${index}-${'x'.repeat(MAX_CONTEXT_FILE_BYTES - 6)}`,
+      'utf8',
+    )
+  }
+  await writeFile(
+    join(homeDir, '.codesurf', 'AGENTS.md'),
+    `LOWEST-USER-RULE\n${importLines.join('\n')}`,
+    'utf8',
+  )
+  await writeFile(
+    join(workspaceDir, '.codesurf', 'AGENTS.md'),
+    'HIGH-PRECEDENCE-WORKSPACE-LOCAL-RULE',
+    'utf8',
+  )
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'local',
+  })
+
+  assert.ok(context.budget.includedBytes <= MAX_AGGREGATE_INSTRUCTION_BYTES)
+  assert.ok(Buffer.byteLength(context.prompt, 'utf8') <= MAX_AGGREGATE_INSTRUCTION_BYTES)
+  assert.match(context.prompt, /HIGH-PRECEDENCE-WORKSPACE-LOCAL-RULE/)
+  assert.ok(context.includedSections.some(section => section.displayPath === '.codesurf/AGENTS.md'))
+  assert.ok(context.budget.omittedByAggregate > 0 || context.budget.truncatedByAggregate > 0)
+})
+
+test('cloud privacy filtering happens before aggregate allocation', async t => {
+  const homeDir = await makeTestTempDir('memory-privacy-budget-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const localRulesDir = join(workspaceDir, '.codesurf', 'local')
+  await mkdir(localRulesDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(workspaceDir, 'AGENTS.md'), 'REMOTE-SAFE-RULE-SURVIVES', 'utf8')
+  const imports = []
+  for (let index = 0; index < 5; index += 1) {
+    imports.push(`@import ./local/${index}.md`)
+    await writeFile(
+      join(localRulesDir, `${index}.md`),
+      `LOCAL-ONLY-${index}-${'z'.repeat(MAX_CONTEXT_FILE_BYTES - 13)}`,
+      'utf8',
+    )
+  }
+  await writeFile(join(workspaceDir, '.codesurf', 'AGENTS.md'), imports.join('\n'), 'utf8')
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'cloud',
+  })
+
+  assert.deepEqual(context.includedBuckets, ['remote-safe'])
+  assert.equal(context.budget.originalSectionCount, 1)
+  assert.equal(context.budget.omittedByAggregate, 0)
+  assert.match(context.prompt, /REMOTE-SAFE-RULE-SURVIVES/)
+  assert.doesNotMatch(context.prompt, /LOCAL-ONLY/)
 })

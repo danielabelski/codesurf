@@ -1,6 +1,15 @@
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { buildContextBucketBundle, getIncludedContextBuckets } from './context-buckets.mjs'
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_IMPORT_DEPTH,
+  MAX_INSTRUCTION_SECTIONS,
+  budgetInstructionFragments,
+  formatInstructionBudgetNotice,
+  truncateUtf8Buffer,
+  utf8ByteLength,
+} from './context-budget.mjs'
 
 export async function loadMemoryContext({
   homeDir,
@@ -12,41 +21,103 @@ export async function loadMemoryContext({
   const normalizedWorkspace = normalizeDir(workspaceDir)
   const orderedProjectPaths = orderProjectPaths(normalizedWorkspace, projectPaths)
   const sections = []
-  const visited = new Set()
-
-  for (const candidate of memoryCandidates({
+  const candidates = memoryCandidates({
     homeDir: normalizedHome,
     workspaceDir: normalizedWorkspace,
     projectPaths: orderedProjectPaths,
-  })) {
-    const loaded = await readMemorySections(candidate, visited)
+  })
+  const firstCandidateIndex = Math.max(0, candidates.length - MAX_INSTRUCTION_SECTIONS)
+  const traversal = {
+    visited: new Set(),
+    importCount: 0,
+    maxImportCount: Math.max(0, MAX_INSTRUCTION_SECTIONS - Math.min(candidates.length, MAX_INSTRUCTION_SECTIONS)),
+    nextPrecedence: 0,
+    omissions: [],
+  }
+
+  if (firstCandidateIndex > 0) {
+    traversal.omissions.push(contextOmissionMetadata({
+      source: 'memory-candidates',
+      displayPath: `${firstCandidateIndex} lower-precedence root candidates`,
+      scope: 'workspace',
+      bucket: 'remote-safe',
+      precedence: 0,
+      reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS})`,
+    }))
+  }
+
+  for (const candidate of candidates.slice(firstCandidateIndex)) {
+    const loaded = await readMemorySections(candidate, traversal)
     if (loaded.length > 0) sections.push(...loaded)
   }
 
   const includedBuckets = getIncludedContextBuckets(executionTarget)
+  // Privacy filtering is intentionally before allocation: local-only content
+  // can never consume the remote-safe aggregate budget for a cloud target.
+  const selectedSections = sections.filter(section => includedBuckets.includes(section.bucket))
+  const budget = budgetInstructionFragments(selectedSections, {
+    reservedBytes: memoryPromptReservedBytes(selectedSections),
+  })
+  const omittedByDepth = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import depth')).length
+  const omittedByImportCount = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum included instruction sections')).length
+  const extraNotices = []
+  if (omittedByDepth > 0) {
+    extraNotices.push(`${omittedByDepth} import${omittedByDepth === 1 ? '' : 's'} omitted by maximum import depth (${MAX_IMPORT_DEPTH}).`)
+  }
+  if (omittedByImportCount > 0) {
+    extraNotices.push(`${omittedByImportCount} import or root candidate${omittedByImportCount === 1 ? '' : 's'} omitted by maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}).`)
+  }
+  const notice = formatInstructionBudgetNotice(budget, extraNotices)
+  const notices = notice ? [notice] : []
   const prompt = buildMemoryPrompt({
-    sections: sections.filter(section => includedBuckets.includes(section.bucket)),
+    sections: budget.fragments,
+    notices,
   })
   const contextBuckets = buildContextBucketBundle({
     executionTarget,
     includedBuckets,
-    sections,
+    sections: budget.fragments,
   }, prompt)
-
-  return {
+  const result = {
     executionTarget,
     includedBuckets,
     sections,
+    includedSections: budget.fragments,
     prompt,
-    contextBuckets,
+    budget: {
+      ...budget,
+      omissions: [...budget.omitted, ...traversal.omissions],
+      omittedByDepth,
+      omittedByImportCount,
+      maxFileBytes: MAX_CONTEXT_FILE_BYTES,
+      maxImportDepth: MAX_IMPORT_DEPTH,
+    },
+    ...(notices.length > 0 ? { notices } : {}),
+  }
+  const inspect = describeMemoryContextForTool(result, prompt)
+  return {
+    ...result,
+    contextBuckets: {
+      ...contextBuckets,
+      ...(inspect.summary || inspect.input ? { inspect } : {}),
+    },
   }
 }
 
 export function buildMemoryPrompt(context) {
-  const sections = Array.isArray(context?.sections)
+  const inputSections = Array.isArray(context?.sections)
     ? context.sections.filter(section => section && typeof section.content === 'string' && section.content.trim())
     : []
-  if (sections.length === 0) return undefined
+  const budget = budgetInstructionFragments(inputSections, {
+    reservedBytes: memoryPromptReservedBytes(inputSections),
+  })
+  const sections = budget.fragments
+  const notices = Array.isArray(context?.notices)
+    ? context.notices.map(value => String(value ?? '').trim()).filter(Boolean)
+    : []
+  const generatedNotice = formatInstructionBudgetNotice(budget)
+  if (generatedNotice && !notices.includes(generatedNotice)) notices.push(generatedNotice)
+  if (sections.length === 0 && notices.length === 0) return undefined
 
   const lines = [
     '## Workspace Instructions',
@@ -60,27 +131,38 @@ export function buildMemoryPrompt(context) {
     lines.push('')
   }
 
+  for (const notice of notices) lines.push(notice)
+
   return lines.join('\n').trim()
 }
 
 export function describeMemoryContextForTool(context, promptOverride) {
   const input = String(promptOverride ?? context?.prompt ?? '').trim() || undefined
-  const visibleSections = Array.isArray(context?.sections) && Array.isArray(context?.includedBuckets)
-    ? context.sections.filter(section => context.includedBuckets.includes(section.bucket))
+  const visibleSections = Array.isArray(context?.includedSections)
+    ? context.includedSections
+    : Array.isArray(context?.sections) && Array.isArray(context?.includedBuckets)
+      ? context.sections.filter(section => context.includedBuckets.includes(section.bucket))
     : []
+  const omittedCount = Number(context?.budget?.omittedSectionCount ?? 0)
+    + Number(context?.budget?.omittedByDepth ?? 0)
+    + Number(context?.budget?.omittedByImportCount ?? 0)
+  const truncatedCount = visibleSections.filter(section => section.truncated).length
+  const budgetSuffix = omittedCount > 0 || truncatedCount > 0
+    ? `; ${truncatedCount} truncated, ${omittedCount} omitted by context budgets`
+    : ''
 
   if (visibleSections.length > 0) {
     const paths = visibleSections.slice(0, 3).map(section => section.displayPath)
     const suffix = visibleSections.length > 3 ? ` +${visibleSections.length - 3} more` : ''
     return {
-      summary: `Loaded ${visibleSections.length} instruction section${visibleSections.length === 1 ? '' : 's'} (${context.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}`,
+      summary: `Loaded ${visibleSections.length} instruction section${visibleSections.length === 1 ? '' : 's'} (${context.includedBuckets.join(', ')}): ${paths.join(', ')}${suffix}${budgetSuffix}`,
       input,
     }
   }
 
   if (input) {
     return {
-      summary: 'Loaded workspace instructions for this run.',
+      summary: `Loaded workspace instructions for this run${budgetSuffix}.`,
       input,
     }
   }
@@ -125,6 +207,30 @@ function sectionTitle(scope) {
     default:
       return 'Workspace Instructions'
   }
+}
+
+function memoryPromptReservedBytes(sections) {
+  const ranked = (Array.isArray(sections) ? sections : [])
+    .map((section, index) => ({
+      section,
+      index,
+      precedence: Number.isFinite(section?.precedence) ? Number(section.precedence) : index,
+    }))
+    .sort((left, right) => right.precedence - left.precedence || right.index - left.index)
+    .slice(0, MAX_INSTRUCTION_SECTIONS)
+    .sort((left, right) => left.index - right.index)
+  const fixed = utf8ByteLength([
+    '## Workspace Instructions',
+    'Follow these layered instructions in addition to the user request. If they conflict, later sections override earlier ones.',
+    '',
+  ].join('\n'))
+  const sectionChrome = ranked.reduce((total, { section }) => {
+    return total + utf8ByteLength(`### ${sectionTitle(section.scope)} [${section.bucket}] (${section.displayPath})\n\n`)
+  }, 0)
+  // Budget notices are bounded aggregate counters, but reserve enough room for
+  // their deterministic markers so they never push the provider prompt over
+  // the advertised aggregate ceiling.
+  return fixed + sectionChrome + 2 * 1024
 }
 
 function orderProjectPaths(workspaceDir, projectPaths) {
@@ -233,15 +339,34 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
   return candidates
 }
 
-async function readMemorySections(candidate, visited, importedFrom = null) {
+async function readMemorySections(candidate, traversal, importedFrom = null, depth = 0) {
   const visitKey = candidate.path
-  if (visited.has(visitKey)) return []
-  visited.add(visitKey)
+  if (traversal.visited.has(visitKey)) return []
 
-  const raw = await readMemoryFile(candidate)
-  if (!raw) return []
+  if (depth > MAX_IMPORT_DEPTH) {
+    traversal.omissions.push(contextOmissionMetadata({
+      ...candidate,
+      precedence: traversal.nextPrecedence,
+      reason: `maximum import depth (${MAX_IMPORT_DEPTH})`,
+    }))
+    return []
+  }
 
-  const { content, imports } = parseInstructionImports(raw)
+  if (importedFrom && traversal.importCount >= traversal.maxImportCount) {
+    traversal.omissions.push(contextOmissionMetadata({
+      ...candidate,
+      precedence: traversal.nextPrecedence,
+      reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS})`,
+    }))
+    return []
+  }
+  traversal.visited.add(visitKey)
+  if (importedFrom) traversal.importCount += 1
+
+  const loaded = await readMemoryFile(candidate)
+  if (!loaded) return []
+
+  const { content, imports } = parseInstructionImports(loaded.content)
   const sections = []
   if (content) {
     sections.push({
@@ -249,14 +374,20 @@ async function readMemorySections(candidate, visited, importedFrom = null) {
       bucket: candidate.bucket,
       displayPath: candidate.displayPath,
       path: candidate.path,
+      source: candidate.path,
       importedFrom,
+      precedence: traversal.nextPrecedence++,
       content,
+      originalBytes: loaded.originalBytes,
+      includedBytes: utf8ByteLength(content),
+      truncated: loaded.truncated,
+      truncationReason: loaded.truncationReason,
     })
   }
 
   for (const importPath of imports) {
     const importedCandidate = resolveImportCandidate(candidate, importPath)
-    const importedSections = await readMemorySections(importedCandidate, visited, candidate.displayPath)
+    const importedSections = await readMemorySections(importedCandidate, traversal, candidate.displayPath, depth + 1)
     if (importedSections.length > 0) sections.push(...importedSections)
   }
 
@@ -310,9 +441,9 @@ async function readMemoryFile(candidate) {
       : 'r'
 
     handle = await fs.open(candidate.path, openFlags)
+    const openedStat = await handle.stat()
 
     if (resolvedRootPath) {
-      const openedStat = await handle.stat()
       const resolvedCandidatePath = await fs.realpath(candidate.path)
       if (!isWithinRoot(resolvedCandidatePath, resolvedRootPath)) {
         throw new Error(`Memory file ${candidate.displayPath} resolves outside the workspace root`)
@@ -323,7 +454,17 @@ async function readMemoryFile(candidate) {
       }
     }
 
-    return await handle.readFile({ encoding: 'utf8' })
+    const raw = await readAtMost(handle, MAX_CONTEXT_FILE_BYTES + 1)
+    const bounded = truncateUtf8Buffer(raw, MAX_CONTEXT_FILE_BYTES, {
+      reason: `maximum context file bytes (${MAX_CONTEXT_FILE_BYTES})`,
+      originalBytes: openedStat.size,
+    })
+    return {
+      content: bounded.text,
+      originalBytes: openedStat.size,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+    }
   } catch (error) {
     if ((error?.code === 'ENOENT' || error?.code === 'EPERM' || error?.code === 'EACCES') && handle == null) {
       return null
@@ -337,6 +478,39 @@ async function readMemoryFile(candidate) {
     throw new Error(`Failed to read memory file ${candidate.displayPath}: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     await handle?.close().catch(() => {})
+  }
+}
+
+async function readAtMost(handle, byteCount) {
+  const buffer = Buffer.allocUnsafe(byteCount)
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  return buffer.subarray(0, offset)
+}
+
+function contextOmissionMetadata({
+  source,
+  path,
+  displayPath,
+  scope,
+  bucket,
+  precedence,
+  reason,
+}) {
+  return {
+    source: String(source ?? path ?? displayPath ?? 'context'),
+    displayPath: String(displayPath ?? source ?? path ?? 'context'),
+    scope: String(scope ?? 'workspace'),
+    bucket: String(bucket ?? 'remote-safe'),
+    precedence: Number.isFinite(precedence) ? Number(precedence) : 0,
+    originalBytes: 0,
+    includedBytes: 0,
+    truncated: true,
+    truncationReason: String(reason ?? 'context budget'),
   }
 }
 
