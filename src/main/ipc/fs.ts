@@ -1,6 +1,13 @@
 import { createRequire } from 'node:module'
 import type { WebContents } from 'electron'
-import { promises as fs, watch as fsWatch, type FSWatcher } from 'fs'
+import {
+  constants as fsConstants,
+  promises as fs,
+  watch as fsWatch,
+  type FSWatcher,
+  type Stats,
+} from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 import { basename, extname, join, parse } from 'path'
 import { homedir } from 'os'
@@ -65,6 +72,8 @@ export interface FsPathScopeOptions {
   allowReadOnlyOpenCodeConfig?: boolean
 }
 
+export type FsPathIntent = 'read' | 'create' | 'write' | 'delete-link' | 'directory'
+
 export function isPathUnderRoot(candidatePath: string, rootPath: string): boolean {
   const resolvedCandidate = path.resolve(candidatePath)
   const resolvedRoot = path.resolve(rootPath)
@@ -104,15 +113,24 @@ function isAllowedReadOnlyOpenCodeConfigPath(resolvedPath: string, home: string)
   return allowedRoots.some(root => isPathUnderRoot(resolvedPath, root))
 }
 
-async function validateReadOnlyOpenCodeConfigRealPath(resolvedPath: string, home: string): Promise<void> {
-  try {
-    const realPath = await fs.realpath(resolvedPath)
-    if (!isAllowedReadOnlyOpenCodeConfigPath(realPath, home)) {
-      throw new Error(`Access denied: path "${resolvedPath}" resolves outside allowed OpenCode config roots`)
+function findSensitiveHomeDir(candidatePath: string, homes: string[]): string | null {
+  for (const home of homes) {
+    for (const dir of SENSITIVE_HOME_DIRS) {
+      const sensitive = path.join(home, dir)
+      if (isPathUnderRoot(candidatePath, sensitive)) return dir
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
-    throw error
+  }
+  return null
+}
+
+function assertPathIsNotSensitive(
+  candidatePath: string,
+  displayPath: string,
+  homes: string[],
+): void {
+  const sensitiveDir = findSensitiveHomeDir(candidatePath, homes)
+  if (sensitiveDir) {
+    throw new Error(`Access denied: path "${displayPath}" targets a sensitive directory (~/${sensitiveDir})`)
   }
 }
 
@@ -147,7 +165,184 @@ export function validateFsPath(filePath: string, options?: FsPathScopeOptions): 
   return resolved
 }
 
-async function validateFsPathForHandler(filePath: string, workspaceId?: string, options?: FsPathScopeOptions): Promise<string> {
+interface CanonicalPathInfo {
+  canonicalPath: string
+  exists: boolean
+  finalIsSymbolicLink: boolean
+}
+
+async function canonicalizeFromExistingAncestor(resolvedPath: string): Promise<CanonicalPathInfo> {
+  let currentPath = resolvedPath
+  const missingSegments: string[] = []
+
+  while (true) {
+    let stats: Stats
+    try {
+      stats = await fs.lstat(currentPath)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error
+
+      const parentPath = path.dirname(currentPath)
+      if (parentPath === currentPath) {
+        throw new Error(`Access denied: no existing ancestor for "${resolvedPath}"`)
+      }
+      missingSegments.unshift(path.basename(currentPath))
+      currentPath = parentPath
+      continue
+    }
+
+    let canonicalAncestor: string
+    try {
+      canonicalAncestor = await fs.realpath(currentPath)
+    } catch (error) {
+      if (stats.isSymbolicLink()) {
+        throw new Error(`Access denied: path "${resolvedPath}" contains a broken symbolic link`)
+      }
+      throw error
+    }
+
+    if (missingSegments.length > 0) {
+      const followedStats = stats.isSymbolicLink() ? await fs.stat(currentPath) : stats
+      if (!followedStats.isDirectory()) {
+        const error = new Error(`Path "${resolvedPath}" has a non-directory ancestor`) as NodeJS.ErrnoException
+        error.code = 'ENOTDIR'
+        throw error
+      }
+    }
+
+    return {
+      canonicalPath: path.resolve(canonicalAncestor, ...missingSegments),
+      exists: missingSegments.length === 0,
+      finalIsSymbolicLink: missingSegments.length === 0 && stats.isSymbolicLink(),
+    }
+  }
+}
+
+async function canonicalizeFsTarget(
+  resolvedPath: string,
+  intent: FsPathIntent,
+): Promise<CanonicalPathInfo> {
+  if (intent === 'delete-link') {
+    try {
+      const stats = await fs.lstat(resolvedPath)
+      if (stats.isSymbolicLink()) {
+        const parent = await canonicalizeFromExistingAncestor(path.dirname(resolvedPath))
+        if (!parent.exists) {
+          throw new Error(`Access denied: parent for "${resolvedPath}" does not exist`)
+        }
+        return {
+          canonicalPath: path.join(parent.canonicalPath, path.basename(resolvedPath)),
+          exists: true,
+          finalIsSymbolicLink: true,
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+  }
+
+  return canonicalizeFromExistingAncestor(resolvedPath)
+}
+
+function assertCanonicalPathAllowedForFs(
+  canonicalPath: string,
+  canonicalCodesurfHome: string,
+  canonicalAllowedRoots: string[],
+  options?: FsPathScopeOptions,
+): void {
+  if (!options?.restrictToWorkspaceRoots) return
+  if (isPathUnderRoot(canonicalPath, canonicalCodesurfHome)) return
+
+  if (canonicalAllowedRoots.length === 0) {
+    throw new Error(
+      'Access denied: no workspace project folders configured. Add a project folder or disable filesystem scoping in Settings.',
+    )
+  }
+  if (canonicalAllowedRoots.some(root => isPathUnderRoot(canonicalPath, root))) return
+
+  throw new Error(`Access denied: path "${canonicalPath}" resolves outside allowed workspace roots`)
+}
+
+export async function validateCanonicalFsPath(
+  filePath: string,
+  intent: FsPathIntent,
+  options?: FsPathScopeOptions,
+): Promise<string> {
+  const home = resolveHome()
+  const allowReadOnlyOpenCodeConfig = Boolean(
+    options?.allowReadOnlyOpenCodeConfig
+    && (intent === 'read' || intent === 'directory'),
+  )
+  const effectiveOptions = {
+    ...options,
+    allowReadOnlyOpenCodeConfig,
+  }
+
+  // Preserve the existing lexical checks as a fast first boundary.
+  const resolvedPath = validateFsPath(filePath, effectiveOptions)
+  const isOpenCodeCarveOut = allowReadOnlyOpenCodeConfig
+    && isAllowedReadOnlyOpenCodeConfigPath(resolvedPath, home)
+  const target = await canonicalizeFsTarget(resolvedPath, intent)
+  const canonicalHome = (await canonicalizeFromExistingAncestor(home)).canonicalPath
+
+  if (isOpenCodeCarveOut) {
+    // Deliberately compare against the canonical home plus the lexical
+    // OpenCode subdirectories. Canonicalizing the subdirectories themselves
+    // would let a symlink broaden this read-only carve-out.
+    if (!isAllowedReadOnlyOpenCodeConfigPath(target.canonicalPath, canonicalHome)) {
+      throw new Error(`Access denied: path "${resolvedPath}" resolves outside allowed OpenCode config roots`)
+    }
+  } else {
+    const homeCandidates = [...new Set([home, canonicalHome])]
+    assertPathIsNotSensitive(resolvedPath, filePath, homeCandidates)
+    assertPathIsNotSensitive(target.canonicalPath, filePath, homeCandidates)
+  }
+
+  const canonicalCodesurfHome = (
+    await canonicalizeFromExistingAncestor(CODESURF_HOME)
+  ).canonicalPath
+  const canonicalAllowedRoots = options?.restrictToWorkspaceRoots
+    ? await Promise.all(
+      (options.allowedRoots ?? []).map(async root => (
+        await canonicalizeFromExistingAncestor(path.resolve(root))
+      ).canonicalPath),
+    )
+    : []
+
+  if (!isOpenCodeCarveOut) {
+    assertCanonicalPathAllowedForFs(
+      target.canonicalPath,
+      canonicalCodesurfHome,
+      canonicalAllowedRoots,
+      effectiveOptions,
+    )
+  }
+
+  const isExplicitDirectoryRoot = intent === 'directory' && (
+    resolvedPath === path.resolve(CODESURF_HOME)
+    || Boolean(
+      options?.restrictToWorkspaceRoots
+      && (options.allowedRoots ?? []).some(root => resolvedPath === path.resolve(root)),
+    )
+  )
+  if (
+    target.finalIsSymbolicLink
+    && intent !== 'delete-link'
+    && !isExplicitDirectoryRoot
+  ) {
+    throw new Error(`Access denied: path "${filePath}" is a symbolic link`)
+  }
+
+  return target.canonicalPath
+}
+
+async function validateFsPathForHandler(
+  filePath: string,
+  intent: FsPathIntent,
+  workspaceId?: string,
+  options?: FsPathScopeOptions,
+): Promise<string> {
   const {
     readSettingsSync,
     getAllWorkspaceProjectPaths,
@@ -156,26 +351,18 @@ async function validateFsPathForHandler(filePath: string, workspaceId?: string, 
   const { applyNewInstallSecurityDefaults } = await import('../../shared/types.ts')
   const settings = applyNewInstallSecurityDefaults(readSettingsSync())
   if (!settings.security.restrictFsToWorkspaceRoots) {
-    const resolved = validateFsPath(filePath, options)
-    if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, resolveHome())) {
-      await validateReadOnlyOpenCodeConfigRealPath(resolved, resolveHome())
-    }
-    return resolved
+    return validateCanonicalFsPath(filePath, intent, options)
   }
 
   const allowedRoots = workspaceId
     ? await getWorkspaceProjectPathsById(workspaceId)
     : await getAllWorkspaceProjectPaths()
 
-  const resolved = validateFsPath(filePath, {
+  return validateCanonicalFsPath(filePath, intent, {
     ...options,
     restrictToWorkspaceRoots: true,
     allowedRoots,
   })
-  if (options?.allowReadOnlyOpenCodeConfig && isAllowedReadOnlyOpenCodeConfigPath(resolved, resolveHome())) {
-    await validateReadOnlyOpenCodeConfigRealPath(resolved, resolveHome())
-  }
-  return resolved
 }
 
 export function assertSafeCardId(cardId: string): void {
@@ -215,6 +402,96 @@ function resolveFsPath(rawPath: string): string {
   return rawPath
 }
 
+function symbolicLinkAccessError(targetPath: string): Error {
+  return new Error(`Access denied: path "${targetPath}" is a symbolic link`)
+}
+
+async function assertOpenHandleMatchesPath(
+  handle: FileHandle,
+  targetPath: string,
+): Promise<Stats> {
+  const [handleStats, pathStats] = await Promise.all([
+    handle.stat(),
+    fs.lstat(targetPath),
+  ])
+  if (pathStats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
+  if (handleStats.dev !== pathStats.dev || handleStats.ino !== pathStats.ino) {
+    throw new Error(`Access denied: path "${targetPath}" changed during access`)
+  }
+  return handleStats
+}
+
+async function openExistingFileNoFollow(
+  targetPath: string,
+  flags: number = fsConstants.O_RDONLY,
+): Promise<{ handle: FileHandle; stats: Stats }> {
+  const handle = await fs.open(targetPath, flags | fsConstants.O_NOFOLLOW)
+  try {
+    const stats = await assertOpenHandleMatchesPath(handle, targetPath)
+    return { handle, stats }
+  } catch (error) {
+    await handle.close().catch(() => undefined)
+    throw error
+  }
+}
+
+async function readUtf8FileNoFollow(targetPath: string): Promise<string> {
+  const { handle } = await openExistingFileNoFollow(targetPath)
+  try {
+    return await handle.readFile({ encoding: 'utf8' })
+  } finally {
+    await handle.close()
+  }
+}
+
+async function writeUtf8FileNoFollow(targetPath: string, content: string): Promise<void> {
+  let createNew = false
+  try {
+    const stats = await fs.lstat(targetPath)
+    if (stats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    createNew = true
+  }
+
+  const flags = createNew
+    ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
+    : fsConstants.O_WRONLY
+  const { handle } = await openExistingFileNoFollow(targetPath, flags)
+  try {
+    // Open without O_TRUNC so an inode swap is detected before any content is
+    // destroyed. Missing files use O_EXCL; existing files use O_NOFOLLOW.
+    await handle.truncate(0)
+    await handle.writeFile(content, { encoding: 'utf8' })
+  } finally {
+    await handle.close()
+  }
+}
+
+async function statPathNoFollow(targetPath: string): Promise<Stats> {
+  const pathStats = await fs.lstat(targetPath)
+  if (pathStats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
+  if (!pathStats.isFile()) return pathStats
+
+  const { handle, stats } = await openExistingFileNoFollow(targetPath)
+  try {
+    return stats
+  } finally {
+    await handle.close()
+  }
+}
+
+async function assertDirectoryNoFollow(targetPath: string): Promise<Stats> {
+  const stats = await fs.lstat(targetPath)
+  if (stats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
+  if (!stats.isDirectory()) {
+    const error = new Error(`Path "${targetPath}" is not a directory`) as NodeJS.ErrnoException
+    error.code = 'ENOTDIR'
+    throw error
+  }
+  return stats
+}
+
 export interface FsEntry {
   name: string
   path: string
@@ -231,17 +508,17 @@ async function getUniqueCopyPath(destDir: string, sourcePath: string): Promise<s
     const suffix = attempt === 0 ? '' : ` ${attempt + 1}`
     const candidate = join(resolvedDir, `${parsed.name}${suffix}${parsed.ext}`)
     try {
-      await fs.access(candidate)
+      await fs.lstat(candidate)
       attempt += 1
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
       return candidate
     }
   }
 }
 
 async function isProbablyTextFile(resolvedPath: string): Promise<boolean> {
-  const resolved = resolvedPath
-  const handle = await fs.open(resolved, 'r')
+  const { handle } = await openExistingFileNoFollow(resolvedPath)
   try {
     const sampleSize = 8192
     const buffer = Buffer.alloc(sampleSize)
@@ -264,12 +541,72 @@ async function isProbablyTextFile(resolvedPath: string): Promise<boolean> {
   }
 }
 
+async function copyFileNoFollow(sourcePath: string, destinationPath: string): Promise<void> {
+  const { handle: sourceHandle, stats: sourceStats } = await openExistingFileNoFollow(sourcePath)
+  if (!sourceStats.isFile()) {
+    await sourceHandle.close()
+    throw new Error('Only files can be copied into a workspace')
+  }
+
+  let destinationHandle: FileHandle | null = null
+  try {
+    destinationHandle = await fs.open(
+      destinationPath,
+      fsConstants.O_WRONLY
+        | fsConstants.O_CREAT
+        | fsConstants.O_EXCL
+        | fsConstants.O_NOFOLLOW,
+      sourceStats.mode & 0o777,
+    )
+    await assertOpenHandleMatchesPath(destinationHandle, destinationPath)
+
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let position = 0
+    while (true) {
+      const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+
+      let written = 0
+      while (written < bytesRead) {
+        const result = await destinationHandle.write(
+          buffer,
+          written,
+          bytesRead - written,
+          position + written,
+        )
+        if (result.bytesWritten === 0) {
+          throw new Error(`Unable to make progress copying to "${destinationPath}"`)
+        }
+        written += result.bytesWritten
+      }
+      position += bytesRead
+    }
+  } catch (error) {
+    if (destinationHandle) {
+      await destinationHandle.close().catch(() => undefined)
+      destinationHandle = null
+    }
+    throw error
+  } finally {
+    await sourceHandle.close()
+    if (destinationHandle) await destinationHandle.close()
+  }
+}
+
 export function registerFsIPC(): void {
   const { ipcMain, shell } = getElectron()
 
   ipcMain.handle('fs:readDir', async (_, dirPath: string, workspaceId?: string) => {
     try {
-      const resolvedDirPath = await validateFsPathForHandler(dirPath, workspaceId, { allowReadOnlyOpenCodeConfig: true })
+      const resolvedDirPath = await validateFsPathForHandler(
+        dirPath,
+        'directory',
+        workspaceId,
+        { allowReadOnlyOpenCodeConfig: true },
+      )
+      // readdir has no portable no-follow descriptor API. Recheck the
+      // canonical directory immediately before the path-based operation.
+      await assertDirectoryNoFollow(resolvedDirPath)
       const entries = await fs.readdir(resolvedDirPath, { withFileTypes: true })
       const result: FsEntry[] = entries.map(e => ({
         name: e.name,
@@ -294,7 +631,13 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:readFile', async (_, filePath: string, workspaceId?: string) => {
     try {
-      return await fs.readFile(await validateFsPathForHandler(filePath, workspaceId, { allowReadOnlyOpenCodeConfig: true }), 'utf8')
+      const resolved = await validateFsPathForHandler(
+        filePath,
+        'read',
+        workspaceId,
+        { allowReadOnlyOpenCodeConfig: true },
+      )
+      return await readUtf8FileNoFollow(resolved)
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       // Access-denied errors must propagate: returning '' would let a
@@ -309,45 +652,71 @@ export function registerFsIPC(): void {
   handleTyped('fs:writeFile', {
     args: [ipcSchemas.boundedString(), ipcSchemas.fileContent, ipcSchemas.optionalString] as const,
     handler: async (_evt, filePath, content, workspaceId) => {
-      await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), content, 'utf8')
+      const resolved = await validateFsPathForHandler(filePath, 'write', workspaceId)
+      await writeUtf8FileNoFollow(resolved, content)
     },
   })
 
   handleTyped('fs:createFile', {
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, filePath, workspaceId) => {
-      await fs.writeFile(await validateFsPathForHandler(filePath, workspaceId), '', 'utf8')
+      const resolved = await validateFsPathForHandler(filePath, 'create', workspaceId)
+      await writeUtf8FileNoFollow(resolved, '')
     },
   })
 
   handleTyped('fs:createDir', {
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, dirPath, workspaceId) => {
-      await fs.mkdir(await validateFsPathForHandler(dirPath, workspaceId), { recursive: true })
+      const resolved = await validateFsPathForHandler(dirPath, 'directory', workspaceId)
+      // mkdir has no descriptor-relative portable equivalent in Node. The
+      // canonical-parent preflight prevents known aliases; the remaining
+      // mutation race is bounded to this path-based call.
+      await fs.mkdir(resolved, { recursive: true })
     },
   })
 
   handleTyped('fs:deleteFile', {
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, fspath, workspaceId) => {
-      await fs.rm(await validateFsPathForHandler(fspath, workspaceId), { recursive: true, force: true })
+      const resolved = await validateFsPathForHandler(fspath, 'write', workspaceId)
+      let currentStats: Stats
+      try {
+        currentStats = await fs.lstat(resolved)
+      } catch (error) {
+        // force:true historically made deletion of a missing path a no-op.
+        // Canonical validation has already authorized its existing parent.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
+      }
+      if (currentStats.isSymbolicLink()) throw symbolicLinkAccessError(resolved)
+      // rm has no no-follow file-descriptor variant. The immediate lstat
+      // ensures recursive deletion never starts from a known symlink.
+      await fs.rm(resolved, { recursive: true, force: true })
     },
   })
 
   handleTyped('fs:renameFile', {
     args: [ipcSchemas.boundedString(), ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, oldPath, newPath, workspaceId) => {
-      await fs.rename(
-        await validateFsPathForHandler(oldPath, workspaceId),
-        await validateFsPathForHandler(newPath, workspaceId),
-      )
+      const resolvedOldPath = await validateFsPathForHandler(oldPath, 'write', workspaceId)
+      const resolvedNewPath = await validateFsPathForHandler(newPath, 'create', workspaceId)
+      // Node exposes rename only as a two-path operation. Both canonical
+      // endpoints are independently preflighted; there is no descriptor-based
+      // portable rename API that can close the remaining mutation race.
+      await fs.rename(resolvedOldPath, resolvedNewPath)
     },
   })
 
   handleTyped('fs:revealInFinder', {
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, filePath, workspaceId) => {
-      shell.showItemInFolder(await validateFsPathForHandler(filePath, workspaceId))
+      const resolved = await validateFsPathForHandler(filePath, 'read', workspaceId)
+      // Electron's shell API accepts only a path, so canonical validation plus
+      // this immediate no-link recheck is the strongest available preflight.
+      const currentStats = await fs.lstat(resolved)
+      if (currentStats.isSymbolicLink()) throw symbolicLinkAccessError(resolved)
+      shell.showItemInFolder(resolved)
     },
   })
 
@@ -357,18 +726,26 @@ export function registerFsIPC(): void {
       assertSafeCardId(cardId)
       const { join } = await import('path')
       const briefDir = join(CODESURF_HOME, 'briefs')
-      await fs.mkdir(briefDir, { recursive: true })
-      const briefPath = join(briefDir, `${cardId}.md`)
-      await fs.writeFile(briefPath, content, 'utf8')
+      const resolvedBriefDir = await validateFsPathForHandler(briefDir, 'directory')
+      await fs.mkdir(resolvedBriefDir, { recursive: true })
+      const briefPath = await validateFsPathForHandler(
+        join(resolvedBriefDir, `${cardId}.md`),
+        'write',
+      )
+      await writeUtf8FileNoFollow(briefPath, content)
       return briefPath
     },
   })
 
   ipcMain.handle('fs:probeDir', async (_, dirPath: string, workspaceId?: string) => {
     try {
-      const resolved = await validateFsPathForHandler(dirPath, workspaceId, { allowReadOnlyOpenCodeConfig: true })
-      const stats = await fs.stat(resolved)
-      if (!stats.isDirectory()) return { ok: false, code: 'ENOTDIR' }
+      const resolved = await validateFsPathForHandler(
+        dirPath,
+        'directory',
+        workspaceId,
+        { allowReadOnlyOpenCodeConfig: true },
+      )
+      await assertDirectoryNoFollow(resolved)
       return { ok: true }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN'
@@ -378,7 +755,13 @@ export function registerFsIPC(): void {
 
   ipcMain.handle('fs:stat', async (_, filePath: string, workspaceId?: string) => {
     try {
-      const stats = await fs.stat(await validateFsPathForHandler(filePath, workspaceId, { allowReadOnlyOpenCodeConfig: true }))
+      const resolved = await validateFsPathForHandler(
+        filePath,
+        'read',
+        workspaceId,
+        { allowReadOnlyOpenCodeConfig: true },
+      )
+      const stats = await statPathNoFollow(resolved)
       return {
         size: stats.size,
         mtimeMs: stats.mtimeMs,
@@ -394,32 +777,37 @@ export function registerFsIPC(): void {
   })
 
   ipcMain.handle('fs:isProbablyTextFile', async (_, filePath: string, workspaceId?: string) => {
-    const resolved = await validateFsPathForHandler(filePath, workspaceId)
-    const stats = await fs.stat(resolved)
+    const resolved = await validateFsPathForHandler(filePath, 'read', workspaceId)
+    const stats = await statPathNoFollow(resolved)
     if (!stats.isFile()) return false
     return isProbablyTextFile(resolved)
   })
 
   ipcMain.handle('fs:copyIntoDir', async (_, sourcePath: string, destDir: string, workspaceId?: string) => {
-    const resolvedSource = await validateFsPathForHandler(sourcePath, workspaceId)
-    const resolvedDestDir = await validateFsPathForHandler(destDir, workspaceId)
+    const resolvedSource = await validateFsPathForHandler(sourcePath, 'read', workspaceId)
+    const resolvedDestDir = await validateFsPathForHandler(destDir, 'directory', workspaceId)
     await fs.mkdir(resolvedDestDir, { recursive: true })
+    await assertDirectoryNoFollow(resolvedDestDir)
 
-    const sourceStats = await fs.stat(resolvedSource)
+    const sourceStats = await statPathNoFollow(resolvedSource)
     if (!sourceStats.isFile()) throw new Error('Only files can be copied into a workspace')
 
     const directTarget = join(resolvedDestDir, basename(resolvedSource))
-    const destPath = directTarget === resolvedSource ? resolvedSource : await getUniqueCopyPath(resolvedDestDir, resolvedSource)
+    const candidatePath = directTarget === resolvedSource
+      ? resolvedSource
+      : await getUniqueCopyPath(resolvedDestDir, resolvedSource)
+    const destPath = await validateFsPathForHandler(candidatePath, 'create', workspaceId)
 
     if (destPath !== resolvedSource) {
-      await fs.copyFile(resolvedSource, destPath)
+      await copyFileNoFollow(resolvedSource, destPath)
     }
 
     return { path: destPath }
   })
 
   ipcMain.handle('fs:watchStart', async (event, dirPath: string, workspaceId?: string) => {
-    const resolved = await validateFsPathForHandler(dirPath, workspaceId)
+    const resolved = await validateFsPathForHandler(dirPath, 'directory', workspaceId)
+    await assertDirectoryNoFollow(resolved)
     // Reuse an existing watcher for this path and just add this window as a
     // subscriber. Previously a second window watching the same dir was dropped
     // (its events never fired) and the first window's close tore the shared
@@ -431,6 +819,8 @@ export function registerFsIPC(): void {
       return
     }
     try {
+      // fs.watch accepts only a path. Canonical validation plus the immediate
+      // directory lstat above is the available no-link preflight.
       const entry: WatchEntry = {
         watcher: undefined as unknown as FSWatcher,
         subscribers: new Map([[event.sender, dirPath]]),
@@ -454,7 +844,7 @@ export function registerFsIPC(): void {
   })
 
   ipcMain.handle('fs:watchStop', async (event, dirPath: string, workspaceId?: string) => {
-    const resolved = await validateFsPathForHandler(dirPath, workspaceId)
+    const resolved = await validateFsPathForHandler(dirPath, 'directory', workspaceId)
     const entry = watchers.get(resolved)
     if (!entry) return
     entry.subscribers.delete(event.sender)
