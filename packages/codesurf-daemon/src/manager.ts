@@ -163,7 +163,9 @@ export function createDaemonManager(
     )
   }
 
-  async function healthcheck(info: DaemonStatusInfo): Promise<boolean> {
+  async function readAuthenticatedDaemonHealth(
+    info: DaemonStatusInfo,
+  ): Promise<{ shuttingDown: boolean } | null> {
     try {
       const response = await fetchImpl(`http://127.0.0.1:${info.port}/health`, {
         signal: AbortSignal.timeout(2_000),
@@ -171,20 +173,29 @@ export function createDaemonManager(
           Authorization: `Bearer ${info.token}`,
         },
       })
-      if (!response.ok) return false
+      if (!response.ok) return null
       const parsed = await response.json() as {
         ok?: boolean
+        shuttingDown?: boolean
         pid?: number
         startedAt?: string
       }
-      return (
+      const identityMatches = (
         parsed.ok === true
         && parsed.pid === info.pid
         && parsed.startedAt === info.startedAt
       )
+      return identityMatches
+        ? { shuttingDown: parsed.shuttingDown === true }
+        : null
     } catch {
-      return false
+      return null
     }
+  }
+
+  async function healthcheck(info: DaemonStatusInfo): Promise<boolean> {
+    const health = await readAuthenticatedDaemonHealth(info)
+    return health !== null && !health.shuttingDown
   }
 
   function clearDaemonCache(): void {
@@ -397,7 +408,10 @@ export function createDaemonManager(
     signal: NodeJS.Signals,
   ): Promise<void> {
     const currentBeforeHealth = readPidInfo()
-    if (!refersToSameDaemon(currentBeforeHealth, info) || !(await healthcheck(info))) {
+    if (
+      !refersToSameDaemon(currentBeforeHealth, info)
+      || !(await readAuthenticatedDaemonHealth(info))
+    ) {
       throw new Error(
         `Refusing to send ${signal} to PID ${info.pid}: daemon identity could not be authenticated`,
       )

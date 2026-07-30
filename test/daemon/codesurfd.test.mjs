@@ -209,7 +209,12 @@ async function runDaemonEntrypointOnce(daemon, appVersion) {
 }
 
 test('daemon health endpoint requires auth and returns metadata', async t => {
-  const daemon = await startDaemon()
+  const daemon = await startDaemon({
+    env: {
+      NODE_ENV: 'test',
+      CODESURF_TEST_SHUTDOWN_DELAY_MS: '350',
+    },
+  })
   t.after(async () => {
     await daemon.stop()
   })
@@ -222,6 +227,28 @@ test('daemon health endpoint requires auth and returns metadata', async t => {
   assert.equal(payload.ok, true)
   assert.equal(payload.protocolVersion, 1)
   assert.equal(payload.appVersion, 'test-suite')
+
+  const pidPath = join(daemon.homeDir, 'daemon', 'pid.json')
+  const lockPath = join(daemon.homeDir, 'daemon', 'daemon.lock')
+  daemon.child.kill('SIGTERM')
+
+  const shutdownHealth = await waitFor(async () => {
+    try {
+      const result = await daemon.request('/health')
+      return result.payload?.shuttingDown === true ? result : null
+    } catch {
+      return null
+    }
+  })
+  assert.equal(shutdownHealth.status, 200)
+  assert.equal(shutdownHealth.payload.pid, daemon.pidInfo.pid)
+  assert.equal(existsSync(pidPath), true)
+  assert.equal(existsSync(lockPath), true)
+  assert.equal(Number((await readFile(lockPath, 'utf8')).trim()), daemon.pidInfo.pid)
+
+  await waitFor(() => daemon.child.exitCode !== null || daemon.child.signalCode !== null)
+  assert.equal(existsSync(pidPath), false)
+  assert.equal(existsSync(lockPath), false)
 })
 
 test('daemon child reuse requires a matching configured app version', async t => {

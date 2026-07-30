@@ -18,6 +18,7 @@ async function makeManagerFixture(options = {}) {
   const alivePids = new Set()
   const identitiesByPort = new Map()
   const termSignalledPids = new Set()
+  let waitForPidExitCallCount = 0
   let nextPid = 42_200
   let spawnCount = 0
   let releaseFirstSpawn
@@ -60,9 +61,9 @@ async function makeManagerFixture(options = {}) {
       const responsePid = options.healthIdentityPid ?? identity?.pid
       const responseStartedAt = options.healthIdentityStartedAt ?? identity?.startedAt
       const healthy = alivePids.has(pid)
-        && !(options.healthFailsAfterTerm && termSignalledPids.has(pid))
       return new Response(JSON.stringify({
         ok: healthy,
+        shuttingDown: termSignalledPids.has(pid),
         pid: responsePid,
         startedAt: responseStartedAt,
       }), {
@@ -112,9 +113,18 @@ async function makeManagerFixture(options = {}) {
       return child
     },
     waitForChildStartupGrace: async () => {},
-    ...(options.waitForPidExitResult === undefined
+    ...(options.waitForPidExitResults === undefined
       ? {}
-      : { waitForPidExit: async () => options.waitForPidExitResult }),
+      : {
+          waitForPidExit: async () => {
+            const index = Math.min(
+              waitForPidExitCallCount,
+              options.waitForPidExitResults.length - 1,
+            )
+            waitForPidExitCallCount += 1
+            return options.waitForPidExitResults[index]
+          },
+        }),
   }
 
   const manager = createDaemonManager({
@@ -200,22 +210,25 @@ test('manager refuses to signal a PID whose authenticated daemon identity does n
   assert.equal(fixture.events.some(event => event.startsWith('SIGKILL:')), false)
 })
 
-test('manager refuses SIGKILL when the daemon cannot be re-authenticated after SIGTERM', async t => {
+test('manager re-authenticates and safely escalates after the SIGTERM timeout', async t => {
   const fixture = await makeManagerFixture({
     existingVersion: '2.0.0',
-    healthFailsAfterTerm: true,
     termLeavesAlive: true,
-    waitForPidExitResult: false,
+    waitForPidExitResults: [false, true],
   })
   t.after(fixture.cleanup)
 
-  await assert.rejects(
-    fixture.manager.stopDaemon(),
-    /refusing to send SIGKILL.*identity could not be authenticated/i,
-  )
+  await fixture.manager.stopDaemon()
 
   assert.equal(fixture.events.filter(event => event === 'SIGTERM:42100').length, 1)
-  assert.equal(fixture.events.some(event => event.startsWith('SIGKILL:')), false)
+  assert.equal(fixture.events.filter(event => event === 'SIGKILL:-42100').length, 1)
+  const termIndex = fixture.events.findIndex(event => event === 'SIGTERM:42100')
+  const killIndex = fixture.events.findIndex(event => event === 'SIGKILL:-42100')
+  assert.ok(
+    fixture.events
+      .slice(termIndex + 1, killIndex)
+      .some(event => event === 'health:42100'),
+  )
 })
 
 test('force restart requested during normal startup is queued and honored', async t => {

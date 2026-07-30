@@ -25,6 +25,9 @@ const PROTOCOL_VERSION = 1
 const APP_VERSION = String(process.env.CODESURF_APP_VERSION ?? '').trim() || null
 export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
 const STARTED_AT = new Date().toISOString()
+const TEST_SHUTDOWN_DELAY_MS = process.env.NODE_ENV === 'test'
+  ? Math.min(10_000, Math.max(0, Number(process.env.CODESURF_TEST_SHUTDOWN_DELAY_MS) || 0))
+  : 0
 const LEGACY_CONFIG_PATH = join(HOME, 'config.json')
 const WORKSPACES_FILE = join(HOME, 'workspaces', 'workspaces.json')
 const PROJECTS_FILE = join(HOME, 'projects', 'projects.json')
@@ -2977,6 +2980,7 @@ const server = createServer(async (req, res) => {
     if (method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, {
         ok: true,
+        shuttingDown,
         pid: process.pid,
         startedAt: STARTED_AT,
         protocolVersion: PROTOCOL_VERSION,
@@ -4027,9 +4031,13 @@ function removeOwnedPidFile() {
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
-  try {
-    removeOwnedPidFile()
-  } catch {}
+  // Keep the authenticated health endpoint and owned PID/lock identity alive
+  // while jobs wind down. The manager may need to re-authenticate this exact
+  // process before bounded SIGKILL escalation. The synchronous `exit` handler
+  // below removes both identity files only when the process actually exits.
+  if (TEST_SHUTDOWN_DELAY_MS > 0) {
+    await new Promise(resolve => setTimeout(resolve, TEST_SHUTDOWN_DELAY_MS))
+  }
   // Cancel in-flight jobs (and kill their CLI children) before closing the
   // server, so a restart/SIGTERM does not orphan agent subprocesses.
   try {
