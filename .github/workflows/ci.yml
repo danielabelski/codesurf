@@ -31,17 +31,17 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=optional
 
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Run tests
+      - name: Run authoritative test gate
         run: npm test
-
-      - name: Install relay package deps
-        run: npm --prefix packages/codesurf-relay install
-
-      - name: Run relay test suite
-        run: npm run test:relay
 
       - name: Build Electron app for E2E
         run: npm run build
