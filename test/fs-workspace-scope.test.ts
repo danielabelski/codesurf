@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import {
   lstat,
   mkdir,
@@ -12,18 +13,25 @@ import {
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
+import { promisify } from 'node:util'
 import {
   assertPathAllowedForFs,
   cleanupCreatedCopyIfUnchanged,
+  copyFileNoFollow,
   isPathUnderRoot,
+  registerFsIPC,
   validateCanonicalFsPath,
+  validateCanonicalFsPathDetails,
   validateFsPath,
+  type FsIpcRegistrationDependencies,
+  type FsPathScopeOptions,
 } from '../src/main/ipc/fs.ts'
 import { CODESURF_HOME } from '../src/main/paths.ts'
 
 // `validateFsPath`'s `resolveHome()` falls back to `process.env.HOME` /
 // `os.homedir()` outside of Electron, which is the case here.
 const HOME = process.env.HOME || process.env.USERPROFILE || homedir()
+const execFileAsync = promisify(execFile)
 
 async function createFsFixture(): Promise<{
   root: string
@@ -44,6 +52,41 @@ const scopedTo = (workspace: string) => ({
   restrictToWorkspaceRoots: true,
   allowedRoots: [workspace],
 })
+
+type CapturedIpcHandler = (event: unknown, ...args: unknown[]) => unknown
+
+function captureFsHandlers(scope: FsPathScopeOptions): {
+  invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
+} {
+  const handlers = new Map<string, CapturedIpcHandler>()
+  const ipcMain: NonNullable<FsIpcRegistrationDependencies['ipcMain']> = {
+    handle(channel, listener) {
+      handlers.set(channel, listener as unknown as CapturedIpcHandler)
+    },
+  }
+  const shell: NonNullable<FsIpcRegistrationDependencies['shell']> = {
+    showItemInFolder() {},
+  }
+
+  registerFsIPC({
+    ipcMain,
+    shell,
+    validatePath: (filePath, intent, _workspaceId, operationOptions) => (
+      validateCanonicalFsPathDetails(filePath, intent, {
+        ...scope,
+        ...operationOptions,
+      })
+    ),
+  })
+
+  return {
+    async invoke(channel, ...args) {
+      const handler = handlers.get(channel)
+      assert.ok(handler, `Expected ${channel} to be registered`)
+      return await handler({}, ...args)
+    },
+  }
+}
 
 describe('isPathUnderRoot', () => {
   test('matches exact root path', () => {
@@ -85,6 +128,89 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       )
       await writeFile(createPath, 'created', 'utf8')
       assert.equal(await readFile(newFilePath, 'utf8'), 'created')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('ignores an unavailable unrelated root but fails closed beneath it', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const validFile = join(fixture.workspace, 'valid.txt')
+      const brokenRoot = join(fixture.root, 'broken-root')
+      await writeFile(validFile, 'valid', 'utf8')
+      await symlink(join(fixture.root, 'missing-root-target'), brokenRoot)
+
+      const canonical = await validateCanonicalFsPath(validFile, 'read', {
+        restrictToWorkspaceRoots: true,
+        allowedRoots: [brokenRoot, fixture.workspace],
+      })
+      assert.equal(await readFile(canonical, 'utf8'), 'valid')
+
+      await assert.rejects(
+        validateCanonicalFsPath(join(brokenRoot, 'unavailable.txt'), 'read', {
+          restrictToWorkspaceRoots: true,
+          allowedRoots: [brokenRoot, fixture.workspace],
+        }),
+        /broken symbolic link|outside allowed workspace roots/,
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('a broken CODESURF_HOME does not disable another workspace or OpenCode reads', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const fakeHome = join(fixture.root, 'home')
+      const validWorkspace = join(fixture.root, 'valid-workspace')
+      const validFile = join(validWorkspace, 'valid.txt')
+      const skillPath = join(fakeHome, '.config', 'opencode', 'skills', 'skill.md')
+      const brokenCodesurfHome = join(fixture.root, 'broken-codesurf-home')
+      await mkdir(dirname(skillPath), { recursive: true })
+      await mkdir(validWorkspace)
+      await writeFile(validFile, 'workspace', 'utf8')
+      await writeFile(skillPath, 'skill', 'utf8')
+      await symlink(join(fixture.root, 'missing-codesurf-home'), brokenCodesurfHome)
+
+      const moduleUrl = new URL('../src/main/ipc/fs.ts', import.meta.url).href
+      const script = `
+        import { readFile } from 'node:fs/promises'
+        import { validateCanonicalFsPath } from ${JSON.stringify(moduleUrl)}
+        const workspacePath = await validateCanonicalFsPath(
+          ${JSON.stringify(validFile)},
+          'read',
+          {
+            restrictToWorkspaceRoots: true,
+            allowedRoots: [${JSON.stringify(validWorkspace)}],
+          },
+        )
+        const skillPath = await validateCanonicalFsPath(
+          ${JSON.stringify(skillPath)},
+          'read',
+          {
+            restrictToWorkspaceRoots: true,
+            allowedRoots: [${JSON.stringify(brokenCodesurfHome)}],
+            allowReadOnlyOpenCodeConfig: true,
+          },
+        )
+        process.stdout.write(JSON.stringify([
+          await readFile(workspacePath, 'utf8'),
+          await readFile(skillPath, 'utf8'),
+        ]))
+      `
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        ['--input-type=module', '--eval', script],
+        {
+          env: {
+            ...process.env,
+            HOME: fakeHome,
+            CODESURF_HOME: brokenCodesurfHome,
+          },
+        },
+      )
+      assert.deepEqual(JSON.parse(stdout), ['workspace', 'skill'])
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -230,12 +356,13 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       const canonical = await validateCanonicalFsPath(filePath, 'read', scopedTo(configuredRoot))
       assert.equal(canonical, await realpath(join(fixture.workspace, 'inside.txt')))
 
-      const canonicalRoot = await validateCanonicalFsPath(
+      const validatedRoot = await validateCanonicalFsPathDetails(
         configuredRoot,
         'directory',
         scopedTo(configuredRoot),
       )
-      assert.equal(canonicalRoot, await realpath(fixture.workspace))
+      assert.equal(validatedRoot.operationPath, await realpath(fixture.workspace))
+      assert.equal(validatedRoot.displayPath, configuredRoot)
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -324,7 +451,131 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
   })
 })
 
+describe('registered filesystem handlers', () => {
+  test('use canonical paths for I/O while preserving a symlink workspace identity', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const configuredRoot = join(fixture.root, 'configured-workspace')
+      const sourceRoot = join(fixture.root, 'import-source')
+      const canonicalFile = join(fixture.workspace, 'notes.txt')
+      const lexicalFile = join(configuredRoot, 'notes.txt')
+      const importSource = join(sourceRoot, 'import.txt')
+      await mkdir(sourceRoot)
+      await writeFile(canonicalFile, 'before', 'utf8')
+      await writeFile(importSource, 'imported', 'utf8')
+      await symlink(fixture.workspace, configuredRoot)
+
+      const { invoke } = captureFsHandlers({
+        restrictToWorkspaceRoots: true,
+        allowedRoots: [configuredRoot, sourceRoot],
+      })
+
+      await invoke('fs:writeFile', lexicalFile, 'after')
+      assert.equal(await readFile(canonicalFile, 'utf8'), 'after')
+      assert.equal(await invoke('fs:readFile', lexicalFile), 'after')
+
+      const entries = await invoke('fs:readDir', configuredRoot) as Array<{
+        name: string
+        path: string
+        isDir: boolean
+        ext: string
+      }>
+      const notesEntry = entries.find(entry => entry.name === 'notes.txt')
+      assert.ok(notesEntry)
+      // FileExplorer stores and passes this path back into later handlers. It
+      // must retain the configured root identity rather than switching to the
+      // real target halfway through navigation.
+      assert.equal(notesEntry.path, lexicalFile)
+      assert.equal(await invoke('fs:readFile', notesEntry.path), 'after')
+
+      const copyResult = await invoke(
+        'fs:copyIntoDir',
+        importSource,
+        configuredRoot,
+      ) as { path: string }
+      assert.deepEqual(copyResult, {
+        path: join(configuredRoot, 'import.txt'),
+      })
+      assert.equal(
+        await readFile(join(fixture.workspace, 'import.txt'), 'utf8'),
+        'imported',
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('real handlers reject symlink escapes for read, write, list, and copy endpoints', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const sourceRoot = join(fixture.root, 'source')
+      const deniedRoot = join(fixture.root, 'denied')
+      const deniedFile = join(deniedRoot, 'secret.txt')
+      const escapedFile = join(fixture.workspace, 'escaped-file.txt')
+      const escapedSource = join(sourceRoot, 'escaped-source.txt')
+      const escapedDirectory = join(fixture.workspace, 'escaped-directory')
+      await Promise.all([mkdir(sourceRoot), mkdir(deniedRoot)])
+      await writeFile(deniedFile, 'secret', 'utf8')
+      await Promise.all([
+        symlink(deniedFile, escapedFile),
+        symlink(deniedFile, escapedSource),
+        symlink(deniedRoot, escapedDirectory),
+      ])
+
+      const { invoke } = captureFsHandlers({
+        restrictToWorkspaceRoots: true,
+        allowedRoots: [fixture.workspace, sourceRoot],
+      })
+
+      await assert.rejects(
+        invoke('fs:readFile', escapedFile),
+        /outside allowed workspace roots|symbolic link/,
+      )
+      await assert.rejects(
+        invoke('fs:writeFile', escapedFile, 'overwrite'),
+        /outside allowed workspace roots|symbolic link/,
+      )
+      await assert.rejects(
+        invoke('fs:readDir', escapedDirectory),
+        /outside allowed workspace roots|symbolic link/,
+      )
+      await assert.rejects(
+        invoke('fs:copyIntoDir', escapedSource, fixture.workspace),
+        /outside allowed workspace roots|symbolic link/,
+      )
+      await assert.rejects(
+        invoke('fs:copyIntoDir', join(sourceRoot, 'missing.txt'), escapedDirectory),
+        /outside allowed workspace roots|symbolic link/,
+      )
+      assert.equal(await readFile(deniedFile, 'utf8'), 'secret')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('copy failure cleanup', () => {
+  test('removes a partial destination after a mid-copy failure', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const sourcePath = join(fixture.workspace, 'large-source.bin')
+      const destinationPath = join(fixture.workspace, 'partial-copy.bin')
+      await writeFile(sourcePath, Buffer.alloc(128 * 1024, 0x61))
+
+      await assert.rejects(
+        copyFileNoFollow(sourcePath, destinationPath, {
+          afterChunkCopied() {
+            throw new Error('injected mid-copy failure')
+          },
+        }),
+        /injected mid-copy failure/,
+      )
+      await assert.rejects(lstat(destinationPath), { code: 'ENOENT' })
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
   test('removes the inode created by a failed copy', async () => {
     const fixture = await createFsFixture()
     try {
