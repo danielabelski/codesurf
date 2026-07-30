@@ -12,6 +12,7 @@ import {
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
+  MAX_ROOT_TRAVERSAL_ATTEMPTS,
 } from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
@@ -412,38 +413,95 @@ test('more than 32 unique imports stays bounded and reports the import-count ove
   })
 
   assert.ok(context.includedSections.length <= MAX_INSTRUCTION_SECTIONS)
+  assert.equal(context.sections.length, MAX_INSTRUCTION_SECTIONS)
   assert.ok(context.budget.omittedByImportCount > 0)
+  assert.ok(context.budget.omittedBySectionLimit > 0)
   assert.match(context.prompt, /rule-39/)
   assert.doesNotMatch(context.prompt, /root-rule|must-not-be-read/)
   assert.match(context.prompt, /maximum included instruction sections/)
-  assert.ok(context.budget.omissions.some(item => /maximum included instruction sections/.test(item.truncationReason)))
+  assert.ok(context.budget.omissions.some(item =>
+    item.source === 'memory-parent-section-limit'
+    && /maximum included instruction sections/.test(item.truncationReason),
+  ))
 })
 
 test('section limits count loaded content instead of nonexistent root candidates', async t => {
   const homeDir = await makeTestTempDir('memory-missing-root-budget-')
   const workspaceDir = join(homeDir, 'workspace')
+  const blockedProjectDir = join(homeDir, 'aaa-blocked-project')
+  const outsideDir = join(homeDir, 'outside-root-candidates')
   await mkdir(workspaceDir, { recursive: true })
+  await mkdir(blockedProjectDir, { recursive: true })
+  await mkdir(outsideDir, { recursive: true })
   t.after(async () => {
     await rm(homeDir, { recursive: true, force: true })
   })
 
   await writeFile(join(workspaceDir, 'AGENTS.md'), 'PRIMARY-WORKSPACE-RULE-SURVIVES', 'utf8')
+  const blockedPath = join(outsideDir, 'blocked.md')
+  await writeFile(blockedPath, 'ROOT-CANDIDATE-MUST-NOT-BE-OPENED', 'utf8')
+  await symlink(blockedPath, join(blockedProjectDir, 'AGENTS.md'))
   const missingProjectPaths = Array.from(
-    { length: MAX_INSTRUCTION_SECTIONS + 8 },
+    { length: MAX_ROOT_TRAVERSAL_ATTEMPTS * 8 },
     (_, index) => join(homeDir, 'missing', String(index), 'project'),
   )
   const context = await loadMemoryContext({
     homeDir,
     workspaceDir,
-    projectPaths: [workspaceDir, ...missingProjectPaths],
+    projectPaths: [workspaceDir, blockedProjectDir, ...missingProjectPaths],
     executionTarget: 'cloud',
   })
 
   assert.match(context.prompt, /PRIMARY-WORKSPACE-RULE-SURVIVES/)
+  assert.match(context.prompt, /maximum root traversal attempts/)
+  assert.doesNotMatch(JSON.stringify(context), /ROOT-CANDIDATE-MUST-NOT-BE-OPENED/)
   assert.equal(context.budget.originalSectionCount, 1)
   assert.equal(context.budget.includedSectionCount, 1)
   assert.equal(context.budget.omittedSectionCount, 0)
   assert.equal(context.budget.omittedByImportCount, 0)
+  assert.equal(context.budget.rootTraversalAttempts, MAX_ROOT_TRAVERSAL_ATTEMPTS)
+  assert.equal(context.budget.primaryRootTraversalAttempts, 2)
+  assert.equal(context.budget.omittedByRootTraversalAttempts, 1)
+  assert.ok(context.budget.omissions.some(item =>
+    item.source === 'memory-root-traversal'
+    && /maximum root traversal attempts/.test(item.truncationReason),
+  ))
+})
+
+test('raw section cap emits generic root overflow metadata without unwinding a 33rd section', async t => {
+  const homeDir = await makeTestTempDir('memory-root-section-cap-')
+  const workspaceDir = join(homeDir, 'primary-workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(workspaceDir, 'AGENTS.md'), 'LOWER-PRIMARY-RULE', 'utf8')
+  const projectPaths = [workspaceDir]
+  for (let index = 0; index < MAX_INSTRUCTION_SECTIONS; index += 1) {
+    const projectDir = join(homeDir, 'nested', String(index), 'project')
+    await mkdir(projectDir, { recursive: true })
+    await writeFile(join(projectDir, 'AGENTS.md'), `HIGHER-PROJECT-RULE-${index}`, 'utf8')
+    projectPaths.push(projectDir)
+  }
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths,
+    executionTarget: 'cloud',
+  })
+
+  assert.equal(context.sections.length, MAX_INSTRUCTION_SECTIONS)
+  assert.equal(context.includedSections.length, MAX_INSTRUCTION_SECTIONS)
+  assert.doesNotMatch(context.prompt, /LOWER-PRIMARY-RULE/)
+  assert.match(context.prompt, /maximum included instruction sections/)
+  assert.equal(context.budget.omittedBySectionLimit, 1)
+  assert.ok(context.budget.omissions.some(item =>
+    item.source === 'memory-root-section-limit'
+    && /root branches not traversed/.test(item.truncationReason),
+  ))
+  assert.match(context.contextBuckets.inspect.summary, /omitted by context budgets/)
 })
 
 test('visible import I/O attempts are hard-capped without suppressing the root section', async t => {
@@ -607,4 +665,51 @@ test('cloud filtering skips local-only imports before traversal and omission acc
   assert.equal(context.budget.omittedByImportCount, 0)
   assert.equal(context.budget.omittedByDepth, 0)
   assert.doesNotMatch(context.contextBuckets.inspect.summary, /omitted by context budgets/)
+})
+
+test('cloud import privacy follows canonical paths through public symlink aliases', async t => {
+  const homeDir = await makeTestTempDir('memory-cloud-canonical-privacy-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const localDir = join(workspaceDir, '.codesurf')
+  await mkdir(localDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(localDir, 'secret.md'), 'LOCAL-ONLY-ALIAS-SECRET', 'utf8')
+  const aliasImports = []
+  for (let index = 0; index <= MAX_IMPORT_TRAVERSAL_ATTEMPTS; index += 1) {
+    const aliasName = index === 0 ? 'public-alias' : `public-alias-${index}`
+    await symlink('.codesurf', join(workspaceDir, aliasName))
+    aliasImports.push(`@import ./${aliasName}/secret.md`)
+  }
+  await writeFile(join(workspaceDir, 'remote-safe.md'), 'REMOTE-SAFE-AFTER-ALIASES', 'utf8')
+  await writeFile(
+    join(workspaceDir, 'AGENTS.md'),
+    `REMOTE-ROOT-SURVIVES\n@import ./remote-safe.md\n${aliasImports.join('\n')}`,
+    'utf8',
+  )
+
+  const cloud = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'cloud',
+  })
+  assert.deepEqual(cloud.sections.map(section => section.displayPath), ['AGENTS.md', 'remote-safe.md'])
+  assert.match(cloud.prompt, /REMOTE-ROOT-SURVIVES[\s\S]*REMOTE-SAFE-AFTER-ALIASES/)
+  assert.doesNotMatch(JSON.stringify(cloud), /LOCAL-ONLY-ALIAS-SECRET|public-alias|\.codesurf\/secret/)
+  assert.equal(cloud.budget.omittedByImportCount, 0)
+  assert.equal(cloud.budget.omittedByTraversalAttempts, 0)
+
+  const local = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'local',
+  })
+  const imported = local.sections.find(section => section.content === 'LOCAL-ONLY-ALIAS-SECRET')
+  assert.equal(imported?.bucket, 'local-only')
+  assert.equal(imported?.displayPath, '.codesurf/secret.md')
+  assert.match(local.prompt, /REMOTE-ROOT-SURVIVES[\s\S]*LOCAL-ONLY-ALIAS-SECRET/)
 })

@@ -2,6 +2,7 @@ export const MAX_CONTEXT_FILE_BYTES: number
 export const MAX_INSTRUCTION_SECTIONS: number
 export const MAX_IMPORT_DEPTH: number
 export const MAX_IMPORT_TRAVERSAL_ATTEMPTS: number
+export const MAX_ROOT_TRAVERSAL_ATTEMPTS: number
 export const MAX_AGGREGATE_INSTRUCTION_BYTES: number
 export const MAX_SELECTED_SKILLS: number
 export const MAX_SKILL_DESCRIPTION_BYTES: number

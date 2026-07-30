@@ -6,6 +6,7 @@ import {
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
+  MAX_ROOT_TRAVERSAL_ATTEMPTS,
   budgetInstructionFragments,
   formatInstructionBudgetNotice,
   truncateUtf8Buffer,
@@ -33,10 +34,11 @@ export async function loadMemoryContext({
   }).filter(candidate => includedBuckets.includes(candidate.bucket))
   const traversal = {
     visited: new Set(),
-    omittedVisits: new Set(),
+    reportedOmissions: new Set(),
     selectedSectionCount: 0,
     importTraversalAttempts: 0,
-    importTraversalLimitReported: false,
+    rootTraversalAttempts: 0,
+    primaryRootTraversalAttempts: 0,
     omissions: [],
     includedBuckets,
     rootCandidatePaths: new Set(candidates.map(candidate => candidate.path)),
@@ -47,7 +49,30 @@ export async function loadMemoryContext({
   // the I/O cap is allocated the same way as the final content budget.
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
     const candidate = candidates[index]
-    if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) break
+    if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) {
+      recordGenericOmission(traversal, 'section-limit-root', {
+        source: 'memory-root-section-limit',
+        displayPath: 'additional lower-precedence root instruction branches',
+        scope: 'workspace',
+        bucket: candidate.bucket,
+        reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}); additional lower-precedence root branches not traversed`,
+      })
+      break
+    }
+    if (candidate.primaryWorkspace) {
+      traversal.primaryRootTraversalAttempts += 1
+    } else if (traversal.rootTraversalAttempts >= MAX_ROOT_TRAVERSAL_ATTEMPTS) {
+      recordGenericOmission(traversal, 'root-traversal-limit', {
+        source: 'memory-root-traversal',
+        displayPath: 'additional lower-precedence root candidates',
+        scope: 'workspace',
+        bucket: candidate.bucket,
+        reason: `maximum root traversal attempts (${MAX_ROOT_TRAVERSAL_ATTEMPTS}); additional lower-precedence root candidates not traversed`,
+      })
+      continue
+    } else {
+      traversal.rootTraversalAttempts += 1
+    }
     await readMemorySections(candidate, traversal, {
       orderKey: [index],
     })
@@ -67,17 +92,10 @@ export async function loadMemoryContext({
   })
   const omittedByDepth = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import depth')).length
   const omittedByTraversalAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import traversal attempts')).length
-  const importedSectionSources = new Set(
-    sections
-      .filter(section => section.importedFrom)
-      .map(section => section.source),
-  )
-  const untraversedImportCount = traversal.omissions.filter(item =>
-    item.importedFrom
-    && item.truncationReason?.startsWith('maximum included instruction sections'),
-  ).length
-  const omittedByImportCount = budget.omitted.filter(item => importedSectionSources.has(item.source)).length
-    + untraversedImportCount
+  const omittedByRootTraversalAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum root traversal attempts')).length
+  const omittedBySectionLimit = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum included instruction sections')).length
+  const untraversedImportCount = traversal.omissions.filter(item => item.source === 'memory-import-section-limit').length
+  const omittedByImportCount = untraversedImportCount
   const extraNotices = []
   if (omittedByDepth > 0) {
     extraNotices.push(`${omittedByDepth} import${omittedByDepth === 1 ? '' : 's'} omitted by maximum import depth (${MAX_IMPORT_DEPTH}).`)
@@ -85,8 +103,11 @@ export async function loadMemoryContext({
   if (omittedByTraversalAttempts > 0) {
     extraNotices.push(`Lower-precedence import traversal stopped after maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}).`)
   }
-  if (omittedByImportCount > 0) {
-    extraNotices.push(`${omittedByImportCount} lower-precedence import branch${omittedByImportCount === 1 ? '' : 'es'} omitted or not traversed after maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}).`)
+  if (omittedByRootTraversalAttempts > 0) {
+    extraNotices.push(`Lower-precedence root traversal stopped after maximum root traversal attempts (${MAX_ROOT_TRAVERSAL_ATTEMPTS}); primary workspace candidates remained reserved.`)
+  }
+  if (omittedBySectionLimit > 0) {
+    extraNotices.push(`Lower-precedence instruction branches were omitted or not traversed after maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}).`)
   }
   const notice = formatInstructionBudgetNotice(budget, extraNotices)
   const notices = notice ? [notice] : []
@@ -110,11 +131,16 @@ export async function loadMemoryContext({
       omissions: [...budget.omitted, ...traversal.omissions],
       omittedByDepth,
       omittedByTraversalAttempts,
+      omittedByRootTraversalAttempts,
+      omittedBySectionLimit,
       omittedByImportCount,
       untraversedImportCount,
       maxFileBytes: MAX_CONTEXT_FILE_BYTES,
       maxImportDepth: MAX_IMPORT_DEPTH,
       maxImportTraversalAttempts: MAX_IMPORT_TRAVERSAL_ATTEMPTS,
+      maxRootTraversalAttempts: MAX_ROOT_TRAVERSAL_ATTEMPTS,
+      rootTraversalAttempts: traversal.rootTraversalAttempts,
+      primaryRootTraversalAttempts: traversal.primaryRootTraversalAttempts,
     },
     ...(notices.length > 0 ? { notices } : {}),
   }
@@ -170,7 +196,8 @@ export function describeMemoryContextForTool(context, promptOverride) {
   const omittedCount = Number(context?.budget?.omittedSectionCount ?? 0)
     + Number(context?.budget?.omittedByDepth ?? 0)
     + Number(context?.budget?.omittedByTraversalAttempts ?? 0)
-    + Number(context?.budget?.untraversedImportCount ?? 0)
+    + Number(context?.budget?.omittedByRootTraversalAttempts ?? 0)
+    + Number(context?.budget?.omittedBySectionLimit ?? 0)
   const truncatedCount = visibleSections.filter(section => section.truncated).length
   const budgetSuffix = omittedCount > 0 || truncatedCount > 0
     ? `; ${truncatedCount} truncated, ${omittedCount} omitted by context budgets`
@@ -318,6 +345,7 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
       path: join(projectPath, '.codesurf', 'DREAMING.md'),
       rootPath: projectPath,
       disallowSymlink: true,
+      primaryWorkspace: projectPath === primaryWorkspace,
     })
     candidates.push({
       scope: scopeRemote,
@@ -328,6 +356,7 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
       path: join(projectPath, 'AGENTS.md'),
       rootPath: projectPath,
       disallowSymlink: true,
+      primaryWorkspace: projectPath === primaryWorkspace,
     })
     candidates.push({
       scope: scopeRemote,
@@ -338,6 +367,7 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
       path: join(projectPath, 'CLAUDE.md'),
       rootPath: projectPath,
       disallowSymlink: true,
+      primaryWorkspace: projectPath === primaryWorkspace,
     })
     candidates.push({
       scope: scopeLocal,
@@ -348,6 +378,7 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
       path: join(projectPath, '.codesurf', 'AGENTS.md'),
       rootPath: projectPath,
       disallowSymlink: true,
+      primaryWorkspace: projectPath === primaryWorkspace,
     })
     candidates.push({
       scope: scopeLocal,
@@ -358,6 +389,7 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
       path: join(projectPath, '.claude', 'CLAUDE.md'),
       rootPath: projectPath,
       disallowSymlink: true,
+      primaryWorkspace: projectPath === primaryWorkspace,
     })
   }
 
@@ -374,21 +406,22 @@ async function readMemorySections(candidate, traversal, {
   // nor reveal their existence through omission counts.
   if (!traversal.includedBuckets.includes(candidate.bucket)) return []
 
-  const visitKey = candidate.path
-  if (traversal.visited.has(visitKey)) return []
+  const lexicalVisitKey = candidate.path
+  if (traversal.visited.has(lexicalVisitKey)) return []
   // Root candidates own their canonical scope/bucket. A cross-import that
   // points at one is deduplicated here and the normal root pass loads it with
   // stable classification independent of the high-precedence selection pass.
-  if (importedFrom && traversal.rootCandidatePaths.has(visitKey)) return []
+  if (importedFrom && traversal.rootCandidatePaths.has(lexicalVisitKey)) return []
 
   if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) {
-    if (importedFrom && !traversal.omittedVisits.has(visitKey)) {
-      traversal.omittedVisits.add(visitKey)
-      traversal.omissions.push(contextOmissionMetadata({
-        ...candidate,
-        importedFrom,
-        reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}); lower-precedence import branch not traversed`,
-      }))
+    if (importedFrom) {
+      recordGenericOmission(traversal, 'section-limit-import', {
+        source: 'memory-import-section-limit',
+        displayPath: 'additional lower-precedence import branches',
+        scope: candidate.scope,
+        bucket: candidate.bucket,
+        reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}); additional lower-precedence import branches not traversed`,
+      })
     }
     return []
   }
@@ -404,23 +437,44 @@ async function readMemorySections(candidate, traversal, {
 
   if (importedFrom) {
     if (traversal.importTraversalAttempts >= MAX_IMPORT_TRAVERSAL_ATTEMPTS) {
-      if (!traversal.importTraversalLimitReported) {
-        traversal.importTraversalLimitReported = true
-        traversal.omissions.push(contextOmissionMetadata({
-          source: 'memory-import-traversal',
-          displayPath: 'additional lower-precedence visible imports',
-          scope: candidate.scope,
-          bucket: candidate.bucket,
-          importedFrom,
-          reason: `maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}); additional lower-precedence import branches not traversed`,
-        }))
-      }
+      recordGenericOmission(traversal, 'import-traversal-limit', {
+        source: 'memory-import-traversal',
+        displayPath: 'additional lower-precedence visible imports',
+        scope: candidate.scope,
+        bucket: candidate.bucket,
+        reason: `maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}); additional lower-precedence import branches not traversed`,
+      })
       return []
     }
+    // Reserve an attempt before canonical privacy validation so missing paths
+    // remain bounded. Canonical local-only aliases and canonical duplicates are
+    // refunded immediately and therefore cannot suppress remote-safe content.
     traversal.importTraversalAttempts += 1
+    const canonicalCandidate = await canonicalizeImportCandidate(candidate)
+    if (!canonicalCandidate) {
+      traversal.visited.add(lexicalVisitKey)
+      return []
+    }
+    candidate = canonicalCandidate
+    const canonicalVisitKey = candidate.canonicalPath
+    if (!traversal.includedBuckets.includes(candidate.bucket)) {
+      traversal.importTraversalAttempts -= 1
+      traversal.visited.add(lexicalVisitKey)
+      traversal.visited.add(canonicalVisitKey)
+      return []
+    }
+    if (traversal.visited.has(canonicalVisitKey)) {
+      traversal.importTraversalAttempts -= 1
+      return []
+    }
+    if (traversal.rootCandidatePaths.has(canonicalVisitKey)) {
+      traversal.importTraversalAttempts -= 1
+      return []
+    }
+    traversal.visited.add(canonicalVisitKey)
   }
 
-  traversal.visited.add(visitKey)
+  traversal.visited.add(lexicalVisitKey)
 
   const loaded = await readMemoryFile(candidate)
   if (!loaded) return []
@@ -442,24 +496,79 @@ async function readMemorySections(candidate, traversal, {
   }
 
   if (content) {
-    traversal.sections.push({
-      scope: candidate.scope,
-      bucket: candidate.bucket,
-      displayPath: candidate.displayPath,
-      path: candidate.path,
-      source: candidate.path,
-      importedFrom,
-      orderKey: [...orderKey, 0],
-      content,
-      originalBytes: loaded.originalBytes,
-      includedBytes: utf8ByteLength(content),
-      truncated: loaded.truncated,
-      truncationReason: loaded.truncationReason,
-    })
-    if (traversal.selectedSectionCount < MAX_INSTRUCTION_SECTIONS) {
+    if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) {
+      recordGenericOmission(traversal, 'section-limit-parent', {
+        source: 'memory-parent-section-limit',
+        displayPath: 'lower-precedence parent instruction sections',
+        scope: candidate.scope,
+        bucket: candidate.bucket,
+        reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}); lower-precedence parent sections omitted during traversal unwind`,
+      })
+    } else {
+      traversal.sections.push({
+        scope: candidate.scope,
+        bucket: candidate.bucket,
+        displayPath: candidate.displayPath,
+        path: candidate.path,
+        source: candidate.canonicalPath ?? candidate.path,
+        importedFrom,
+        orderKey: [...orderKey, 0],
+        content,
+        originalBytes: loaded.originalBytes,
+        includedBytes: utf8ByteLength(content),
+        truncated: loaded.truncated,
+        truncationReason: loaded.truncationReason,
+      })
       traversal.selectedSectionCount += 1
     }
   }
+}
+
+function recordGenericOmission(traversal, key, metadata) {
+  if (traversal.reportedOmissions.has(key)) return
+  traversal.reportedOmissions.add(key)
+  traversal.omissions.push(contextOmissionMetadata(metadata))
+}
+
+async function canonicalizeImportCandidate(candidate) {
+  try {
+    const canonicalRootPath = candidate.rootPath
+      ? await fs.realpath(candidate.rootPath)
+      : null
+    const canonicalPath = await fs.realpath(candidate.path)
+    if (canonicalRootPath && !isWithinRoot(canonicalPath, canonicalRootPath)) {
+      throw new Error(`Memory import resolves outside the workspace root`)
+    }
+    const canonicalRelativePath = canonicalRootPath
+      ? relative(canonicalRootPath, canonicalPath).replace(/\\/g, '/')
+      : candidate.displayPath
+    const canonicalIsLocalOnly = candidate.bucket === 'local-only'
+      || isLocalOnlyWorkspacePath(canonicalRelativePath)
+    return {
+      ...candidate,
+      scope: canonicalIsLocalOnly ? candidate.scopeLocal : candidate.scopeRemote,
+      bucket: canonicalIsLocalOnly ? 'local-only' : 'remote-safe',
+      displayPath: canonicalRelativePath,
+      canonicalPath,
+      canonicalRootPath,
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'EPERM' || error?.code === 'EACCES') {
+      return null
+    }
+    if (error instanceof Error && /outside the workspace root/i.test(error.message)) {
+      throw error
+    }
+    throw new Error(`Failed to validate memory import: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+function isLocalOnlyWorkspacePath(relativePath) {
+  const normalized = String(relativePath ?? '').replace(/\\/g, '/').toLowerCase()
+  return normalized === '.codesurf'
+    || normalized.startsWith('.codesurf/')
+    || normalized === '.claude'
+    || normalized.startsWith('.claude/')
 }
 
 function compareOrderKeys(left, right) {
@@ -497,10 +606,7 @@ function resolveImportCandidate(parent, importPath) {
     ? relative(parent.rootPath, candidatePath).replace(/\\/g, '/')
     : importPath
   const importedIsLocalOnly = parent.bucket === 'local-only'
-    || relativePath === '.codesurf/AGENTS.md'
-    || relativePath.startsWith('.codesurf/')
-    || relativePath === '.claude/CLAUDE.md'
-    || relativePath.startsWith('.claude/')
+    || isLocalOnlyWorkspacePath(relativePath)
   return {
     ...parent,
     scope: importedIsLocalOnly ? parent.scopeLocal : parent.scopeRemote,
@@ -525,6 +631,12 @@ async function readMemoryFile(candidate) {
 
     if (resolvedRootPath) {
       const resolvedCandidatePath = await fs.realpath(candidate.path)
+      if (candidate.canonicalRootPath && resolvedRootPath !== candidate.canonicalRootPath) {
+        throw new Error(`Memory file ${candidate.displayPath} changed during privacy validation`)
+      }
+      if (candidate.canonicalPath && resolvedCandidatePath !== candidate.canonicalPath) {
+        throw new Error(`Memory file ${candidate.displayPath} changed during privacy validation`)
+      }
       if (!isWithinRoot(resolvedCandidatePath, resolvedRootPath)) {
         throw new Error(`Memory file ${candidate.displayPath} resolves outside the workspace root`)
       }
@@ -552,7 +664,7 @@ async function readMemoryFile(candidate) {
     if (candidate.disallowSymlink && error?.code === 'ELOOP') {
       throw new Error(`Memory file ${candidate.displayPath} must not be a symlink`)
     }
-    if (error instanceof Error && /(must not be a symlink|outside the workspace root|changed during validation)/i.test(error.message)) {
+    if (error instanceof Error && /(must not be a symlink|outside the workspace root|changed during (?:privacy )?validation)/i.test(error.message)) {
       throw error
     }
     throw new Error(`Failed to read memory file ${candidate.displayPath}: ${error instanceof Error ? error.message : String(error)}`)
