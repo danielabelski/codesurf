@@ -15,6 +15,7 @@ import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import { log, sendStream, getPreparedMessages } from '../runtime'
+import { createAuthenticatedOpenCodeClient, OpenCodeClientCache } from './opencode-client'
 
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
 // externalizeDepsPlugin converts dynamic import() to require() which can't
@@ -337,7 +338,7 @@ export async function abortOpenCodeSession(cardId: string): Promise<void> {
     if (mgr.isRunning()) {
       const createClient = await getOpencodeClient()
       const { url } = await mgr.ensureRunning()
-      const client = createClient({ baseUrl: url, headers: mgr.getAuthHeaders() })
+      const client = createAuthenticatedOpenCodeClient<any>(createClient, url, mgr.getAuthHeaders())
       await client.session.abort({ sessionID: ocSessionId })
       log('opencode session aborted:', ocSessionId)
     }
@@ -348,22 +349,14 @@ export async function abortOpenCodeSession(cardId: string): Promise<void> {
 
 // Cached SDK client — avoid re-creating on every message
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _cachedOpencodeClient: any = null
-let _cachedClientUrl: string | null = null
+const opencodeClientCache = new OpenCodeClientCache<any>()
 
 async function getOrCreateOpencodeClient(): Promise<{ client: any; url: string }> {
   const mgr = OpenCodeServerManager.getInstance()
   const { url } = await mgr.ensureRunning()
-
-  // Reuse client if server URL hasn't changed
-  if (_cachedOpencodeClient && _cachedClientUrl === url) {
-    return { client: _cachedOpencodeClient, url }
-  }
-
   const createClient = await getOpencodeClient()
-  _cachedOpencodeClient = createClient({ baseUrl: url })
-  _cachedClientUrl = url
-  return { client: _cachedOpencodeClient, url }
+  const client = opencodeClientCache.getOrCreate(url, createClient, mgr.getAuthHeaders())
+  return { client, url }
 }
 
 export function chatOpencode(req: ChatRequest): void {
