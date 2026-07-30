@@ -44,6 +44,8 @@ export interface RequestOptions {
   body?: unknown
   /** Per-request override of the request timeout (ms). */
   timeoutMs?: number
+  /** Cancels the request and any read-only retry immediately. */
+  signal?: AbortSignal
 }
 
 type RequestRetryPolicy = 'read-only' | 'none'
@@ -83,11 +85,55 @@ export interface StreamJobEventsOptions {
   jobId: string
   since?: number
   signal?: AbortSignal
+  /** Maximum reconnects after the initial stream. Defaults to 3, capped at 10. */
+  maxReconnectAttempts?: number
+  /** Initial reconnect delay in milliseconds. Doubles per retry, capped at 30s. */
+  reconnectDelayMs?: number
   onEvent: (event: DaemonChatJobEvent) => void | Promise<void>
   onParseError?: (error: Error) => void | Promise<void>
 }
 
 export type DaemonClient = ReturnType<typeof createDaemonClient>
+
+class DaemonStreamConsumerError extends Error {
+  readonly original: unknown
+
+  constructor(original: unknown) {
+    super(original instanceof Error ? original.message : String(original))
+    this.name = 'DaemonStreamConsumerError'
+    this.original = original
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal)
+}
+
+async function waitForReconnect(delayMs: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
+  if (delayMs <= 0) return
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(signal ? abortReason(signal) : new DOMException('The operation was aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function isActiveJobState(state: DaemonChatJobState | null): boolean {
+  return state?.status === 'queued' || state?.status === 'running'
+}
 
 export function createDaemonClient(hooks: DaemonClientHooks) {
   const defaultTimeoutMs = hooks.requestTimeoutMs ?? 5_000
@@ -98,9 +144,12 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     const maxAttempts = options.retryPolicy === 'read-only' ? 2 : 1
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const daemon = await hooks.ensureRunning()
+      throwIfAborted(options.signal)
 
       try {
+        const daemon = await hooks.ensureRunning()
+        throwIfAborted(options.signal)
+        const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs)
         const response = await fetch(`http://127.0.0.1:${daemon.port}${path}`, {
           method,
           headers: {
@@ -108,7 +157,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
             ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
           },
           body: options.body == null ? undefined : JSON.stringify(options.body),
-          signal: AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
+          signal: options.signal
+            ? AbortSignal.any([options.signal, timeoutSignal])
+            : timeoutSignal,
         })
 
         if (!response.ok) {
@@ -121,6 +172,7 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
 
         return await response.json() as T
       } catch (error) {
+        if (options.signal?.aborted) throw abortReason(options.signal)
         lastError = error instanceof Error ? error : new Error(String(error))
         const canRetry = attempt + 1 < maxAttempts
 
@@ -162,19 +214,69 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
   }
 
   async function streamJobEvents(options: StreamJobEventsOptions): Promise<void> {
-    let lastError: Error | null = null
     const jobId = String(options.jobId ?? '').trim()
     if (!jobId) throw new Error('jobId is required')
     const since = Number.isFinite(options.since) ? Number(options.since) : 0
-    const query = new URLSearchParams({
-      jobId,
-      since: String(Math.max(0, since)),
-    })
+    let lastDeliveredSequence = Math.max(0, since)
+    let terminalEventSeen = false
+    let terminalCatchupAttempted = false
+    let reconnectCount = 0
+    const maxReconnectAttempts = Math.min(
+      10,
+      Math.max(0, Math.trunc(Number(options.maxReconnectAttempts ?? 3) || 0)),
+    )
+    const reconnectDelayMs = Math.min(
+      30_000,
+      Math.max(0, Number(options.reconnectDelayMs ?? 250) || 0),
+    )
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const daemon = await hooks.ensureRunning()
+    async function deliverBuffer(buffer: string): Promise<{ remaining: string; terminal: boolean }> {
+      const parsed = parseSseJsonBuffer<DaemonChatJobEvent>(buffer)
+      for (const error of parsed.errors) {
+        try {
+          await options.onParseError?.(error)
+        } catch (consumerError) {
+          throw new DaemonStreamConsumerError(consumerError)
+        }
+      }
+      for (const event of parsed.events) {
+        const sequence = Number(event?.sequence)
+        if (!Number.isFinite(sequence) || sequence <= 0) {
+          try {
+            await options.onParseError?.(new Error('Daemon event is missing a valid sequence'))
+          } catch (consumerError) {
+            throw new DaemonStreamConsumerError(consumerError)
+          }
+          continue
+        }
+        if (sequence <= lastDeliveredSequence) continue
+        try {
+          await options.onEvent(event)
+        } catch (consumerError) {
+          throw new DaemonStreamConsumerError(consumerError)
+        }
+        lastDeliveredSequence = sequence
+        if (event.type === 'done') {
+          terminalEventSeen = true
+          return { remaining: parsed.remaining, terminal: true }
+        }
+      }
+      return { remaining: parsed.remaining, terminal: false }
+    }
+
+    while (true) {
+      throwIfAborted(options.signal)
+      const isTerminalCatchupAttempt = terminalCatchupAttempted
+      let disconnectError: Error | null = null
+      let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
       try {
+        const daemon = await hooks.ensureRunning()
+        throwIfAborted(options.signal)
+        const query = new URLSearchParams({
+          jobId,
+          since: String(lastDeliveredSequence),
+        })
         const response = await fetch(`http://127.0.0.1:${daemon.port}/chat/job/events?${query.toString()}`, {
           headers: {
             Accept: 'text/event-stream',
@@ -185,16 +287,14 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
 
         if (!response.ok || !response.body) {
           const text = await response.text().catch(() => '')
-          const error = new Error(text || `Daemon event stream failed: ${response.status}`)
-          lastError = error
-          if (attempt === 0 && (response.status === 401 || response.status === 408 || response.status === 502 || response.status === 503 || response.status === 504)) {
-            hooks.invalidate()
-            continue
-          }
-          throw error
+          if (RETRYABLE_RESPONSE_STATUSES.has(response.status)) hooks.invalidate()
+          throw new DaemonResponseError(
+            text || `Daemon event stream failed: ${response.status}`,
+            response.status,
+          )
         }
 
-        const reader = response.body.getReader()
+        reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
 
@@ -202,32 +302,82 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
           const { done, value } = await reader.read()
           if (done) break
           buffer += decoder.decode(value, { stream: true })
-          const parsed = parseSseJsonBuffer<DaemonChatJobEvent>(buffer)
-          buffer = parsed.remaining
-          for (const error of parsed.errors) {
-            await options.onParseError?.(error)
-          }
-          for (const event of parsed.events) {
-            await options.onEvent(event)
-          }
+          const delivered = await deliverBuffer(buffer)
+          buffer = delivered.remaining
+          if (delivered.terminal) return
         }
 
-        return
+        buffer += decoder.decode()
+        if (buffer.trim()) {
+          const delivered = await deliverBuffer(buffer.endsWith('\n\n') ? buffer : `${buffer}\n\n`)
+          if (delivered.terminal) return
+        }
       } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        if (options.signal?.aborted) throw lastError
-        if (attempt === 0) {
-          const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
-          if (!status.running) {
-            hooks.invalidate()
-          }
+        if (error instanceof DaemonStreamConsumerError) {
+          if (error.original instanceof Error) throw error.original
+          throw new Error(String(error.original))
+        }
+        if (options.signal?.aborted) throw abortReason(options.signal)
+        disconnectError = error instanceof Error ? error : new Error(String(error))
+      } finally {
+        if (reader) {
+          try { await reader.cancel() } catch {}
+          try { reader.releaseLock() } catch {}
+        }
+      }
+
+      if (terminalEventSeen) return
+      if (isTerminalCatchupAttempt) {
+        throw new Error(
+          `Daemon terminal replay ended before delivering the terminal event for job ${jobId}`,
+          { cause: disconnectError ?? undefined },
+        )
+      }
+      if (disconnectError instanceof DaemonResponseError && !disconnectError.retryable) {
+        throw disconnectError
+      }
+
+      let state: DaemonChatJobState | null = null
+      try {
+        state = await request<DaemonChatJobState>(
+          `/chat/job/state?jobId=${encodeURIComponent(jobId)}`,
+          { signal: options.signal },
+        )
+      } catch (stateError) {
+        if (options.signal?.aborted) throw abortReason(options.signal)
+        const daemonStatus = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
+        if (!daemonStatus.running) hooks.invalidate()
+        if (reconnectCount >= maxReconnectAttempts) {
+          throw (disconnectError ?? (stateError instanceof Error ? stateError : new Error(String(stateError))))
+        }
+      }
+
+      if (state && !isActiveJobState(state)) {
+        const terminalLastSequence = Math.max(0, Number(state.lastSequence) || 0)
+        if (!terminalCatchupAttempted && terminalLastSequence > lastDeliveredSequence) {
+          terminalCatchupAttempted = true
+          await waitForReconnect(reconnectDelayMs, options.signal)
           continue
         }
-        throw lastError
+        return
       }
-    }
+      if (reconnectCount >= maxReconnectAttempts) {
+        if (state && isActiveJobState(state)) {
+          throw new Error(
+            `Daemon event stream ended unexpectedly while job ${jobId} remains active`,
+            { cause: disconnectError ?? undefined },
+          )
+        }
+        throw (disconnectError ?? new Error(`Daemon event stream ended unexpectedly for job ${jobId}`))
+      }
 
-    throw (lastError ?? new Error('Daemon event stream failed'))
+      reconnectCount += 1
+      const delay = Math.min(
+        30_000,
+        reconnectDelayMs * (2 ** (reconnectCount - 1)),
+      )
+      await waitForReconnect(delay, options.signal)
+    }
   }
 
   return {

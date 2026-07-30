@@ -3391,7 +3391,6 @@ const server = createServer(async (req, res) => {
         'X-Accel-Buffering': 'no',
       })
       res.flushHeaders?.()
-      res.write(': connected\n\n')
 
       const keepOpen = await chatJobs.streamJob(jobId, sinceSequence, res)
       if (!keepOpen) {

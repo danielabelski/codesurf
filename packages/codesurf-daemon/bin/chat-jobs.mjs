@@ -2,9 +2,10 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
@@ -1153,18 +1154,303 @@ function extractOpenCodeTextPayload(event) {
   return ''
 }
 
-function writeSseEvent(res, payload) {
-  // Isolate per-subscriber failures: a throwing/closed socket must not starve
-  // sibling subscribers of the same event. Returns the write() backpressure
-  // signal (false = buffer full) so callers can react if needed.
-  try {
-    return res.write(`data: ${JSON.stringify(payload)}\n\n`)
-  } catch {
-    return false
+function sseEventEntry(payload) {
+  const sequence = Number(payload?.sequence ?? 0)
+  return {
+    chunk: `data: ${JSON.stringify(payload)}\n\n`,
+    sequence: Number.isFinite(sequence) ? sequence : 0,
+    terminal: payload?.type === 'done',
   }
 }
 
-export function createChatJobManager({ homeDir, checkpointStore = null, claudeQuery = query, codexSdkFactory = null, maxConcurrentJobs = 4 }) {
+function responseIsClosed(res) {
+  return Boolean(res?.destroyed || res?.writableEnded || res?.closed)
+}
+
+export function createSseSubscriberRegistry({
+  maxQueuedEvents = 256,
+  maxQueuedBytes = 1024 * 1024,
+  drainTimeoutMs = 30_000,
+  heartbeatMs = 15_000,
+} = {}) {
+  const subscribers = new Map()
+  const eventLimit = Math.max(1, Number(maxQueuedEvents) || 256)
+  const byteLimit = Math.max(1, Number(maxQueuedBytes) || 1024 * 1024)
+  const drainLimitMs = Math.max(1, Number(drainTimeoutMs) || 30_000)
+  let stopped = false
+
+  function removeFromRegistry(record) {
+    const current = subscribers.get(record.jobId)
+    if (!current) return
+    current.delete(record)
+    if (current.size === 0) subscribers.delete(record.jobId)
+  }
+
+  function clearDrainTimer(record) {
+    if (!record.drainTimer) return
+    clearTimeout(record.drainTimer)
+    record.drainTimer = null
+  }
+
+  function resolveDrainWaiters(record, writable) {
+    const waiters = Array.from(record.drainWaiters)
+    record.drainWaiters.clear()
+    for (const resolveWaiter of waiters) resolveWaiter(writable)
+  }
+
+  function closeRecord(record, { destroy = false, end = true } = {}) {
+    if (!record || record.closed) return
+    record.closed = true
+    clearDrainTimer(record)
+    removeFromRegistry(record)
+    record.res.off?.('drain', record.onDrain)
+    record.res.off?.('close', record.onClose)
+    record.res.off?.('error', record.onError)
+    record.queue.length = 0
+    record.replayBuffer.length = 0
+    record.bufferedEvents = 0
+    record.bufferedBytes = 0
+    resolveDrainWaiters(record, false)
+
+    if (destroy && !record.res.destroyed) {
+      try { record.res.destroy?.() } catch {}
+    } else if (end && !record.res.writableEnded && !record.res.destroyed) {
+      try { record.res.end?.() } catch {}
+    }
+  }
+
+  function markBlocked(record) {
+    if (record.closed || record.blocked) return
+    record.blocked = true
+    record.drainTimer = setTimeout(() => {
+      closeRecord(record, { destroy: true, end: false })
+    }, drainLimitMs)
+    record.drainTimer.unref?.()
+  }
+
+  function unaccountEntry(record, entry) {
+    record.bufferedEvents = Math.max(0, record.bufferedEvents - 1)
+    record.bufferedBytes = Math.max(0, record.bufferedBytes - entry.bytes)
+  }
+
+  function writeEntry(record, entry) {
+    if (record.closed) return false
+    if (responseIsClosed(record.res)) {
+      closeRecord(record, { end: false })
+      return false
+    }
+
+    let writable
+    try {
+      writable = record.res.write(entry.chunk)
+    } catch {
+      closeRecord(record, { destroy: true, end: false })
+      return false
+    }
+
+    if (entry.sequence > record.lastSentSequence) {
+      record.lastSentSequence = entry.sequence
+    }
+    if (!writable) markBlocked(record)
+    if (entry.terminal) {
+      closeRecord(record)
+      return false
+    }
+    return !record.closed
+  }
+
+  function enqueue(record, entry, target) {
+    if (record.closed) return false
+    if (
+      record.bufferedEvents + 1 > eventLimit
+      || record.bufferedBytes + entry.bytes > byteLimit
+    ) {
+      closeRecord(record, { destroy: true, end: false })
+      return false
+    }
+    target.push(entry)
+    record.bufferedEvents += 1
+    record.bufferedBytes += entry.bytes
+    return true
+  }
+
+  function flushQueue(record) {
+    while (!record.closed && !record.blocked && record.queue.length > 0) {
+      const entry = record.queue.shift()
+      unaccountEntry(record, entry)
+      if (entry.sequence > 0 && entry.sequence <= record.lastSentSequence) continue
+      if (!writeEntry(record, entry)) return
+    }
+  }
+
+  function handleDrain(record) {
+    if (record.closed) return
+    clearDrainTimer(record)
+    record.blocked = false
+    flushQueue(record)
+    if (!record.closed && !record.blocked) resolveDrainWaiters(record, true)
+  }
+
+  function register(jobId, res, { sinceSequence = 0, replaying = true } = {}) {
+    const record = {
+      jobId,
+      res,
+      queue: [],
+      replayBuffer: [],
+      replaying,
+      blocked: false,
+      closed: false,
+      bufferedEvents: 0,
+      bufferedBytes: 0,
+      drainTimer: null,
+      drainWaiters: new Set(),
+      lastSentSequence: Math.max(0, Number(sinceSequence) || 0),
+      onDrain: null,
+      onClose: null,
+      onError: null,
+    }
+    record.onDrain = () => handleDrain(record)
+    record.onClose = () => closeRecord(record, { end: false })
+    record.onError = () => closeRecord(record, { destroy: true, end: false })
+    res.on?.('drain', record.onDrain)
+    res.on?.('close', record.onClose)
+    res.on?.('error', record.onError)
+
+    const listeners = subscribers.get(jobId) ?? new Set()
+    listeners.add(record)
+    subscribers.set(jobId, listeners)
+    if (stopped) {
+      closeRecord(record)
+    } else if (responseIsClosed(res)) {
+      closeRecord(record, { end: false })
+    }
+    return record
+  }
+
+  function publish(jobId, payload) {
+    const listeners = subscribers.get(jobId)
+    if (!listeners) return
+    const baseEntry = sseEventEntry(payload)
+    for (const record of Array.from(listeners)) {
+      if (record.closed || baseEntry.sequence <= record.lastSentSequence) continue
+      const entry = { ...baseEntry, bytes: Buffer.byteLength(baseEntry.chunk) }
+      if (record.replaying) {
+        enqueue(record, entry, record.replayBuffer)
+      } else if (record.blocked || record.queue.length > 0) {
+        enqueue(record, entry, record.queue)
+      } else {
+        writeEntry(record, entry)
+      }
+    }
+  }
+
+  function waitForWritable(record) {
+    if (record.closed) return Promise.resolve(false)
+    if (!record.blocked) return Promise.resolve(true)
+    return new Promise(resolveWaiter => {
+      record.drainWaiters.add(resolveWaiter)
+    })
+  }
+
+  async function sendReplay(record, payload) {
+    if (record.closed) return false
+    const entry = sseEventEntry(payload)
+    entry.bytes = Buffer.byteLength(entry.chunk)
+    if (entry.sequence <= record.lastSentSequence) return true
+    if (!await waitForWritable(record)) return false
+    return writeEntry(record, entry)
+  }
+
+  function finishReplay(record) {
+    if (record.closed) return false
+    record.replaying = false
+    const buffered = record.replayBuffer
+      .splice(0)
+      .sort((a, b) => a.sequence - b.sequence)
+    for (const entry of buffered) {
+      unaccountEntry(record, entry)
+      if (record.closed || entry.sequence <= record.lastSentSequence) continue
+      if (record.blocked || record.queue.length > 0) {
+        if (!enqueue(record, entry, record.queue)) break
+      } else if (!writeEntry(record, entry)) {
+        break
+      }
+    }
+    return !record.closed
+  }
+
+  function sendComment(record, comment) {
+    if (record.closed || record.blocked) return false
+    const chunk = comment.endsWith('\n\n') ? comment : `${comment}\n\n`
+    return writeEntry(record, {
+      chunk,
+      bytes: Buffer.byteLength(chunk),
+      sequence: 0,
+      terminal: false,
+    })
+  }
+
+  function pulseHeartbeat() {
+    for (const listeners of subscribers.values()) {
+      for (const record of Array.from(listeners)) {
+        if (
+          record.closed
+          || record.blocked
+          || record.replaying
+          || record.queue.length > 0
+          || record.replayBuffer.length > 0
+        ) {
+          continue
+        }
+        sendComment(record, ': ping\n\n')
+      }
+    }
+  }
+
+  const heartbeatTimer = heartbeatMs > 0
+    ? setInterval(pulseHeartbeat, Math.max(1, Number(heartbeatMs) || 15_000))
+    : null
+  heartbeatTimer?.unref?.()
+
+  function shutdown() {
+    if (stopped) return
+    stopped = true
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    const records = Array.from(subscribers.values()).flatMap(listeners => Array.from(listeners))
+    for (const record of records) closeRecord(record)
+    subscribers.clear()
+  }
+
+  return {
+    register,
+    publish,
+    sendReplay,
+    finishReplay,
+    sendComment,
+    pulseHeartbeat,
+    close: closeRecord,
+    shutdown,
+    count(jobId) {
+      if (jobId) return subscribers.get(jobId)?.size ?? 0
+      let total = 0
+      for (const listeners of subscribers.values()) total += listeners.size
+      return total
+    },
+  }
+}
+
+export function createChatJobManager({
+  homeDir,
+  checkpointStore = null,
+  claudeQuery = query,
+  codexSdkFactory = null,
+  maxConcurrentJobs = 4,
+  subscriberMaxQueuedEvents = 256,
+  subscriberMaxQueuedBytes = 1024 * 1024,
+  subscriberDrainTimeoutMs = 30_000,
+  heartbeatMs = 15_000,
+  timelineAppend = (path, data) => fs.appendFile(path, data, 'utf8'),
+}) {
   const jobsDir = join(homeDir, 'jobs')
   const timelinesDir = join(homeDir, 'timelines')
   ensureDir(jobsDir)
@@ -1193,44 +1479,57 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
   }
 
   const liveJobs = new Map()
-  const subscribers = new Map()
   const sessionPermissionGrants = new Map()
   const pendingToolPermissions = new Map()
+  const subscriberRegistry = createSseSubscriberRegistry({
+    maxQueuedEvents: subscriberMaxQueuedEvents,
+    maxQueuedBytes: subscriberMaxQueuedBytes,
+    drainTimeoutMs: subscriberDrainTimeoutMs,
+    heartbeatMs,
+  })
 
   // daemon-07: debounce the full metadata rewrite. The timeline jsonl is still
   // appended on every event (cheap, append-only), but the whole-object
   // metadata file is only rewritten at most every METADATA_FLUSH_MS during a
-  // streaming turn. Terminal/session events flush immediately so the final
-  // status + sessionId are always durable; lastSequence is recoverable from the
-  // timeline if a crash loses the last sub-flush window.
+  // streaming turn. Terminal/session events flush immediately after their
+  // timeline entry is durable. If an append fails, metadata deliberately stays
+  // behind the timeline gap and same-process replay uses pendingTimelineEvents.
   const METADATA_FLUSH_MS = 250
   const metadataFlushTimers = new Map() // jobId -> timeout
   const timelineWriteChains = new Map() // jobId -> Promise<void>
+  const pendingTimelineEvents = new Map() // jobId -> Map<sequence, payload>
 
   function enqueueTimelineWrite(jobId, payload) {
+    const pending = pendingTimelineEvents.get(jobId) ?? new Map()
+    pending.set(payload.sequence, payload)
+    pendingTimelineEvents.set(jobId, pending)
     const previous = timelineWriteChains.get(jobId) ?? Promise.resolve()
     const next = previous
-      .catch(() => {})
-      .then(() => fs.appendFile(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`, 'utf8'))
+      .then(() => timelineAppend(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`))
     timelineWriteChains.set(jobId, next)
-    next.finally(() => {
+    next.then(() => {
+      const current = pendingTimelineEvents.get(jobId)
+      if (current?.get(payload.sequence) === payload) current.delete(payload.sequence)
+      if (current?.size === 0) pendingTimelineEvents.delete(jobId)
       if (timelineWriteChains.get(jobId) === next) timelineWriteChains.delete(jobId)
     }).catch(() => {})
     return next
   }
 
-  // Periodic SSE heartbeat so clients can detect a silently-dead stream (e.g. a
-  // half-open socket, or the post-crash wedge that streamJob's liveness guard
-  // also defends against). One unref'd timer for the manager's lifetime.
-  const SSE_HEARTBEAT_MS = 15000
-  const heartbeatTimer = setInterval(() => {
-    for (const listeners of subscribers.values()) {
-      for (const res of listeners) {
-        try { res.write(': ping\n\n') } catch { /* dropped; close handler cleans up */ }
-      }
+  function snapshotPendingTimelineEvents(jobId, sinceSequence, throughSequence) {
+    const events = []
+    let maxSequence = Math.max(0, sinceSequence)
+    let terminalSeen = false
+    for (const payload of pendingTimelineEvents.get(jobId)?.values() ?? []) {
+      const sequence = Number(payload?.sequence ?? 0)
+      if (!Number.isFinite(sequence) || sequence <= 0 || sequence > throughSequence) continue
+      maxSequence = Math.max(maxSequence, sequence)
+      if (payload?.type === 'done') terminalSeen = true
+      if (sequence > sinceSequence) events.push(payload)
     }
-  }, SSE_HEARTBEAT_MS)
-  heartbeatTimer.unref?.()
+    events.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0))
+    return { events, maxSequence, terminalSeen }
+  }
 
   function jobMetaPath(jobId) {
     return join(jobsDir, `${jobId}.json`)
@@ -1277,7 +1576,23 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const timer = setTimeout(() => {
       metadataFlushTimers.delete(jobId)
       const live = liveJobs.get(jobId)
-      if (live?.metadata) void writeJobMetadata(live.metadata).catch(() => {})
+      if (!live?.metadata) return
+      const timelineWrite = timelineWriteChains.get(jobId)
+      if (!timelineWrite) {
+        void writeJobMetadata(live.metadata).catch(() => {})
+        return
+      }
+      void timelineWrite.then(() => {
+        if (timelineWriteChains.has(jobId)) {
+          scheduleMetadataFlush(jobId)
+          return
+        }
+        const currentLive = liveJobs.get(jobId)
+        if (currentLive?.metadata) return writeJobMetadata(currentLive.metadata)
+      }).catch(() => {
+        // Fail closed: never advance durable metadata beyond a timeline gap.
+        // The pending event map remains available for same-process SSE replay.
+      })
     }, METADATA_FLUSH_MS)
     timer.unref?.()
     metadataFlushTimers.set(jobId, timer)
@@ -1323,12 +1638,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     // fanout so token rendering latency is provider/network-bound, not fs-bound.
     const timelineWrite = enqueueTimelineWrite(jobId, payload)
 
-    const listeners = subscribers.get(jobId)
-    if (listeners) {
-      for (const res of listeners) {
-        writeSseEvent(res, payload)
-      }
-    }
+    subscriberRegistry.publish(jobId, payload)
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
     // completedAt, sessionId must be durable right away) or when the job has no
@@ -1336,21 +1646,25 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const isTerminalEvent = event.type === 'done' || event.type === 'error'
     if (isTerminalEvent || event.sessionId || !live) {
       clearMetadataFlush(jobId)
-      await timelineWrite.catch(() => {})
-      await writeJobMetadata(metadata)
+      let timelinePersisted = true
+      try {
+        await timelineWrite
+      } catch (error) {
+        timelinePersisted = false
+        console.error(
+          `[chat-jobs] timeline append failed for job ${jobId} at sequence ${payload.sequence}:`,
+          error,
+        )
+      }
+      if (timelinePersisted) {
+        await writeJobMetadata(metadata)
+      }
     } else {
       scheduleMetadataFlush(jobId)
     }
 
     if (event.type === 'done' || event.type === 'error') {
       cancelPendingToolPermissionsForJob(jobId, event.type === 'done' ? 'Job completed' : 'Job failed')
-      if (event.type === 'done') {
-        const listeners = subscribers.get(jobId)
-        if (listeners) {
-          for (const res of listeners) res.end()
-        }
-        subscribers.delete(jobId)
-      }
     }
 
     return payload
@@ -2919,66 +3233,117 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     return await readJobMetadata(jobId)
   }
 
+  async function replayTimeline(record, jobId, sinceSequence, throughSequence = Number.POSITIVE_INFINITY) {
+    const timelinePath = jobTimelinePath(jobId)
+    if (!existsSync(timelinePath)) {
+      return { maxSequence: Math.max(0, sinceSequence), terminalSeen: false }
+    }
+
+    const input = createReadStream(timelinePath, { encoding: 'utf8' })
+    const lines = createInterface({ input, crlfDelay: Infinity })
+    let maxSequence = Math.max(0, sinceSequence)
+    let terminalSeen = false
+    try {
+      for await (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let payload
+        try {
+          payload = JSON.parse(trimmed)
+        } catch {
+          // A corrupt line cannot be replayed, but the surrounding valid JSONL
+          // remains recoverable. No history-size cap is applied: replay streams
+          // the complete file under writable backpressure.
+          continue
+        }
+        const sequence = Number(payload?.sequence ?? 0)
+        if (!Number.isFinite(sequence) || sequence <= 0) continue
+        maxSequence = Math.max(maxSequence, sequence)
+        if (payload.type === 'done') terminalSeen = true
+        if (sequence <= sinceSequence || sequence > throughSequence) continue
+        if (!await subscriberRegistry.sendReplay(record, payload)) break
+      }
+    } finally {
+      lines.close()
+      input.destroy()
+    }
+    return { maxSequence, terminalSeen }
+  }
+
   async function streamJob(jobId, sinceSequence, res) {
-    const metadata = await readJobMetadata(jobId)
+    const persistedMetadata = await readJobMetadata(jobId)
+    const live = liveJobs.get(jobId)
+    const metadata = live?.metadata ?? persistedMetadata
     if (!metadata) return false
 
-    const raw = existsSync(jobTimelinePath(jobId))
-      ? readFileSync(jobTimelinePath(jobId), 'utf8')
-      : ''
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      try {
-        const payload = JSON.parse(trimmed)
-        if (Number(payload.sequence ?? 0) > sinceSequence) {
-          writeSseEvent(res, payload)
-        }
-      } catch {
-        // ignore corrupt lines
-      }
-    }
-
-    // Post-crash wedge guard: metadata may say 'running'/'queued' for a job
-    // that is no longer live (daemon crashed/restarted). Registering a
-    // subscriber would hang the client forever on a stream that never fires.
-    // Emit a terminal pair and close instead.
+    const normalizedSince = Math.max(0, Number(sinceSequence) || 0)
     const statusActive = metadata.status === 'running' || metadata.status === 'queued'
-    if (statusActive && !liveJobs.has(jobId)) {
-      // Derive baseSeq from the actual max sequence in the timeline file to avoid
-      // duplicate sequence numbers when metadata.lastSequence is stale after a crash.
-      let baseSeq = Number(metadata.lastSequence ?? 0)
-      for (const line of raw.split('\n')) {
-        const t = line.trim()
-        if (!t) continue
-        try {
-          const seq = Number(JSON.parse(t).sequence ?? 0)
-          if (seq > baseSeq) baseSeq = seq
-        } catch { /* ignore */ }
+    const liveAtRegistration = statusActive && Boolean(live)
+    const replayThrough = liveAtRegistration
+      ? Math.max(normalizedSince, Number(metadata.lastSequence ?? 0))
+      : Number.POSITIVE_INFINITY
+    const pendingAtRegistration = snapshotPendingTimelineEvents(
+      jobId,
+      normalizedSince,
+      replayThrough,
+    )
+
+    // Register synchronously before the first replay await. Live events emitted
+    // while disk history is streaming are buffered on this subscriber, then
+    // reconciled by sequence after the replay high-water mark.
+    const subscriber = subscriberRegistry.register(jobId, res, {
+      sinceSequence: normalizedSince,
+      replaying: true,
+    })
+    subscriberRegistry.sendComment(subscriber, ': connected\n\n')
+
+    const replay = await replayTimeline(
+      subscriber,
+      jobId,
+      normalizedSince,
+      replayThrough,
+    )
+    let reconciledMaxSequence = Math.max(replay.maxSequence, pendingAtRegistration.maxSequence)
+    let reconciledTerminalSeen = replay.terminalSeen || pendingAtRegistration.terminalSeen
+    for (const payload of pendingAtRegistration.events) {
+      const sequence = Number(payload?.sequence ?? 0)
+      if (Number.isFinite(sequence)) {
+        reconciledMaxSequence = Math.max(reconciledMaxSequence, sequence)
       }
-      writeSseEvent(res, { jobId, sequence: baseSeq + 1, timestamp: Date.now(), type: 'error', error: 'Job was interrupted (the daemon restarted)' })
-      writeSseEvent(res, { jobId, sequence: baseSeq + 2, timestamp: Date.now(), type: 'done' })
-      return false
+      if (payload?.type === 'done') reconciledTerminalSeen = true
+      if (!await subscriberRegistry.sendReplay(subscriber, payload)) break
     }
 
-    // Hold the stream open for live jobs that are running OR still queued
-    // (daemon-01): a queued job has no events yet, but it is live and will emit
-    // once a concurrency slot frees, so the subscriber must wait, not close.
-    if (metadata.status === 'running' || metadata.status === 'queued') {
-      const listeners = subscribers.get(jobId) ?? new Set()
-      listeners.add(res)
-      subscribers.set(jobId, listeners)
-      const cleanup = () => {
-        const current = subscribers.get(jobId)
-        if (!current) return
-        current.delete(res)
-        if (current.size === 0) subscribers.delete(jobId)
-      }
-      res.on('close', cleanup)
-      res.on('error', cleanup)
-      return true
+    if (liveAtRegistration) {
+      return subscriberRegistry.finishReplay(subscriber)
     }
 
+    // Post-crash wedge guard: metadata may say active even though no live
+    // runner exists. Re-read after replay so a terminal append racing the first
+    // metadata read is recognized rather than receiving a synthetic duplicate.
+    const latestMetadata = await readJobMetadata(jobId)
+    const latestStatusActive = latestMetadata?.status === 'running' || latestMetadata?.status === 'queued'
+    if (statusActive && latestStatusActive && !reconciledTerminalSeen) {
+      const baseSequence = Math.max(
+        reconciledMaxSequence,
+        Number(latestMetadata?.lastSequence ?? metadata.lastSequence ?? 0),
+      )
+      await subscriberRegistry.sendReplay(subscriber, {
+        jobId,
+        sequence: baseSequence + 1,
+        timestamp: Date.now(),
+        type: 'error',
+        error: 'Job was interrupted (the daemon restarted)',
+      })
+      await subscriberRegistry.sendReplay(subscriber, {
+        jobId,
+        sequence: baseSequence + 2,
+        timestamp: Date.now(),
+        type: 'done',
+      })
+    }
+
+    subscriberRegistry.close(subscriber, { end: false })
     return false
   }
 
@@ -3030,7 +3395,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
   // queries or spawned codex/opencode/hermes CLI children (which run with
   // file-write access and would otherwise keep running, reparented to init).
   async function shutdown() {
-    clearInterval(heartbeatTimer)
+    subscriberRegistry.shutdown()
     for (const timer of metadataFlushTimers.values()) clearTimeout(timer)
     metadataFlushTimers.clear()
     const jobs = Array.from(liveJobs.values())
