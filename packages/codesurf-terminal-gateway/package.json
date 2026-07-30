@@ -15,10 +15,13 @@
   "files": [
     "bin/",
     "src/",
+    "scripts/",
     "deploy/",
     "README.md"
   ],
   "scripts": {
+    "postinstall": "node ./scripts/ensure-node-pty-spawn-helper.mjs",
+    "pretest": "node ./scripts/ensure-node-pty-spawn-helper.mjs",
     "start": "node ./bin/codesurf-terminal-gateway.mjs",
     "test": "node --test test/*.test.mjs"
   },

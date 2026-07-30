@@ -24,7 +24,7 @@ Effort key: **S** ≤ ~30 min · **M** ~1–3 h · **L** ~half-day+ · **XL** mu
 
 4. **1d · Migrate + retire the special-case (M).** Move the bundled `codesurf-relay-suite` (the hardcoded `id === 'codesurf-relay-suite'` relay bridge mentioned in §6) onto the broker as the first real consumer. Once green, flip the default so new power extensions run brokered; leave a documented escape hatch for trusted bundled extensions if needed during transition.
 
-**Risk:** High — touches every power extension's runtime. Mitigate: keep the raw-`require` path behind a feature flag until 1d is proven; migrate one extension at a time; add an integration test mirroring `test/owl-host-integration.test.mjs` (lifecycle, capability-deny, crash-recovery, PNG/asset round-trip).
+**Risk:** High — touches every power extension's runtime. Mitigate: keep the raw-`require` path behind a feature flag until 1d is proven; migrate one extension at a time; add an integration test mirroring `test/hosts/owl-host-integration.test.mjs` (lifecycle, capability-deny, crash-recovery, PNG/asset round-trip).
 
 **Acceptance:** A power extension granted only `chat` is provably unable to read `~/.ssh` (test asserts the `fs` capability call is rejected in main); killing the child process does not crash main; `codesurf-relay-suite` works through the broker.
 

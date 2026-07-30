@@ -3,7 +3,7 @@
  *
  * When CODESURF_BROKER_TEST=1, src/main/index.ts skips normal app startup and
  * runs this stdin/stdout JSON-RPC server instead. The integration test
- * (test/broker-host-integration.test.mjs) drives this harness to exercise:
+ * (test/hosts/broker-host-integration.test.mjs) drives this harness to exercise:
  *   - activate/deactivate lifecycle
  *   - capability-deny assertions (chat-only ext cannot use fs/shell)
  *   - crash recovery (killing the child does not crash main)

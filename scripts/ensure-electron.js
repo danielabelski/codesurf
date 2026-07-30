@@ -121,7 +121,16 @@ async function main() {
   const distPath = process.env.ELECTRON_OVERRIDE_DIST_PATH || path.join(electronDir, 'dist')
   await fs.promises.rm(distPath, { recursive: true, force: true })
   await fs.promises.mkdir(distPath, { recursive: true })
-  await extract(zipPath, { dir: distPath })
+  if (platform === 'darwin' && process.platform === 'darwin') {
+    // extract-zip can stall partway through Electron's large archive on newer
+    // Node releases. ditto is a standard macOS tool and preserves the app
+    // bundle's executable modes and symlinks.
+    childProcess.execFileSync('/usr/bin/ditto', ['-x', '-k', zipPath, distPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } else {
+    await extract(zipPath, { dir: distPath })
+  }
 
   const srcTypeDefPath = path.join(distPath, 'electron.d.ts')
   const targetTypeDefPath = path.join(electronDir, 'electron.d.ts')
@@ -133,7 +142,14 @@ async function main() {
   console.log('[ensure-electron] Electron binary ready')
 }
 
-main().catch((error) => {
-  console.error('[ensure-electron]', error.stack || error)
-  process.exit(1)
-})
+// A pending Promise does not keep Node's event loop alive. Some @electron/get
+// transports can have no ref'ed handles while a cached/downloaded artifact is
+// being resolved, which previously let this process exit successfully before
+// extraction and path.txt creation completed.
+const keepAlive = setInterval(() => {}, 1_000)
+main()
+  .catch((error) => {
+    console.error('[ensure-electron]', error.stack || error)
+    process.exitCode = 1
+  })
+  .finally(() => clearInterval(keepAlive))

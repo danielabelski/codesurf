@@ -66,7 +66,7 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: npm ci --omit=optional
+        run: npm ci
 
       - name: Install package test dependencies
         run: |
