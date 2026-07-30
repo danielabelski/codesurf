@@ -541,6 +541,54 @@ async function isProbablyTextFile(resolvedPath: string): Promise<boolean> {
   }
 }
 
+interface FileIdentity {
+  dev: number
+  ino: number
+}
+
+function hasFileIdentity(stats: Stats, identity: FileIdentity): boolean {
+  return stats.dev === identity.dev && stats.ino === identity.ino
+}
+
+export async function cleanupCreatedCopyIfUnchanged(
+  destinationPath: string,
+  createdIdentity: FileIdentity,
+): Promise<boolean> {
+  let currentStats: Stats
+  try {
+    currentStats = await fs.lstat(destinationPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+
+  // The copy target is created with O_EXCL. Only remove that exact inode:
+  // never follow or unlink a symlink, and preserve anything that replaced it.
+  if (
+    currentStats.isSymbolicLink()
+    || !hasFileIdentity(currentStats, createdIdentity)
+  ) {
+    return false
+  }
+
+  // Recheck immediately before unlinking to narrow the remaining path-based
+  // race. Node does not expose unlinkat(2) for deleting by an open descriptor.
+  const confirmedStats = await fs.lstat(destinationPath).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  })
+  if (
+    !confirmedStats
+    || confirmedStats.isSymbolicLink()
+    || !hasFileIdentity(confirmedStats, createdIdentity)
+  ) {
+    return false
+  }
+
+  await fs.unlink(destinationPath)
+  return true
+}
+
 async function copyFileNoFollow(sourcePath: string, destinationPath: string): Promise<void> {
   const { handle: sourceHandle, stats: sourceStats } = await openExistingFileNoFollow(sourcePath)
   if (!sourceStats.isFile()) {
@@ -549,6 +597,7 @@ async function copyFileNoFollow(sourcePath: string, destinationPath: string): Pr
   }
 
   let destinationHandle: FileHandle | null = null
+  let createdDestinationIdentity: FileIdentity | null = null
   try {
     destinationHandle = await fs.open(
       destinationPath,
@@ -558,6 +607,11 @@ async function copyFileNoFollow(sourcePath: string, destinationPath: string): Pr
         | fsConstants.O_NOFOLLOW,
       sourceStats.mode & 0o777,
     )
+    const createdDestinationStats = await destinationHandle.stat()
+    createdDestinationIdentity = {
+      dev: createdDestinationStats.dev,
+      ino: createdDestinationStats.ino,
+    }
     await assertOpenHandleMatchesPath(destinationHandle, destinationPath)
 
     const buffer = Buffer.allocUnsafe(64 * 1024)
@@ -581,10 +635,21 @@ async function copyFileNoFollow(sourcePath: string, destinationPath: string): Pr
       }
       position += bytesRead
     }
+
+    await destinationHandle.close()
+    destinationHandle = null
   } catch (error) {
     if (destinationHandle) {
       await destinationHandle.close().catch(() => undefined)
       destinationHandle = null
+    }
+    if (createdDestinationIdentity) {
+      // Preserve the original copy failure. Cleanup is best-effort because a
+      // concurrent actor may have removed or replaced the destination.
+      await cleanupCreatedCopyIfUnchanged(
+        destinationPath,
+        createdDestinationIdentity,
+      ).catch(() => undefined)
     }
     throw error
   } finally {

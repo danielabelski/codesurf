@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -13,6 +14,7 @@ import { basename, dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
 import {
   assertPathAllowedForFs,
+  cleanupCreatedCopyIfUnchanged,
   isPathUnderRoot,
   validateCanonicalFsPath,
   validateFsPath,
@@ -88,7 +90,7 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
     }
   })
 
-  test('rejects an external-file symlink for read, write, stat, and reveal intents', async () => {
+  test('rejects an external-file symlink for read and write intents', async () => {
     const fixture = await createFsFixture()
     try {
       const externalFile = join(fixture.outside, 'secret.txt')
@@ -319,6 +321,64 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       canonical,
       join(canonicalCodesurfHome, `plan-013-${process.pid}`, 'state.json'),
     )
+  })
+})
+
+describe('copy failure cleanup', () => {
+  test('removes the inode created by a failed copy', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const destinationPath = join(fixture.workspace, 'partial-copy.txt')
+      await writeFile(destinationPath, 'partial', 'utf8')
+      const createdStats = await lstat(destinationPath)
+
+      assert.equal(
+        await cleanupCreatedCopyIfUnchanged(destinationPath, {
+          dev: createdStats.dev,
+          ino: createdStats.ino,
+        }),
+        true,
+      )
+      await assert.rejects(lstat(destinationPath), { code: 'ENOENT' })
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('preserves replacement files and symlinks', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const destinationPath = join(fixture.workspace, 'partial-copy.txt')
+      await writeFile(destinationPath, 'partial', 'utf8')
+      const createdStats = await lstat(destinationPath)
+      await rm(destinationPath)
+      await writeFile(destinationPath, 'replacement', 'utf8')
+
+      assert.equal(
+        await cleanupCreatedCopyIfUnchanged(destinationPath, {
+          dev: createdStats.dev,
+          ino: createdStats.ino,
+        }),
+        false,
+      )
+      assert.equal(await readFile(destinationPath, 'utf8'), 'replacement')
+
+      await rm(destinationPath)
+      const symlinkTarget = join(fixture.workspace, 'symlink-target.txt')
+      await writeFile(symlinkTarget, 'target', 'utf8')
+      await symlink(symlinkTarget, destinationPath)
+
+      assert.equal(
+        await cleanupCreatedCopyIfUnchanged(destinationPath, {
+          dev: createdStats.dev,
+          ino: createdStats.ino,
+        }),
+        false,
+      )
+      assert.equal((await lstat(destinationPath)).isSymbolicLink(), true)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
   })
 })
 
