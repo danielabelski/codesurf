@@ -24,6 +24,8 @@ import { CODESURF_HOME } from './paths'
 import { assertSafePathSegment } from './security/pathSegments'
 import { dispatchTool, getAllStaticTools } from './mcp/registry'
 import { executeImageEditTool as executeImageEditToolImpl } from './mcp/tools/generation'
+import { resolveTileWorkspaceDir } from './mcp/tools/peer-bridge'
+import { requestToolPermission } from './permissions'
 import type { McpToolContext, McpToolSchema } from './mcp/types'
 import { resolvePrincipal, assertTileScope, type McpPrincipal } from './mcp/auth'
 
@@ -700,7 +702,7 @@ export async function startMCPServer(): Promise<number> {
           }
           body += chunk
         })
-        req.on('end', () => {
+        req.on('end', async () => {
           try {
             const { card_id, message, append_newline = true } = JSON.parse(body)
             const scopeError = assertTileScope(principal, card_id)
@@ -708,6 +710,23 @@ export async function startMCPServer(): Promise<number> {
               setCorsHeaders(res, req)
               res.writeHead(403, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: scopeError }))
+              return
+            }
+            // /inject writes into a live terminal — the same capability class
+            // as terminal_send_input, so gate it behind the same permission
+            // prompt instead of leaving it as an ungated bypass route.
+            const workspaceDir = await resolveTileWorkspaceDir(String(card_id ?? ''))
+            const allowed = await requestToolPermission({
+              provider: 'mcp',
+              toolName: 'terminal_send_input',
+              workspaceDir: workspaceDir ?? undefined,
+              title: 'Terminal input via /inject',
+              description: `An MCP agent wants to write into terminal tile "${card_id}" via /inject:\n${String(message ?? '').slice(0, 200)}${String(message ?? '').length > 200 ? '...' : ''}`,
+            }, /* interactive */ true)
+            if (!allowed) {
+              setCorsHeaders(res, req)
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Permission denied: /inject was not approved' }))
               return
             }
             // Tell renderer to write to the terminal

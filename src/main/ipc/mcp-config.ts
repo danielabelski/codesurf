@@ -3,8 +3,15 @@ import { join } from 'path'
 import { promises as fsP } from 'fs'
 import { getMCPPort, getMCPToken, buildContexHttpMcpServerEntry } from '../mcp-server'
 import { CODESURF_HOME } from '../paths'
+import { assertSafePathSegment } from '../security/pathSegments'
 
 const mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
+
+// workspaceId is renderer-supplied and interpolated into paths below —
+// reject segments that could escape the workspaces dir ('../../tmp/x').
+function safeWorkspaceDir(workspaceId: string): string {
+  return join(CODESURF_HOME, 'workspaces', assertSafePathSegment(workspaceId, 'workspaceId'))
+}
 
 function getRuntimeContexBase(): string | undefined {
   const port = getMCPPort()
@@ -100,7 +107,7 @@ export function registerMcpConfigIPC(): void {
   // Per-workspace MCP servers
   ipcMain.handle('mcp:getWorkspaceServers', async (_, workspaceId: string) => {
     try {
-      const p = join(CODESURF_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
+      const p = join(safeWorkspaceDir(workspaceId), 'mcp-servers.json')
       const raw = await fsP.readFile(p, 'utf8')
       return JSON.parse(raw)
     } catch { return {} }
@@ -108,7 +115,7 @@ export function registerMcpConfigIPC(): void {
 
   ipcMain.handle('mcp:saveWorkspaceServers', async (_, workspaceId: string, servers: Record<string, unknown>) => {
     try {
-      const dir = join(CODESURF_HOME, 'workspaces', workspaceId)
+      const dir = safeWorkspaceDir(workspaceId)
       await fsP.mkdir(dir, { recursive: true })
       const p = join(dir, 'mcp-servers.json')
       const normalized = normalizeMcpServers(servers)
@@ -135,7 +142,7 @@ export function registerMcpConfigIPC(): void {
       // Workspace servers
       let wsServers: Record<string, unknown> = {}
       try {
-        const wsPath = join(CODESURF_HOME, 'workspaces', workspaceId, 'mcp-servers.json')
+        const wsPath = join(safeWorkspaceDir(workspaceId), 'mcp-servers.json')
         const raw = await fsP.readFile(wsPath, 'utf8')
         wsServers = JSON.parse(raw)
       } catch (err) {
@@ -172,7 +179,7 @@ export function registerMcpConfigIPC(): void {
       }
 
       // Also write a merged file inside .codesurf so it doesn't pollute the workspace root
-      const wsContex = join(CODESURF_HOME, 'workspaces', workspaceId, '.codesurf')
+      const wsContex = join(safeWorkspaceDir(workspaceId), '.codesurf')
       await fsP.mkdir(wsContex, { recursive: true })
       await fsP.writeFile(
         join(wsContex, 'mcp-merged.json'),

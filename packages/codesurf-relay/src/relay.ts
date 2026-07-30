@@ -66,6 +66,20 @@ function validateChannelId(id: string): void {
   if (id.length > 128) throw new Error('Channel ID too long (max 128 chars)')
 }
 
+function validateTileId(id: string): void {
+  if (!id || typeof id !== 'string') throw new Error('Tile ID is required')
+  if (INVALID_ID_PATTERN.test(id)) throw new Error(`Invalid tile ID: ${id}`)
+  if (id.length > 128) throw new Error('Tile ID too long (max 128 chars)')
+}
+
+// Mailbox filenames are joined into mailbox dirs and are renderer-supplied
+// through relay:* IPC — they must stay plain basenames (no separators, no
+// '..'), otherwise moveMessage/readMessage become arbitrary file primitives.
+function validateMessageFilename(filename: string): void {
+  if (!filename || typeof filename !== 'string') throw new Error('Message filename is required')
+  if (INVALID_ID_PATTERN.test(filename)) throw new Error(`Invalid message filename: ${filename}`)
+}
+
 async function ensureDir(path: string): Promise<void> {
   await fs.mkdir(path, { recursive: true })
 }
@@ -175,6 +189,7 @@ export class CodesurfRelay {
   }
 
   participantCursorFile(id: string, channel: string): string {
+    validateChannelId(channel)
     return join(this.participantDir(id), 'cursors', `${channel}.json`)
   }
 
@@ -192,6 +207,7 @@ export class CodesurfRelay {
   }
 
   tileMailboxDir(tileId: string, mailbox: Exclude<RelayMailbox, 'channel' | 'central'>): string {
+    validateTileId(tileId)
     return join(this.workspacePath, '.codesurf', tileId, 'messages', mailbox)
   }
 
@@ -535,10 +551,12 @@ export class CodesurfRelay {
   }
 
   async readParticipantMessage(participantId: string, mailbox: Exclude<RelayMailbox, 'channel' | 'central'>, filename: string): Promise<RelayMessage | null> {
+    validateMessageFilename(filename)
     return readMessage(join(this.participantMailboxDir(participantId, mailbox), filename), mailbox, filename)
   }
 
   async updateMessageStatus(participantId: string, mailbox: Exclude<RelayMailbox, 'channel' | 'central'>, filename: string, status: RelayMessageStatus): Promise<boolean> {
+    validateMessageFilename(filename)
     const existing = await this.readParticipantMessage(participantId, mailbox, filename)
     if (!existing) return false
     const stamp = nowStamp()
@@ -732,6 +750,7 @@ export class CodesurfRelay {
   }
 
   async moveMessage(participantId: string, fromMailbox: Exclude<RelayMailbox, 'channel' | 'central'>, toMailbox: Exclude<RelayMailbox, 'channel' | 'central'>, filename: string): Promise<boolean> {
+    validateMessageFilename(filename)
     try {
       await ensureDir(this.participantMailboxDir(participantId, toMailbox))
       await fs.rename(

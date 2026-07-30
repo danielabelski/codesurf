@@ -4,6 +4,7 @@
 
 import { spawn, ChildProcess, execFileSync } from 'child_process'
 import * as net from 'net'
+import { randomUUID } from 'node:crypto'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
@@ -69,12 +70,23 @@ class OpenCodeServerManager {
   private server: ChildProcess | null = null
   private port: number | null = null
   private startPromise: Promise<{ port: number; url: string }> | null = null
+  // `opencode serve` listens on 127.0.0.1 but otherwise has no auth — any
+  // local process could drive agent sessions with the user's permissions.
+  // The server honors OPENCODE_SERVER_PASSWORD (basic auth, user "opencode"),
+  // so generate one per app run and pass it to the server + every client.
+  private readonly serverPassword = randomUUID()
 
   static getInstance(): OpenCodeServerManager {
     if (!OpenCodeServerManager.instance) {
       OpenCodeServerManager.instance = new OpenCodeServerManager()
     }
     return OpenCodeServerManager.instance
+  }
+
+  getAuthHeaders(): Record<string, string> {
+    return {
+      Authorization: `Basic ${Buffer.from(`opencode:${this.serverPassword}`).toString('base64')}`,
+    }
   }
 
   async ensureRunning(): Promise<{ port: number; url: string }> {
@@ -103,7 +115,10 @@ class OpenCodeServerManager {
       const shellPath = getShellEnvPath()
       this.server = spawn(binary, ['serve', '--port', String(this.port)], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
+        env: buildSafeSpawnEnv({
+          ...(shellPath && { PATH: shellPath }),
+          OPENCODE_SERVER_PASSWORD: this.serverPassword,
+        }),
       })
 
       let started = false
@@ -322,7 +337,7 @@ export async function abortOpenCodeSession(cardId: string): Promise<void> {
     if (mgr.isRunning()) {
       const createClient = await getOpencodeClient()
       const { url } = await mgr.ensureRunning()
-      const client = createClient({ baseUrl: url })
+      const client = createClient({ baseUrl: url, headers: mgr.getAuthHeaders() })
       await client.session.abort({ sessionID: ocSessionId })
       log('opencode session aborted:', ocSessionId)
     }

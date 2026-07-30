@@ -1,163 +1,155 @@
-CodeSurf — Generated Memory (2026-07-15)
+# CodeSurf — Generated Memory (2026-07-28)
 
 ## Overview
 
-CodeSurf is an Electron desktop app providing an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat) live on a 2D canvas. AI agents connect via MCP and collaborate with humans asynchronously. Multi-target architecture is live: one React renderer shared across Electron (full), browser PWA, and a Native Zig WebView shell. Reference: `docs/multi-target.md`.
+CodeSurf is an Electron desktop app — an infinite-canvas workspace where tiles (terminal, code editor, browser, kanban, chat, and more) live on a 2D canvas. AI agents connect via MCP and collaborate with humans asynchronously.
 
-The codebase is in an active large-scale **modularization phase** — monolithic components (App.tsx, ChatTile.tsx, ToolBlockView.tsx, useCanvasEngine.ts, Sidebar.tsx, TileChrome.tsx, themePresets.ts) are being split into focused modules with stable re-export surfaces and test coverage added for each split. This is the dominant pattern in recent commits; continue it rather than fighting it.
+Multi-target architecture is live. One React renderer is shared across three hosts: Electron (full product), browser PWA (`npm run web:dev`), and a Native Zig WebView shell (`npm run desktop:dev`). Reference: `docs/multi-target.md`. Electron is never removed; web/Native are additive shells that talk to `codesurfd` via `scripts/web-host.mjs`.
 
-CodeSurf is also actively used as an agent orchestration platform — Canvas Codex tiles run as specialised subagents in external projects. Expected behaviour.
+Product name: **CodeSurf**. Legacy internal identifiers (`window.contex`, `~/.contex/`, `contex-relay`) are preserved as-is — do not rename.
 
 ---
 
-## Durable Facts
+## Durable Architecture Facts
 
-### Identity
+### Source layout
 
-- Product name: **CodeSurf** — never "contex" in user-facing copy
-- Legacy internal namespace (`window.contex`, `~/.codesurf/`) remains stable — do not rename
-- Package `contex-relay` was renamed to `codesurf-relay` in commit `ba94e3a` — update any remaining references
+- `src/main/` — Electron main process: IPC handlers, MCP server, event bus, extensions, chat providers, session-sources, security, OWL runtime, secrets, usage, generation, privacy, storage
+- `src/preload/index.ts` — Context bridge (exposed as `window.contex` — legacy identifier, do NOT rename)
+- `src/renderer/src/` — Shared React SPA across all targets
+  - `App.tsx` — orchestration shell; canvas composition delegated to focused hooks
+  - `components/` — tile components (lazy-loaded via `React.lazy` + `Suspense`); subdirs: `canvas/`, `chat/`, `sidebar/`, `settings/`, `tile-chrome/`, `browser/`, `codesurf-ui/`, `ai-elements/`
+  - `hooks/` — 70+ focused hooks; canvas family (`useAppCanvas*`, `useCanvas*`), chat family (`useChatTile*`), sidebar, sessions, discovery
+- `shared/types.ts` — Shared TypeScript types (TileType union, etc.)
+- `packages/` — `codesurf-daemon`, `codesurf-chat-bridge`, `codesurf-plugin`, `codesurf-relay`, `codesurf-terminal-gateway`
+- `desktop/` — Native Zig WebView thin shell
+- `scripts/web-host.mjs` — fixed-port host API for browser/Native targets
 
-### Codebase Anchors
+### Key patterns
 
-| Area | Path |
-|---|---|
-| Electron main entry | `src/main/index.ts` |
-| Event bus | `src/main/event-bus.ts` |
-| MCP server (34 tools) | `src/main/mcp-server.ts` |
-| IPC handlers (41+ files) | `src/main/ipc/` |
-| Canvas engine shell (trimmed) | `src/renderer/src/App.tsx` |
-| Canvas engine math | `src/renderer/src/hooks/canvasEngineMath.ts` |
-| Canvas pointer handlers | `src/renderer/src/hooks/useCanvasPointerHandlers.ts` |
-| Canvas context menus | `src/renderer/src/hooks/useCanvasContextMenus.ts` |
-| Canvas connection lock | `src/renderer/src/hooks/useCanvasConnectionLock.ts` |
-| Canvas engine orchestrator | `src/renderer/src/hooks/useCanvasEngine.ts` (re-exports above) |
-| Canvas derived state hook | `src/renderer/src/hooks/useAppCanvasDerivedState.ts` (untracked, in-progress) |
-| Canvas visibility lib | `src/renderer/src/lib/canvasVisibility.ts` (untracked, in-progress) |
-| Canvas history equality | `src/renderer/src/hooks/canvasHistory.ts` |
-| Shell chrome hook | `src/renderer/src/hooks/useAppShellChrome.ts` |
-| Shell layout metrics | `src/renderer/src/hooks/useShellLayoutMetrics.ts` |
-| Tile components (lazy) | `src/renderer/src/components/` |
-| Sidebar shell | `src/renderer/src/components/Sidebar.tsx` (re-export surface) |
-| Sidebar controller | `src/renderer/src/components/sidebar/useSidebarController.tsx` |
-| TileChrome shell | `src/renderer/src/components/TileChrome.tsx` (re-export surface) |
-| TileChrome drawer panels | `src/renderer/src/components/tile-chrome/DrawerPanels.tsx` |
-| TileChrome drawer activity | `src/renderer/src/components/tile-chrome/drawerActivity.ts` |
-| TileChrome resize handle | `src/renderer/src/components/tile-chrome/ResizeHandle.tsx` |
-| TileChrome labels/types | `src/renderer/src/components/tile-chrome/labels.ts`, `types.ts` |
-| ChatTile shell (trimmed) | `src/renderer/src/components/ChatTile.tsx` |
-| Chat stream hub | `src/renderer/src/components/chat/chatStreamHub.ts` |
-| Chat messages store | `src/renderer/src/components/chat/chatMessagesStore.ts` |
-| Thinking clock | `src/renderer/src/components/chat/thinkingClock.ts` |
-| Transcript window | `src/renderer/src/components/chat/transcriptWindow.ts` |
-| ToolBlockView shell | `src/renderer/src/components/chat/ToolBlockView.tsx` (re-export surface) |
-| ToolBlockView core | `src/renderer/src/components/chat/ToolBlockViewCore.tsx` |
-| Thinking/Working chips | `src/renderer/src/components/chat/ThinkingWorkingChips.tsx` |
-| Tool group chips | `src/renderer/src/components/chat/ToolGroupChips.tsx` |
-| Tool input view | `src/renderer/src/components/chat/ToolInputView.tsx` |
-| Chat send path hook | `src/renderer/src/hooks/useChatTileSendPath.ts` |
-| Chat session core hook | `src/renderer/src/hooks/useChatTileSessionCore.ts` |
-| Chat shell model hook | `src/renderer/src/hooks/useChatTileShellModel.ts` |
-| Chat agent modes hook | `src/renderer/src/hooks/useChatTileAgentModes.ts` |
-| Runtime checkpoints | `src/main/chat/runtime-checkpoints.ts` |
-| Theme presets (entry) | `src/renderer/src/themePresets.ts` (re-exports from catalogs) |
-| Theme presets core | `src/renderer/src/themePresetsCore.ts` |
-| Theme presets dark | `src/renderer/src/themePresetsDark.ts` |
-| Theme presets light | `src/renderer/src/themePresetsLight.ts` |
-| Shared types | `src/shared/types.ts` |
-| Stream parser | `src/main/ipc/stream.ts` |
-| Agent room store | `src/main/agent-room/` (`index.ts`, `store.ts`, `types.ts`) |
-| Activity cap | `src/main/activity-cap.ts` |
-| Webview paint bridge | `src/shared/webview-paint-bridge.ts` |
-| Platform layer | `src/renderer/src/platform/` (detect, daemonBridge, hostConfig, nativeRuntimeConfig, pickFolder, pwa) |
-| Terminal transport | `src/renderer/src/platform/terminalTransport.ts` |
-| Terminal gateway package | `packages/codesurf-terminal-gateway/` |
-| Daemon package | `packages/codesurf-daemon/` |
-| Plugin package | `packages/codesurf-plugin/` |
-| Relay package | `packages/codesurf-relay/` |
-| Chat bridge package | `packages/codesurf-chat-bridge/` |
-| Native Zig launcher | `desktop/src/sidecar_launcher.zig` |
-| Web host | `scripts/web-host.mjs` |
+- **Canvas engine** — App.tsx is the orchestration shell; pan/zoom, drag, resize, snapping, groups, undo/redo, context menus, and connection locks live in `hooks/useAppCanvasInteraction.ts` and related focused hooks. World coords = screen coords adjusted for zoom + pan. Group movement recurses through nested groups. Undo snapshots full state (max 50). Perf flags are flag-gated — see `docs/perf-flags.md`. App.tsx is still a large surface — be surgical and prefer focused hooks; changes ripple widely.
+- **Tiles** — lazy-loaded with `React.lazy` + `Suspense`. Canvas tile chrome in `components/tile-chrome/`.
+- **Event bus** — Main-process pub/sub (`src/main/event-bus.ts`). Wildcard subscriptions (`tile:*`, `*`). Ring-buffer per channel (500 events). No persistence.
+- **MCP server** — Random port. Config at `~/.codesurf/mcp-server.json`. 34 tools. Never hardcode the port — always read from config.
+- **Persistence** — File-based, no cloud sync: `~/.codesurf/workspaces/{id}/canvas.json` (500ms debounce), `~/.codesurf/workspaces/{id}/tiles/{tileId}.json` (kanban).
+- **CODESURF_HOME** — Env var overrides `~/.codesurf/` base path. All tests that write there must set it to a temp dir.
+- **IPC naming** — `{feature}:{action}`.
 
-### Persistence Locations
-
-- `~/.codesurf/workspaces/{id}/canvas.json` — auto-saved, 500 ms debounce
-- `~/.codesurf/workspaces/{id}/tiles/{tileId}.json` — kanban tile state
-- `~/.codesurf/mcp-server.json` — MCP server config (random port — always read from file, never hardcode)
-
-### Build Commands
+### Build commands
 
 | Command | Purpose |
 |---|---|
-| `npm run dev` | Electron (hot reload) — full product |
-| `npm run web:dev` | Browser UI + web-host `:4177` + terminal gateway `:4178` |
+| `npm run dev` | Electron full product (hot reload) — default |
+| `npm run web:dev` | Browser UI + web-host + codesurfd |
 | `npm run web:preview` | Serve production web build (PWA installable) |
-| `npm run desktop:dev` | Native SDK WebView shell + web stack |
+| `npm run web:pwa` | web:dev with service worker for install testing |
+| `npm run desktop:dev` | Native WebView shell + web stack |
 | `npm run build` | Electron build (main + preload + renderer) |
-| `npm run build:web` | Renderer only → `dist/` |
-| `npm run rebuild` | Native rebuild for node-pty |
+| `npm run build:web` | Renderer-only → dist/ |
+| `npm run desktop:build` | Package Native shell |
+| `npm run rebuild` | Native rebuild (node-pty) — required after native dep changes |
 
-### Commit History (as of 2026-07-15)
+### Chat providers
 
-HEAD: `8ec42e1` (Split theme presets into core catalogs)
+Claude · Codex · OpenCode · Hermes · CSAgent · OpenClaw · Pi-Agent — all streaming via NDJSON/SSE parsed in `src/main/ipc/stream.ts`. Providers live in `src/main/chat/providers/`. Session sources live in `src/main/session-sources/`.
 
-- `8ec42e1` — Split theme presets into core catalogs (`themePresetsCore`, `themePresetsDark`, `themePresetsLight`)
-- `beb6536` — Refactor chat shell orchestration (ChatTile split; chatStreamHub, chatMessagesStore, thinkingClock, transcriptWindow; new hooks; structural canvas history equality; 7+ new tests)
-- `d4bcebb` — Split Sidebar and TileChrome into modules
-- `f33578e` — Modularize chat chips and canvas engine hooks (ToolBlockView split; useCanvasEngine split; runtime-checkpoints)
-- `ef9046e` / `8f441e1` — Merge polly daemon-host-binding and claude-resume-transcript-guard
-- `7c688cb` — Add terminal gateway and Native loopback sidecar
-- `52921bd` — Upgrade to native zero
-- `ba94e3a` — Major collaboration updates (agent-room, webview-paint bridge, activity cap, codesurf-relay rename)
+### Daemon
 
-### Working Tree (2026-07-15, post-8ec42e1)
-
-Modified: `src/renderer/src/App.tsx` — extracting `panelTileIds`, `tileByIdMap`, `expandedCanvasMembership` into `useAppCanvasDerivedState` hook.
-
-Untracked (in-progress): `src/renderer/src/hooks/useAppCanvasDerivedState.ts`, `src/renderer/src/lib/canvasVisibility.ts`, `test/app-canvas-derived-state.test.ts`, `test/theme-presets-split.test.ts`.
+`packages/codesurf-daemon/bin/codesurfd.mjs`. Pid at `~/.codesurf/daemon/pid.json`. HTTP+SSE protocol: `POST /chat/job/start`, `GET /chat/job/events?jobId`, `POST /chat/job/cancel`, `GET /health`. Desktop owns the daemon — grok-cli does not spawn it.
 
 ---
 
-## Active Capabilities
+## Security Hardening (shipped bc2d0a9, 2026-07-17)
 
-### Modularization Pattern (Active)
+All shipped — bridge confinement, `chat:loadSessionHistory` restriction, Codicons path traversal fix, SVG CSP, `event.origin` validation, kanban shell-injection fix, React hook ordering fix, `mcp-auth.test.ts` isolation.
 
-Shell files become thin re-export surfaces; logic moves to sibling directories; tests added for new modules. When touching a component, check if it has already been split — the shell may be very short with logic in a subfolder.
+---
 
-### Chat Shell Architecture (post-beb6536)
+## Extension System
 
-ChatTile substantially slimmed. Key new seams: `chatStreamHub.ts` (global stream multiplexer), `chatMessagesStore.ts` (per-tile message state), `thinkingClock.ts`, `transcriptWindow.ts`, `useChatTileShellModel.ts`, `useChatTileSendPath.ts`, `useChatTileSessionCore.ts`, `useChatTileAgentModes.ts`.
+Broker framework at `src/main/extensions/broker/` exists but direct `require()` is still default. Phase 1 migration is unstarted (XL).
 
-### Chat Chip Chrome Map — Do Not Break
+---
+
+## Modularization State
+
+App.tsx → `useAppCanvas*` hooks; Sidebar → `components/sidebar/`; ChatTile → `useChatTile*` hooks; TileChrome → `components/tile-chrome/`; Settings → `components/settings/`; session-sources → `src/main/session-sources/`; Dreaming subsystem → `src/main/ipc/dreaming.ts` + `src/renderer/src/components/mainStatusBarDreaming.ts` (status tones: `active | pending | ready | disabled | failed | idle`).
+
+---
+
+## Chat Chip Chrome Rules (DO NOT BREAK)
 
 | Component | Chrome |
 |---|---|
-| `ThinkingBlockView` | Full chip — background + border + shadow |
-| `WorkingChipView` | Full chip — background + border + shadow |
-| `ToolBlockViewCore` | Full chip — canonical reference |
-| `CollationSummaryChip` / group chips | Accent chip — coloured background/border |
+| `ThinkingBlockView` (individual thinking block in transcript) | Full chip — background + border + shadow |
+| `WorkingChipView` (live WORKING indicator) | Full chip — background + border + shadow |
+| `ToolBlockView` (individual tool chip) | Full chip — canonical reference |
+| `CollationSummaryChip` / group chips | Accent chip — coloured background/border, still bordered |
 
-- `ThinkingBlockView` and `WorkingChipView` are independent — never edit both in one change; both now live in `ThinkingWorkingChips.tsx`
-- Canvas overlap issues → check App.tsx `bringToFront`/`nextZIndex` before touching transcript CSS
-- `textTransform: uppercase` on spans containing number+unit strings destroys the unit suffix
-- Chip expansion: use `React.startTransition` on all expand toggles
-- `ToolBlockView.tsx` is a re-export surface only; real logic is in `ToolBlockViewCore.tsx`
+- `ThinkingBlockView` and `WorkingChipView` are **independent** — never touch one when fixing the other.
+- Canvas z-index bugs → fix in App.tsx (`bringToFront`, `nextZIndex`), never in transcript row CSS.
+- `textTransform: uppercase` on number+unit spans breaks rendering — remove transform or split elements.
+- Chip expand toggles use `React.startTransition`.
 
-### Terminal Gateway / Multi-target / Agent Room / Security / Canvas Perf
+---
 
-All landed and stable — see previous memory entries; no changes to these subsystems in latest commits.
+## Infinitty / titerm
+
+**Infinitty** is the agentic terminal tile in CodeSurf. **titerm** (`~/Documents/GitHub/titerm`) is a separate Swift + Metal macOS terminal emulator — the native backend Infinitty fronts. Not part of the CodeSurf repo.
+
+**Active usage (2026-07-28):** Infinitty tile is in active use with Codex agents (gpt-5.6-terra, gpt-5.6). The Infinitty system prompt (`you ARE the terminal`) is working; agents call `infinitty_*` tools. Observed: `/status` is not available inside the Infinitty Claude subprocess environment.
+
+**Pane system** committed at `2757cf9` in titerm. Confirmed working: synchronous zoom topology restore, non-cumulative traffic-light rebasing, animation restart guard in `PaneChrome.swift:349`.
+
+**Agent Notch** embedded as commit `3587ad8` ("Embed Agent Notch activity UI") in titerm. Includes Claude/Codex session discovery, animations, session panel, subagent grouping, 8 bundled pet sprites, 5 tests. No runtime dependency on the sibling repo.
+
+**Notch click routing** — design audited, not yet implemented. Priority: (1) focus owning `TerminalSession`; (2) resume in new terminal; (3) recover via PetChat. "Agent Notch" user-facing label also needs removal.
+
+**Outstanding titerm code-review findings** (unmerged, 2026-07-21):
+- `TerminalTabStrip.swift:538` — tabs can shrink below 190 pt minimum
+- `PaneChrome.swift:67` — resize while maximized counts hidden panes' stale widths
+- `App.swift:1513` — maximize stores absolute divider coords; stale on restore after window resize
+- `App.swift:1037/1215/1524` — split-created terminals skip shared-surface rendering
+- `App.swift:1937` — SwiftPM flattens logos; `subdirectory: "Logos"` lookup fails
+- `App.swift:1964` — new panes after tint selection stay default blue
+- `TerminalTabStrip.swift:375–395` — tint on button, not sibling icon view
+- `TerminalTabStrip.swift:472–524` — sibling icons don't reserve title space
+
+---
+
+## Hermes Agent Codex Fix (2026-07-20)
+
+`hermes-agent/agent-core-rs/src/external.rs:586` — replaced removed `-a never` with `-c approval_policy="never"`, added stderr capture. Binary at `/usr/local/bin/hermes-rs` updated.
+
+---
+
+## grok-cli Integration
+
+Separate repo at `~/Documents/GitHub/grok-cli`. Model IDs must stay in sync with `src/renderer/src/config/providers.ts` DEFAULT_MODELS. Edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array when provider list changes; update `src/core/extensions/codesurf-desktop-provider.test.ts` fixtures if default model changes. **Open blocker:** daemon-mode permission grants have no UI — every tool call requires explicit grant but Desktop has no dialog to surface it back to the daemon-connected CLI.
+
+---
+
+## Electron Target Uncertainty (2026-07-28)
+
+Session evidence from 2026-07-28 shows uncertainty about whether a `native-floating-webview` worktree change was truly reverted. User stated "we changed this back yesterday" but no Electron restoration commit was found on `main` by forensic session review. The `native-floating-webview` worktree may still be present. **Verify branch/worktree state before assuming Electron is the current main target.**
+
+---
+
+## Side Projects (active, not CodeSurf core)
+
+- **agensis / visual-editor** (`~/Documents/GitHub/agensis`) — pluggable in-page visual editor package. Features: double-click-to-edit-in-place, live preview isolated to changed area, multi-page content selector. Tests: 11/11 interaction, 87/87 standalone. Root CI now covers standalone package suite. Route-based SPA targets are a known gap (only `.html` file discovery, no config API for app routes).
+- **Claude-for-speed** (`~/Documents/GitHub/Claude-for-speed`) — browser drift/racing game. Visual improvements (Blender-style textures, post-processing, shadows, wet reflections) shipped. `npm run test:drift` (8 chassis) and `npm run capture` suites pass.
+- **scrape/carve** (`~/Documents/GitHub/scrape/carve`) — browser game with modal/keyboard UX. Functional defects fixed (keyboard nav behind settings dialog, focus trap, landscape crash overlap). No automated test suite exists.
 
 ---
 
 ## Open Threads
 
-- **App.tsx canvas derived state extraction** — `useAppCanvasDerivedState` + `canvasVisibility.ts` untracked; App.tsx modified; needs commit
-- **theme-presets-split test** — `test/theme-presets-split.test.ts` untracked; needs commit alongside `8ec42e1`
-- **Native cold-start white screen** — synchronous `std.process.run`; needs persistent async controller path
-- **Electron test: 1 remaining failure** — abort/rename edge case
-- **titerm P0/P1** — post-fork libc deadlock, token cap, `last-output` row bug, zero tests; re-verify before fixing
-- **Lazar TUI** — fabrication/grounding kernel changes staged; TUI is a separate repo and must be committed independently
-- **runext Wave 1** — 50 VS Code API stubs pending; 3 open audit findings
-- **tsc baseline dirty** — ~145 pre-existing errors; measure regressions per-file, not by exit code
-- **`cluso-widget`** — optional local dep (`file:../agentation-real`); may not exist in all environments
-- **node-pty** — requires `npm run rebuild` after any native dependency change
+- **Electron vs native-floating-webview** — verify current state of `main` branch and any remaining worktree; unclear if restoration is committed
+- Extension broker Phase 1 migration — unstarted (XL)
+- grok-cli permission UI — no dialog path from daemon into Desktop
+- titerm: eight code-review findings above need a clean fix commit
+- titerm: notch click routing not yet implemented; "Agent Notch" label needs removal
+- tsc baseline is dirty (~145 pre-existing errors) — measure regressions per-file, not by exit code
+- `cluso-widget` optional local dep (`file:../agentation-real`) may not exist in all environments
+- agensis visual-editor: SPA/route-based page discovery not yet implemented
