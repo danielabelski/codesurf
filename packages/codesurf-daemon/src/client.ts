@@ -56,11 +56,26 @@ const RETRYABLE_RESPONSE_STATUSES = new Set([401, 408, 502, 503, 504])
 
 class DaemonResponseError extends Error {
   readonly retryable: boolean
+  readonly status: number
 
   constructor(message: string, status: number) {
     super(message)
     this.name = 'DaemonResponseError'
+    this.status = status
     this.retryable = RETRYABLE_RESPONSE_STATUSES.has(status)
+  }
+}
+
+class DaemonMutationOutcomeUnknownError extends Error {
+  readonly status: number | undefined
+
+  constructor(path: string, cause: Error) {
+    super(
+      `Daemon mutation outcome is unknown for ${path}: ${cause.message}. Check daemon state before retrying.`,
+    )
+    this.name = 'DaemonMutationOutcomeUnknownError'
+    this.status = cause instanceof DaemonResponseError ? cause.status : undefined
+    this.cause = cause
   }
 }
 
@@ -114,6 +129,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
             hooks.invalidate()
             if (canRetry) continue
           }
+          if (method !== 'GET' && lastError.status === 408) {
+            throw new DaemonMutationOutcomeUnknownError(path, lastError)
+          }
           throw lastError
         }
 
@@ -126,11 +144,7 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         }
 
         if (method !== 'GET') {
-          const outcomeError = new Error(
-            `Daemon mutation outcome is unknown for ${path}: ${lastError.message}. Check daemon state before retrying.`,
-          )
-          outcomeError.cause = lastError
-          throw outcomeError
+          throw new DaemonMutationOutcomeUnknownError(path, lastError)
         }
         throw lastError
       }

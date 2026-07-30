@@ -51,6 +51,8 @@ export interface DaemonManagerRuntime {
   kill?: (pid: number, signal?: NodeJS.Signals | number) => boolean
   /** Test seam that bypasses the real startup grace timer. */
   waitForChildStartupGrace?: (child: ChildProcess) => Promise<void>
+  /** Test seam for the bounded TERM/KILL wait without a wall-clock delay. */
+  waitForPidExit?: (pid: number, timeoutMs: number) => Promise<boolean>
 }
 
 export interface DaemonManager {
@@ -87,6 +89,8 @@ export function createDaemonManager(
 
   let cachedInfo: DaemonStatusInfo | null = null
   let startupPromise: Promise<DaemonStatusInfo> | null = null
+  let startupForcesRestart = false
+  let queuedForceRestartPromise: Promise<DaemonStatusInfo> | null = null
 
   function ensureDaemonDir(): void {
     mkdirSync(DAEMON_DIR, { recursive: true })
@@ -145,6 +149,20 @@ export function createDaemonManager(
     }
   }
 
+  function refersToSameDaemon(
+    first: DaemonStatusInfo | null,
+    second: DaemonStatusInfo | null,
+  ): boolean {
+    return Boolean(
+      first
+      && second
+      && first.pid === second.pid
+      && first.port === second.port
+      && first.token === second.token
+      && first.startedAt === second.startedAt,
+    )
+  }
+
   async function healthcheck(info: DaemonStatusInfo): Promise<boolean> {
     try {
       const response = await fetchImpl(`http://127.0.0.1:${info.port}/health`, {
@@ -154,8 +172,16 @@ export function createDaemonManager(
         },
       })
       if (!response.ok) return false
-      const parsed = await response.json() as { ok?: boolean }
-      return parsed.ok === true
+      const parsed = await response.json() as {
+        ok?: boolean
+        pid?: number
+        startedAt?: string
+      }
+      return (
+        parsed.ok === true
+        && parsed.pid === info.pid
+        && parsed.startedAt === info.startedAt
+      )
     } catch {
       return false
     }
@@ -355,12 +381,34 @@ export function createDaemonManager(
   }
 
   async function waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+    if (runtime.waitForPidExit) {
+      return await runtime.waitForPidExit(pid, timeoutMs)
+    }
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       if (!isProcessAlive(pid)) return true
       await sleep(DAEMON_POLL_INTERVAL_MS)
     }
     return !isProcessAlive(pid)
+  }
+
+  async function authenticateDaemonBeforeSignal(
+    info: DaemonStatusInfo,
+    signal: NodeJS.Signals,
+  ): Promise<void> {
+    const currentBeforeHealth = readPidInfo()
+    if (!refersToSameDaemon(currentBeforeHealth, info) || !(await healthcheck(info))) {
+      throw new Error(
+        `Refusing to send ${signal} to PID ${info.pid}: daemon identity could not be authenticated`,
+      )
+    }
+
+    const currentAfterHealth = readPidInfo()
+    if (!refersToSameDaemon(currentAfterHealth, info)) {
+      throw new Error(
+        `Refusing to send ${signal} to PID ${info.pid}: daemon identity changed during verification`,
+      )
+    }
   }
 
   async function stopDaemonProcess(info: DaemonStatusInfo | null): Promise<void> {
@@ -373,15 +421,21 @@ export function createDaemonManager(
 
     if (!isProcessAlive(info.pid)) {
       const current = readPidInfo()
-      if (!current || current.pid === info.pid) {
+      if (!current || refersToSameDaemon(current, info)) {
         removeFileIfPresent(DAEMON_PID_PATH)
       }
       return
     }
 
+    await authenticateDaemonBeforeSignal(info, 'SIGTERM')
     signalProcessSafely(info.pid, 'SIGTERM')
     let stopped = await waitForPidExit(info.pid, DAEMON_STOP_TIMEOUT_MS)
     if (!stopped) {
+      // Re-authenticate before escalation. If SIGTERM closes HTTP while the
+      // process remains alive, fail closed rather than risk sending SIGKILL to
+      // a recycled PID. The caller receives the explicit refusal from the
+      // identity check and can inspect/remove stale daemon state deliberately.
+      await authenticateDaemonBeforeSignal(info, 'SIGKILL')
       signalProcessGroupSafely(info.pid, 'SIGKILL')
       stopped = await waitForPidExit(info.pid, DAEMON_KILL_TIMEOUT_MS)
     }
@@ -391,13 +445,12 @@ export function createDaemonManager(
     }
 
     const current = readPidInfo()
-    if (!current || current.pid === info.pid) {
+    if (!current || refersToSameDaemon(current, info)) {
       removeFileIfPresent(DAEMON_PID_PATH)
     }
   }
 
-  async function ensureDaemonRunning(options?: { forceRestart?: boolean }): Promise<DaemonStatusInfo> {
-    const forceRestart = options?.forceRestart === true
+  async function runEnsureDaemon(forceRestart: boolean): Promise<DaemonStatusInfo> {
     const appVersion = resolveAppVersion()
     const hasCompatibleVersion = (info: DaemonStatusInfo): boolean => (
       !info.appVersion || info.appVersion === appVersion
@@ -410,65 +463,102 @@ export function createDaemonManager(
       }
     }
 
-    if (startupPromise) return startupPromise
+    const existing = readPidInfo()
+    const existingHealthy = Boolean(
+      existing
+      && isProcessAlive(existing.pid)
+      && await healthcheck(existing),
+    )
+    if (forceRestart || (existingHealthy && existing && !hasCompatibleVersion(existing))) {
+      await stopDaemonProcess(existing)
+      clearDaemonCache()
+    } else if (
+      existing
+      && existingHealthy
+      && hasCompatibleVersion(existing)
+    ) {
+      cachedInfo = existing
+      return existing
+    }
 
-    startupPromise = (async () => {
-      const existing = readPidInfo()
-      const existingHealthy = Boolean(
-        existing
-        && isProcessAlive(existing.pid)
-        && await healthcheck(existing),
+    return await withStartupLock(async () => {
+      const lockedExisting = readPidInfo()
+      const lockedExistingHealthy = Boolean(
+        lockedExisting
+        && isProcessAlive(lockedExisting.pid)
+        && await healthcheck(lockedExisting),
       )
-      if (forceRestart || (existingHealthy && existing && !hasCompatibleVersion(existing))) {
-        await stopDaemonProcess(existing)
-        clearDaemonCache()
-      } else if (
-        existing
-        && existingHealthy
-        && hasCompatibleVersion(existing)
+      if (
+        lockedExisting
+        && lockedExistingHealthy
+        && canReuse(lockedExisting)
       ) {
-        cachedInfo = existing
-        return existing
+        cachedInfo = lockedExisting
+        return lockedExisting
       }
 
-      return await withStartupLock(async () => {
-        const lockedExisting = readPidInfo()
-        const lockedExistingHealthy = Boolean(
-          lockedExisting
-          && isProcessAlive(lockedExisting.pid)
-          && await healthcheck(lockedExisting),
+      if (
+        lockedExisting
+        && (
+          forceRestart
+          || (lockedExistingHealthy && !hasCompatibleVersion(lockedExisting))
         )
-        if (
-          lockedExisting
-          && lockedExistingHealthy
-          && canReuse(lockedExisting)
-        ) {
-          cachedInfo = lockedExisting
-          return lockedExisting
-        }
+      ) {
+        await stopDaemonProcess(lockedExisting)
+        clearDaemonCache()
+      }
 
-        if (
-          lockedExisting
-          && (
-            forceRestart
-            || (lockedExistingHealthy && !hasCompatibleVersion(lockedExisting))
-          )
-        ) {
-          await stopDaemonProcess(lockedExisting)
-          clearDaemonCache()
-        }
+      const child = spawnDaemonProcess()
+      await waitForChildStartupGrace(child)
+      return await waitForDaemonReady()
+    }, canReuse)
+  }
 
-        const child = spawnDaemonProcess()
-        await waitForChildStartupGrace(child)
-        return await waitForDaemonReady()
-      }, canReuse)
-    })()
+  function beginStartup(forceRestart: boolean): Promise<DaemonStatusInfo> {
+    const operation = runEnsureDaemon(forceRestart)
+    startupPromise = operation
+    startupForcesRestart = forceRestart
 
-    try {
-      return await startupPromise
-    } finally {
+    const clearOperation = (): void => {
+      if (startupPromise !== operation) return
       startupPromise = null
+      startupForcesRestart = false
     }
+    void operation.then(clearOperation, clearOperation)
+    return operation
+  }
+
+  function ensureDaemonRunning(options?: { forceRestart?: boolean }): Promise<DaemonStatusInfo> {
+    const forceRestart = options?.forceRestart === true
+
+    // Once a forced restart is queued, all later callers must observe its
+    // replacement. Returning the original startup here would hand out a daemon
+    // that is about to be terminated.
+    if (queuedForceRestartPromise) {
+      return queuedForceRestartPromise
+    }
+
+    if (startupPromise) {
+      if (!forceRestart || startupForcesRestart) {
+        return startupPromise
+      }
+
+      const activeStartup = startupPromise
+      const queuedRestart = activeStartup
+        .catch(() => undefined)
+        .then(() => beginStartup(true))
+      queuedForceRestartPromise = queuedRestart
+
+      const clearQueuedRestart = (): void => {
+        if (queuedForceRestartPromise === queuedRestart) {
+          queuedForceRestartPromise = null
+        }
+      }
+      void queuedRestart.then(clearQueuedRestart, clearQueuedRestart)
+      return queuedRestart
+    }
+
+    return beginStartup(forceRestart)
   }
 
   async function getDaemonStatus(): Promise<{ running: boolean; info: DaemonStatusInfo | null }> {

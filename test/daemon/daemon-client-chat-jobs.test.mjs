@@ -175,6 +175,32 @@ test('startChatJob never retries a transient HTTP response', async t => {
   assert.equal(calls.length, 1)
 })
 
+test('startChatJob reports an actionable unknown outcome for HTTP 408 without retrying', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    return jsonResponse({ error: 'request timed out after delivery' }, 408)
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.startChatJob({ provider: 'claude', model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
+    error => {
+      assert.match(error.message, /outcome is unknown.*check daemon state before retrying/i)
+      assert.equal(error.status, 408)
+      assert.equal(error.cause?.status, 408)
+      return true
+    },
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(calls.invalidated, true)
+})
+
 test('cancel and permission mutations use the declared no-retry policy', async t => {
   const originalFetch = globalThis.fetch
   const calls = []
