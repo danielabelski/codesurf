@@ -79,6 +79,22 @@ export async function waitFor(check, timeoutMs = 5_000, intervalMs = 50) {
   throw new Error(`Timed out after ${timeoutMs}ms`)
 }
 
+export async function makeDaemonTestTempDir(prefix) {
+  if (
+    typeof prefix !== 'string'
+    || !prefix
+    || prefix === '.'
+    || prefix === '..'
+    || prefix.includes('/')
+    || prefix.includes('\\')
+    || prefix.includes(sep)
+  ) {
+    throw new Error('daemon test temp prefix must be one safe path segment')
+  }
+  await mkdir(TEST_TMP_ROOT, { recursive: true })
+  return await mkdtemp(join(TEST_TMP_ROOT, prefix))
+}
+
 export function spawnManagedChild({
   command,
   args = [],
@@ -187,5 +203,175 @@ export function spawnManagedChild({
     get stderr() {
       return finalResult?.stderr ?? stderrCollector.read()
     },
+  }
+}
+
+function createRequestHelpers(pidInfo) {
+  const authorizedHeaders = {
+    Authorization: `Bearer ${pidInfo.token}`,
+  }
+  const baseUrl = `http://127.0.0.1:${pidInfo.port}`
+
+  const request = async (path, options = {}) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: options.method ?? (options.body == null ? 'GET' : 'POST'),
+      headers: {
+        ...authorizedHeaders,
+        ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
+        ...(options.headers ?? {}),
+      },
+      body: options.body == null ? undefined : JSON.stringify(options.body),
+    })
+    const text = await response.text()
+    return {
+      status: response.status,
+      payload: text.trim() ? JSON.parse(text) : null,
+    }
+  }
+
+  const requestText = async (path, options = {}) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: options.method ?? 'GET',
+      headers: {
+        ...authorizedHeaders,
+        ...(options.headers ?? {}),
+      },
+    })
+    return {
+      status: response.status,
+      body: await response.text(),
+      contentType: response.headers.get('content-type') ?? '',
+    }
+  }
+
+  const requestRaw = async (path, options = {}) => {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: options.method ?? 'POST',
+      headers: {
+        ...authorizedHeaders,
+        'Content-Type': 'application/json',
+        ...(options.headers ?? {}),
+      },
+      body: options.body ?? '',
+    })
+    const text = await response.text()
+    return {
+      status: response.status,
+      payload: text.trim() ? JSON.parse(text) : null,
+    }
+  }
+
+  return { request, requestRaw, requestText }
+}
+
+function startupError(message, managed, cause) {
+  const diagnostics = [
+    managed.stdout.trim() ? `stdout:\n${managed.stdout.trim()}` : '',
+    managed.stderr.trim() ? `stderr:\n${managed.stderr.trim()}` : '',
+  ].filter(Boolean).join('\n')
+  return new Error(`${message}${diagnostics ? `\n${diagnostics}` : ''}`, { cause })
+}
+
+export async function spawnDaemon({
+  homeDir: suppliedHomeDir,
+  homePrefix = 'codesurfd-test-',
+  daemonEntry = DEFAULT_DAEMON_ENTRY,
+  appVersion = 'test-suite',
+  env = {},
+  startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS,
+  termTimeoutMs = DEFAULT_TERM_TIMEOUT_MS,
+  killTimeoutMs = DEFAULT_KILL_TIMEOUT_MS,
+  cleanupHome = true,
+  assertEmptyStderr = true,
+} = {}) {
+  const requestedHomeDir = suppliedHomeDir ?? await makeDaemonTestTempDir(homePrefix)
+  if (!isAbsolute(requestedHomeDir)) {
+    throw new Error('daemon test home must be absolute')
+  }
+  const homeDir = resolve(requestedHomeDir)
+  if (!homeDir.startsWith(`${TEST_TMP_ROOT}${sep}`)) {
+    throw new Error(`daemon test home must be inside ${TEST_TMP_ROOT}`)
+  }
+  const pidPath = join(homeDir, 'daemon', 'pid.json')
+  const managed = spawnManagedChild({
+    command: process.execPath,
+    args: [daemonEntry],
+    cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      ...env,
+      HOME: homeDir,
+      CODESURF_HOME: homeDir,
+      CODESURF_DAEMON_PID_PATH: pidPath,
+      CODESURF_APP_VERSION: appVersion,
+    },
+  })
+
+  let pidInfo
+  try {
+    pidInfo = await waitFor(async () => {
+      if (managed.spawnError) {
+        throw startupError('daemon process failed to spawn', managed, managed.spawnError)
+      }
+      if (managed.finalResult) {
+        throw startupError('daemon exited before publishing startup state', managed)
+      }
+      try {
+        const parsed = JSON.parse(await readFile(pidPath, 'utf8'))
+        if (parsed.pid !== managed.child.pid) return null
+        if (!Number.isInteger(parsed.port) || parsed.port <= 0 || typeof parsed.token !== 'string' || !parsed.token) {
+          throw new Error('daemon pid file did not contain a positive port and token')
+        }
+        return parsed
+      } catch (error) {
+        if (error?.code === 'ENOENT') return null
+        throw error
+      }
+    }, startupTimeoutMs, 25)
+  } catch (error) {
+    let shutdownError = null
+    try {
+      await managed.stop({ termTimeoutMs, killTimeoutMs })
+    } catch (stopError) {
+      shutdownError = stopError
+    }
+    if (!shutdownError && cleanupHome) {
+      await rm(homeDir, { recursive: true, force: true })
+    }
+    if (shutdownError) {
+      throw new AggregateError(
+        [error, shutdownError],
+        'daemon startup failed and its child did not shut down cleanly',
+      )
+    }
+    throw error
+  }
+
+  const requests = createRequestHelpers(pidInfo)
+  let daemonStopPromise = null
+  const stop = () => {
+    if (daemonStopPromise) return daemonStopPromise
+    daemonStopPromise = (async () => {
+      const result = await managed.stop({ termTimeoutMs, killTimeoutMs })
+      if (cleanupHome) {
+        await rm(homeDir, { recursive: true, force: true })
+      }
+      if (assertEmptyStderr && result.stderr.trim()) {
+        throw new Error(`daemon stderr was not empty:\n${result.stderr}`)
+      }
+      return result
+    })()
+    return daemonStopPromise
+  }
+
+  return {
+    child: managed.child,
+    daemonEntry,
+    homeDir,
+    pidInfo,
+    pidPath,
+    managed,
+    stop,
+    ...requests,
   }
 }
