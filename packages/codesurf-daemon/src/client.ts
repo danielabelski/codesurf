@@ -46,6 +46,24 @@ export interface RequestOptions {
   timeoutMs?: number
 }
 
+type RequestRetryPolicy = 'read-only' | 'none'
+
+interface InternalRequestOptions extends RequestOptions {
+  retryPolicy: RequestRetryPolicy
+}
+
+const RETRYABLE_RESPONSE_STATUSES = new Set([401, 408, 502, 503, 504])
+
+class DaemonResponseError extends Error {
+  readonly retryable: boolean
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'DaemonResponseError'
+    this.retryable = RETRYABLE_RESPONSE_STATUSES.has(status)
+  }
+}
+
 export interface StreamJobEventsOptions {
   jobId: string
   since?: number
@@ -59,49 +77,74 @@ export type DaemonClient = ReturnType<typeof createDaemonClient>
 export function createDaemonClient(hooks: DaemonClientHooks) {
   const defaultTimeoutMs = hooks.requestTimeoutMs ?? 5_000
 
-  async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+  async function requestWithPolicy<T>(path: string, options: InternalRequestOptions): Promise<T> {
     let lastError: Error | null = null
+    const method = options.method ?? (options.body == null ? 'GET' : 'POST')
+    const maxAttempts = options.retryPolicy === 'read-only' ? 2 : 1
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const daemon = await hooks.ensureRunning()
 
       try {
         const response = await fetch(`http://127.0.0.1:${daemon.port}${path}`, {
-          method: options?.method ?? (options?.body == null ? 'GET' : 'POST'),
+          method,
           headers: {
             Authorization: `Bearer ${daemon.token}`,
-            ...(options?.body == null ? {} : { 'Content-Type': 'application/json' }),
+            ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
           },
-          body: options?.body == null ? undefined : JSON.stringify(options.body),
-          signal: AbortSignal.timeout(options?.timeoutMs ?? defaultTimeoutMs),
+          body: options.body == null ? undefined : JSON.stringify(options.body),
+          signal: AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs),
         })
 
         if (!response.ok) {
           const text = await response.text()
-          const error = new Error(text || `Daemon request failed: ${response.status}`)
-          lastError = error
-          if (attempt === 0 && (response.status === 401 || response.status === 408 || response.status === 502 || response.status === 503 || response.status === 504)) {
-            hooks.invalidate()
-            continue
-          }
-          throw error
+          throw new DaemonResponseError(
+            text || `Daemon request failed: ${response.status}`,
+            response.status,
+          )
         }
 
         return await response.json() as T
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt === 0) {
-          const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
-          if (!status.running) {
+        const canRetry = attempt + 1 < maxAttempts
+
+        if (lastError instanceof DaemonResponseError) {
+          if (lastError.retryable) {
             hooks.invalidate()
+            if (canRetry) continue
           }
+          throw lastError
+        }
+
+        const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
+        if (!status.running) {
+          hooks.invalidate()
+        }
+        if (canRetry) {
           continue
+        }
+
+        if (method !== 'GET') {
+          const outcomeError = new Error(
+            `Daemon mutation outcome is unknown for ${path}: ${lastError.message}. Check daemon state before retrying.`,
+          )
+          outcomeError.cause = lastError
+          throw outcomeError
         }
         throw lastError
       }
     }
 
     throw (lastError ?? new Error('Daemon request failed'))
+  }
+
+  async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+    const method = options?.method ?? (options?.body == null ? 'GET' : 'POST')
+    return await requestWithPolicy<T>(path, {
+      ...options,
+      retryPolicy: method === 'GET' ? 'read-only' : 'none',
+    })
   }
 
   async function streamJobEvents(options: StreamJobEventsOptions): Promise<void> {

@@ -23,6 +23,7 @@ const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'p
 const LOCK_PATH = join(HOME, 'daemon', 'daemon.lock')
 const PROTOCOL_VERSION = 1
 const APP_VERSION = String(process.env.CODESURF_APP_VERSION ?? '').trim() || null
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
 const STARTED_AT = new Date().toISOString()
 const LEGACY_CONFIG_PATH = join(HOME, 'config.json')
 const WORKSPACES_FILE = join(HOME, 'workspaces', 'workspaces.json')
@@ -2796,25 +2797,91 @@ async function healthcheck(info) {
 async function reuseExistingDaemonIfHealthy() {
   const existing = readPidInfo()
   if (!existing || !isProcessAlive(existing.pid)) return false
+  if (APP_VERSION && existing.appVersion !== APP_VERSION) return false
   return await healthcheck(existing)
+}
+
+class RequestBodyError extends Error {
+  constructor(statusCode, code, message) {
+    super(message)
+    this.name = 'RequestBodyError'
+    this.statusCode = statusCode
+    this.code = code
+  }
 }
 
 function parseRequestBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
-    req.on('data', chunk => chunks.push(Buffer.from(chunk)))
-    req.on('end', () => {
+    let byteCount = 0
+    let settled = false
+
+    const cleanup = () => {
+      req.off('data', onData)
+      req.off('end', onEnd)
+      req.off('error', onError)
+      req.off('aborted', onAborted)
+    }
+
+    const rejectBody = (error, drain = false) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      chunks.length = 0
+
+      if (drain && !req.complete && !req.destroyed) {
+        const ignoreDrainError = () => {}
+        req.on('error', ignoreDrainError)
+        req.once('close', () => {
+          req.off('error', ignoreDrainError)
+        })
+        req.resume()
+      }
+      reject(error)
+    }
+
+    const onData = chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      byteCount += buffer.byteLength
+      if (byteCount > MAX_REQUEST_BODY_BYTES) {
+        rejectBody(
+          new RequestBodyError(413, 'REQUEST_BODY_TOO_LARGE', 'Request body too large'),
+          true,
+        )
+        return
+      }
+      chunks.push(buffer)
+    }
+
+    const onEnd = () => {
+      if (settled) return
+      settled = true
+      cleanup()
       if (chunks.length === 0) {
         resolve({})
         return
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch (error) {
-        reject(error)
+        const body = Buffer.concat(chunks).toString('utf8')
+        chunks.length = 0
+        resolve(JSON.parse(body))
+      } catch {
+        reject(new RequestBodyError(400, 'INVALID_JSON', 'Malformed JSON request body'))
       }
-    })
-    req.on('error', reject)
+    }
+
+    const onError = error => {
+      rejectBody(error)
+    }
+
+    const onAborted = () => {
+      rejectBody(new RequestBodyError(400, 'REQUEST_ABORTED', 'Request body aborted'))
+    }
+
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+    req.on('aborted', onAborted)
   })
 }
 
@@ -3841,6 +3908,18 @@ const server = createServer(async (req, res) => {
 
     sendJson(res, 404, { error: 'Not found' })
   } catch (error) {
+    if (res.headersSent || res.writableEnded) {
+      if (!res.writableEnded) res.end()
+      return
+    }
+    if (error instanceof RequestBodyError) {
+      sendJson(res, error.statusCode, {
+        error: error.message,
+        code: error.code,
+        ...(error.statusCode === 413 ? { maxBytes: MAX_REQUEST_BODY_BYTES } : {}),
+      })
+      return
+    }
     sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
   }
 })

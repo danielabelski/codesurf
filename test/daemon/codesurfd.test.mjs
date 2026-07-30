@@ -5,10 +5,12 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawn } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
 const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
+const TEST_MAX_REQUEST_BODY_BYTES = 1024 * 1024
 
 async function waitFor(check, timeoutMs = 5_000, intervalMs = 50) {
   const started = Date.now()
@@ -103,6 +105,23 @@ async function startDaemon(options = {}) {
     }
   }
 
+  const requestRaw = async (path, options = {}) => {
+    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
+      method: options.method ?? 'POST',
+      headers: {
+        Authorization: `Bearer ${pidInfo.token}`,
+        'Content-Type': 'application/json',
+        ...(options.headers ?? {}),
+      },
+      body: options.body ?? '',
+    })
+    const text = await response.text()
+    return {
+      status: response.status,
+      payload: text.trim() ? JSON.parse(text) : null,
+    }
+  }
+
   const stop = async () => {
     if (!child.killed) child.kill('SIGTERM')
     await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
@@ -113,7 +132,80 @@ async function startDaemon(options = {}) {
     }
   }
 
-  return { child, homeDir, pidInfo, request, requestText, stop }
+  return { child, homeDir, pidInfo, request, requestRaw, requestText, stop }
+}
+
+function makeJsonBodyAtSize(name, size) {
+  const empty = JSON.stringify({ name, padding: '' })
+  const paddingBytes = size - Buffer.byteLength(empty)
+  assert.ok(paddingBytes >= 0)
+  const body = JSON.stringify({ name, padding: 'x'.repeat(paddingBytes) })
+  assert.equal(Buffer.byteLength(body), size)
+  return body
+}
+
+async function requestChunkedBeforeEnd(daemon, path, chunks) {
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      request.destroy()
+      reject(new Error('Daemon did not reject a chunked oversized body before request end'))
+    }, 3_000)
+    timeout.unref()
+    const request = httpRequest({
+      hostname: '127.0.0.1',
+      port: daemon.pidInfo.port,
+      path,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemon.pidInfo.token}`,
+        'Content-Type': 'application/json',
+      },
+    }, response => {
+      const responseChunks = []
+      response.on('data', chunk => responseChunks.push(Buffer.from(chunk)))
+      response.on('end', () => {
+        settled = true
+        clearTimeout(timeout)
+        request.end()
+        const body = Buffer.concat(responseChunks).toString('utf8')
+        resolve({
+          status: response.statusCode,
+          payload: body.trim() ? JSON.parse(body) : null,
+        })
+      })
+    })
+    request.on('error', error => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timeout)
+        reject(error)
+      }
+    })
+
+    for (const chunk of chunks) request.write(chunk)
+  })
+}
+
+async function runDaemonEntrypointOnce(daemon, appVersion) {
+  const child = spawn(process.execPath, [DAEMON_ENTRY], {
+    cwd: ROOT_DIR,
+    env: {
+      ...process.env,
+      HOME: daemon.homeDir,
+      CODESURF_HOME: daemon.homeDir,
+      CODESURF_DAEMON_PID_PATH: join(daemon.homeDir, 'daemon', 'pid.json'),
+      CODESURF_APP_VERSION: appVersion,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stderr = ''
+  child.stderr.on('data', chunk => {
+    stderr += String(chunk)
+  })
+  await waitFor(() => child.exitCode !== null || child.signalCode !== null)
+  return { exitCode: child.exitCode, signalCode: child.signalCode, stderr }
 }
 
 test('daemon health endpoint requires auth and returns metadata', async t => {
@@ -130,6 +222,80 @@ test('daemon health endpoint requires auth and returns metadata', async t => {
   assert.equal(payload.ok, true)
   assert.equal(payload.protocolVersion, 1)
   assert.equal(payload.appVersion, 'test-suite')
+})
+
+test('daemon child reuse requires a matching configured app version', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const sameVersion = await runDaemonEntrypointOnce(daemon, 'test-suite')
+  assert.equal(sameVersion.exitCode, 0)
+  assert.equal(sameVersion.stderr, '')
+
+  const mismatchedVersion = await runDaemonEntrypointOnce(daemon, 'next-version')
+  assert.equal(mismatchedVersion.exitCode, 0)
+  assert.match(mismatchedVersion.stderr, /Another daemon is starting up/)
+
+  const currentPid = await readJson(join(daemon.homeDir, 'daemon', 'pid.json'))
+  assert.equal(currentPid.pid, daemon.pidInfo.pid)
+})
+
+test('daemon request bodies enforce the 1 MiB limit and deterministic JSON errors', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const exactBody = makeJsonBodyAtSize('Exact limit workspace', TEST_MAX_REQUEST_BODY_BYTES)
+  const exact = await daemon.requestRaw('/workspace/create', { body: exactBody })
+  assert.equal(exact.status, 200)
+  assert.equal(exact.payload.name, 'Exact limit workspace')
+
+  const oversizedBody = makeJsonBodyAtSize('Oversized workspace', TEST_MAX_REQUEST_BODY_BYTES + 1)
+  const oversized = await daemon.requestRaw('/workspace/create', { body: oversizedBody })
+  assert.equal(oversized.status, 413)
+  assert.deepEqual(oversized.payload, {
+    error: 'Request body too large',
+    code: 'REQUEST_BODY_TOO_LARGE',
+    maxBytes: TEST_MAX_REQUEST_BODY_BYTES,
+  })
+
+  const malformed = await daemon.requestRaw('/workspace/create', { body: '{"name":' })
+  assert.equal(malformed.status, 400)
+  assert.deepEqual(malformed.payload, {
+    error: 'Malformed JSON request body',
+    code: 'INVALID_JSON',
+  })
+
+  const empty = await daemon.requestRaw('/session/external/invalidate')
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.payload, { ok: true })
+
+  const workspaces = await daemon.request('/workspace/list')
+  assert.equal(workspaces.payload.some(workspace => workspace.name === 'Oversized workspace'), false)
+})
+
+test('daemon rejects chunked oversized bodies before the request stream ends', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const prefix = Buffer.from('{"name":"Chunked oversized workspace","padding":"')
+  const overflow = Buffer.alloc(TEST_MAX_REQUEST_BODY_BYTES + 1 - prefix.byteLength, 'x')
+  const response = await requestChunkedBeforeEnd(
+    daemon,
+    '/workspace/create',
+    [prefix, overflow],
+  )
+
+  assert.equal(response.status, 413)
+  assert.equal(response.payload.code, 'REQUEST_BODY_TOO_LARGE')
+
+  const workspaces = await daemon.request('/workspace/list')
+  assert.equal(workspaces.payload.some(workspace => workspace.name === 'Chunked oversized workspace'), false)
 })
 
 test('daemon dashboard serves html and query-token auth works', async t => {

@@ -42,6 +42,17 @@ export interface DaemonManagerConfig {
   healthTimeoutMs?: number
 }
 
+export interface DaemonManagerRuntime {
+  /** Test seam for daemon health requests. Defaults to global `fetch`. */
+  fetch?: typeof globalThis.fetch
+  /** Test seam for detached child creation. Defaults to `node:child_process.spawn`. */
+  spawn?: typeof spawn
+  /** Test seam for process liveness checks and TERM/KILL delivery. */
+  kill?: (pid: number, signal?: NodeJS.Signals | number) => boolean
+  /** Test seam that bypasses the real startup grace timer. */
+  waitForChildStartupGrace?: (child: ChildProcess) => Promise<void>
+}
+
 export interface DaemonManager {
   ensureDaemonRunning: (options?: { forceRestart?: boolean }) => Promise<DaemonStatusInfo>
   getDaemonStatus: () => Promise<{ running: boolean; info: DaemonStatusInfo | null }>
@@ -61,8 +72,14 @@ const DAEMON_KILL_TIMEOUT_MS = 2_000
  * instantiated once per host process (Electron main, codesurf TUI, etc.) and
  * shared across all callers in that process.
  */
-export function createDaemonManager(config: DaemonManagerConfig): DaemonManager {
+export function createDaemonManager(
+  config: DaemonManagerConfig,
+  runtime: DaemonManagerRuntime = {},
+): DaemonManager {
   const healthTimeoutMs = config.healthTimeoutMs ?? 15_000
+  const fetchImpl = runtime.fetch ?? globalThis.fetch
+  const spawnImpl = runtime.spawn ?? spawn
+  const killImpl = runtime.kill ?? ((pid: number, signal?: NodeJS.Signals | number) => process.kill(pid, signal))
   const DAEMON_DIR = join(config.homeDir, 'daemon')
   const DAEMON_PID_PATH = join(DAEMON_DIR, 'pid.json')
   const DAEMON_LOG_PATH = join(DAEMON_DIR, 'daemon.log')
@@ -120,7 +137,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
 
   function isProcessAlive(pid: number): boolean {
     try {
-      process.kill(pid, 0)
+      killImpl(pid, 0)
       return true
     } catch (error) {
       const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code ?? '') : ''
@@ -130,7 +147,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
 
   async function healthcheck(info: DaemonStatusInfo): Promise<boolean> {
     try {
-      const response = await fetch(`http://127.0.0.1:${info.port}/health`, {
+      const response = await fetchImpl(`http://127.0.0.1:${info.port}/health`, {
         signal: AbortSignal.timeout(2_000),
         headers: {
           Authorization: `Bearer ${info.token}`,
@@ -203,6 +220,11 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
   }
 
   async function waitForChildStartupGrace(child: ChildProcess): Promise<void> {
+    if (runtime.waitForChildStartupGrace) {
+      await runtime.waitForChildStartupGrace(child)
+      return
+    }
+
     const exitedEarly = await new Promise<boolean>((resolve) => {
       let settled = false
       const finish = (value: boolean): void => {
@@ -239,7 +261,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
     if (!existsSync(daemonScriptPath)) {
       throw new Error(`Resolved daemon script path does not exist: ${daemonScriptPath}`)
     }
-    const child = spawn(process.execPath, [daemonScriptPath], {
+    const child = spawnImpl(process.execPath, [daemonScriptPath], {
       detached: true,
       stdio: ['ignore', out, out],
       env: {
@@ -259,7 +281,10 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
     return child
   }
 
-  async function withStartupLock(work: () => Promise<DaemonStatusInfo>): Promise<DaemonStatusInfo> {
+  async function withStartupLock(
+    work: () => Promise<DaemonStatusInfo>,
+    canReuseExisting: (info: DaemonStatusInfo) => boolean,
+  ): Promise<DaemonStatusInfo> {
     ensureDaemonDir()
     const deadline = Date.now() + healthTimeoutMs
 
@@ -278,7 +303,12 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
         if (code !== 'EEXIST') throw error
 
         const existing = readPidInfo()
-        if (existing && isProcessAlive(existing.pid) && await healthcheck(existing)) {
+        if (
+          existing
+          && canReuseExisting(existing)
+          && isProcessAlive(existing.pid)
+          && await healthcheck(existing)
+        ) {
           cachedInfo = existing
           return existing
         }
@@ -298,7 +328,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
   function signalProcessSafely(pid: number, signal: NodeJS.Signals): boolean {
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return false
     try {
-      process.kill(pid, signal)
+      killImpl(pid, signal)
       return true
     } catch (error) {
       const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code ?? '') : ''
@@ -314,7 +344,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
     }
     if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) return false
     try {
-      process.kill(-pid, signal)
+      killImpl(-pid, signal)
       return true
     } catch (error) {
       const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code ?? '') : ''
@@ -334,8 +364,18 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
   }
 
   async function stopDaemonProcess(info: DaemonStatusInfo | null): Promise<void> {
-    if (!info || !isProcessAlive(info.pid)) {
-      removeFileIfPresent(DAEMON_PID_PATH)
+    if (!info) {
+      if (!readPidInfo()) {
+        removeFileIfPresent(DAEMON_PID_PATH)
+      }
+      return
+    }
+
+    if (!isProcessAlive(info.pid)) {
+      const current = readPidInfo()
+      if (!current || current.pid === info.pid) {
+        removeFileIfPresent(DAEMON_PID_PATH)
+      }
       return
     }
 
@@ -350,15 +390,22 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
       throw new Error(`Timed out stopping CodeSurf daemon PID ${info.pid}`)
     }
 
-    removeFileIfPresent(DAEMON_PID_PATH)
+    const current = readPidInfo()
+    if (!current || current.pid === info.pid) {
+      removeFileIfPresent(DAEMON_PID_PATH)
+    }
   }
 
   async function ensureDaemonRunning(options?: { forceRestart?: boolean }): Promise<DaemonStatusInfo> {
     const forceRestart = options?.forceRestart === true
     const appVersion = resolveAppVersion()
+    const hasCompatibleVersion = (info: DaemonStatusInfo): boolean => (
+      !info.appVersion || info.appVersion === appVersion
+    )
+    const canReuse = (info: DaemonStatusInfo): boolean => !forceRestart && hasCompatibleVersion(info)
 
     if (cachedInfo && isProcessAlive(cachedInfo.pid) && await healthcheck(cachedInfo)) {
-      if (!forceRestart && (!cachedInfo.appVersion || cachedInfo.appVersion === appVersion)) {
+      if (canReuse(cachedInfo)) {
         return cachedInfo
       }
     }
@@ -367,14 +414,18 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
 
     startupPromise = (async () => {
       const existing = readPidInfo()
-      if (forceRestart) {
+      const existingHealthy = Boolean(
+        existing
+        && isProcessAlive(existing.pid)
+        && await healthcheck(existing),
+      )
+      if (forceRestart || (existingHealthy && existing && !hasCompatibleVersion(existing))) {
         await stopDaemonProcess(existing)
         clearDaemonCache()
       } else if (
         existing
-        && isProcessAlive(existing.pid)
-        && await healthcheck(existing)
-        && (!existing.appVersion || existing.appVersion === appVersion)
+        && existingHealthy
+        && hasCompatibleVersion(existing)
       ) {
         cachedInfo = existing
         return existing
@@ -382,18 +433,27 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
 
       return await withStartupLock(async () => {
         const lockedExisting = readPidInfo()
-        if (
-          !forceRestart
-          && lockedExisting
+        const lockedExistingHealthy = Boolean(
+          lockedExisting
           && isProcessAlive(lockedExisting.pid)
-          && await healthcheck(lockedExisting)
-          && (!lockedExisting.appVersion || lockedExisting.appVersion === appVersion)
+          && await healthcheck(lockedExisting),
+        )
+        if (
+          lockedExisting
+          && lockedExistingHealthy
+          && canReuse(lockedExisting)
         ) {
           cachedInfo = lockedExisting
           return lockedExisting
         }
 
-        if (forceRestart && lockedExisting) {
+        if (
+          lockedExisting
+          && (
+            forceRestart
+            || (lockedExistingHealthy && !hasCompatibleVersion(lockedExisting))
+          )
+        ) {
           await stopDaemonProcess(lockedExisting)
           clearDaemonCache()
         }
@@ -401,7 +461,7 @@ export function createDaemonManager(config: DaemonManagerConfig): DaemonManager 
         const child = spawnDaemonProcess()
         await waitForChildStartupGrace(child)
         return await waitForDaemonReady()
-      })
+      }, canReuse)
     })()
 
     try {

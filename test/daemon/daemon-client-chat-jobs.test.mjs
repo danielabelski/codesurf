@@ -16,6 +16,7 @@ function makeClient(calls) {
     invalidate: () => {
       calls.invalidated = true
     },
+    requestTimeoutMs: 25,
   })
 }
 
@@ -112,4 +113,91 @@ test('streamJobEvents parses SSE without putting bearer token in the URL', async
   assert.equal(calls.length, 1)
   assert.deepEqual(events.map(event => event.type), ['text', 'done'])
   assert.equal(events[0].text, 'hi')
+})
+
+test('read-only daemon requests retry once after a transient response', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    if (calls.length === 1) return jsonResponse({ error: 'temporarily unavailable' }, 503)
+    return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 2 })
+  }
+
+  const client = makeClient(calls)
+  const state = await client.getJobState('job-1')
+
+  assert.equal(state.id, 'job-1')
+  assert.equal(calls.length, 2)
+  assert.equal(calls.invalidated, true)
+})
+
+test('startChatJob never retries when delivery times out', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    throw new DOMException('request timed out', 'TimeoutError')
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.startChatJob({ provider: 'claude', model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
+    /outcome is unknown.*check daemon state before retrying/i,
+  )
+  assert.equal(calls.length, 1)
+})
+
+test('startChatJob never retries a transient HTTP response', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    return jsonResponse({ error: 'temporarily unavailable' }, 503)
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.startChatJob({ provider: 'claude', model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
+  )
+  assert.equal(calls.length, 1)
+})
+
+test('cancel and permission mutations use the declared no-retry policy', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async (url) => {
+    calls.push(new URL(String(url)).pathname)
+    return jsonResponse({ error: 'temporarily unavailable' }, 503)
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(client.cancelJob('job-1'))
+  await assert.rejects(client.answerPermission({
+    jobId: 'job-1',
+    toolId: 'tool-1',
+    decision: 'once',
+  }))
+
+  assert.deepEqual([...calls], [
+    '/chat/job/cancel',
+    '/chat/job/permission/answer',
+  ])
+  assert.equal(calls.invalidated, true)
 })
