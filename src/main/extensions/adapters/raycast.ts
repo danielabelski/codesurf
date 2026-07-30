@@ -21,9 +21,10 @@
  */
 
 import { promises as fs } from 'fs'
-import { join, basename } from 'path'
+import { join, basename, isAbsolute, relative } from 'path'
 import type { ExtensionAdapter } from './types'
 import type { ExtensionManifest } from '../../../shared/types'
+import { assertSafePathSegment, resolveInside } from '../../security/pathSegments.ts'
 
 interface RaycastCommand {
   name: string
@@ -35,6 +36,7 @@ interface RaycastCommand {
 }
 
 interface RaycastPackageJson {
+  id?: string
   name: string
   version: string
   description?: string
@@ -42,6 +44,18 @@ interface RaycastPackageJson {
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
   commands?: RaycastCommand[]
+}
+
+function getViewCommands(pkg: RaycastPackageJson): RaycastCommand[] {
+  const commands = Array.isArray(pkg.commands) ? pkg.commands : []
+  return commands.filter(cmd => {
+    if (!cmd || typeof cmd !== 'object' || cmd.mode !== 'view') return false
+    assertSafePathSegment(cmd.name, 'Raycast command name')
+    if (typeof cmd.title !== 'string' || !cmd.title.trim()) {
+      throw new Error(`Invalid Raycast command title for ${cmd.name}`)
+    }
+    return true
+  })
 }
 
 export const raycastAdapter: ExtensionAdapter = {
@@ -63,8 +77,7 @@ export const raycastAdapter: ExtensionAdapter = {
     const pkg = JSON.parse(raw) as RaycastPackageJson
     const dirName = basename(dir)
 
-    const tiles = (pkg.commands ?? [])
-      .filter(cmd => cmd.mode === 'view')
+    const tiles = getViewCommands(pkg)
       .map(cmd => ({
         type: `ext:raycast-${dirName}-${cmd.name}`,
         label: cmd.title,
@@ -75,7 +88,7 @@ export const raycastAdapter: ExtensionAdapter = {
       }))
 
     return {
-      id: `raycast-${dirName}`,
+      id: pkg.id ?? `raycast-${dirName}`,
       name: pkg.name ?? dirName,
       version: pkg.version ?? '0.0.0',
       description: pkg.description ?? `Raycast extension: ${dirName}`,
@@ -92,16 +105,23 @@ export const raycastAdapter: ExtensionAdapter = {
     // Generate shim HTML files for each command
     const raw = await fs.readFile(join(dir, 'package.json'), 'utf8')
     const pkg = JSON.parse(raw) as RaycastPackageJson
-    const distDir = join(dir, 'dist')
+    const commands = getViewCommands(pkg)
+    const canonicalRoot = await fs.realpath(dir)
+    const distDir = join(canonicalRoot, 'dist')
     await fs.mkdir(distDir, { recursive: true })
+    const canonicalDistDir = await fs.realpath(distDir)
+    const distRel = relative(canonicalRoot, canonicalDistDir)
+    if (!distRel || distRel.startsWith('..') || isAbsolute(distRel)) {
+      throw new Error('Raycast output directory escapes the extension root')
+    }
 
-    for (const cmd of (pkg.commands ?? []).filter(c => c.mode === 'view')) {
+    for (const cmd of commands) {
       const shimHtml = generateRaycastShim(cmd)
-      const shimPath = join(distDir, `_raycast_shim_${cmd.name}.html`)
+      const shimPath = resolveInside(canonicalDistDir, `_raycast_shim_${cmd.name}.html`)
       await fs.writeFile(shimPath, shimHtml)
     }
 
-    return distDir
+    return canonicalDistDir
   },
 }
 

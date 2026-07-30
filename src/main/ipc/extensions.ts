@@ -15,6 +15,7 @@ import { CODESURF_HOME } from '../paths'
 import { readSettingsSync } from './workspace'
 import { getPluginState, setPluginState, replacePluginState } from '../extensions/plugin-store'
 import { assertValidExtensionId, resolveExtensionSettingsPath } from '../extensions/identity'
+import { inspectAdaptedExtension } from '../extensions/adapters'
 import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
 import { log } from '../utils/logger.ts'
 
@@ -122,6 +123,50 @@ async function readAndValidateManifest(dir: string): Promise<{ id: string; name:
   return { id, name: manifest.name.trim(), version: manifest.version.trim() }
 }
 
+async function readEffectiveExtensionIdentity(
+  dir: string,
+): Promise<{ id: string; name: string; version: string }> {
+  const nativeManifestPath = join(dir, 'extension.json')
+  const hasNativeManifest = await fs.stat(nativeManifestPath)
+    .then(info => info.isFile())
+    .catch(() => false)
+
+  if (hasNativeManifest) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await fs.readFile(nativeManifestPath, 'utf8'))
+    } catch {
+      throw new Error('Effective extension manifest (extension.json) is not valid JSON')
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error('Effective extension manifest must be a JSON object')
+    }
+    const manifest = parsed as Record<string, unknown>
+    const id = assertValidExtensionId(manifest.id, `effective manifest directory ${dir}`)
+    if (typeof manifest.name !== 'string' || !manifest.name.trim()) {
+      throw new Error('Effective extension manifest is missing required field: name')
+    }
+    if (typeof manifest.version !== 'string' || !manifest.version.trim()) {
+      throw new Error('Effective extension manifest is missing required field: version')
+    }
+    return {
+      id,
+      name: manifest.name.trim(),
+      version: manifest.version.trim(),
+    }
+  }
+
+  const adapted = await inspectAdaptedExtension(dir)
+  if (!adapted) {
+    throw new Error('Plugin archive has no loadable extension.json or supported adapter manifest')
+  }
+  return {
+    id: adapted.manifest.id,
+    name: adapted.manifest.name,
+    version: adapted.manifest.version,
+  }
+}
+
 /**
  * Install a packaged plugin archive (.vsix or plain .zip) into ~/.codesurf/extensions
  * and rescan. vsix archives nest content under extension/; plain plugin zips put the
@@ -131,65 +176,132 @@ async function readAndValidateManifest(dir: string): Promise<{ id: string; name:
  * Security measures:
  *   1. Validate all archive entries for traversal/absolute/symlink before extraction.
  *   2. Extract into a scoped temp directory inside EXTENSIONS_DIR.
- *   3. Read and validate the manifest (must have id/name/version) BEFORE moving into place.
- *   4. Key the final install directory on the validated manifest `id`, not the archive filename.
+ *   3. Require the package id to match the effective native/adapted manifest id.
+ *   4. Replace transactionally, confirm registry path ownership, and restore on failure.
  */
 async function installPluginArchive(registry: ExtensionRegistry, archivePath: string): Promise<InstallPluginResult> {
+  let stagingRoot: string | null = null
+  let payloadDir: string | null = null
+  let destDir: string | null = null
+  let backupDir: string | null = null
+  let promoted = false
+
   try {
     await fs.mkdir(EXTENSIONS_DIR, { recursive: true })
 
     // Step 1: validate all entries before touching the extensions directory.
     await assertSafeZipEntries(archivePath)
 
-    // Step 2: extract into a scoped temp dir inside EXTENSIONS_DIR.
-    // Using a fixed suffix makes it easy to clean up on failure.
+    // Step 2: extract into a scoped staging root inside EXTENSIONS_DIR.
     const tempName = `__tmp_install_${Date.now()}_${Math.random().toString(36).slice(2)}`
-    const tempDir = resolveInside(EXTENSIONS_DIR, tempName)
-    await fs.mkdir(tempDir, { recursive: true })
+    stagingRoot = resolveInside(EXTENSIONS_DIR, tempName)
+    payloadDir = resolveInside(stagingRoot, 'payload')
+    await fs.mkdir(payloadDir, { recursive: true })
+    await execFileAsync('/usr/bin/unzip', ['-o', archivePath, '-d', payloadDir])
 
-    try {
-      await execFileAsync('/usr/bin/unzip', ['-o', archivePath, '-d', tempDir])
-
-      // vsix archives nest everything under extension/ — flatten it up a level.
-      const extensionSubdir = join(tempDir, 'extension')
-      const hasExtDir = await fs.stat(extensionSubdir).then(s => s.isDirectory()).catch(() => false)
-      if (hasExtDir) {
-        for (const item of await fs.readdir(extensionSubdir)) {
-          // Validate each item name before renaming to avoid unexpected paths.
-          assertSafePathSegment(item, 'extension entry name')
-          await fs.rename(join(extensionSubdir, item), join(tempDir, item)).catch(() => {})
-        }
-        await fs.rm(extensionSubdir, { recursive: true, force: true }).catch(() => {})
+    // vsix archives nest everything under extension/ — flatten it up a level.
+    const extensionSubdir = join(payloadDir, 'extension')
+    const hasExtDir = await fs.stat(extensionSubdir).then(s => s.isDirectory()).catch(() => false)
+    if (hasExtDir) {
+      for (const item of await fs.readdir(extensionSubdir)) {
+        // Validate each item name before renaming to avoid unexpected paths.
+        assertSafePathSegment(item, 'extension entry name')
+        await fs.rename(join(extensionSubdir, item), join(payloadDir, item)).catch(() => {})
       }
-      // Strip vsix packaging junk.
-      for (const junk of ['[Content_Types].xml', '_rels']) {
-        await fs.rm(join(tempDir, junk), { recursive: true, force: true }).catch(() => {})
-      }
-
-      // Step 3: validate the manifest BEFORE moving into place.
-      const manifest = await readAndValidateManifest(tempDir)
-
-      // Step 4: key the final directory on the manifest id, not the archive filename.
-      // assertSafePathSegment ensures the id cannot be used to escape EXTENSIONS_DIR.
-      assertSafePathSegment(manifest.id, 'plugin id')
-      const destDir = resolveInside(EXTENSIONS_DIR, manifest.id)
-
-      // Remove any existing installation with this id (deterministic on collision).
-      await fs.rm(destDir, { recursive: true, force: true }).catch(() => {})
-
-      // Move the validated temp dir into its final location.
-      await fs.rename(tempDir, destDir)
-
-      await registry.rescan(registry.getActiveWorkspacePath())
-      return { ok: true, extId: manifest.id, name: manifest.name }
-    } catch (err) {
-      // Clean up temp dir on any failure.
-      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
-      throw err
+      await fs.rm(extensionSubdir, { recursive: true, force: true }).catch(() => {})
     }
+    // Strip vsix packaging junk.
+    for (const junk of ['[Content_Types].xml', '_rels']) {
+      await fs.rm(join(payloadDir, junk), { recursive: true, force: true }).catch(() => {})
+    }
+
+    // Step 3: validate the package identity, then inspect the payload from a
+    // staging directory with the same basename it will have after promotion.
+    // Basename-derived adapters therefore produce the exact id the registry
+    // will later load, rather than an id derived from a random temp name.
+    const packageManifest = await readAndValidateManifest(payloadDir)
+    const effectivePayloadDir = resolveInside(stagingRoot, packageManifest.id)
+    if (effectivePayloadDir !== payloadDir) {
+      await fs.rename(payloadDir, effectivePayloadDir)
+      payloadDir = effectivePayloadDir
+    }
+    const effectiveManifest = await readEffectiveExtensionIdentity(payloadDir)
+    if (effectiveManifest.id !== packageManifest.id) {
+      throw new Error(
+        `Plugin package id "${packageManifest.id}" does not match effective extension id "${effectiveManifest.id}"`,
+      )
+    }
+
+    assertSafePathSegment(packageManifest.id, 'plugin id')
+    destDir = resolveInside(EXTENSIONS_DIR, packageManifest.id)
+    backupDir = resolveInside(stagingRoot, 'previous-install')
+
+    // Step 4: promote transactionally only after staged identity validation.
+    const hasExistingInstall = await fs.lstat(destDir).then(() => true).catch(() => false)
+    if (hasExistingInstall) {
+      await fs.rename(destDir, backupDir)
+    } else {
+      backupDir = null
+    }
+
+    await fs.rename(payloadDir, destDir)
+    payloadDir = null
+    promoted = true
+
+    await registry.rescan(registry.getActiveWorkspacePath())
+    const registered = registry.get(packageManifest.id)
+    const registeredPath = registered?.manifest._path
+    if (!registeredPath || registered.manifest.id !== packageManifest.id) {
+      throw new Error(`Installed extension "${packageManifest.id}" did not register`)
+    }
+    const [canonicalRegisteredPath, canonicalDestPath] = await Promise.all([
+      fs.realpath(registeredPath),
+      fs.realpath(destDir),
+    ])
+    if (canonicalRegisteredPath !== canonicalDestPath) {
+      throw new Error(`Installed extension "${packageManifest.id}" registered from an unexpected path`)
+    }
+
+    if (backupDir) {
+      await fs.rm(backupDir, { recursive: true, force: true })
+      backupDir = null
+    }
+    promoted = false
+    return { ok: true, extId: packageManifest.id, name: effectiveManifest.name }
   } catch (err) {
+    let rollbackError: unknown
+    let rollbackRecoveryPath: string | null = null
+    if (promoted && destDir) {
+      await fs.rm(destDir, { recursive: true, force: true }).catch(() => {})
+      promoted = false
+    }
+    if (backupDir && destDir) {
+      try {
+        await fs.rename(backupDir, destDir)
+        backupDir = null
+        await registry.rescan(registry.getActiveWorkspacePath()).catch(() => {})
+      } catch (restoreError) {
+        rollbackError = restoreError
+        rollbackRecoveryPath = backupDir
+        // Keep the staging root and its previous-install directory recoverable.
+        stagingRoot = null
+      }
+    }
     console.error('[ext:install] Failed:', err)
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    const error = err instanceof Error ? err.message : String(err)
+    return {
+      ok: false,
+      error: rollbackError
+        ? `${error}; previous installation could not be restored automatically and remains at ${rollbackRecoveryPath}`
+        : error,
+    }
+  } finally {
+    if (payloadDir) {
+      await fs.rm(payloadDir, { recursive: true, force: true }).catch(() => {})
+    }
+    if (stagingRoot) {
+      await fs.rm(stagingRoot, { recursive: true, force: true }).catch(() => {})
+    }
   }
 }
 

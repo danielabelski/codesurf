@@ -1,12 +1,15 @@
-import { net, protocol } from 'electron'
-import { promises as fs } from 'fs'
+import { protocol } from 'electron'
 import { join, extname, resolve } from 'path'
-import { pathToFileURL } from 'url'
 import type { ExtensionRegistry } from './registry'
 import { getBridgeScript } from './bridge'
 import { getSandboxProxyHtml } from './sandbox-proxy'
 import { isValidExtensionId } from './identity'
-import { resolveCanonicalResourcePath } from './resource-path'
+import {
+  openCanonicalResource,
+  readOpenedCanonicalResourceText,
+  streamOpenedCanonicalResource,
+  type CanonicalResourceOpen,
+} from './resource-path'
 
 const MIME_TYPES: Record<string, string> = {
   '.js': 'application/javascript',
@@ -28,19 +31,22 @@ const MIME_TYPES: Record<string, string> = {
 // browser's same-origin policy already prevents cross-extension fetches.
 // We do NOT set Access-Control-Allow-Origin at all; if a future use-case needs
 // CORS within an extension's own assets, add it narrowly there.
-function serveFile(filePath: string): Promise<Response> {
-  const ext = extname(filePath).toLowerCase()
-  const mime = MIME_TYPES[ext] || 'application/octet-stream'
-  return fs.readFile(filePath).then(
-    buf => new Response(buf, {
+function serveResource(resource: Extract<CanonicalResourceOpen, { ok: true }>): Response {
+  try {
+    const ext = extname(resource.path).toLowerCase()
+    const mime = MIME_TYPES[ext] || 'application/octet-stream'
+    return new Response(streamOpenedCanonicalResource(resource), {
       status: 200,
       headers: {
         'content-type': mime,
+        'content-length': String(resource.size),
         'Cache-Control': 'no-store, no-cache, must-revalidate',
       },
-    }),
-    () => new Response('Not found', { status: 404 }),
-  )
+    })
+  } catch (error) {
+    void resource.handle.close().catch(() => {})
+    throw error
+  }
 }
 
 protocol.registerSchemesAsPrivileged([
@@ -103,13 +109,13 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
         const segments = url.pathname.split('/').filter(Boolean).map(s => decodeURIComponent(s))
         const codiconBase = join(__dirname, '..', '..', 'node_modules', '@vscode', 'codicons')
         const candidate = join(codiconBase, ...segments)
-        const resolvedResource = await resolveCanonicalResourcePath(codiconBase, candidate)
+        const resolvedResource = await openCanonicalResource(codiconBase, candidate)
         if (!resolvedResource.ok) {
           return resolvedResource.status === 403
             ? new Response('Forbidden', { status: 403 })
             : new Response('Codicon resource not found', { status: 404 })
         }
-        return serveFile(resolvedResource.path)
+        return serveResource(resolvedResource)
       }
 
       // ── __runext_resource__ — serve absolute file paths scoped to one extension ──
@@ -135,13 +141,13 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
           return new Response('Forbidden', { status: 403 })
         }
         const absPath = resolve('/' + pathSegments.join('/'))
-        const resolvedResource = await resolveCanonicalResourcePath(root, absPath)
+        const resolvedResource = await openCanonicalResource(root, absPath)
         if (!resolvedResource.ok) {
           return resolvedResource.status === 403
             ? new Response('Forbidden', { status: 403 })
             : new Response('Resource not found', { status: 404 })
         }
-        return serveFile(resolvedResource.path)
+        return serveResource(resolvedResource)
       }
 
       // ── Extension assets ──────────────────────────────────────────────────
@@ -164,7 +170,7 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
       }
 
       const filePath = join(root, ...fileSegments)
-      const resolvedResource = await resolveCanonicalResourcePath(root, filePath)
+      const resolvedResource = await openCanonicalResource(root, filePath)
       if (!resolvedResource.ok) {
         return resolvedResource.status === 403
           ? new Response('Forbidden', { status: 403 })
@@ -173,7 +179,13 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
       const canonicalFilePath = resolvedResource.path
 
       if (/\.html?$/i.test(canonicalFilePath)) {
-        const raw = await fs.readFile(canonicalFilePath, 'utf8')
+        const textResource = await readOpenedCanonicalResourceText(resolvedResource)
+        if (!textResource.ok) {
+          return textResource.status === 413
+            ? new Response('Extension HTML resource is too large', { status: 413 })
+            : new Response('Extension resource not found', { status: 404 })
+        }
+        const raw = textResource.text
         // Chat surfaces route through the same bridge — use the surface instance
         // id as the bridge's tileId so host-side RPC routing stays uniform.
         const tileId = url.searchParams.get('tileId') || url.searchParams.get('surfaceId')
@@ -187,15 +199,7 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
         })
       }
 
-      const resp = await net.fetch(pathToFileURL(canonicalFilePath).toString())
-      // Prevent Chromium from caching extension assets so edits take effect immediately
-      const headers = new Headers(resp.headers)
-      headers.set('Cache-Control', 'no-store, no-cache, must-revalidate')
-      return new Response(resp.body, {
-        status: resp.status,
-        statusText: resp.statusText,
-        headers,
-      })
+      return serveResource(resolvedResource)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return new Response(`Extension load failed: ${message}`, { status: 500 })

@@ -14,11 +14,11 @@ import { CODESURF_HOME } from '../paths'
 import { ExtensionContext } from './context'
 import { activatePowerExtension, type ExtensionScope } from './loader'
 import { bus } from '../event-bus'
-import { adapters, tryAdaptExtension } from './adapters'
+import { adapters, assertValidAdaptedManifest, tryAdaptExtension } from './adapters'
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
 import { resolveExtensionEnabled } from './activation-policy'
 import { assertValidExtensionId, isValidExtensionId } from './identity'
-import { resolveCanonicalResourcePath } from './resource-path'
+import { openCanonicalResource, readOpenedCanonicalResourceText } from './resource-path'
 import { log } from '../utils/logger.ts'
 
 const extLog = log.scope('Extensions')
@@ -430,7 +430,7 @@ export class ExtensionRegistry {
 
   /** Load an already-parsed manifest (used by adapters) */
   async loadFromManifest(manifest: ExtensionManifest, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
-    assertValidExtensionId(manifest.id, `adapted manifest directory ${manifest._path ?? '(unknown)'}`)
+    assertValidAdaptedManifest(manifest, manifest._path ?? '(unknown)')
     if (this.extensions.has(manifest.id)) return
 
     normalizeManifestUi(manifest)
@@ -625,10 +625,12 @@ export class ExtensionRegistry {
     if (!entry) return null
     const root = ext.manifest._path
     const abs = resolve(root, ...entry.split(/[\\/]/).filter(Boolean))
-    const resolvedResource = await resolveCanonicalResourcePath(root, abs)
+    const resolvedResource = await openCanonicalResource(root, abs)
     if (!resolvedResource.ok) return null
     try {
-      const raw = await fs.readFile(resolvedResource.path, 'utf8')
+      const textResource = await readOpenedCanonicalResourceText(resolvedResource)
+      if (!textResource.ok) return null
+      const raw = textResource.text
       if (raw.trimStart().startsWith('{')) {
         try {
           const obj = JSON.parse(raw) as { resource?: { contents?: Array<{ text?: string }> }; contents?: Array<{ text?: string }> }
