@@ -359,6 +359,75 @@ test('streamJobEvents aborts reconnect backoff without issuing another request',
   assert.equal(calls.filter(path => path === '/chat/job/events').length, 1)
 })
 
+test('streamJobEvents aborts promptly while daemon startup is slow and observes the abandoned startup rejection', async t => {
+  const originalFetch = globalThis.fetch
+  const fetchCalls = []
+  const unhandled = []
+  let rejectStartup
+  const startup = new Promise((_, reject) => {
+    rejectStartup = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+  globalThis.fetch = async (...args) => {
+    fetchCalls.push(args)
+    throw new Error('fetch should not run')
+  }
+  const client = createDaemonClient({
+    ensureRunning: () => startup,
+    getStatus: async () => ({ running: false, info: null }),
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const startedAt = Date.now()
+  const stream = client.streamJobEvents({
+    jobId: 'job-1',
+    signal: controller.signal,
+    onEvent() {},
+  })
+  setTimeout(() => controller.abort(), 10)
+
+  await assert.rejects(stream, error => error?.name === 'AbortError')
+  assert.ok(Date.now() - startedAt < 250)
+  assert.equal(fetchCalls.length, 0)
+
+  rejectStartup(new Error('late startup failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
+test('request aborts promptly while daemon startup is slow', async t => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  let fetchCalled = false
+  globalThis.fetch = async () => {
+    fetchCalled = true
+    throw new Error('fetch should not run')
+  }
+  const startup = new Promise(() => {})
+  const client = createDaemonClient({
+    ensureRunning: () => startup,
+    getStatus: async () => ({ running: false, info: null }),
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const request = client.request('/chat/job/state?jobId=job-1', {
+    signal: controller.signal,
+  })
+  setTimeout(() => controller.abort(), 10)
+
+  await assert.rejects(request, error => error?.name === 'AbortError')
+  assert.equal(fetchCalled, false)
+})
+
 test('read-only daemon requests retry once after a transient response', async t => {
   const originalFetch = globalThis.fetch
   const calls = []

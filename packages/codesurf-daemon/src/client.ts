@@ -113,6 +113,30 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal)
 }
 
+function awaitAbortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation
+  throwIfAborted(signal)
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      callback()
+    }
+    const onAbort = () => {
+      finish(() => reject(abortReason(signal)))
+    }
+
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
+    )
+  })
+}
+
 async function waitForReconnect(delayMs: number, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal)
   if (delayMs <= 0) return
@@ -147,7 +171,7 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
       throwIfAborted(options.signal)
 
       try {
-        const daemon = await hooks.ensureRunning()
+        const daemon = await awaitAbortable(hooks.ensureRunning(), options.signal)
         throwIfAborted(options.signal)
         const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs)
         const response = await fetch(`http://127.0.0.1:${daemon.port}${path}`, {
@@ -271,7 +295,7 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
       let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
       try {
-        const daemon = await hooks.ensureRunning()
+        const daemon = await awaitAbortable(hooks.ensureRunning(), options.signal)
         throwIfAborted(options.signal)
         const query = new URLSearchParams({
           jobId,
