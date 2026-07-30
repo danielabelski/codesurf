@@ -64,9 +64,11 @@ class IpcValidationError extends Error {
 export function handleTyped<Spec extends readonly ZodType[]>(
   channel: string,
   options: HandleTypedOptions<Spec>,
+  ipcMainOverride?: Pick<typeof import('electron')['ipcMain'], 'handle'>,
 ): void {
   const { args: schemas, handler } = options
-  getIpcMain().handle(channel, async (event, ...rawArgs) => {
+  const ipcMain = ipcMainOverride ?? getIpcMain()
+  ipcMain.handle(channel, async (event, ...rawArgs) => {
     if (rawArgs.length > schemas.length) {
       throw new IpcValidationError(channel, {
         message: `too many arguments: expected ${schemas.length}, got ${rawArgs.length}`,
