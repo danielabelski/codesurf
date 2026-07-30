@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildInstructionPrompt, loadInstructionContext } from '../../bin/instruction-context.mjs'
+import { MAX_CONTEXT_FILE_BYTES } from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 
 async function makeFixture() {
   const root = await mkdtemp(join(tmpdir(), 'codesurf-instruction-context-'))
@@ -147,4 +148,38 @@ test('unexpected instruction file read errors are surfaced instead of silently i
     }),
     /AGENTS\.md|EISDIR/i,
   )
+})
+
+test('instruction files at the byte limit stay identical and one-byte-over UTF-8 files are visibly truncated', async t => {
+  const fixture = await makeFixture()
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true })
+  })
+
+  const exact = 'é'.repeat(MAX_CONTEXT_FILE_BYTES / 2)
+  await writeFile(join(fixture.workspaceDir, 'AGENTS.md'), exact, 'utf8')
+  let context = await loadInstructionContext({
+    homeDir: fixture.homeDir,
+    workspaceDir: fixture.workspaceDir,
+    executionTarget: 'local',
+  })
+
+  assert.equal(context.sections[0].content, exact)
+  assert.equal(context.sections[0].originalBytes, MAX_CONTEXT_FILE_BYTES)
+  assert.equal(context.sections[0].includedBytes, MAX_CONTEXT_FILE_BYTES)
+  assert.equal(context.sections[0].truncated, false)
+
+  const oneByteOver = `${'a'.repeat(MAX_CONTEXT_FILE_BYTES - 1)}é`
+  await writeFile(join(fixture.workspaceDir, 'AGENTS.md'), oneByteOver, 'utf8')
+  context = await loadInstructionContext({
+    homeDir: fixture.homeDir,
+    workspaceDir: fixture.workspaceDir,
+    executionTarget: 'local',
+  })
+
+  assert.equal(context.sections[0].originalBytes, MAX_CONTEXT_FILE_BYTES + 1)
+  assert.equal(context.sections[0].truncated, true)
+  assert.match(context.sections[0].content, /maximum context file bytes/)
+  assert.ok(Buffer.byteLength(context.sections[0].content, 'utf8') <= MAX_CONTEXT_FILE_BYTES)
+  assert.doesNotMatch(context.sections[0].content, /\uFFFD/)
 })

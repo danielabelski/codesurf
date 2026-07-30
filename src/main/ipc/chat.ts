@@ -34,6 +34,15 @@ import type { ExecutionHostRecord } from '../../shared/types'
 import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { parseSseJsonBuffer } from '@codesurf/daemon/sse'
+import {
+  MAX_AGGREGATE_INSTRUCTION_BYTES,
+  MAX_PERSONA_PROMPT_BYTES,
+  MAX_SKILLS_PROMPT_BYTES,
+  MAX_SKILLS_SUMMARY_BYTES,
+  boundContextWithReservedSuffix,
+  previewContextToolInput,
+  truncateUtf8,
+} from '../../../packages/codesurf-daemon/bin/context-budget.mjs'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
 import { getWorkspacePathById, readSettingsSync } from './workspace'
 
@@ -584,6 +593,54 @@ function buildMemoryContextInput(context: LoadedMemoryContext | null | undefined
   )
 }
 
+function boundOptionalRuntimeContext(value: unknown, maxBytes: number, reason: string): string | undefined {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) return undefined
+  return truncateUtf8(normalized, maxBytes, { reason }).text
+}
+
+function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
+  const memory = boundContextWithReservedSuffix(
+    req.memoryPrompt,
+    req.roomContext,
+    MAX_AGGREGATE_INSTRUCTION_BYTES,
+    {
+      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    },
+  )
+  const skillsPrompt = boundOptionalRuntimeContext(
+    req.skillsPrompt,
+    MAX_SKILLS_PROMPT_BYTES,
+    `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
+  )
+  const skillsSummary = boundOptionalRuntimeContext(
+    req.skillsSummary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
+  const personaPrompt = boundOptionalRuntimeContext(
+    req.agentMode?.systemPrompt,
+    MAX_PERSONA_PROMPT_BYTES,
+    `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
+  )
+  return {
+    ...req,
+    memoryPrompt: memory.text,
+    roomContext: memory.suffix,
+    skillsPrompt,
+    skillsSummary,
+    ...(req.agentMode
+      ? {
+        agentMode: {
+          ...req.agentMode,
+          systemPrompt: personaPrompt ?? '',
+        },
+      }
+      : {}),
+  }
+}
+
 function emitMemoryContextLoaded(cardId: string, context: LoadedMemoryContext | null | undefined): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
@@ -591,13 +648,17 @@ function emitMemoryContextLoaded(cardId: string, context: LoadedMemoryContext | 
   sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
   const input = buildMemoryContextInput(context)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(cardId, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
   sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
 }
 
 function summarizeSelectedSkills(index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): string | undefined {
-  return String(index?.selection?.summary ?? '').trim() || undefined
+  return boundOptionalRuntimeContext(
+    index?.selection?.summary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
 }
 
 function buildSelectedSkillsPrompt(index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): string | undefined {
@@ -611,7 +672,7 @@ function emitSelectedSkillsLoaded(cardId: string, index: Awaited<ReturnType<type
   sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Included Skills' })
   const input = buildSelectedSkillsPrompt(index)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(cardId, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
   sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
 }
@@ -1081,7 +1142,9 @@ export function registerChatIPC(): void {
     emitFileReferenceExpansion(req.cardId, fileReferenceExpansion)
 
     // Room membership + consume pending traffic (all execution backends)
-    requestWithFileReferences = attachRoomContext(requestWithFileReferences)
+    requestWithFileReferences = revalidateRuntimeContextRequest(
+      attachRoomContext(requestWithFileReferences),
+    )
 
     if (daemonHost) {
       log('chat execution route', {

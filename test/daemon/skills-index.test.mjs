@@ -6,6 +6,12 @@ import { chmodSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildSkillSelectionPrompt, createSkillsIndex } from '../../bin/skills-index.mjs'
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_SELECTED_SKILLS,
+  MAX_SKILL_DESCRIPTION_BYTES,
+  MAX_SKILLS_PROMPT_BYTES,
+} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 
 const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
@@ -160,6 +166,117 @@ test('buildSkillSelectionPrompt summarizes selected workspace, global, and comma
   assert.match(result.prompt, /@lint-fix \[workspace\] — Fix lint failures before commit\./)
   assert.match(result.prompt, /@\/compact \[command\] — Compact conversation\./)
   assert.match(result.prompt, /@release-notes \[global\] — Write concise release notes\./)
+})
+
+test('selected skills cap count and UTF-8 description bytes with visible omission markers', () => {
+  const skills = Array.from({ length: 30 }, (_, index) => ({
+    id: `skill-${index}`,
+    name: `skill-${index}`,
+    description: index === 0
+      ? 'é'.repeat(MAX_SKILL_DESCRIPTION_BYTES)
+      : `Description ${index}.`,
+    scope: 'workspace',
+    kind: 'skill',
+    displayPath: `.codesurf/skills/skill-${index}/SKILL.md`,
+  }))
+  const result = buildSkillSelectionPrompt({
+    skills,
+    selection: {
+      enabledIds: skills.map(skill => skill.id),
+      disabledIds: [],
+    },
+  })
+
+  assert.equal(result.resolved.length, MAX_SELECTED_SKILLS)
+  assert.equal(result.omittedCount, 30 - MAX_SELECTED_SKILLS)
+  assert.equal(result.omittedIds[0], `skill-${MAX_SELECTED_SKILLS}`)
+  assert.match(result.summary, /omitted 6 selected skills/)
+  assert.match(result.prompt, /maximum selected skills/)
+  assert.doesNotMatch(result.prompt, /@skill-29 /)
+  assert.match(result.resolved[0].description, /maximum skill description bytes/)
+  assert.match(result.summary, /1 skill description truncated by maximum skill description bytes/)
+  assert.match(result.summary, /omitted 6 selected skills by maximum selected skills/)
+  assert.ok(Buffer.byteLength(result.resolved[0].description, 'utf8') <= MAX_SKILL_DESCRIPTION_BYTES)
+  assert.equal(result.metadata[0].truncated, true)
+  assert.ok(Buffer.byteLength(result.prompt, 'utf8') <= MAX_SKILLS_PROMPT_BYTES)
+})
+
+test('skill selection summary reports aggregate prompt truncation', () => {
+  const hugeName = 'n'.repeat(MAX_SKILLS_PROMPT_BYTES)
+  const result = buildSkillSelectionPrompt({
+    skills: [{
+      id: 'huge-summary-skill',
+      name: hugeName,
+      description: 'é'.repeat(MAX_SKILL_DESCRIPTION_BYTES),
+      scope: 'workspace',
+      kind: 'skill',
+      displayPath: '.codesurf/skills/huge-summary-skill/SKILL.md',
+    }],
+    selection: {
+      enabledIds: ['huge-summary-skill'],
+      disabledIds: [],
+    },
+  })
+
+  assert.equal(result.promptMetadata.truncated, true)
+  assert.match(result.summary, /^Included 1 skill \(1 skill description truncated/)
+  assert.match(result.summary, /aggregate skill prompt truncated by maximum skills prompt bytes/)
+})
+
+test('skill list and detail reads share the bounded context-file contract', async t => {
+  const homeDir = await makeTestTempDir('skills-index-byte-budget-')
+  const workspaceDir = join(homeDir, 'project')
+  const skillDir = join(workspaceDir, '.codesurf', 'skills', 'large-skill')
+  await mkdir(skillDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const skillPath = join(skillDir, 'SKILL.md')
+  await writeFile(
+    skillPath,
+    `---\nname: Large Skill\ndescription: Large but bounded.\n---\n${'é'.repeat(MAX_CONTEXT_FILE_BYTES)}`,
+    'utf8',
+  )
+  const index = createSkillsIndex({ homeDir, userHomeDir: homeDir })
+  const listed = await index.listSkills({ workspaceDir })
+  const listedSkill = listed.skills.find(skill => skill.id === `discovered-${skillPath}`)
+  assert.ok(listedSkill)
+  assert.equal(listedSkill.contextMetadata.truncated, true)
+  assert.ok(listedSkill.contextMetadata.includedBytes <= MAX_CONTEXT_FILE_BYTES)
+  assert.equal(Object.prototype.hasOwnProperty.call(listedSkill, 'content'), false)
+
+  const detailed = await index.getSkill({
+    workspaceDir,
+    skillId: `discovered-${skillPath}`,
+  })
+  assert.ok(detailed)
+  assert.equal(detailed.contextMetadata.truncated, true)
+  assert.ok(Buffer.byteLength(detailed.content, 'utf8') <= MAX_CONTEXT_FILE_BYTES)
+  assert.match(detailed.content, /maximum context file bytes/)
+  assert.doesNotMatch(detailed.content, /\uFFFD/)
+})
+
+test('oversized saved-skill metadata is reported visibly without a full-file read', async t => {
+  const homeDir = await makeTestTempDir('skills-index-saved-budget-')
+  const workspaceDir = join(homeDir, 'project')
+  const savedSkillsFile = join(workspaceDir, '.codesurf', 'customisation', 'skills.json')
+  await writeJson(savedSkillsFile, [{
+    id: 'custom:oversized',
+    name: 'Oversized',
+    description: 'Saved skill with oversized metadata.',
+    content: 'x'.repeat(MAX_CONTEXT_FILE_BYTES),
+  }])
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const index = createSkillsIndex({ homeDir, userHomeDir: homeDir })
+  const result = await index.listSkills({ workspaceDir })
+  assert.ok(result.skippedLocations.some(entry =>
+    entry.path === savedSkillsFile && entry.code === 'CONTEXT_FILE_LIMIT',
+  ))
+  assert.equal(result.skills.some(skill => skill.id === 'custom:oversized'), false)
 })
 
 test('daemon skills list/get/install merge global and workspace roots with inspectable selection summaries', async t => {

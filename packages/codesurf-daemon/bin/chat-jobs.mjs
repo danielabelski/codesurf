@@ -8,6 +8,15 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
+import {
+  MAX_AGGREGATE_INSTRUCTION_BYTES,
+  MAX_PERSONA_PROMPT_BYTES,
+  MAX_SKILLS_PROMPT_BYTES,
+  MAX_SKILLS_SUMMARY_BYTES,
+  boundContextWithReservedSuffix,
+  previewContextToolInput,
+  truncateUtf8,
+} from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,
@@ -676,7 +685,8 @@ function buildCodeSurfActivityConvention() {
 }
 
 function summarizeMemoryContext(contextBuckets, instructionPrompt) {
-  return describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
+  return String(contextBuckets?.inspect?.summary ?? '').trim()
+    || describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
 }
 
 function buildMemoryContextInput(contextBuckets, instructionPrompt) {
@@ -688,7 +698,91 @@ function buildMemoryContextInput(contextBuckets, instructionPrompt) {
 // so the persona frames the turn the same way for every provider. Empty/missing
 // systemPrompt contributes nothing (joinPromptSections drops blank sections).
 function agentPersonaPrompt(request) {
-  return String(request?.agentMode?.systemPrompt ?? '').trim() || undefined
+  const value = String(request?.agentMode?.systemPrompt ?? '').trim()
+  if (!value) return undefined
+  return truncateUtf8(value, MAX_PERSONA_PROMPT_BYTES, {
+    reason: `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
+  }).text
+}
+
+function boundOptionalContext(value, maxBytes, reason) {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) {
+    return {
+      value: undefined,
+      metadata: {
+        originalBytes: 0,
+        includedBytes: 0,
+        truncated: false,
+        truncationReason: null,
+      },
+    }
+  }
+  const bounded = truncateUtf8(normalized, maxBytes, { reason })
+  return {
+    value: bounded.text,
+    metadata: {
+      originalBytes: bounded.originalBytes,
+      includedBytes: bounded.includedBytes,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+    },
+  }
+}
+
+export function revalidateDaemonContextRequest(request = {}) {
+  const memory = boundContextWithReservedSuffix(
+    request.memoryPrompt,
+    request.roomContext,
+    MAX_AGGREGATE_INSTRUCTION_BYTES,
+    {
+      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    },
+  )
+  const skills = boundOptionalContext(
+    request.skillsPrompt,
+    MAX_SKILLS_PROMPT_BYTES,
+    `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
+  )
+  const skillsSummary = boundOptionalContext(
+    request.skillsSummary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
+  const persona = boundOptionalContext(
+    request?.agentMode?.systemPrompt,
+    MAX_PERSONA_PROMPT_BYTES,
+    `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
+  )
+  return {
+    request: {
+      ...request,
+      memoryPrompt: memory.text,
+      roomContext: memory.suffix,
+      skillsPrompt: skills.value,
+      skillsSummary: skillsSummary.value,
+      ...(request?.agentMode && typeof request.agentMode === 'object'
+        ? {
+            agentMode: {
+              ...request.agentMode,
+              systemPrompt: persona.value ?? '',
+            },
+          }
+        : {}),
+    },
+    metadata: {
+      memoryPrompt: {
+        originalBytes: memory.originalBytes,
+        includedBytes: memory.includedBytes,
+        truncated: memory.truncated,
+        truncationReason: memory.truncationReason,
+      },
+      skillsPrompt: skills.metadata,
+      skillsSummary: skillsSummary.metadata,
+      personaPrompt: persona.metadata,
+    },
+  }
 }
 
 function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
@@ -2592,6 +2686,12 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         request = { ...request, agentMode: authoritative.agentMode }
       }
 
+      // Treat every caller-provided context field as untrusted at the daemon
+      // boundary. Main-process validation is useful UX, but remote callers and
+      // older clients can bypass it; provider builders only see this copy.
+      const contextValidation = revalidateDaemonContextRequest(request)
+      request = contextValidation.request
+
       const memoryContext = await loadMemoryContext({
         homeDir,
         workspaceDir,
@@ -2599,8 +2699,21 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         executionTarget: request.executionTarget ?? 'local',
       })
       const instructionPrompt = String(request.memoryPrompt ?? '').trim() || buildMemoryPrompt(memoryContext)
-      const contextBuckets = buildContextBucketBundle(request.contextBuckets ?? memoryContext, instructionPrompt)
-      const memorySummary = summarizeMemoryContext(contextBuckets, instructionPrompt)
+      const suppliedContext = request.contextBuckets ?? memoryContext
+      const contextBuckets = buildContextBucketBundle(suppliedContext, instructionPrompt)
+      const suppliedContextSummary = String(suppliedContext?.inspect?.summary ?? '').trim()
+      if (suppliedContextSummary && contextBuckets.inspect) {
+        contextBuckets.inspect.summary = suppliedContextSummary
+      }
+      const baseMemorySummary = summarizeMemoryContext(contextBuckets, instructionPrompt)
+      const unboundedMemorySummary = contextValidation.metadata.memoryPrompt.truncated
+        ? `${baseMemorySummary || 'Loaded workspace instructions for this run.'}; caller-provided prompt was truncated by the daemon context budget`
+        : baseMemorySummary
+      const memorySummary = unboundedMemorySummary
+        ? truncateUtf8(unboundedMemorySummary, MAX_SKILLS_SUMMARY_BYTES, {
+            reason: `maximum context summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+          }).text
+        : undefined
       const memoryInput = buildMemoryContextInput(contextBuckets, instructionPrompt)
       if (memorySummary) {
         await appendEvent(job.id, {
@@ -2609,10 +2722,11 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           toolName: 'Workspace Instructions',
         })
         if (memoryInput) {
+          const preview = previewContextToolInput(memoryInput)
           await appendEvent(job.id, {
             type: 'tool_input',
             toolId: 'codesurf-memory-context',
-            text: memoryInput,
+            text: preview.text,
           })
         }
         await appendEvent(job.id, {
@@ -2623,8 +2737,16 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         })
       }
 
-      const skillsSummary = String(request.skillsSummary ?? '').trim()
+      const baseSkillsSummary = String(request.skillsSummary ?? '').trim()
       const skillsPrompt = String(request.skillsPrompt ?? '').trim()
+      const unboundedSkillsSummary = contextValidation.metadata.skillsPrompt.truncated
+        ? `${baseSkillsSummary || 'Included skills context for this run.'}; caller-provided prompt was truncated by the daemon context budget`
+        : baseSkillsSummary || (skillsPrompt ? 'Included skills context for this run.' : '')
+      const skillsSummary = unboundedSkillsSummary
+        ? truncateUtf8(unboundedSkillsSummary, MAX_SKILLS_SUMMARY_BYTES, {
+            reason: `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+          }).text
+        : ''
       if (skillsSummary) {
         await appendEvent(job.id, {
           type: 'tool_start',
@@ -2632,10 +2754,11 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           toolName: 'Included Skills',
         })
         if (skillsPrompt) {
+          const preview = previewContextToolInput(skillsPrompt)
           await appendEvent(job.id, {
             type: 'tool_input',
             toolId: 'codesurf-skills-context',
-            text: skillsPrompt,
+            text: preview.text,
           })
         }
         await appendEvent(job.id, {

@@ -1,29 +1,60 @@
 import { constants as fsConstants, promises as fs } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_INSTRUCTION_SECTIONS,
+  budgetInstructionFragments,
+  formatInstructionBudgetNotice,
+  truncateUtf8Buffer,
+  utf8ByteLength,
+} from './context-budget.mjs'
 
 export async function loadInstructionContext({ homeDir, workspaceDir, executionTarget = 'local' } = {}) {
   const sections = []
 
   for (const candidate of instructionCandidates({ homeDir, workspaceDir, executionTarget })) {
-    const content = await readInstructionFile(candidate)
-    if (!content) continue
+    const loaded = await readInstructionFile(candidate)
+    if (!loaded?.content) continue
     sections.push({
       scope: candidate.scope,
+      bucket: candidate.bucket,
       displayPath: candidate.displayPath,
       path: candidate.path,
-      content,
+      source: candidate.path,
+      precedence: sections.length,
+      content: loaded.content,
+      originalBytes: loaded.originalBytes,
+      includedBytes: utf8ByteLength(loaded.content),
+      truncated: loaded.truncated,
+      truncationReason: loaded.truncationReason,
     })
   }
 
-  return { sections }
+  const budget = budgetInstructionFragments(sections, {
+    reservedBytes: instructionPromptReservedBytes(sections),
+  })
+  const notice = formatInstructionBudgetNotice(budget)
+  return {
+    sections: budget.fragments,
+    budget,
+    ...(notice ? { notices: [notice] } : {}),
+  }
 }
 
 export function buildInstructionPrompt(context) {
-  const sections = Array.isArray(context?.sections)
+  const inputSections = Array.isArray(context?.sections)
     ? context.sections.filter(section => section && typeof section.content === 'string' && section.content.trim().length > 0)
     : []
-
-  if (sections.length === 0) return undefined
+  const budget = budgetInstructionFragments(inputSections, {
+    reservedBytes: instructionPromptReservedBytes(inputSections),
+  })
+  const sections = budget.fragments
+  const notices = Array.isArray(context?.notices)
+    ? context.notices.map(value => String(value ?? '').trim()).filter(Boolean)
+    : []
+  const generatedNotice = formatInstructionBudgetNotice(budget)
+  if (generatedNotice && !notices.includes(generatedNotice)) notices.push(generatedNotice)
+  if (sections.length === 0 && notices.length === 0) return undefined
 
   const lines = [
     '## Workspace Instructions',
@@ -37,6 +68,8 @@ export function buildInstructionPrompt(context) {
     lines.push('')
   }
 
+  for (const notice of notices) lines.push(notice)
+
   return lines.join('\n').trim()
 }
 
@@ -48,6 +81,7 @@ function instructionCandidates({ homeDir, workspaceDir, executionTarget }) {
   if (executionTarget !== 'cloud' && normalizedHome) {
     candidates.push({
       scope: 'user',
+      bucket: 'local-only',
       displayPath: '~/.codesurf/AGENTS.md',
       path: join(normalizedHome, '.codesurf', 'AGENTS.md'),
       disallowSymlink: false,
@@ -57,18 +91,22 @@ function instructionCandidates({ homeDir, workspaceDir, executionTarget }) {
   if (normalizedWorkspace) {
     candidates.push({
       scope: 'workspace',
+      bucket: 'remote-safe',
       displayPath: 'AGENTS.md',
       path: join(normalizedWorkspace, 'AGENTS.md'),
       rootPath: normalizedWorkspace,
       disallowSymlink: true,
     })
-    candidates.push({
-      scope: 'workspace-local',
-      displayPath: '.codesurf/AGENTS.md',
-      path: join(normalizedWorkspace, '.codesurf', 'AGENTS.md'),
-      rootPath: normalizedWorkspace,
-      disallowSymlink: true,
-    })
+    if (executionTarget !== 'cloud') {
+      candidates.push({
+        scope: 'workspace-local',
+        bucket: 'local-only',
+        displayPath: '.codesurf/AGENTS.md',
+        path: join(normalizedWorkspace, '.codesurf', 'AGENTS.md'),
+        rootPath: normalizedWorkspace,
+        disallowSymlink: true,
+      })
+    }
   }
 
   return candidates
@@ -84,6 +122,27 @@ function sectionTitle(scope) {
     default:
       return 'Workspace Instructions'
   }
+}
+
+function instructionPromptReservedBytes(sections) {
+  const ranked = (Array.isArray(sections) ? sections : [])
+    .map((section, index) => ({
+      section,
+      index,
+      precedence: Number.isFinite(section?.precedence) ? Number(section.precedence) : index,
+    }))
+    .sort((left, right) => right.precedence - left.precedence || right.index - left.index)
+    .slice(0, MAX_INSTRUCTION_SECTIONS)
+    .sort((left, right) => left.index - right.index)
+  const fixed = utf8ByteLength([
+    '## Workspace Instructions',
+    'Follow these layered instructions in addition to the user request. If they conflict, later sections override earlier ones.',
+    '',
+  ].join('\n'))
+  const sectionChrome = ranked.reduce((total, { section }) => {
+    return total + utf8ByteLength(`### ${sectionTitle(section.scope)} (${section.displayPath})\n\n`)
+  }, 0)
+  return fixed + sectionChrome + 2 * 1024
 }
 
 function normalizeDir(value) {
@@ -103,9 +162,9 @@ async function readInstructionFile(candidate) {
       : 'r'
 
     handle = await fs.open(candidate.path, openFlags)
+    const openedStat = await handle.stat()
 
     if (resolvedRootPath) {
-      const openedStat = await handle.stat()
       const resolvedCandidatePath = await fs.realpath(candidate.path)
       if (!isWithinRoot(resolvedCandidatePath, resolvedRootPath)) {
         throw new Error(`Instruction file ${candidate.displayPath} resolves outside the workspace root`)
@@ -116,8 +175,19 @@ async function readInstructionFile(candidate) {
       }
     }
 
-    const raw = await handle.readFile({ encoding: 'utf8' })
-    return normalizeInstructionContent(raw)
+    const raw = await readAtMost(handle, MAX_CONTEXT_FILE_BYTES + 1)
+    const bounded = truncateUtf8Buffer(raw, MAX_CONTEXT_FILE_BYTES, {
+      reason: `maximum context file bytes (${MAX_CONTEXT_FILE_BYTES})`,
+      originalBytes: openedStat.size,
+    })
+    const content = normalizeInstructionContent(bounded.text)
+    if (!content) return null
+    return {
+      content,
+      originalBytes: openedStat.size,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+    }
   } catch (error) {
     if (error?.code === 'ENOENT' && handle == null) {
       return null
@@ -132,6 +202,17 @@ async function readInstructionFile(candidate) {
   } finally {
     await handle?.close().catch(() => {})
   }
+}
+
+async function readAtMost(handle, byteCount) {
+  const buffer = Buffer.allocUnsafe(byteCount)
+  let offset = 0
+  while (offset < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  return buffer.subarray(0, offset)
 }
 
 function isWithinRoot(candidatePath, rootPath) {
