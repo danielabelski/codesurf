@@ -53,6 +53,22 @@ test('daemon revalidates inbound memory, skills, summary, and persona prompts by
   assert.doesNotMatch(result.request.agentMode.systemPrompt, /\uFFFD/)
 })
 
+test('daemon memory bounding reserves an appended higher-precedence room context', () => {
+  const roomContext = 'ROOM-CONTEXT-MUST-SURVIVE'
+  const baseMemory = `MEMORY-START\n${'m'.repeat(MAX_AGGREGATE_INSTRUCTION_BYTES)}\nMEMORY-END`
+  const result = revalidateDaemonContextRequest({
+    memoryPrompt: `${baseMemory}\n\n${roomContext}`,
+    roomContext,
+  })
+
+  assert.ok(Buffer.byteLength(result.request.memoryPrompt, 'utf8') <= MAX_AGGREGATE_INSTRUCTION_BYTES)
+  assert.equal(result.request.roomContext, roomContext)
+  assert.match(result.request.memoryPrompt, /maximum aggregate instruction bytes/)
+  assert.ok(result.request.memoryPrompt.endsWith(roomContext))
+  assert.equal(result.request.memoryPrompt.match(/ROOM-CONTEXT-MUST-SURVIVE/g)?.length, 1)
+  assert.equal(result.metadata.memoryPrompt.truncated, true)
+})
+
 test('context transcript inputs stay at 8 KiB while Claude receives the larger bounded prompts', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-context-preview-'))
   const workspaceDir = join(homeDir, 'workspace')

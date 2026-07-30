@@ -458,9 +458,6 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
   }
   const previewNames = resolved.slice(0, 4).map(skill => skill.name)
   const suffix = resolved.length > 4 ? ` +${resolved.length - 4} more` : ''
-  const omissionSummary = omittedIds.length > 0
-    ? `; omitted ${omittedIds.length} selected skill${omittedIds.length === 1 ? '' : 's'} by maximum selected skills (${MAX_SELECTED_SKILLS})`
-    : ''
   const omissionMarker = omittedIds.length > 0
     ? `[Skill selection limited: ${omittedIds.length} selected skill${omittedIds.length === 1 ? '' : 's'} omitted by maximum selected skills (${MAX_SELECTED_SKILLS}).]`
     : null
@@ -474,6 +471,21 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
   const boundedPrompt = truncateUtf8(prompt, MAX_SKILLS_PROMPT_BYTES, {
     reason: `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
   })
+  const truncatedDescriptionCount = metadata.filter(item => item.truncated).length
+  const summaryNotices = [
+    ...(truncatedDescriptionCount > 0
+      ? [`${truncatedDescriptionCount} skill description${truncatedDescriptionCount === 1 ? '' : 's'} truncated by maximum skill description bytes (${MAX_SKILL_DESCRIPTION_BYTES})`]
+      : []),
+    ...(omittedIds.length > 0
+      ? [`omitted ${omittedIds.length} selected skill${omittedIds.length === 1 ? '' : 's'} by maximum selected skills (${MAX_SELECTED_SKILLS})`]
+      : []),
+    ...(boundedPrompt.truncated
+      ? [`aggregate skill prompt truncated by maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`]
+      : []),
+  ]
+  const summaryNotice = summaryNotices.length > 0
+    ? ` (${summaryNotices.join('; ')})`
+    : ''
   return {
     enabledIds,
     disabledIds,
@@ -482,7 +494,7 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
     omittedIds,
     omittedCount: omittedIds.length,
     metadata,
-    summary: `Included ${resolved.length} skill${resolved.length === 1 ? '' : 's'}: ${previewNames.join(', ')}${suffix}${omissionSummary}`,
+    summary: `Included ${resolved.length} skill${resolved.length === 1 ? '' : 's'}${summaryNotice}: ${previewNames.join(', ')}${suffix}`,
     prompt: boundedPrompt.text,
     promptMetadata: {
       source: 'selected-skills',

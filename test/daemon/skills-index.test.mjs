@@ -194,9 +194,33 @@ test('selected skills cap count and UTF-8 description bytes with visible omissio
   assert.match(result.prompt, /maximum selected skills/)
   assert.doesNotMatch(result.prompt, /@skill-29 /)
   assert.match(result.resolved[0].description, /maximum skill description bytes/)
+  assert.match(result.summary, /1 skill description truncated by maximum skill description bytes/)
+  assert.match(result.summary, /omitted 6 selected skills by maximum selected skills/)
   assert.ok(Buffer.byteLength(result.resolved[0].description, 'utf8') <= MAX_SKILL_DESCRIPTION_BYTES)
   assert.equal(result.metadata[0].truncated, true)
   assert.ok(Buffer.byteLength(result.prompt, 'utf8') <= MAX_SKILLS_PROMPT_BYTES)
+})
+
+test('skill selection summary reports aggregate prompt truncation', () => {
+  const hugeName = 'n'.repeat(MAX_SKILLS_PROMPT_BYTES)
+  const result = buildSkillSelectionPrompt({
+    skills: [{
+      id: 'huge-summary-skill',
+      name: hugeName,
+      description: 'é'.repeat(MAX_SKILL_DESCRIPTION_BYTES),
+      scope: 'workspace',
+      kind: 'skill',
+      displayPath: '.codesurf/skills/huge-summary-skill/SKILL.md',
+    }],
+    selection: {
+      enabledIds: ['huge-summary-skill'],
+      disabledIds: [],
+    },
+  })
+
+  assert.equal(result.promptMetadata.truncated, true)
+  assert.match(result.summary, /^Included 1 skill \(1 skill description truncated/)
+  assert.match(result.summary, /aggregate skill prompt truncated by maximum skills prompt bytes/)
 })
 
 test('skill list and detail reads share the bounded context-file contract', async t => {

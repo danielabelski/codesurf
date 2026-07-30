@@ -4,6 +4,7 @@ import { buildContextBucketBundle, getIncludedContextBuckets } from './context-b
 import {
   MAX_CONTEXT_FILE_BYTES,
   MAX_IMPORT_DEPTH,
+  MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
   budgetInstructionFragments,
   formatInstructionBudgetNotice,
@@ -21,51 +22,71 @@ export async function loadMemoryContext({
   const normalizedWorkspace = normalizeDir(workspaceDir)
   const orderedProjectPaths = orderProjectPaths(normalizedWorkspace, projectPaths)
   const sections = []
+  const includedBuckets = getIncludedContextBuckets(executionTarget)
+  // Apply the outbound privacy policy before opening files, following imports,
+  // or consuming any traversal/budget accounting. Cloud runs must not let
+  // local-only candidates suppress visible remote-safe instructions.
   const candidates = memoryCandidates({
     homeDir: normalizedHome,
     workspaceDir: normalizedWorkspace,
     projectPaths: orderedProjectPaths,
-  })
-  const firstCandidateIndex = Math.max(0, candidates.length - MAX_INSTRUCTION_SECTIONS)
+  }).filter(candidate => includedBuckets.includes(candidate.bucket))
   const traversal = {
     visited: new Set(),
-    importCount: 0,
-    maxImportCount: Math.max(0, MAX_INSTRUCTION_SECTIONS - Math.min(candidates.length, MAX_INSTRUCTION_SECTIONS)),
-    nextPrecedence: 0,
+    omittedVisits: new Set(),
+    selectedSectionCount: 0,
+    importTraversalAttempts: 0,
+    importTraversalLimitReported: false,
     omissions: [],
+    includedBuckets,
+    rootCandidatePaths: new Set(candidates.map(candidate => candidate.path)),
+    sections,
   }
 
-  if (firstCandidateIndex > 0) {
-    traversal.omissions.push(contextOmissionMetadata({
-      source: 'memory-candidates',
-      displayPath: `${firstCandidateIndex} lower-precedence root candidates`,
-      scope: 'workspace',
-      bucket: 'remote-safe',
-      precedence: 0,
-      reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS})`,
-    }))
+  // Later root candidates have higher precedence. Traverse from high to low so
+  // the I/O cap is allocated the same way as the final content budget.
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index]
+    if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) break
+    await readMemorySections(candidate, traversal, {
+      orderKey: [index],
+    })
   }
 
-  for (const candidate of candidates.slice(firstCandidateIndex)) {
-    const loaded = await readMemorySections(candidate, traversal)
-    if (loaded.length > 0) sections.push(...loaded)
+  sections.sort((left, right) => compareOrderKeys(left.orderKey, right.orderKey))
+  for (let index = 0; index < sections.length; index += 1) {
+    sections[index].precedence = index
+    delete sections[index].orderKey
   }
 
-  const includedBuckets = getIncludedContextBuckets(executionTarget)
-  // Privacy filtering is intentionally before allocation: local-only content
-  // can never consume the remote-safe aggregate budget for a cloud target.
-  const selectedSections = sections.filter(section => includedBuckets.includes(section.bucket))
-  const budget = budgetInstructionFragments(selectedSections, {
-    reservedBytes: memoryPromptReservedBytes(selectedSections),
+  // `sections` contains only successfully loaded, non-empty, visible content.
+  // The shared allocator therefore applies its count cap to real sections,
+  // never to candidate paths that did not exist.
+  const budget = budgetInstructionFragments(sections, {
+    reservedBytes: memoryPromptReservedBytes(sections),
   })
   const omittedByDepth = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import depth')).length
-  const omittedByImportCount = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum included instruction sections')).length
+  const omittedByTraversalAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import traversal attempts')).length
+  const importedSectionSources = new Set(
+    sections
+      .filter(section => section.importedFrom)
+      .map(section => section.source),
+  )
+  const untraversedImportCount = traversal.omissions.filter(item =>
+    item.importedFrom
+    && item.truncationReason?.startsWith('maximum included instruction sections'),
+  ).length
+  const omittedByImportCount = budget.omitted.filter(item => importedSectionSources.has(item.source)).length
+    + untraversedImportCount
   const extraNotices = []
   if (omittedByDepth > 0) {
     extraNotices.push(`${omittedByDepth} import${omittedByDepth === 1 ? '' : 's'} omitted by maximum import depth (${MAX_IMPORT_DEPTH}).`)
   }
+  if (omittedByTraversalAttempts > 0) {
+    extraNotices.push(`Lower-precedence import traversal stopped after maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}).`)
+  }
   if (omittedByImportCount > 0) {
-    extraNotices.push(`${omittedByImportCount} import or root candidate${omittedByImportCount === 1 ? '' : 's'} omitted by maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}).`)
+    extraNotices.push(`${omittedByImportCount} lower-precedence import branch${omittedByImportCount === 1 ? '' : 'es'} omitted or not traversed after maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}).`)
   }
   const notice = formatInstructionBudgetNotice(budget, extraNotices)
   const notices = notice ? [notice] : []
@@ -88,9 +109,12 @@ export async function loadMemoryContext({
       ...budget,
       omissions: [...budget.omitted, ...traversal.omissions],
       omittedByDepth,
+      omittedByTraversalAttempts,
       omittedByImportCount,
+      untraversedImportCount,
       maxFileBytes: MAX_CONTEXT_FILE_BYTES,
       maxImportDepth: MAX_IMPORT_DEPTH,
+      maxImportTraversalAttempts: MAX_IMPORT_TRAVERSAL_ATTEMPTS,
     },
     ...(notices.length > 0 ? { notices } : {}),
   }
@@ -145,7 +169,8 @@ export function describeMemoryContextForTool(context, promptOverride) {
     : []
   const omittedCount = Number(context?.budget?.omittedSectionCount ?? 0)
     + Number(context?.budget?.omittedByDepth ?? 0)
-    + Number(context?.budget?.omittedByImportCount ?? 0)
+    + Number(context?.budget?.omittedByTraversalAttempts ?? 0)
+    + Number(context?.budget?.untraversedImportCount ?? 0)
   const truncatedCount = visibleSections.filter(section => section.truncated).length
   const budgetSuffix = omittedCount > 0 || truncatedCount > 0
     ? `; ${truncatedCount} truncated, ${omittedCount} omitted by context budgets`
@@ -339,59 +364,114 @@ function memoryCandidates({ homeDir, workspaceDir, projectPaths }) {
   return candidates
 }
 
-async function readMemorySections(candidate, traversal, importedFrom = null, depth = 0) {
+async function readMemorySections(candidate, traversal, {
+  importedFrom = null,
+  depth = 0,
+  orderKey = [],
+} = {}) {
+  // An imported path can change buckets relative to its parent. Reject it
+  // before visit/depth accounting so cloud runs neither touch local-only files
+  // nor reveal their existence through omission counts.
+  if (!traversal.includedBuckets.includes(candidate.bucket)) return []
+
   const visitKey = candidate.path
   if (traversal.visited.has(visitKey)) return []
+  // Root candidates own their canonical scope/bucket. A cross-import that
+  // points at one is deduplicated here and the normal root pass loads it with
+  // stable classification independent of the high-precedence selection pass.
+  if (importedFrom && traversal.rootCandidatePaths.has(visitKey)) return []
+
+  if (traversal.selectedSectionCount >= MAX_INSTRUCTION_SECTIONS) {
+    if (importedFrom && !traversal.omittedVisits.has(visitKey)) {
+      traversal.omittedVisits.add(visitKey)
+      traversal.omissions.push(contextOmissionMetadata({
+        ...candidate,
+        importedFrom,
+        reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS}); lower-precedence import branch not traversed`,
+      }))
+    }
+    return []
+  }
 
   if (depth > MAX_IMPORT_DEPTH) {
     traversal.omissions.push(contextOmissionMetadata({
       ...candidate,
-      precedence: traversal.nextPrecedence,
+      importedFrom,
       reason: `maximum import depth (${MAX_IMPORT_DEPTH})`,
     }))
     return []
   }
 
-  if (importedFrom && traversal.importCount >= traversal.maxImportCount) {
-    traversal.omissions.push(contextOmissionMetadata({
-      ...candidate,
-      precedence: traversal.nextPrecedence,
-      reason: `maximum included instruction sections (${MAX_INSTRUCTION_SECTIONS})`,
-    }))
-    return []
+  if (importedFrom) {
+    if (traversal.importTraversalAttempts >= MAX_IMPORT_TRAVERSAL_ATTEMPTS) {
+      if (!traversal.importTraversalLimitReported) {
+        traversal.importTraversalLimitReported = true
+        traversal.omissions.push(contextOmissionMetadata({
+          source: 'memory-import-traversal',
+          displayPath: 'additional lower-precedence visible imports',
+          scope: candidate.scope,
+          bucket: candidate.bucket,
+          importedFrom,
+          reason: `maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}); additional lower-precedence import branches not traversed`,
+        }))
+      }
+      return []
+    }
+    traversal.importTraversalAttempts += 1
   }
+
   traversal.visited.add(visitKey)
-  if (importedFrom) traversal.importCount += 1
 
   const loaded = await readMemoryFile(candidate)
   if (!loaded) return []
 
   const { content, imports } = parseInstructionImports(loaded.content)
-  const sections = []
+
+  // Imports override their parent section, later imports override earlier
+  // imports, and descendants override their importing section. Visit this
+  // precedence tree in reverse while retaining an explicit forward order key
+  // for deterministic rendering after selection.
+  for (let index = imports.length - 1; index >= 0; index -= 1) {
+    const importPath = imports[index]
+    const importedCandidate = resolveImportCandidate(candidate, importPath)
+    await readMemorySections(importedCandidate, traversal, {
+      importedFrom: candidate.displayPath,
+      depth: depth + 1,
+      orderKey: [...orderKey, index + 1],
+    })
+  }
+
   if (content) {
-    sections.push({
+    traversal.sections.push({
       scope: candidate.scope,
       bucket: candidate.bucket,
       displayPath: candidate.displayPath,
       path: candidate.path,
       source: candidate.path,
       importedFrom,
-      precedence: traversal.nextPrecedence++,
+      orderKey: [...orderKey, 0],
       content,
       originalBytes: loaded.originalBytes,
       includedBytes: utf8ByteLength(content),
       truncated: loaded.truncated,
       truncationReason: loaded.truncationReason,
     })
+    if (traversal.selectedSectionCount < MAX_INSTRUCTION_SECTIONS) {
+      traversal.selectedSectionCount += 1
+    }
   }
+}
 
-  for (const importPath of imports) {
-    const importedCandidate = resolveImportCandidate(candidate, importPath)
-    const importedSections = await readMemorySections(importedCandidate, traversal, candidate.displayPath, depth + 1)
-    if (importedSections.length > 0) sections.push(...importedSections)
+function compareOrderKeys(left, right) {
+  const leftKey = Array.isArray(left) ? left : []
+  const rightKey = Array.isArray(right) ? right : []
+  const length = Math.max(leftKey.length, rightKey.length)
+  for (let index = 0; index < length; index += 1) {
+    if (leftKey[index] === undefined) return -1
+    if (rightKey[index] === undefined) return 1
+    if (leftKey[index] !== rightKey[index]) return leftKey[index] - rightKey[index]
   }
-
-  return sections
+  return 0
 }
 
 function parseInstructionImports(raw) {
@@ -499,6 +579,7 @@ function contextOmissionMetadata({
   scope,
   bucket,
   precedence,
+  importedFrom,
   reason,
 }) {
   return {
@@ -507,6 +588,7 @@ function contextOmissionMetadata({
     scope: String(scope ?? 'workspace'),
     bucket: String(bucket ?? 'remote-safe'),
     precedence: Number.isFinite(precedence) ? Number(precedence) : 0,
+    ...(importedFrom ? { importedFrom: String(importedFrom) } : {}),
     originalBytes: 0,
     includedBytes: 0,
     truncated: true,

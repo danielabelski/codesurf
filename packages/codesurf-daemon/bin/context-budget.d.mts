@@ -1,6 +1,7 @@
 export const MAX_CONTEXT_FILE_BYTES: number
 export const MAX_INSTRUCTION_SECTIONS: number
 export const MAX_IMPORT_DEPTH: number
+export const MAX_IMPORT_TRAVERSAL_ATTEMPTS: number
 export const MAX_AGGREGATE_INSTRUCTION_BYTES: number
 export const MAX_SELECTED_SKILLS: number
 export const MAX_SKILL_DESCRIPTION_BYTES: number
@@ -25,4 +26,20 @@ export function truncateUtf8(
   maxBytes: number,
   options?: { reason?: string, originalBytes?: number },
 ): TruncatedUtf8
+export interface ReservedSuffixContext {
+  text: string | undefined
+  suffix: string | undefined
+  originalBytes: number
+  includedBytes: number
+  truncated: boolean
+  truncationReason: string | null
+  base: TruncatedUtf8
+  higherPrecedenceSuffix: TruncatedUtf8
+}
+export function boundContextWithReservedSuffix(
+  value: unknown,
+  suffixValue: unknown,
+  maxBytes: number,
+  options?: { reason?: string, suffixReason?: string },
+): ReservedSuffixContext
 export function previewContextToolInput(value: unknown): TruncatedUtf8

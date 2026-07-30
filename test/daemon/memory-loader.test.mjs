@@ -10,6 +10,7 @@ import {
   MAX_AGGREGATE_INSTRUCTION_BYTES,
   MAX_CONTEXT_FILE_BYTES,
   MAX_IMPORT_DEPTH,
+  MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
 } from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 
@@ -384,7 +385,9 @@ test('more than 32 unique imports stays bounded and reports the import-count ove
   const homeDir = await makeTestTempDir('memory-import-count-')
   const workspaceDir = join(homeDir, 'workspace')
   const rulesDir = join(workspaceDir, 'rules')
+  const outsideDir = join(homeDir, 'outside-rules')
   await mkdir(rulesDir, { recursive: true })
+  await mkdir(outsideDir, { recursive: true })
   t.after(async () => {
     await rm(homeDir, { recursive: true, force: true })
   })
@@ -392,7 +395,13 @@ test('more than 32 unique imports stays bounded and reports the import-count ove
   const imports = []
   for (let index = 0; index < 40; index += 1) {
     imports.push(`@import ./rules/${index}.md`)
-    await writeFile(join(rulesDir, `${index}.md`), `rule-${index}`, 'utf8')
+    if (index < 8) {
+      const outsidePath = join(outsideDir, `${index}.md`)
+      await writeFile(outsidePath, `must-not-be-read-${index}`, 'utf8')
+      await symlink(outsidePath, join(rulesDir, `${index}.md`))
+    } else {
+      await writeFile(join(rulesDir, `${index}.md`), `rule-${index}`, 'utf8')
+    }
   }
   await writeFile(join(workspaceDir, 'AGENTS.md'), `root-rule\n${imports.join('\n')}`, 'utf8')
 
@@ -404,8 +413,80 @@ test('more than 32 unique imports stays bounded and reports the import-count ove
 
   assert.ok(context.includedSections.length <= MAX_INSTRUCTION_SECTIONS)
   assert.ok(context.budget.omittedByImportCount > 0)
+  assert.match(context.prompt, /rule-39/)
+  assert.doesNotMatch(context.prompt, /root-rule|must-not-be-read/)
   assert.match(context.prompt, /maximum included instruction sections/)
   assert.ok(context.budget.omissions.some(item => /maximum included instruction sections/.test(item.truncationReason)))
+})
+
+test('section limits count loaded content instead of nonexistent root candidates', async t => {
+  const homeDir = await makeTestTempDir('memory-missing-root-budget-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(workspaceDir, 'AGENTS.md'), 'PRIMARY-WORKSPACE-RULE-SURVIVES', 'utf8')
+  const missingProjectPaths = Array.from(
+    { length: MAX_INSTRUCTION_SECTIONS + 8 },
+    (_, index) => join(homeDir, 'missing', String(index), 'project'),
+  )
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir, ...missingProjectPaths],
+    executionTarget: 'cloud',
+  })
+
+  assert.match(context.prompt, /PRIMARY-WORKSPACE-RULE-SURVIVES/)
+  assert.equal(context.budget.originalSectionCount, 1)
+  assert.equal(context.budget.includedSectionCount, 1)
+  assert.equal(context.budget.omittedSectionCount, 0)
+  assert.equal(context.budget.omittedByImportCount, 0)
+})
+
+test('visible import I/O attempts are hard-capped without suppressing the root section', async t => {
+  const homeDir = await makeTestTempDir('memory-import-traversal-budget-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const rulesDir = join(workspaceDir, 'rules')
+  const outsideDir = join(homeDir, 'outside')
+  await mkdir(rulesDir, { recursive: true })
+  await mkdir(outsideDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const blockedPath = join(outsideDir, 'blocked.md')
+  await writeFile(blockedPath, 'MUST-NOT-BE-OPENED', 'utf8')
+  await symlink(blockedPath, join(rulesDir, 'blocked.md'))
+  const imports = ['@import ./rules/blocked.md']
+  for (let index = 1; index <= MAX_IMPORT_TRAVERSAL_ATTEMPTS + 8; index += 1) {
+    imports.push(`@import ./rules/${index}.md`)
+    if (index % 2 === 0) {
+      await writeFile(join(rulesDir, `${index}.md`), '', 'utf8')
+    }
+  }
+  await writeFile(
+    join(workspaceDir, 'AGENTS.md'),
+    `ROOT-SECTION-SURVIVES-TRAVERSAL-CAP\n${imports.join('\n')}`,
+    'utf8',
+  )
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'cloud',
+  })
+
+  assert.match(context.prompt, /ROOT-SECTION-SURVIVES-TRAVERSAL-CAP/)
+  assert.match(context.prompt, /maximum import traversal attempts/)
+  assert.equal(context.budget.maxImportTraversalAttempts, MAX_IMPORT_TRAVERSAL_ATTEMPTS)
+  assert.equal(context.budget.omittedByTraversalAttempts, 1)
+  assert.ok(context.budget.omissions.some(item => /maximum import traversal attempts/.test(item.truncationReason)))
+  assert.match(context.contextBuckets.inspect.summary, /omitted by context budgets/)
+  assert.doesNotMatch(JSON.stringify(context), /MUST-NOT-BE-OPENED/)
 })
 
 test('aggregate allocation protects high-precedence workspace-local instructions', async t => {
@@ -485,4 +566,45 @@ test('cloud privacy filtering happens before aggregate allocation', async t => {
   assert.equal(context.budget.omittedByAggregate, 0)
   assert.match(context.prompt, /REMOTE-SAFE-RULE-SURVIVES/)
   assert.doesNotMatch(context.prompt, /LOCAL-ONLY/)
+})
+
+test('cloud filtering skips local-only imports before traversal and omission accounting', async t => {
+  const homeDir = await makeTestTempDir('memory-cloud-import-privacy-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const localRulesDir = join(workspaceDir, '.codesurf', 'local')
+  await mkdir(localRulesDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const imports = []
+  for (let index = 0; index < MAX_INSTRUCTION_SECTIONS + 8; index += 1) {
+    imports.push(`@import ./.codesurf/local/${index}.md`)
+    await writeFile(join(localRulesDir, `${index}.md`), `PRIVATE-LOCAL-${index}`, 'utf8')
+  }
+  imports.push('@import ./remote-safe.md')
+  await writeFile(
+    join(workspaceDir, 'AGENTS.md'),
+    `ROOT-REMOTE-SAFE\n${imports.join('\n')}`,
+    'utf8',
+  )
+  await writeFile(join(workspaceDir, 'remote-safe.md'), 'LAST-REMOTE-SAFE-IMPORT', 'utf8')
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'cloud',
+  })
+
+  assert.deepEqual(context.sections.map(section => section.displayPath), [
+    'AGENTS.md',
+    'remote-safe.md',
+  ])
+  assert.match(context.prompt, /ROOT-REMOTE-SAFE[\s\S]*LAST-REMOTE-SAFE-IMPORT/)
+  assert.doesNotMatch(JSON.stringify(context), /PRIVATE-LOCAL|\.codesurf\/local/)
+  assert.equal(context.budget.originalSectionCount, 2)
+  assert.equal(context.budget.omittedByImportCount, 0)
+  assert.equal(context.budget.omittedByDepth, 0)
+  assert.doesNotMatch(context.contextBuckets.inspect.summary, /omitted by context budgets/)
 })

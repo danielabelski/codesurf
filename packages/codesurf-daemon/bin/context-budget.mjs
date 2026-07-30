@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder'
 export const MAX_CONTEXT_FILE_BYTES = 32 * 1024
 export const MAX_INSTRUCTION_SECTIONS = 32
 export const MAX_IMPORT_DEPTH = 8
+export const MAX_IMPORT_TRAVERSAL_ATTEMPTS = 128
 export const MAX_AGGREGATE_INSTRUCTION_BYTES = 128 * 1024
 export const MAX_SELECTED_SKILLS = 24
 export const MAX_SKILL_DESCRIPTION_BYTES = 2 * 1024
@@ -102,6 +103,79 @@ export function truncateUtf8Buffer(value, maxBytes, options = {}) {
     ? decoder.write(buffer.subarray(0, Math.min(buffer.length, limit + 1)))
     : decoder.end(buffer)
   return truncateUtf8(observed, limit, options)
+}
+
+function normalizeOptionalText(value) {
+  return String(value ?? '').trim()
+}
+
+function stripAppendedSuffix(value, suffix) {
+  if (!value || !suffix) return value
+  if (value === suffix) return ''
+  const appended = `\n\n${suffix}`
+  return value.endsWith(appended)
+    ? value.slice(0, -appended.length).trimEnd()
+    : value
+}
+
+/**
+ * Bound two ordered context fragments while reserving capacity for the
+ * higher-precedence suffix. Callers may pass a legacy value that already has
+ * the suffix appended; the exact duplicate is removed before allocation.
+ */
+export function boundContextWithReservedSuffix(
+  value,
+  suffixValue,
+  maxBytes,
+  {
+    reason = 'context byte limit',
+    suffixReason = reason,
+  } = {},
+) {
+  const suffix = normalizeOptionalText(suffixValue)
+  const base = stripAppendedSuffix(normalizeOptionalText(value), suffix)
+  const limit = Math.max(0, Math.floor(Number(maxBytes) || 0))
+
+  if (!suffix) {
+    const bounded = truncateUtf8(base, limit, { reason })
+    return {
+      text: bounded.text || undefined,
+      suffix: undefined,
+      originalBytes: bounded.originalBytes,
+      includedBytes: bounded.includedBytes,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+      base: bounded,
+      higherPrecedenceSuffix: truncateUtf8('', limit, { reason: suffixReason }),
+    }
+  }
+
+  const boundedSuffix = truncateUtf8(suffix, limit, { reason: suffixReason })
+  const separator = base && boundedSuffix.text ? '\n\n' : ''
+  const remainingBytes = Math.max(
+    0,
+    limit - utf8ByteLength(boundedSuffix.text) - utf8ByteLength(separator),
+  )
+  const boundedBase = truncateUtf8(base, remainingBytes, { reason })
+  const text = [boundedBase.text, boundedSuffix.text].filter(Boolean).join('\n\n')
+  const originalBytes = utf8ByteLength(base)
+    + utf8ByteLength(base && suffix ? '\n\n' : '')
+    + utf8ByteLength(suffix)
+  const truncationReason = combineReasons(
+    boundedBase.truncationReason,
+    boundedSuffix.truncationReason,
+  ) || null
+
+  return {
+    text: text || undefined,
+    suffix: boundedSuffix.text || undefined,
+    originalBytes,
+    includedBytes: utf8ByteLength(text),
+    truncated: boundedBase.truncated || boundedSuffix.truncated,
+    truncationReason,
+    base: boundedBase,
+    higherPrecedenceSuffix: boundedSuffix,
+  }
 }
 
 function normalizeFragmentMetadata(fragment, index) {

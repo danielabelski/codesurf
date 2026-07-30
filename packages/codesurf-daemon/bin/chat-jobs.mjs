@@ -13,6 +13,7 @@ import {
   MAX_PERSONA_PROMPT_BYTES,
   MAX_SKILLS_PROMPT_BYTES,
   MAX_SKILLS_SUMMARY_BYTES,
+  boundContextWithReservedSuffix,
   previewContextToolInput,
   truncateUtf8,
 } from './context-budget.mjs'
@@ -730,10 +731,14 @@ function boundOptionalContext(value, maxBytes, reason) {
 }
 
 export function revalidateDaemonContextRequest(request = {}) {
-  const memory = boundOptionalContext(
+  const memory = boundContextWithReservedSuffix(
     request.memoryPrompt,
+    request.roomContext,
     MAX_AGGREGATE_INSTRUCTION_BYTES,
-    `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    {
+      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    },
   )
   const skills = boundOptionalContext(
     request.skillsPrompt,
@@ -753,7 +758,8 @@ export function revalidateDaemonContextRequest(request = {}) {
   return {
     request: {
       ...request,
-      memoryPrompt: memory.value,
+      memoryPrompt: memory.text,
+      roomContext: memory.suffix,
       skillsPrompt: skills.value,
       skillsSummary: skillsSummary.value,
       ...(request?.agentMode && typeof request.agentMode === 'object'
@@ -766,7 +772,12 @@ export function revalidateDaemonContextRequest(request = {}) {
         : {}),
     },
     metadata: {
-      memoryPrompt: memory.metadata,
+      memoryPrompt: {
+        originalBytes: memory.originalBytes,
+        includedBytes: memory.includedBytes,
+        truncated: memory.truncated,
+        truncationReason: memory.truncationReason,
+      },
       skillsPrompt: skills.metadata,
       skillsSummary: skillsSummary.metadata,
       personaPrompt: persona.metadata,

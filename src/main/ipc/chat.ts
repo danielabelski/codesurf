@@ -39,6 +39,7 @@ import {
   MAX_PERSONA_PROMPT_BYTES,
   MAX_SKILLS_PROMPT_BYTES,
   MAX_SKILLS_SUMMARY_BYTES,
+  boundContextWithReservedSuffix,
   previewContextToolInput,
   truncateUtf8,
 } from '../../../packages/codesurf-daemon/bin/context-budget.mjs'
@@ -599,10 +600,14 @@ function boundOptionalRuntimeContext(value: unknown, maxBytes: number, reason: s
 }
 
 function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
-  const memoryPrompt = boundOptionalRuntimeContext(
+  const memory = boundContextWithReservedSuffix(
     req.memoryPrompt,
+    req.roomContext,
     MAX_AGGREGATE_INSTRUCTION_BYTES,
-    `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    {
+      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
+    },
   )
   const skillsPrompt = boundOptionalRuntimeContext(
     req.skillsPrompt,
@@ -621,7 +626,8 @@ function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
   )
   return {
     ...req,
-    memoryPrompt,
+    memoryPrompt: memory.text,
+    roomContext: memory.suffix,
     skillsPrompt,
     skillsSummary,
     ...(req.agentMode
