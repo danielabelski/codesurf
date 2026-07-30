@@ -68,6 +68,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --omit=optional
 
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+
       - name: Run release gate tests
         run: npm test
 

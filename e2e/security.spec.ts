@@ -12,7 +12,9 @@ test.describe('Security hardening probes', () => {
 
       const probe = await page.evaluate(async () => {
         const port = await window.electron.mcp?.getPort?.()
-        if (!port) return { skipped: true as const }
+        if (typeof port !== 'number' || port <= 0) {
+          return { port, status: null, body: '' }
+        }
 
         const res = await fetch(`http://127.0.0.1:${port}/push`, {
           method: 'POST',
@@ -20,14 +22,13 @@ test.describe('Security hardening probes', () => {
           body: JSON.stringify({ card_id: 'e2e', event: 'card_update', data: { note: 'probe' } }),
         })
 
-        return { skipped: false as const, status: res.status, body: await res.text() }
+        return { port, status: res.status, body: await res.text() }
       })
 
-      if (probe.skipped) {
-        test.skip(true, 'MCP server port unavailable in E2E session')
-        return
-      }
-
+      expect(
+        probe.port,
+        `MCP server failed to start: mcp.getPort() returned ${String(probe.port)} instead of a positive port`,
+      ).toBeGreaterThan(0)
       expect(probe.status).toBe(401)
       expect(JSON.parse(probe.body)).toEqual({ error: 'Unauthorized' })
     } finally {

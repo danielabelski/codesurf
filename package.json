@@ -18,10 +18,14 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs && npm run test:relay",
-    "test:daemon": "node --test test/daemon/*.test.mjs",
+    "test": "npm run test:unit && npm run test:packages",
+    "test:unit": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs",
+    "test:daemon-package": "npm --prefix packages/codesurf-daemon test",
     "test:relay": "npm --prefix packages/codesurf-relay test",
-    "test:all": "npm test && npm run test:relay",
+    "test:terminal-gateway": "npm --prefix packages/codesurf-terminal-gateway test",
+    "test:packages": "npm run test:daemon-package && npm run test:relay && npm run test:terminal-gateway",
+    "test:all": "npm test",
+    "test:daemon": "node --test test/daemon/*.test.mjs",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:build": "npm run build && npm run test:e2e",
     "test:e2e:headed": "playwright test --config e2e/playwright.config.ts --headed",
@@ -65,8 +69,7 @@
     "validate-extension": "node scripts/validate-extension.mjs",
     "ensure-electron": "node scripts/ensure-electron.js",
     "rebuild": "node scripts/rebuild-natives.mjs",
-    "postinstall": "node scripts/ensure-electron.js && node scripts/rebuild-natives.mjs",
-    "test:unit": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs"
+    "postinstall": "node scripts/ensure-electron.js && node scripts/rebuild-natives.mjs"
   },
   "keywords": [],
   "author": "Jason",
