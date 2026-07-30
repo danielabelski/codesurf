@@ -14,6 +14,7 @@ import { getBridgeScript } from '../extensions/bridge'
 import { CODESURF_HOME } from '../paths'
 import { readSettingsSync } from './workspace'
 import { getPluginState, setPluginState, replacePluginState } from '../extensions/plugin-store'
+import { assertValidExtensionId, resolveExtensionSettingsPath } from '../extensions/identity'
 import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
 import { log } from '../utils/logger.ts'
 
@@ -21,6 +22,7 @@ const extLog = log.scope('Extensions')
 
 const execFileAsync = promisify(execFile)
 const EXTENSIONS_DIR = join(CODESURF_HOME, 'extensions')
+const EXTENSION_SETTINGS_DIR = join(CODESURF_HOME, 'extension-settings')
 
 /** Result of installing a packaged plugin (.vsix / .zip) into the plugins dir. */
 interface InstallPluginResult {
@@ -110,16 +112,14 @@ async function readAndValidateManifest(dir: string): Promise<{ id: string; name:
     throw new Error('Plugin manifest must be a JSON object')
   }
   const manifest = parsed as Record<string, unknown>
-  if (typeof manifest.id !== 'string' || !manifest.id.trim()) {
-    throw new Error('Plugin manifest is missing required field: id')
-  }
+  const id = assertValidExtensionId(manifest.id, `plugin manifest directory ${dir}`)
   if (typeof manifest.name !== 'string' || !manifest.name.trim()) {
     throw new Error('Plugin manifest is missing required field: name')
   }
   if (typeof manifest.version !== 'string' || !manifest.version.trim()) {
     throw new Error('Plugin manifest is missing required field: version')
   }
-  return { id: manifest.id.trim(), name: manifest.name.trim(), version: manifest.version.trim() }
+  return { id, name: manifest.name.trim(), version: manifest.version.trim() }
 }
 
 /**
@@ -194,10 +194,11 @@ async function installPluginArchive(registry: ExtensionRegistry, archivePath: st
 }
 
 function extensionSettingsPath(extId: string): string {
-  return join(CODESURF_HOME, 'extension-settings', `${extId}.json`)
+  return resolveExtensionSettingsPath(EXTENSION_SETTINGS_DIR, extId)
 }
 
 async function readExtensionSettings(registry: ExtensionRegistry, extId: string): Promise<Record<string, unknown>> {
+  const settingsPath = extensionSettingsPath(extId)
   const ext = registry.get(extId)
   if (!ext) return {}
 
@@ -215,11 +216,23 @@ async function readExtensionSettings(registry: ExtensionRegistry, extId: string)
   }
 
   try {
-    const raw = await fs.readFile(extensionSettingsPath(extId), 'utf8')
+    const raw = await fs.readFile(settingsPath, 'utf8')
     return { ...defaults, ...(JSON.parse(raw) as Record<string, unknown>) }
   } catch {
     return defaults
   }
+}
+
+function requireRegisteredExtensionId(
+  registry: ExtensionRegistry,
+  extId: unknown,
+  context: string,
+): string {
+  const validExtId = assertValidExtensionId(extId, context)
+  if (!registry.get(validExtId)) {
+    throw new Error(`Extension is not registered for ${context}`)
+  }
+  return validExtId
 }
 
 export function registerExtensionIPC(registry: ExtensionRegistry): void {
@@ -280,7 +293,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       return { entries: [], tiles: [] }
     }
 
-    const manifests = await registry.scanLightweight(workspacePath ?? registry.getActiveWorkspacePath())
+    const manifests = await registry.scanLightweight(workspacePath)
     const extActions = registry.getExtensionActions()
 
     return {
@@ -366,13 +379,15 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
 
   // Get the bridge script to inject into extension iframes
   ipcMain.handle('ext:get-bridge-script', (_, tileId: string, extId: string) => {
-    return getBridgeScript(tileId, extId, registry.getCapabilityGate(extId))
+    const validExtId = requireRegisteredExtensionId(registry, extId, 'bridge script request')
+    return getBridgeScript(tileId, validExtId, registry.getCapabilityGate(validExtId))
   })
 
   // P1 capability gate for a plugin — the host RPC dispatcher (ExtensionTile)
   // rejects gated namespaces (chat/relay/canvas) the plugin wasn't granted.
   ipcMain.handle('ext:capability-gate', (_, extId: string) => {
-    return registry.getCapabilityGate(extId)
+    const validExtId = requireRegisteredExtensionId(registry, extId, 'capability gate request')
+    return registry.getCapabilityGate(validExtId)
   })
 
   // Enable/disable an extension
@@ -412,6 +427,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
   })
 
   ipcMain.handle('ext:settings-set', async (_, extId: string, settings: Record<string, unknown>) => {
+    const settingsPath = extensionSettingsPath(extId)
     const ext = registry.get(extId)
     if (!ext) return false
 
@@ -426,8 +442,10 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       Object.entries(settings ?? {}).filter(([key]) => allowedKeys.has(key)),
     )
 
-    await fs.mkdir(join(CODESURF_HOME, 'extension-settings'), { recursive: true })
-    await fs.writeFile(extensionSettingsPath(extId), JSON.stringify(filtered, null, 2))
+    await fs.mkdir(EXTENSION_SETTINGS_DIR, { recursive: true, mode: 0o700 })
+    await fs.chmod(EXTENSION_SETTINGS_DIR, 0o700).catch(() => {})
+    await fs.writeFile(settingsPath, JSON.stringify(filtered, null, 2), { mode: 0o600 })
+    await fs.chmod(settingsPath, 0o600).catch(() => {})
     return true
   })
 
@@ -440,15 +458,18 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
   // Plugin Store — durable reactive per-plugin state (~/.codesurf/plugin-state/{id}.json).
   // Changes broadcast on the bus channel plugin:<id>:state (see plugin-store.ts).
   ipcMain.handle('ext:store-get', async (_, extId: string) => {
-    return getPluginState(extId)
+    const validExtId = requireRegisteredExtensionId(registry, extId, 'plugin store read')
+    return getPluginState(validExtId)
   })
 
   ipcMain.handle('ext:store-set', async (_, extId: string, patch: Record<string, unknown>) => {
-    return setPluginState(extId, patch ?? {})
+    const validExtId = requireRegisteredExtensionId(registry, extId, 'plugin store write')
+    return setPluginState(validExtId, patch ?? {})
   })
 
   ipcMain.handle('ext:store-replace', async (_, extId: string, value: Record<string, unknown>) => {
-    return replacePluginState(extId, value ?? {})
+    const validExtId = requireRegisteredExtensionId(registry, extId, 'plugin store replace')
+    return replacePluginState(validExtId, value ?? {})
   })
 
   // List context menu contributions

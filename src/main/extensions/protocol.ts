@@ -1,10 +1,12 @@
 import { net, protocol } from 'electron'
-import { existsSync, promises as fs } from 'fs'
-import { isAbsolute, join, relative, extname, resolve } from 'path'
+import { promises as fs } from 'fs'
+import { join, extname, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import type { ExtensionRegistry } from './registry'
 import { getBridgeScript } from './bridge'
 import { getSandboxProxyHtml } from './sandbox-proxy'
+import { isValidExtensionId } from './identity'
+import { resolveCanonicalResourcePath } from './resource-path'
 
 const MIME_TYPES: Record<string, string> = {
   '.js': 'application/javascript',
@@ -68,22 +70,6 @@ function injectBridge(html: string, bridgeScript: string): string {
   return `${tag}\n${html}`
 }
 
-function isPathInside(root: string, candidate: string): boolean {
-  const resolvedRoot = resolve(root)
-  const resolvedCandidate = resolve(candidate)
-  const rel = relative(resolvedRoot, resolvedCandidate)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-}
-
-// ── Scoped resource-path check ─────────────────────────────────────────────
-// Only authorizes reads to files within the REQUESTING extension's own root.
-// Previously this checked all enabled extensions, allowing cross-plugin reads.
-function isExtensionResourcePath(registry: ExtensionRegistry, extId: string, candidate: string): boolean {
-  const ext = registry.get(extId)
-  const root = ext?.manifest._path
-  return Boolean(root && ext?.manifest._enabled !== false && isPathInside(root, candidate))
-}
-
 export function registerExtensionProtocol(registry: ExtensionRegistry): void {
   protocol.handle('codesurf-ext', async request => {
     try {
@@ -117,17 +103,13 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
         const segments = url.pathname.split('/').filter(Boolean).map(s => decodeURIComponent(s))
         const codiconBase = join(__dirname, '..', '..', 'node_modules', '@vscode', 'codicons')
         const candidate = join(codiconBase, ...segments)
-        // Containment check (same pattern as the extension-assets route below):
-        // '..%2f' decodes after URL parsing, so without this any file on disk
-        // is readable via codesurf-ext://__runext_codicons__/../../...
-        const rel = relative(codiconBase, candidate)
-        if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
-          return new Response('Forbidden', { status: 403 })
+        const resolvedResource = await resolveCanonicalResourcePath(codiconBase, candidate)
+        if (!resolvedResource.ok) {
+          return resolvedResource.status === 403
+            ? new Response('Forbidden', { status: 403 })
+            : new Response('Codicon resource not found', { status: 404 })
         }
-        if (existsSync(candidate)) {
-          return serveFile(candidate)
-        }
-        return new Response('Codicon resource not found', { status: 404 })
+        return serveFile(resolvedResource.path)
       }
 
       // ── __runext_resource__ — serve absolute file paths scoped to one extension ──
@@ -135,30 +117,43 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
       // The extId in the first path segment scopes the read to that extension's root,
       // preventing one extension from using this route to read another extension's files.
       if (host === '__runext_resource__') {
-        const segments = url.pathname.split('/').filter(Boolean).map(s => decodeURIComponent(s))
+        const encodedSegments = url.pathname.split('/').filter(Boolean)
+        if (encodedSegments[0]?.includes('%')) {
+          return new Response('Forbidden', { status: 403 })
+        }
+        const segments = encodedSegments.map(s => decodeURIComponent(s))
         const [resourceExtId, ...pathSegments] = segments
         if (!resourceExtId || pathSegments.length === 0) {
           return new Response('Invalid resource URL', { status: 400 })
         }
-        const absPath = resolve('/' + pathSegments.join('/'))
-        if (!isExtensionResourcePath(registry, resourceExtId, absPath)) {
+        if (!isValidExtensionId(resourceExtId)) {
           return new Response('Forbidden', { status: 403 })
         }
-        if (!existsSync(absPath)) {
-          return new Response('Resource not found', { status: 404 })
+        const ext = registry.get(resourceExtId)
+        const root = ext?.manifest._path
+        if (!root || ext?.manifest._enabled === false) {
+          return new Response('Forbidden', { status: 403 })
         }
-        return serveFile(absPath)
+        const absPath = resolve('/' + pathSegments.join('/'))
+        const resolvedResource = await resolveCanonicalResourcePath(root, absPath)
+        if (!resolvedResource.ok) {
+          return resolvedResource.status === 403
+            ? new Response('Forbidden', { status: 403 })
+            : new Response('Resource not found', { status: 404 })
+        }
+        return serveFile(resolvedResource.path)
       }
 
       // ── Extension assets ──────────────────────────────────────────────────
-      // host IS the extId (percent-decoded by new URL()).
-      const extId = decodeURIComponent(host)
+      // host IS the extId. Valid ids never need percent encoding, so reject it
+      // rather than allowing multiple encoded authorities to alias one origin.
+      const extId = host
       const fileSegments = url.pathname
         .split('/')
         .filter(Boolean)
         .map(segment => decodeURIComponent(segment))
 
-      if (!extId || fileSegments.length === 0) {
+      if (host.includes('%') || !isValidExtensionId(extId) || fileSegments.length === 0) {
         return new Response('Invalid extension URL', { status: 400 })
       }
 
@@ -169,13 +164,16 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
       }
 
       const filePath = join(root, ...fileSegments)
-      const rel = relative(root, filePath)
-      if (!rel || rel.startsWith('..') || isAbsolute(rel)) {
-        return new Response('Forbidden', { status: 403 })
+      const resolvedResource = await resolveCanonicalResourcePath(root, filePath)
+      if (!resolvedResource.ok) {
+        return resolvedResource.status === 403
+          ? new Response('Forbidden', { status: 403 })
+          : new Response('Extension resource not found', { status: 404 })
       }
+      const canonicalFilePath = resolvedResource.path
 
-      if (/\.html?$/i.test(filePath)) {
-        const raw = await fs.readFile(filePath, 'utf8')
+      if (/\.html?$/i.test(canonicalFilePath)) {
+        const raw = await fs.readFile(canonicalFilePath, 'utf8')
         // Chat surfaces route through the same bridge — use the surface instance
         // id as the bridge's tileId so host-side RPC routing stays uniform.
         const tileId = url.searchParams.get('tileId') || url.searchParams.get('surfaceId')
@@ -189,7 +187,7 @@ export function registerExtensionProtocol(registry: ExtensionRegistry): void {
         })
       }
 
-      const resp = await net.fetch(pathToFileURL(filePath).toString())
+      const resp = await net.fetch(pathToFileURL(canonicalFilePath).toString())
       // Prevent Chromium from caching extension assets so edits take effect immediately
       const headers = new Headers(resp.headers)
       headers.set('Cache-Control', 'no-store, no-cache, must-revalidate')

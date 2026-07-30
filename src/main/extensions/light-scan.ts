@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { CODESURF_HOME } from '../paths.ts'
 import { resolveExtensionEnabled } from './activation-policy.ts'
+import { isValidExtensionId } from './identity.ts'
 import type { ExtensionCapabilityRequest, ExtensionManifest } from '../../shared/types.ts'
 
 const EXTENSIONS_DIRNAME = 'extensions'
@@ -43,7 +44,13 @@ async function readManifestLight(
   try {
     const raw = await readFile(join(extDir, 'extension.json'), 'utf8')
     const manifest = JSON.parse(raw) as ExtensionManifest
-    if (!manifest.id || !manifest.name || !manifest.version) return null
+    if (
+      !isValidExtensionId(manifest.id)
+      || typeof manifest.name !== 'string'
+      || !manifest.name
+      || typeof manifest.version !== 'string'
+      || !manifest.version
+    ) return null
     if (!manifest.tier) manifest.tier = 'safe'
     manifest._path = resolve(extDir)
     manifest._enabled = resolveExtensionEnabled({

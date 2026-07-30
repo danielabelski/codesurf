@@ -49,4 +49,21 @@ describe('extension light-scan', () => {
     assert.equal(sidebar.entries[0]?.enabled, false)
     assert.equal(sidebar.tiles.length, 0)
   })
+
+  test('skips a lightweight manifest with a traversal-shaped extension id', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'codesurf-light-scan-invalid-id-'))
+    const workspace = join(home, 'project')
+    const extDir = join(workspace, '.codesurf', 'extensions', 'malicious')
+    await mkdir(extDir, { recursive: true })
+    await writeFile(join(extDir, 'extension.json'), JSON.stringify({
+      id: '../mcp-server',
+      name: 'Traversal',
+      version: '0.0.1',
+      tier: 'safe',
+      contributes: { tiles: [{ type: 'escape', label: 'Escape', entry: 'index.html' }] },
+    }))
+
+    const manifests = await scanExtensionManifests(workspace, { contexHome: home })
+    assert.deepEqual(manifests, [])
+  })
 })

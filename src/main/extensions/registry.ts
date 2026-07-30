@@ -17,6 +17,8 @@ import { bus } from '../event-bus'
 import { adapters, tryAdaptExtension } from './adapters'
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
 import { resolveExtensionEnabled } from './activation-policy'
+import { assertValidExtensionId, isValidExtensionId } from './identity'
+import { resolveCanonicalResourcePath } from './resource-path'
 import { log } from '../utils/logger.ts'
 
 const extLog = log.scope('Extensions')
@@ -178,44 +180,59 @@ export class ExtensionRegistry {
   }
 
   async rescan(workspacePath?: string | null): Promise<void> {
+    const normalizedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
     const run = async (): Promise<void> => {
       this.deactivateAll()
       this.extensions.clear()
       this.extraMCPTools = []
-      this.activeWorkspacePath = workspacePath ?? null
+      this.activeWorkspacePath = normalizedWorkspacePath
       await this.scan()
-      if (workspacePath) {
-        await this.scanWorkspace(workspacePath)
+      if (normalizedWorkspacePath) {
+        await this.scanWorkspace(normalizedWorkspacePath)
       }
     }
 
-    this.rescanQueue = this.rescanQueue.then(run, run)
-    return this.rescanQueue
+    return this.enqueueTransition(run)
   }
 
   async scanLightweight(workspacePath?: string | null): Promise<ExtensionManifest[]> {
-    const disabledIds = await loadDisabledSet()
-    const manifests = new Map<string, ExtensionManifest>()
-    const targetWorkspacePath = workspacePath ?? this.activeWorkspacePath
+    const requestedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
+    return this.enqueueTransition(async () => {
+      const disabledIds = await loadDisabledSet()
+      const manifests = new Map<string, ExtensionManifest>()
+      const targetWorkspacePath = requestedWorkspacePath ?? this.activeWorkspacePath
 
-    for (const bundledDir of this.bundledDirs) {
-      await this.scanDirLight(bundledDir, manifests, disabledIds)
-    }
-    await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
-    if (targetWorkspacePath) {
-      await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
-    }
-    // Catalog dirs — scanned last, default-disabled unless the user has
-    // explicitly enabled the id (reflected in disabledIds set membership).
-    for (const catalogDir of this.catalogDirs) {
-      await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
-    }
+      for (const bundledDir of this.bundledDirs) {
+        await this.scanDirLight(bundledDir, manifests, disabledIds)
+      }
+      await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
+      if (targetWorkspacePath) {
+        await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
+      }
+      // Catalog dirs — scanned last, default-disabled unless the user has
+      // explicitly enabled the id (reflected in disabledIds set membership).
+      for (const catalogDir of this.catalogDirs) {
+        await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
+      }
 
-    return [...manifests.values()]
+      if (requestedWorkspacePath) {
+        this.activeWorkspacePath = requestedWorkspacePath
+      }
+      return [...manifests.values()]
+    })
   }
 
   getActiveWorkspacePath(): string | null {
     return this.activeWorkspacePath
+  }
+
+  private enqueueTransition<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.rescanQueue.then(run, run)
+    this.rescanQueue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   private async scanDir(dir: string, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
@@ -233,17 +250,19 @@ export class ExtensionRegistry {
       if (!stat?.isDirectory()) continue
 
       try {
-        await this.loadExtension(extDir, opts)
-      } catch {
-        // Not a native codesurf extension — try adapters
-        try {
+        const hasNativeManifest = await fs.stat(join(extDir, 'extension.json'))
+          .then(info => info.isFile())
+          .catch(() => false)
+        if (hasNativeManifest) {
+          await this.loadExtension(extDir, opts)
+        } else {
           const adapted = await tryAdaptExtension(extDir)
           if (adapted) {
             await this.loadFromManifest(adapted, opts)
           }
-        } catch (err) {
-          console.error(`[Extensions] Failed to load ${extDir}:`, err)
         }
+      } catch (err) {
+        console.error(`[Extensions] Failed to load ${extDir}:`, err)
       }
     }
   }
@@ -280,7 +299,13 @@ export class ExtensionRegistry {
     try {
       const raw = await fs.readFile(join(extDir, 'extension.json'), 'utf8')
       const manifest: ExtensionManifest = JSON.parse(raw)
-      if (!manifest.id || !manifest.name || !manifest.version) {
+      if (
+        !isValidExtensionId(manifest.id)
+        || typeof manifest.name !== 'string'
+        || !manifest.name
+        || typeof manifest.version !== 'string'
+        || !manifest.version
+      ) {
         return null
       }
       if (!manifest.tier) manifest.tier = 'safe'
@@ -310,6 +335,7 @@ export class ExtensionRegistry {
           }
         }
         if (!adapted) return null
+        if (!isValidExtensionId(adapted.id)) return null
         normalizeManifestUi(adapted)
         adapted._path = resolve(extDir)
         const defaultEnabledAdapted = opts?.defaultEnabled !== false
@@ -330,9 +356,15 @@ export class ExtensionRegistry {
     const manifest: ExtensionManifest = JSON.parse(raw)
 
     // Validate required fields
-    if (!manifest.id || !manifest.name || !manifest.version) {
+    if (
+      typeof manifest.name !== 'string'
+      || !manifest.name
+      || typeof manifest.version !== 'string'
+      || !manifest.version
+    ) {
       throw new Error(`Invalid manifest in ${extDir}: missing id, name, or version`)
     }
+    assertValidExtensionId(manifest.id, `manifest directory ${extDir}`)
     if (!manifest.tier) manifest.tier = 'safe'
     normalizeManifestUi(manifest)
 
@@ -398,6 +430,7 @@ export class ExtensionRegistry {
 
   /** Load an already-parsed manifest (used by adapters) */
   async loadFromManifest(manifest: ExtensionManifest, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
+    assertValidExtensionId(manifest.id, `adapted manifest directory ${manifest._path ?? '(unknown)'}`)
     if (this.extensions.has(manifest.id)) return
 
     normalizeManifestUi(manifest)
@@ -442,6 +475,7 @@ export class ExtensionRegistry {
   }
 
   get(id: string): LoadedExtension | undefined {
+    if (!isValidExtensionId(id)) return undefined
     return this.extensions.get(id)
   }
 
@@ -580,7 +614,7 @@ export class ExtensionRegistry {
    *  html feed. If the entry is an MCP-UI createUIResource JSON, extract its html
    *  text. Path-guarded to the extension root. */
   async getSurfaceHtml(extId: string, kind: string, surfaceId: string): Promise<string | null> {
-    const ext = this.extensions.get(extId)
+    const ext = this.get(extId)
     if (!ext?.manifest._path || !ext.manifest._enabled) return null
     const c = ext.manifest.contributes
     let entry: string | undefined
@@ -589,11 +623,12 @@ export class ExtensionRegistry {
     else if (kind === 'tile') entry = c?.tiles?.find(t => t.type === surfaceId)?.entry
     else if (kind === 'chat') entry = c?.chatSurfaces?.find(s => s.id === surfaceId)?.entry
     if (!entry) return null
-    const root = resolve(ext.manifest._path)
+    const root = ext.manifest._path
     const abs = resolve(root, ...entry.split(/[\\/]/).filter(Boolean))
-    if (abs !== root && !abs.startsWith(root + '/')) return null // path-traversal guard
+    const resolvedResource = await resolveCanonicalResourcePath(root, abs)
+    if (!resolvedResource.ok) return null
     try {
-      const raw = await fs.readFile(abs, 'utf8')
+      const raw = await fs.readFile(resolvedResource.path, 'utf8')
       if (raw.trimStart().startsWith('{')) {
         try {
           const obj = JSON.parse(raw) as { resource?: { contents?: Array<{ text?: string }> }; contents?: Array<{ text?: string }> }
