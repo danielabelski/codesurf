@@ -23,27 +23,78 @@ function getElectron(): typeof import('electron') {
 
 interface WatchEntry {
   watcher: FSWatcher
-  // Each subscribing renderer plus the raw dirPath it passed. The renderer keys
-  // its listener on `fs:watch:${dirPath}`, so we must echo that exact string —
-  // and we must broadcast to ALL subscribers, not just the first one.
-  subscribers: Map<WebContents, string>
+  // A renderer may subscribe to the same canonical directory through more
+  // than one lexical alias. Keep every subscription identity so stopping one
+  // does not accidentally detach another.
+  subscribers: Map<WebContents, Map<string, {
+    rawPath: string
+    count: number
+  }>>
   debounce: ReturnType<typeof setTimeout> | null
 }
 const watchers = new Map<string, WatchEntry>()
-const senderWatchPaths = new WeakMap<WebContents, Set<string>>()
+const senderWatchPaths = new WeakMap<WebContents, Map<string, string[]>>()
 const senderWatchCleanupAttached = new WeakSet<WebContents>()
+const senderWatchQueues = new WeakMap<WebContents, Map<string, Promise<void>>>()
 
-function trackWatchSender(sender: WebContents, resolvedPath: string): void {
-  const existing = senderWatchPaths.get(sender)
-  if (existing) existing.add(resolvedPath)
-  else senderWatchPaths.set(sender, new Set([resolvedPath]))
+function watchSubscriptionKey(dirPath: string, workspaceId?: string): string {
+  return `${workspaceId ?? ''}\0${dirPath}`
+}
+
+function runWatchSubscriptionOperation(
+  sender: WebContents,
+  subscriptionKey: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const queues = senderWatchQueues.get(sender) ?? new Map<string, Promise<void>>()
+  senderWatchQueues.set(sender, queues)
+  const previous = queues.get(subscriptionKey) ?? Promise.resolve()
+
+  let current: Promise<void>
+  current = previous
+    .catch(() => undefined)
+    .then(operation)
+    .finally(() => {
+      if (queues.get(subscriptionKey) !== current) return
+      queues.delete(subscriptionKey)
+      if (queues.size === 0) senderWatchQueues.delete(sender)
+    })
+  queues.set(subscriptionKey, current)
+  return current
+}
+
+function trackWatchSender(
+  sender: WebContents,
+  subscriptionKey: string,
+  rawPath: string,
+  resolvedPath: string,
+): void {
+  const senderPaths = senderWatchPaths.get(sender) ?? new Map<string, string[]>()
+  const subscriptionPaths = senderPaths.get(subscriptionKey) ?? []
+  subscriptionPaths.push(resolvedPath)
+  senderPaths.set(subscriptionKey, subscriptionPaths)
+  senderWatchPaths.set(sender, senderPaths)
+
+  const entry = watchers.get(resolvedPath)
+  if (entry) {
+    const subscriptions = entry.subscribers.get(sender) ?? new Map()
+    const subscription = subscriptions.get(subscriptionKey)
+    subscriptions.set(subscriptionKey, {
+      rawPath,
+      count: (subscription?.count ?? 0) + 1,
+    })
+    entry.subscribers.set(sender, subscriptions)
+  }
 
   if (senderWatchCleanupAttached.has(sender)) return
   senderWatchCleanupAttached.add(sender)
   sender.once('destroyed', () => {
     const watchedPaths = senderWatchPaths.get(sender)
     if (watchedPaths) {
-      for (const watchedPath of watchedPaths) {
+      const uniqueWatchedPaths = new Set(
+        [...watchedPaths.values()].flat(),
+      )
+      for (const watchedPath of uniqueWatchedPaths) {
         const entry = watchers.get(watchedPath)
         if (entry) {
           entry.subscribers.delete(sender)
@@ -59,6 +110,34 @@ function trackWatchSender(sender: WebContents, resolvedPath: string): void {
     senderWatchPaths.delete(sender)
     senderWatchCleanupAttached.delete(sender)
   })
+}
+
+function untrackWatchSender(
+  sender: WebContents,
+  subscriptionKey: string,
+): string | null {
+  const senderPaths = senderWatchPaths.get(sender)
+  const subscriptionPaths = senderPaths?.get(subscriptionKey)
+  const resolvedPath = subscriptionPaths?.shift() ?? null
+  if (!senderPaths || !subscriptionPaths || !resolvedPath) return null
+
+  if (subscriptionPaths.length === 0) senderPaths.delete(subscriptionKey)
+  if (senderPaths.size === 0) senderWatchPaths.delete(sender)
+
+  const entry = watchers.get(resolvedPath)
+  const subscriptions = entry?.subscribers.get(sender)
+  const subscription = subscriptions?.get(subscriptionKey)
+  if (subscriptions && subscription) {
+    if (subscription.count <= 1) subscriptions.delete(subscriptionKey)
+    else {
+      subscriptions.set(subscriptionKey, {
+        ...subscription,
+        count: subscription.count - 1,
+      })
+    }
+  }
+  if (subscriptions?.size === 0) entry?.subscribers.delete(sender)
+  return resolvedPath
 }
 
 // --- Security: path validation (SEC-03) ---
@@ -171,6 +250,17 @@ interface CanonicalPathInfo {
   finalIsSymbolicLink: boolean
 }
 
+export interface FileIdentity {
+  dev: number
+  ino: number
+}
+
+export interface FsPathAuthorization {
+  expectedCanonicalPath: string
+  canonicalParentPath: string
+  parentIdentity: FileIdentity | null
+}
+
 async function canonicalizeFromExistingAncestor(resolvedPath: string): Promise<CanonicalPathInfo> {
   let currentPath = resolvedPath
   const missingSegments: string[] = []
@@ -245,6 +335,40 @@ async function canonicalizeFsTarget(
   return canonicalizeFromExistingAncestor(resolvedPath)
 }
 
+async function createPathAuthorization(
+  canonicalPath: string,
+): Promise<FsPathAuthorization> {
+  const canonicalParentPath = path.dirname(canonicalPath)
+  let parentIdentity: FileIdentity | null = null
+
+  try {
+    const [currentCanonicalParent, parentStats] = await Promise.all([
+      fs.realpath(canonicalParentPath),
+      fs.stat(canonicalParentPath),
+    ])
+    if (path.resolve(currentCanonicalParent) !== path.resolve(canonicalParentPath)) {
+      throw new Error(
+        `Access denied: parent for "${canonicalPath}" changed during authorization`,
+      )
+    }
+    if (!parentStats.isDirectory()) {
+      throw new Error(`Access denied: parent for "${canonicalPath}" is not a directory`)
+    }
+    parentIdentity = {
+      dev: parentStats.dev,
+      ino: parentStats.ino,
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+
+  return {
+    expectedCanonicalPath: canonicalPath,
+    canonicalParentPath,
+    parentIdentity,
+  }
+}
+
 async function canonicalizeAuthorizationRoot(rootPath: string): Promise<string | null> {
   try {
     return (await canonicalizeFromExistingAncestor(path.resolve(rootPath))).canonicalPath
@@ -280,6 +404,8 @@ export interface ValidatedFsPath {
   operationPath: string
   /** Normalized lexical identity retained for renderer-facing path contracts. */
   displayPath: string
+  /** Snapshot used to detect ancestor swaps before handle-based I/O. */
+  authorization: FsPathAuthorization
 }
 
 export async function validateCanonicalFsPathDetails(
@@ -320,6 +446,7 @@ export async function validateCanonicalFsPathDetails(
     return {
       operationPath: target.canonicalPath,
       displayPath: resolvedPath,
+      authorization: await createPathAuthorization(target.canonicalPath),
     }
   } else {
     const canonicalHome = await canonicalizeAuthorizationRoot(home)
@@ -360,6 +487,7 @@ export async function validateCanonicalFsPathDetails(
   return {
     operationPath: target.canonicalPath,
     displayPath: resolvedPath,
+    authorization: await createPathAuthorization(target.canonicalPath),
   }
 }
 
@@ -440,9 +568,44 @@ function symbolicLinkAccessError(targetPath: string): Error {
   return new Error(`Access denied: path "${targetPath}" is a symbolic link`)
 }
 
+async function assertAuthorizedParentUnchanged(
+  authorization: FsPathAuthorization,
+): Promise<void> {
+  if (!authorization.parentIdentity) return
+
+  const [canonicalParent, parentStats] = await Promise.all([
+    fs.realpath(authorization.canonicalParentPath),
+    fs.stat(authorization.canonicalParentPath),
+  ])
+  if (
+    path.resolve(canonicalParent) !== path.resolve(authorization.canonicalParentPath)
+    || !hasFileIdentity(parentStats, authorization.parentIdentity)
+  ) {
+    throw new Error(
+      `Access denied: parent for "${authorization.expectedCanonicalPath}" changed during access`,
+    )
+  }
+}
+
+async function assertPathMatchesAuthorization(
+  targetPath: string,
+  authorization: FsPathAuthorization,
+): Promise<void> {
+  await assertAuthorizedParentUnchanged(authorization)
+  const currentCanonicalPath = await fs.realpath(targetPath)
+  if (
+    path.resolve(currentCanonicalPath)
+    !== path.resolve(authorization.expectedCanonicalPath)
+  ) {
+    throw new Error(`Access denied: path "${targetPath}" changed during access`)
+  }
+  await assertAuthorizedParentUnchanged(authorization)
+}
+
 async function assertOpenHandleMatchesPath(
   handle: FileHandle,
   targetPath: string,
+  authorization?: FsPathAuthorization,
 ): Promise<Stats> {
   const [handleStats, pathStats] = await Promise.all([
     handle.stat(),
@@ -452,16 +615,31 @@ async function assertOpenHandleMatchesPath(
   if (handleStats.dev !== pathStats.dev || handleStats.ino !== pathStats.ino) {
     throw new Error(`Access denied: path "${targetPath}" changed during access`)
   }
+  if (authorization) {
+    await assertPathMatchesAuthorization(targetPath, authorization)
+    const confirmedHandleStats = await handle.stat()
+    const confirmedPathStats = await fs.lstat(targetPath)
+    if (
+      confirmedPathStats.isSymbolicLink()
+      || !hasFileIdentity(confirmedHandleStats, {
+        dev: confirmedPathStats.dev,
+        ino: confirmedPathStats.ino,
+      })
+    ) {
+      throw new Error(`Access denied: path "${targetPath}" changed during access`)
+    }
+  }
   return handleStats
 }
 
 async function openExistingFileNoFollow(
   targetPath: string,
   flags: number = fsConstants.O_RDONLY,
+  authorization?: FsPathAuthorization,
 ): Promise<{ handle: FileHandle; stats: Stats }> {
   const handle = await fs.open(targetPath, flags | fsConstants.O_NOFOLLOW)
   try {
-    const stats = await assertOpenHandleMatchesPath(handle, targetPath)
+    const stats = await assertOpenHandleMatchesPath(handle, targetPath, authorization)
     return { handle, stats }
   } catch (error) {
     await handle.close().catch(() => undefined)
@@ -469,8 +647,15 @@ async function openExistingFileNoFollow(
   }
 }
 
-async function readUtf8FileNoFollow(targetPath: string): Promise<string> {
-  const { handle } = await openExistingFileNoFollow(targetPath)
+async function readUtf8FileNoFollow(
+  targetPath: string,
+  authorization?: FsPathAuthorization,
+): Promise<string> {
+  const { handle } = await openExistingFileNoFollow(
+    targetPath,
+    fsConstants.O_RDONLY,
+    authorization,
+  )
   try {
     return await handle.readFile({ encoding: 'utf8' })
   } finally {
@@ -478,7 +663,16 @@ async function readUtf8FileNoFollow(targetPath: string): Promise<string> {
   }
 }
 
-async function writeUtf8FileNoFollow(targetPath: string, content: string): Promise<void> {
+export interface WriteUtf8FileNoFollowOptions {
+  authorization?: FsPathAuthorization
+  beforeOpen?: () => void | Promise<void>
+}
+
+export async function writeUtf8FileNoFollow(
+  targetPath: string,
+  content: string,
+  options?: WriteUtf8FileNoFollowOptions,
+): Promise<void> {
   let createNew = false
   try {
     const stats = await fs.lstat(targetPath)
@@ -491,23 +685,62 @@ async function writeUtf8FileNoFollow(targetPath: string, content: string): Promi
   const flags = createNew
     ? fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL
     : fsConstants.O_WRONLY
-  const { handle } = await openExistingFileNoFollow(targetPath, flags)
+  await options?.beforeOpen?.()
+
+  let handle: FileHandle | null = null
+  let createdIdentity: FileIdentity | null = null
   try {
+    handle = await fs.open(targetPath, flags | fsConstants.O_NOFOLLOW)
+    const openedStats = await handle.stat()
+    if (createNew) {
+      createdIdentity = {
+        dev: openedStats.dev,
+        ino: openedStats.ino,
+      }
+    }
+    await assertOpenHandleMatchesPath(
+      handle,
+      targetPath,
+      options?.authorization,
+    )
     // Open without O_TRUNC so an inode swap is detected before any content is
-    // destroyed. Missing files use O_EXCL; existing files use O_NOFOLLOW.
+    // destroyed. Missing files use O_EXCL; existing files use O_NOFOLLOW. A
+    // parent swap can still make O_EXCL briefly create an empty file outside
+    // the authorized tree because Node has no openat(2). The authorization
+    // recheck above happens before content mutation; the catch path removes
+    // only the exact inode this call created.
     await handle.truncate(0)
     await handle.writeFile(content, { encoding: 'utf8' })
+  } catch (error) {
+    if (handle) {
+      await handle.close().catch(() => undefined)
+      handle = null
+    }
+    if (createdIdentity) {
+      await cleanupCreatedCopyIfUnchanged(targetPath, createdIdentity)
+    }
+    throw error
   } finally {
-    await handle.close()
+    if (handle) await handle.close()
   }
 }
 
-async function statPathNoFollow(targetPath: string): Promise<Stats> {
+async function statPathNoFollow(
+  targetPath: string,
+  authorization?: FsPathAuthorization,
+): Promise<Stats> {
   const pathStats = await fs.lstat(targetPath)
   if (pathStats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
-  if (!pathStats.isFile()) return pathStats
+  if (!pathStats.isFile()) {
+    if (authorization) await assertPathMatchesAuthorization(targetPath, authorization)
+    return pathStats
+  }
 
-  const { handle, stats } = await openExistingFileNoFollow(targetPath)
+  const { handle, stats } = await openExistingFileNoFollow(
+    targetPath,
+    fsConstants.O_RDONLY,
+    authorization,
+  )
   try {
     return stats
   } finally {
@@ -515,7 +748,10 @@ async function statPathNoFollow(targetPath: string): Promise<Stats> {
   }
 }
 
-async function assertDirectoryNoFollow(targetPath: string): Promise<Stats> {
+async function assertDirectoryNoFollow(
+  targetPath: string,
+  authorization?: FsPathAuthorization,
+): Promise<Stats> {
   const stats = await fs.lstat(targetPath)
   if (stats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
   if (!stats.isDirectory()) {
@@ -523,6 +759,7 @@ async function assertDirectoryNoFollow(targetPath: string): Promise<Stats> {
     error.code = 'ENOTDIR'
     throw error
   }
+  if (authorization) await assertPathMatchesAuthorization(targetPath, authorization)
   return stats
 }
 
@@ -551,8 +788,15 @@ async function getUniqueCopyPath(destDir: string, sourcePath: string): Promise<s
   }
 }
 
-async function isProbablyTextFile(resolvedPath: string): Promise<boolean> {
-  const { handle } = await openExistingFileNoFollow(resolvedPath)
+async function isProbablyTextFile(
+  resolvedPath: string,
+  authorization?: FsPathAuthorization,
+): Promise<boolean> {
+  const { handle } = await openExistingFileNoFollow(
+    resolvedPath,
+    fsConstants.O_RDONLY,
+    authorization,
+  )
   try {
     const sampleSize = 8192
     const buffer = Buffer.alloc(sampleSize)
@@ -573,11 +817,6 @@ async function isProbablyTextFile(resolvedPath: string): Promise<boolean> {
   } finally {
     await handle.close()
   }
-}
-
-interface FileIdentity {
-  dev: number
-  ino: number
 }
 
 function hasFileIdentity(stats: Stats, identity: FileIdentity): boolean {
@@ -625,6 +864,8 @@ export async function cleanupCreatedCopyIfUnchanged(
 
 export interface CopyFileNoFollowOptions {
   afterChunkCopied?: (bytesCopied: number) => void | Promise<void>
+  sourceAuthorization?: FsPathAuthorization
+  destinationAuthorization?: FsPathAuthorization
 }
 
 export async function copyFileNoFollow(
@@ -632,7 +873,11 @@ export async function copyFileNoFollow(
   destinationPath: string,
   options?: CopyFileNoFollowOptions,
 ): Promise<void> {
-  const { handle: sourceHandle, stats: sourceStats } = await openExistingFileNoFollow(sourcePath)
+  const { handle: sourceHandle, stats: sourceStats } = await openExistingFileNoFollow(
+    sourcePath,
+    fsConstants.O_RDONLY,
+    options?.sourceAuthorization,
+  )
   if (!sourceStats.isFile()) {
     await sourceHandle.close()
     throw new Error('Only files can be copied into a workspace')
@@ -654,7 +899,11 @@ export async function copyFileNoFollow(
       dev: createdDestinationStats.dev,
       ino: createdDestinationStats.ino,
     }
-    await assertOpenHandleMatchesPath(destinationHandle, destinationPath)
+    await assertOpenHandleMatchesPath(
+      destinationHandle,
+      destinationPath,
+      options?.destinationAuthorization,
+    )
 
     const buffer = Buffer.allocUnsafe(64 * 1024)
     let position = 0
@@ -714,6 +963,7 @@ export interface FsIpcRegistrationDependencies {
   ipcMain?: FsIpcMain
   shell?: FsShell
   validatePath?: FsPathValidator
+  watchDirectory?: typeof fsWatch
 }
 
 export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): void {
@@ -723,6 +973,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
   const ipcMain = dependencies?.ipcMain ?? electron!.ipcMain
   const shell = dependencies?.shell ?? electron!.shell
   const validatePath = dependencies?.validatePath ?? validateFsPathForHandler
+  const watchDirectory = dependencies?.watchDirectory ?? fsWatch
 
   ipcMain.handle('fs:readDir', async (_, dirPath: string, workspaceId?: string) => {
     try {
@@ -734,7 +985,10 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       )
       // readdir has no portable no-follow descriptor API. Recheck the
       // canonical directory immediately before the path-based operation.
-      await assertDirectoryNoFollow(validatedDirPath.operationPath)
+      await assertDirectoryNoFollow(
+        validatedDirPath.operationPath,
+        validatedDirPath.authorization,
+      )
       const entries = await fs.readdir(validatedDirPath.operationPath, { withFileTypes: true })
       const result: FsEntry[] = entries.map(e => ({
         name: e.name,
@@ -765,7 +1019,10 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
         workspaceId,
         { allowReadOnlyOpenCodeConfig: true },
       )
-      return await readUtf8FileNoFollow(validated.operationPath)
+      return await readUtf8FileNoFollow(
+        validated.operationPath,
+        validated.authorization,
+      )
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       // Access-denied errors must propagate: returning '' would let a
@@ -781,7 +1038,9 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
     args: [ipcSchemas.boundedString(), ipcSchemas.fileContent, ipcSchemas.optionalString] as const,
     handler: async (_evt, filePath, content, workspaceId) => {
       const validated = await validatePath(filePath, 'write', workspaceId)
-      await writeUtf8FileNoFollow(validated.operationPath, content)
+      await writeUtf8FileNoFollow(validated.operationPath, content, {
+        authorization: validated.authorization,
+      })
     },
   }, ipcMain)
 
@@ -789,7 +1048,9 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, filePath, workspaceId) => {
       const validated = await validatePath(filePath, 'create', workspaceId)
-      await writeUtf8FileNoFollow(validated.operationPath, '')
+      await writeUtf8FileNoFollow(validated.operationPath, '', {
+        authorization: validated.authorization,
+      })
     },
   }, ipcMain)
 
@@ -800,6 +1061,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       // mkdir has no descriptor-relative portable equivalent in Node. The
       // canonical-parent preflight prevents known aliases; the remaining
       // mutation race is bounded to this path-based call.
+      await assertAuthorizedParentUnchanged(validated.authorization)
       await fs.mkdir(validated.operationPath, { recursive: true })
     },
   }, ipcMain)
@@ -807,7 +1069,12 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
   handleTyped('fs:deleteFile', {
     args: [ipcSchemas.boundedString(), ipcSchemas.optionalString] as const,
     handler: async (_evt, fspath, workspaceId) => {
-      const { operationPath } = await validatePath(fspath, 'write', workspaceId)
+      const { operationPath, authorization } = await validatePath(
+        fspath,
+        'delete-link',
+        workspaceId,
+      )
+      await assertAuthorizedParentUnchanged(authorization)
       let currentStats: Stats
       try {
         currentStats = await fs.lstat(operationPath)
@@ -817,7 +1084,15 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
         throw error
       }
-      if (currentStats.isSymbolicLink()) throw symbolicLinkAccessError(operationPath)
+      if (currentStats.isSymbolicLink()) {
+        // unlink removes the directory entry itself and never follows its
+        // target. Recheck the parent immediately before the path-based unlink;
+        // Node has no unlinkat(2), so a final ancestor mutation window remains.
+        await assertAuthorizedParentUnchanged(authorization)
+        await fs.unlink(operationPath)
+        return
+      }
+      await assertPathMatchesAuthorization(operationPath, authorization)
       // rm has no no-follow file-descriptor variant. The immediate lstat
       // ensures recursive deletion never starts from a known symlink.
       await fs.rm(operationPath, { recursive: true, force: true })
@@ -832,6 +1107,11 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       // Node exposes rename only as a two-path operation. Both canonical
       // endpoints are independently preflighted; there is no descriptor-based
       // portable rename API that can close the remaining mutation race.
+      await assertPathMatchesAuthorization(
+        validatedOldPath.operationPath,
+        validatedOldPath.authorization,
+      )
+      await assertAuthorizedParentUnchanged(validatedNewPath.authorization)
       await fs.rename(validatedOldPath.operationPath, validatedNewPath.operationPath)
     },
   }, ipcMain)
@@ -846,6 +1126,10 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       if (currentStats.isSymbolicLink()) {
         throw symbolicLinkAccessError(validated.operationPath)
       }
+      await assertPathMatchesAuthorization(
+        validated.operationPath,
+        validated.authorization,
+      )
       shell.showItemInFolder(validated.operationPath)
     },
   }, ipcMain)
@@ -857,12 +1141,15 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       const { join } = await import('path')
       const briefDir = join(CODESURF_HOME, 'briefs')
       const validatedBriefDir = await validatePath(briefDir, 'directory')
+      await assertAuthorizedParentUnchanged(validatedBriefDir.authorization)
       await fs.mkdir(validatedBriefDir.operationPath, { recursive: true })
       const briefPath = await validatePath(
         join(validatedBriefDir.displayPath, `${cardId}.md`),
         'write',
       )
-      await writeUtf8FileNoFollow(briefPath.operationPath, content)
+      await writeUtf8FileNoFollow(briefPath.operationPath, content, {
+        authorization: briefPath.authorization,
+      })
       return briefPath.displayPath
     },
   }, ipcMain)
@@ -875,7 +1162,10 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
         workspaceId,
         { allowReadOnlyOpenCodeConfig: true },
       )
-      await assertDirectoryNoFollow(validated.operationPath)
+      await assertDirectoryNoFollow(
+        validated.operationPath,
+        validated.authorization,
+      )
       return { ok: true }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN'
@@ -891,7 +1181,10 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
         workspaceId,
         { allowReadOnlyOpenCodeConfig: true },
       )
-      const stats = await statPathNoFollow(validated.operationPath)
+      const stats = await statPathNoFollow(
+        validated.operationPath,
+        validated.authorization,
+      )
       return {
         size: stats.size,
         mtimeMs: stats.mtimeMs,
@@ -908,18 +1201,31 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
 
   ipcMain.handle('fs:isProbablyTextFile', async (_, filePath: string, workspaceId?: string) => {
     const validated = await validatePath(filePath, 'read', workspaceId)
-    const stats = await statPathNoFollow(validated.operationPath)
+    const stats = await statPathNoFollow(
+      validated.operationPath,
+      validated.authorization,
+    )
     if (!stats.isFile()) return false
-    return isProbablyTextFile(validated.operationPath)
+    return isProbablyTextFile(
+      validated.operationPath,
+      validated.authorization,
+    )
   })
 
   ipcMain.handle('fs:copyIntoDir', async (_, sourcePath: string, destDir: string, workspaceId?: string) => {
     const validatedSource = await validatePath(sourcePath, 'read', workspaceId)
     const validatedDestDir = await validatePath(destDir, 'directory', workspaceId)
+    await assertAuthorizedParentUnchanged(validatedDestDir.authorization)
     await fs.mkdir(validatedDestDir.operationPath, { recursive: true })
-    await assertDirectoryNoFollow(validatedDestDir.operationPath)
+    await assertDirectoryNoFollow(
+      validatedDestDir.operationPath,
+      validatedDestDir.authorization,
+    )
 
-    const sourceStats = await statPathNoFollow(validatedSource.operationPath)
+    const sourceStats = await statPathNoFollow(
+      validatedSource.operationPath,
+      validatedSource.authorization,
+    )
     if (!sourceStats.isFile()) throw new Error('Only files can be copied into a workspace')
 
     const sourceName = basename(validatedSource.displayPath)
@@ -936,59 +1242,97 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
     const destPath = await validatePath(candidateDisplayPath, 'create', workspaceId)
 
     if (destPath.operationPath !== validatedSource.operationPath) {
-      await copyFileNoFollow(validatedSource.operationPath, destPath.operationPath)
+      await copyFileNoFollow(
+        validatedSource.operationPath,
+        destPath.operationPath,
+        {
+          sourceAuthorization: validatedSource.authorization,
+          destinationAuthorization: destPath.authorization,
+        },
+      )
     }
 
     return { path: destPath.displayPath }
   })
 
   ipcMain.handle('fs:watchStart', async (event, dirPath: string, workspaceId?: string) => {
-    const validated = await validatePath(dirPath, 'directory', workspaceId)
-    await assertDirectoryNoFollow(validated.operationPath)
-    // Reuse an existing watcher for this path and just add this window as a
-    // subscriber. Previously a second window watching the same dir was dropped
-    // (its events never fired) and the first window's close tore the shared
-    // watcher down out from under everyone else.
-    const existing = watchers.get(validated.operationPath)
-    if (existing) {
-      existing.subscribers.set(event.sender, dirPath)
-      trackWatchSender(event.sender, validated.operationPath)
-      return
-    }
-    try {
-      // fs.watch accepts only a path. Canonical validation plus the immediate
-      // directory lstat above is the available no-link preflight.
-      const entry: WatchEntry = {
-        watcher: undefined as unknown as FSWatcher,
-        subscribers: new Map([[event.sender, dirPath]]),
-        debounce: null,
-      }
-      entry.watcher = fsWatch(validated.operationPath, { recursive: true }, () => {
-        if (entry.debounce) clearTimeout(entry.debounce)
-        entry.debounce = setTimeout(() => {
-          for (const [sender, rawPath] of entry.subscribers) {
-            if (sender.isDestroyed()) {
-              entry.subscribers.delete(sender)
-              continue
-            }
-            sender.send(`fs:watch:${rawPath}`)
+    const subscriptionKey = watchSubscriptionKey(dirPath, workspaceId)
+    return runWatchSubscriptionOperation(
+      event.sender,
+      subscriptionKey,
+      async () => {
+        const validated = await validatePath(dirPath, 'directory', workspaceId)
+        if (event.sender.isDestroyed()) return
+        await assertDirectoryNoFollow(
+          validated.operationPath,
+          validated.authorization,
+        )
+        // Reuse an existing watcher for this path and just add this window as a
+        // subscriber. Previously a second window watching the same dir was dropped
+        // (its events never fired) and the first window's close tore the shared
+        // watcher down out from under everyone else.
+        const existing = watchers.get(validated.operationPath)
+        if (existing) {
+          trackWatchSender(
+            event.sender,
+            subscriptionKey,
+            dirPath,
+            validated.operationPath,
+          )
+          return
+        }
+        try {
+          // fs.watch accepts only a path. Canonical validation plus the immediate
+          // directory lstat above is the available no-link preflight.
+          const entry: WatchEntry = {
+            watcher: undefined as unknown as FSWatcher,
+            subscribers: new Map(),
+            debounce: null,
           }
-        }, 200)
-      })
-      watchers.set(validated.operationPath, entry)
-      trackWatchSender(event.sender, validated.operationPath)
-    } catch { /* ignore */ }
+          entry.watcher = watchDirectory(validated.operationPath, { recursive: true }, () => {
+            if (entry.debounce) clearTimeout(entry.debounce)
+            entry.debounce = setTimeout(() => {
+              for (const [sender, subscriptions] of entry.subscribers) {
+                if (sender.isDestroyed()) {
+                  entry.subscribers.delete(sender)
+                  continue
+                }
+                for (const subscription of subscriptions.values()) {
+                  sender.send(`fs:watch:${subscription.rawPath}`)
+                }
+              }
+            }, 200)
+          })
+          watchers.set(validated.operationPath, entry)
+          trackWatchSender(
+            event.sender,
+            subscriptionKey,
+            dirPath,
+            validated.operationPath,
+          )
+        } catch { /* ignore */ }
+      },
+    )
   })
 
   ipcMain.handle('fs:watchStop', async (event, dirPath: string, workspaceId?: string) => {
-    const validated = await validatePath(dirPath, 'directory', workspaceId)
-    const entry = watchers.get(validated.operationPath)
-    if (!entry) return
-    entry.subscribers.delete(event.sender)
-    if (entry.subscribers.size === 0) {
-      entry.watcher.close()
-      if (entry.debounce) clearTimeout(entry.debounce)
-      watchers.delete(validated.operationPath)
-    }
+    const subscriptionKey = watchSubscriptionKey(dirPath, workspaceId)
+    return runWatchSubscriptionOperation(
+      event.sender,
+      subscriptionKey,
+      async () => {
+        const trackedPath = untrackWatchSender(event.sender, subscriptionKey)
+        const operationPath = trackedPath ?? (
+          await validatePath(dirPath, 'directory', workspaceId)
+        ).operationPath
+        const entry = watchers.get(operationPath)
+        if (!entry) return
+        if (entry.subscribers.size === 0) {
+          entry.watcher.close()
+          if (entry.debounce) clearTimeout(entry.debounce)
+          watchers.delete(operationPath)
+        }
+      },
+    )
   })
 }

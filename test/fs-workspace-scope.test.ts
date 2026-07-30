@@ -6,12 +6,13 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { describe, test } from 'node:test'
 import { promisify } from 'node:util'
 import {
@@ -23,6 +24,7 @@ import {
   validateCanonicalFsPath,
   validateCanonicalFsPathDetails,
   validateFsPath,
+  writeUtf8FileNoFollow,
   type FsIpcRegistrationDependencies,
   type FsPathScopeOptions,
 } from '../src/main/ipc/fs.ts'
@@ -55,8 +57,16 @@ const scopedTo = (workspace: string) => ({
 
 type CapturedIpcHandler = (event: unknown, ...args: unknown[]) => unknown
 
-function captureFsHandlers(scope: FsPathScopeOptions): {
+function captureFsHandlers(
+  scope: FsPathScopeOptions,
+  overrides?: Omit<FsIpcRegistrationDependencies, 'ipcMain'>,
+): {
   invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
+  invokeWithEvent: (
+    channel: string,
+    event: unknown,
+    ...args: unknown[]
+  ) => Promise<unknown>
 } {
   const handlers = new Map<string, CapturedIpcHandler>()
   const ipcMain: NonNullable<FsIpcRegistrationDependencies['ipcMain']> = {
@@ -69,22 +79,34 @@ function captureFsHandlers(scope: FsPathScopeOptions): {
   }
 
   registerFsIPC({
+    ...overrides,
     ipcMain,
-    shell,
-    validatePath: (filePath, intent, _workspaceId, operationOptions) => (
-      validateCanonicalFsPathDetails(filePath, intent, {
-        ...scope,
-        ...operationOptions,
-      })
+    shell: overrides?.shell ?? shell,
+    validatePath: overrides?.validatePath ?? (
+      (filePath, intent, _workspaceId, operationOptions) => (
+        validateCanonicalFsPathDetails(filePath, intent, {
+          ...scope,
+          ...operationOptions,
+        })
+      )
     ),
   })
 
+  async function invokeWithEvent(
+    channel: string,
+    event: unknown,
+    ...args: unknown[]
+  ): Promise<unknown> {
+    const handler = handlers.get(channel)
+    assert.ok(handler, `Expected ${channel} to be registered`)
+    return await handler(event, ...args)
+  }
+
   return {
     async invoke(channel, ...args) {
-      const handler = handlers.get(channel)
-      assert.ok(handler, `Expected ${channel} to be registered`)
-      return await handler({}, ...args)
+      return invokeWithEvent(channel, {}, ...args)
     },
+    invokeWithEvent,
   }
 }
 
@@ -451,6 +473,77 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
   })
 })
 
+describe('ancestor-swap resistance', () => {
+  test('detects a parent swap before content write and cleans its created inode', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const authorizedParent = join(fixture.workspace, 'authorized-parent')
+      const movedParent = join(fixture.workspace, 'moved-parent')
+      const targetPath = join(authorizedParent, 'created.txt')
+      const escapedTarget = join(fixture.outside, 'created.txt')
+      await mkdir(authorizedParent)
+
+      const validated = await validateCanonicalFsPathDetails(
+        targetPath,
+        'create',
+        scopedTo(fixture.workspace),
+      )
+      await assert.rejects(
+        writeUtf8FileNoFollow(validated.operationPath, 'must-not-escape', {
+          authorization: validated.authorization,
+          async beforeOpen() {
+            await rename(authorizedParent, movedParent)
+            await symlink(fixture.outside, authorizedParent)
+          },
+        }),
+        /changed during access/,
+      )
+
+      // O_EXCL can briefly create an empty file after the ancestor swap because
+      // Node has no openat(2), but authorization runs before content mutation
+      // and removes only the inode opened by this call.
+      await assert.rejects(lstat(escapedTarget), { code: 'ENOENT' })
+      await assert.rejects(lstat(join(movedParent, 'created.txt')), { code: 'ENOENT' })
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('does not truncate an existing external file after a parent swap', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const authorizedParent = join(fixture.workspace, 'authorized-parent')
+      const movedParent = join(fixture.workspace, 'moved-parent')
+      const targetPath = join(authorizedParent, 'existing.txt')
+      const escapedTarget = join(fixture.outside, 'existing.txt')
+      await mkdir(authorizedParent)
+      await writeFile(targetPath, 'inside', 'utf8')
+      await writeFile(escapedTarget, 'outside-secret', 'utf8')
+
+      const validated = await validateCanonicalFsPathDetails(
+        targetPath,
+        'write',
+        scopedTo(fixture.workspace),
+      )
+      await assert.rejects(
+        writeUtf8FileNoFollow(validated.operationPath, 'must-not-overwrite', {
+          authorization: validated.authorization,
+          async beforeOpen() {
+            await rename(authorizedParent, movedParent)
+            await symlink(fixture.outside, authorizedParent)
+          },
+        }),
+        /changed during access/,
+      )
+
+      assert.equal(await readFile(escapedTarget, 'utf8'), 'outside-secret')
+      assert.equal(await readFile(join(movedParent, 'existing.txt'), 'utf8'), 'inside')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('registered filesystem handlers', () => {
   test('use canonical paths for I/O while preserving a symlink workspace identity', async () => {
     const fixture = await createFsFixture()
@@ -500,6 +593,355 @@ describe('registered filesystem handlers', () => {
         await readFile(join(fixture.workspace, 'import.txt'), 'utf8'),
         'imported',
       )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('covers create, rename, reveal, probe, stat, text detection, and delete', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const revealedPaths: string[] = []
+      const { invoke } = captureFsHandlers(scopedTo(fixture.workspace), {
+        shell: {
+          showItemInFolder(fullPath) {
+            revealedPaths.push(fullPath)
+          },
+        },
+      })
+      const createdDir = join(fixture.workspace, 'created-dir')
+      const createdFile = join(createdDir, 'created.txt')
+      const renamedFile = join(createdDir, 'renamed.txt')
+
+      await invoke('fs:createDir', createdDir)
+      await invoke('fs:createFile', createdFile)
+      assert.equal(await readFile(createdFile, 'utf8'), '')
+      await invoke('fs:writeFile', createdFile, 'plain text')
+
+      assert.deepEqual(await invoke('fs:probeDir', createdDir), { ok: true })
+      const stats = await invoke('fs:stat', createdFile) as {
+        size: number
+        mtimeMs: number
+        isFile: boolean
+        isDir: boolean
+      }
+      assert.equal(stats.size, Buffer.byteLength('plain text'))
+      assert.equal(stats.isFile, true)
+      assert.equal(stats.isDir, false)
+      assert.equal(await invoke('fs:isProbablyTextFile', createdFile), true)
+
+      await invoke('fs:renameFile', createdFile, renamedFile)
+      assert.equal(await readFile(renamedFile, 'utf8'), 'plain text')
+      await invoke('fs:revealInFinder', renamedFile)
+      assert.deepEqual(revealedPaths, [await realpath(renamedFile)])
+
+      await invoke('fs:deleteFile', renamedFile)
+      await assert.rejects(lstat(renamedFile), { code: 'ENOENT' })
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('deletes an in-workspace symlink entry without touching its external target', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const externalTarget = join(fixture.outside, 'keep.txt')
+      const workspaceLink = join(fixture.workspace, 'safe-link.txt')
+      await writeFile(externalTarget, 'keep-me', 'utf8')
+      await symlink(externalTarget, workspaceLink)
+
+      const { invoke } = captureFsHandlers(scopedTo(fixture.workspace))
+      await invoke('fs:deleteFile', workspaceLink)
+
+      await assert.rejects(lstat(workspaceLink), { code: 'ENOENT' })
+      assert.equal(await readFile(externalTarget, 'utf8'), 'keep-me')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('writes briefs through the real handler without leaking test state', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const appStateRoot = join(fixture.workspace, 'app-state')
+      await mkdir(appStateRoot)
+      const scope = scopedTo(fixture.workspace)
+      const validatePath: NonNullable<
+        FsIpcRegistrationDependencies['validatePath']
+      > = async (filePath, intent, _workspaceId, operationOptions) => {
+        const lexicalPath = resolve(filePath)
+        if (isPathUnderRoot(lexicalPath, CODESURF_HOME)) {
+          const mappedPath = join(
+            appStateRoot,
+            relative(CODESURF_HOME, lexicalPath),
+          )
+          const validated = await validateCanonicalFsPathDetails(
+            mappedPath,
+            intent,
+            {
+              ...scope,
+              ...operationOptions,
+            },
+          )
+          return {
+            ...validated,
+            displayPath: lexicalPath,
+          }
+        }
+        return validateCanonicalFsPathDetails(filePath, intent, {
+          ...scope,
+          ...operationOptions,
+        })
+      }
+      const { invoke } = captureFsHandlers(scope, { validatePath })
+
+      const returnedPath = await invoke(
+        'fs:writeBrief',
+        'card-123',
+        '# Brief',
+      )
+      assert.equal(returnedPath, join(CODESURF_HOME, 'briefs', 'card-123.md'))
+      assert.equal(
+        await readFile(join(appStateRoot, 'briefs', 'card-123.md'), 'utf8'),
+        '# Brief',
+      )
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('stops the original watcher after a symlink workspace root is retargeted', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const configuredRoot = join(fixture.root, 'configured-workspace')
+      await symlink(fixture.workspace, configuredRoot)
+      const scope: FsPathScopeOptions = {
+        restrictToWorkspaceRoots: true,
+        allowedRoots: [configuredRoot, fixture.workspace, fixture.outside],
+      }
+      let validationCount = 0
+      let closeCount = 0
+      const watchedPaths: string[] = []
+      const validatePath: NonNullable<
+        FsIpcRegistrationDependencies['validatePath']
+      > = async (filePath, intent, _workspaceId, operationOptions) => {
+        validationCount += 1
+        return validateCanonicalFsPathDetails(filePath, intent, {
+          ...scope,
+          ...operationOptions,
+        })
+      }
+      const watchDirectory = ((
+        watchedPath: string,
+      ) => {
+        watchedPaths.push(watchedPath)
+        return {
+          close() {
+            closeCount += 1
+          },
+        }
+      }) as unknown as NonNullable<
+        FsIpcRegistrationDependencies['watchDirectory']
+      >
+      const { invokeWithEvent } = captureFsHandlers(scope, {
+        validatePath,
+        watchDirectory,
+      })
+      const destroyedListeners: Array<() => void> = []
+      const sender = {
+        once(eventName: string, listener: () => void) {
+          if (eventName === 'destroyed') destroyedListeners.push(listener)
+          return this
+        },
+        isDestroyed() {
+          return false
+        },
+        send() {},
+      }
+      const event = { sender }
+
+      await invokeWithEvent('fs:watchStart', event, configuredRoot, 'workspace-1')
+      assert.deepEqual(watchedPaths, [await realpath(fixture.workspace)])
+      assert.equal(validationCount, 1)
+
+      await rm(configuredRoot)
+      await symlink(fixture.outside, configuredRoot)
+      await invokeWithEvent('fs:watchStop', event, configuredRoot, 'workspace-1')
+
+      assert.equal(validationCount, 1)
+      assert.equal(closeCount, 1)
+      assert.equal(destroyedListeners.length, 1)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('reference-counts duplicate watches from the same renderer', async () => {
+    const fixture = await createFsFixture()
+    try {
+      let watchCount = 0
+      let closeCount = 0
+      const watchDirectory = (() => {
+        watchCount += 1
+        return {
+          close() {
+            closeCount += 1
+          },
+        }
+      }) as unknown as NonNullable<
+        FsIpcRegistrationDependencies['watchDirectory']
+      >
+      const { invokeWithEvent } = captureFsHandlers(
+        scopedTo(fixture.workspace),
+        { watchDirectory },
+      )
+      const sender = {
+        once() {
+          return this
+        },
+        isDestroyed() {
+          return false
+        },
+        send() {},
+      }
+      const event = { sender }
+
+      await invokeWithEvent('fs:watchStart', event, fixture.workspace, 'workspace-1')
+      await invokeWithEvent('fs:watchStart', event, fixture.workspace, 'workspace-1')
+      assert.equal(watchCount, 1)
+
+      await invokeWithEvent('fs:watchStop', event, fixture.workspace, 'workspace-1')
+      assert.equal(closeCount, 0)
+      await invokeWithEvent('fs:watchStop', event, fixture.workspace, 'workspace-1')
+      assert.equal(closeCount, 1)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('serializes an immediate stop behind an in-flight watch start', async () => {
+    const fixture = await createFsFixture()
+    try {
+      let releaseValidation: (() => void) | undefined
+      let markValidationStarted: (() => void) | undefined
+      const validationGate = new Promise<void>(resolveGate => {
+        releaseValidation = resolveGate
+      })
+      const validationStarted = new Promise<void>(resolveStarted => {
+        markValidationStarted = resolveStarted
+      })
+      let watchCount = 0
+      let closeCount = 0
+      const validatePath: NonNullable<
+        FsIpcRegistrationDependencies['validatePath']
+      > = async (filePath, intent, _workspaceId, operationOptions) => {
+        markValidationStarted?.()
+        await validationGate
+        return validateCanonicalFsPathDetails(filePath, intent, {
+          ...scopedTo(fixture.workspace),
+          ...operationOptions,
+        })
+      }
+      const watchDirectory = (() => {
+        watchCount += 1
+        return {
+          close() {
+            closeCount += 1
+          },
+        }
+      }) as unknown as NonNullable<
+        FsIpcRegistrationDependencies['watchDirectory']
+      >
+      const { invokeWithEvent } = captureFsHandlers(
+        scopedTo(fixture.workspace),
+        { validatePath, watchDirectory },
+      )
+      const sender = {
+        once() {
+          return this
+        },
+        isDestroyed() {
+          return false
+        },
+        send() {},
+      }
+      const event = { sender }
+
+      const start = invokeWithEvent(
+        'fs:watchStart',
+        event,
+        fixture.workspace,
+        'workspace-1',
+      )
+      await validationStarted
+      const stop = invokeWithEvent(
+        'fs:watchStop',
+        event,
+        fixture.workspace,
+        'workspace-1',
+      )
+      releaseValidation?.()
+      await Promise.all([start, stop])
+
+      assert.equal(watchCount, 1)
+      assert.equal(closeCount, 1)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('retargeted re-subscriptions retain both canonical watcher lifecycles', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const configuredRoot = join(fixture.root, 'configured-workspace')
+      await symlink(fixture.workspace, configuredRoot)
+      const scope: FsPathScopeOptions = {
+        restrictToWorkspaceRoots: true,
+        allowedRoots: [configuredRoot, fixture.workspace, fixture.outside],
+      }
+      const watchedPaths: string[] = []
+      const closedPaths: string[] = []
+      const watchDirectory = ((
+        watchedPath: string,
+      ) => {
+        watchedPaths.push(watchedPath)
+        return {
+          close() {
+            closedPaths.push(watchedPath)
+          },
+        }
+      }) as unknown as NonNullable<
+        FsIpcRegistrationDependencies['watchDirectory']
+      >
+      const { invokeWithEvent } = captureFsHandlers(scope, { watchDirectory })
+      const destroyedListeners: Array<() => void> = []
+      const sender = {
+        once(eventName: string, listener: () => void) {
+          if (eventName === 'destroyed') destroyedListeners.push(listener)
+          return this
+        },
+        isDestroyed() {
+          return false
+        },
+        send() {},
+      }
+      const event = { sender }
+
+      await invokeWithEvent('fs:watchStart', event, configuredRoot, 'workspace-1')
+      await rm(configuredRoot)
+      await symlink(fixture.outside, configuredRoot)
+      await invokeWithEvent('fs:watchStart', event, configuredRoot, 'workspace-1')
+
+      const canonicalWorkspace = await realpath(fixture.workspace)
+      const canonicalOutside = await realpath(fixture.outside)
+      assert.deepEqual(watchedPaths, [canonicalWorkspace, canonicalOutside])
+
+      await invokeWithEvent('fs:watchStop', event, configuredRoot, 'workspace-1')
+      assert.deepEqual(closedPaths, [canonicalWorkspace])
+      assert.equal(destroyedListeners.length, 1)
+
+      destroyedListeners[0]()
+      assert.deepEqual(closedPaths, [canonicalWorkspace, canonicalOutside])
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
