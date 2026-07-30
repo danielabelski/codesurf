@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -133,6 +133,7 @@ test('daemon Claude foreground jobs ask for tool permission and persist scoped a
   const workspaceDir = join(homeDir, 'workspace')
   const targetFile = join(workspaceDir, 'notes.txt')
   await mkdir(workspaceDir, { recursive: true })
+  if (process.platform !== 'win32') await chmod(homeDir, 0o755)
   await writeFile(targetFile, 'before prompt write\n', 'utf8')
   t.after(async () => {
     await rm(homeDir, { recursive: true, force: true })
@@ -187,13 +188,18 @@ test('daemon Claude foreground jobs ask for tool permission and persist scoped a
   assert.equal(timeline.some(event => event.type === 'tool_permission_request' && event.toolName === 'Write'), true)
   assert.equal(timeline.some(event => event.type === 'tool_permission_resolved' && event.decision === 'today'), true)
 
-  const permissionStore = JSON.parse(await readFile(join(homeDir, 'permissions.json'), 'utf8'))
+  const permissionsFile = join(homeDir, 'permissions.json')
+  const permissionStore = JSON.parse(await readFile(permissionsFile, 'utf8'))
   assert.equal(permissionStore.grants.length, 1)
   assert.equal(permissionStore.grants[0].provider, 'claude')
   assert.equal(permissionStore.grants[0].toolName, 'Write')
   assert.equal(permissionStore.grants[0].action, 'allow')
   assert.equal(permissionStore.grants[0].scope, 'today')
   assert.equal(permissionStore.grants[0].workspaceDir, workspaceDir)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(homeDir)).mode & 0o777, 0o700)
+    assert.equal((await stat(permissionsFile)).mode & 0o777, 0o600)
+  }
 })
 
 test('daemon Claude grant-only mode denies ungranted tools without prompting', async t => {

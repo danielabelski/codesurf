@@ -2,7 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -132,11 +132,23 @@ function readPermissionGrants(homeDir) {
 }
 
 function writePermissionGrants(homeDir, grants) {
-  ensureDir(homeDir)
+  mkdirSync(homeDir, { recursive: true, mode: 0o700 })
+  chmodSync(homeDir, 0o700)
   const filePath = join(homeDir, 'permissions.json')
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
-  writeFileSync(tempPath, `${JSON.stringify({ version: 1, grants }, null, 2)}\n`, 'utf8')
-  renameSync(tempPath, filePath)
+  let replaced = false
+  try {
+    writeFileSync(tempPath, `${JSON.stringify({ version: 1, grants }, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+    renameSync(tempPath, filePath)
+    replaced = true
+    chmodSync(filePath, 0o600)
+  } finally {
+    if (!replaced && existsSync(tempPath)) unlinkSync(tempPath)
+  }
 }
 
 function normalizeWorkspaceDir(workspaceDir) {
@@ -922,7 +934,8 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
   // the client as request.sessionId), resume that thread so the model keeps the
   // full conversation — `codex exec [OPTIONS] resume <threadId> [PROMPT]`.
   // Codex's CLI grammar requires every exec-level OPTION (--json, --model,
-  // --skip-git-repo-check, -C <dir>, sandbox/approval flags) to precede the
+  // --ignore-user-config, --skip-git-repo-check, -C <dir>,
+  // sandbox/approval flags) to precede the
   // `resume` subcommand; only SESSION_ID and PROMPT follow it. Placing `resume`
   // before the options makes codex reject the trailing flags (e.g.
   // `error: unexpected argument '-C' found`). Mirrors the runtime builder
@@ -934,9 +947,10 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
     '--json',
     '--model',
     request.model,
+    ...sandboxApprovalFlags,
+    '--ignore-user-config',
     '--skip-git-repo-check',
     ...(workspaceDir ? ['-C', workspaceDir] : []),
-    ...sandboxApprovalFlags,
     ...resumeArgs,
   ]
   codexArgs.push(buildCodexPrompt(

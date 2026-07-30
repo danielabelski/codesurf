@@ -19,21 +19,22 @@ test('buildCodexExecArgs places exec-level options before resume', () => {
     messages: [{ role: 'user', content: 'continue' }],
   }, '/tmp/workspace')
 
-  assert.deepEqual(args.slice(0, 12), [
+  assert.deepEqual(args.slice(0, 13), [
     'exec',
     '--json',
     '--model',
     'o3',
-    '--skip-git-repo-check',
-    '-C',
-    '/tmp/workspace',
     '-s',
     'workspace-write',
     '-c',
     'approval_policy=on-request',
+    '--ignore-user-config',
+    '--skip-git-repo-check',
+    '-C',
+    '/tmp/workspace',
     'resume',
   ])
-  assert.equal(args[12], 'session-1')
+  assert.equal(args[13], 'session-1')
   assert.match(args.at(-1), /continue/)
 })
 
@@ -50,7 +51,7 @@ test('buildCodexExecArgs never emits -C (or any flag) after resume', () => {
   assert.ok(resumeIdx > -1, 'resume subcommand must be present on a continuation turn')
   // `-C` and every other exec-level flag must live BEFORE `resume`.
   assert.ok(args.lastIndexOf('-C') < resumeIdx, '`-C` must never follow `resume`')
-  for (const flag of ['--json', '--model', '--skip-git-repo-check', '-s', '-c']) {
+  for (const flag of ['--json', '--model', '--ignore-user-config', '--skip-git-repo-check', '-s', '-c']) {
     assert.ok(args.indexOf(flag) > -1 && args.indexOf(flag) < resumeIdx, `${flag} must precede resume`)
   }
   // Only the session id and prompt follow `resume`.

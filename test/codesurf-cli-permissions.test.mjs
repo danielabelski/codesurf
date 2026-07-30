@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -25,7 +25,10 @@ async function runCodesurf(args, options) {
 test('codesurf permissions CLI writes the same persisted grant shape used by chat', async t => {
   const homeDir = await mkdtemp(join(ROOT_DIR, '.tmp', 'codesurf-cli-permissions-'))
   const workspaceDir = join(homeDir, 'workspace')
+  const codesurfHome = join(homeDir, '.codesurf')
   await mkdir(workspaceDir, { recursive: true })
+  await mkdir(codesurfHome, { recursive: true, mode: 0o755 })
+  if (process.platform !== 'win32') await chmod(codesurfHome, 0o755)
   t.after(async () => {
     await rm(homeDir, { recursive: true, force: true })
   })
@@ -62,9 +65,14 @@ test('codesurf permissions CLI writes the same persisted grant shape used by cha
   assert.equal(denyResult.grant.scope, 'never')
   assert.equal(denyResult.grant.workspaceDir, resolve(workspaceDir))
 
-  const store = JSON.parse(await readFile(join(homeDir, '.codesurf', 'permissions.json'), 'utf8'))
+  const permissionsFile = join(codesurfHome, 'permissions.json')
+  const store = JSON.parse(await readFile(permissionsFile, 'utf8'))
   assert.equal(store.version, 1)
   assert.deepEqual(store.grants, denyResult.grants)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(codesurfHome)).mode & 0o777, 0o700)
+    assert.equal((await stat(permissionsFile)).mode & 0o777, 0o600)
+  }
 
   const listOutput = await runCodesurf(['permissions', 'list', '--json'], { homeDir, cwd: workspaceDir })
   const listResult = JSON.parse(listOutput)

@@ -109,8 +109,19 @@ function readPermissionStore() {
 function writePermissionStore(store) {
   ensureCacheDir()
   const tempPath = `${PERMISSIONS_FILE}.${process.pid}.${Date.now()}.tmp`
-  fs.writeFileSync(tempPath, `${JSON.stringify({ version: PERMISSIONS_VERSION, grants: store.grants }, null, 2)}\n`, 'utf8')
-  fs.renameSync(tempPath, PERMISSIONS_FILE)
+  let replaced = false
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify({ version: PERMISSIONS_VERSION, grants: store.grants }, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+    fs.renameSync(tempPath, PERMISSIONS_FILE)
+    replaced = true
+    fs.chmodSync(PERMISSIONS_FILE, 0o600)
+  } finally {
+    if (!replaced && fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
+  }
 }
 
 function makePermissionId() {
@@ -355,8 +366,9 @@ function migrateLegacyData() {
 
 function ensureCacheDir() {
   if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true })
+    fs.mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 })
   }
+  fs.chmodSync(CACHE_DIR, 0o700)
   migrateLegacyData()
   if (!fs.existsSync(ELECTRON_CACHE)) {
     fs.mkdirSync(ELECTRON_CACHE, { recursive: true })

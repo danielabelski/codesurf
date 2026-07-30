@@ -506,7 +506,8 @@ test('daemon Codex: a request with sessionId resumes the thread (`exec [OPTIONS]
   // Continuation turn: the Codex thread id from a prior turn is echoed back as
   // request.sessionId. Codex's CLI grammar is `codex exec [OPTIONS] resume
   // <SESSION_ID> [PROMPT]` — ALL exec-level options (--json, --model,
-  // --skip-git-repo-check, -C <dir>, sandbox/approval flags) MUST precede the
+  // --ignore-user-config, --skip-git-repo-check, -C <dir>,
+  // sandbox/approval flags) MUST precede the
   // `resume` subcommand; only the SESSION_ID and PROMPT follow it. Emitting
   // `resume` before the options makes codex reject the trailing flags
   // (`error: unexpected argument '-C' found`), which broke multi-turn resume.
@@ -521,7 +522,7 @@ test('daemon Codex: a request with sessionId resumes the thread (`exec [OPTIONS]
   assert.equal(resumeIdx, resumed.length - 3, '`resume` must be third-from-last (resume, <id>, <prompt>)')
   assert.match(resumed.at(-1), /do it/, 'the prompt is the final positional arg')
   // Every exec-level option/flag must appear BEFORE `resume`.
-  for (const flag of ['--json', '--model', 'gpt-test', '--skip-git-repo-check', '-C', '/ws', '-s', 'workspace-write', '-c', 'approval_policy=on-request']) {
+  for (const flag of ['--json', '--model', 'gpt-test', '--ignore-user-config', '--skip-git-repo-check', '-C', '/ws', '-s', 'workspace-write', '-c', 'approval_policy=on-request']) {
     assert.ok(resumed.indexOf(flag) > -1 && resumed.indexOf(flag) < resumeIdx, `${flag} must precede resume`)
   }
   // `-C <dir>` must never appear after `resume` (the exact bug codex rejected).
@@ -538,6 +539,31 @@ test('daemon Codex: a request with sessionId resumes the thread (`exec [OPTIONS]
   // Resume must not disturb the sandbox/approval flags (continuity is orthogonal
   // to permission enforcement).
   assert.deepEqual(codexSandboxAndApproval(resumed), { sandbox: 'workspace-write', approval: 'on-request' })
+})
+
+test('daemon Codex argv keeps the runtime builder option prefix exactly aligned', () => {
+  const request = {
+    provider: 'codex',
+    model: 'gpt-test',
+    mode: 'default',
+    sessionId: 'thread-parity',
+    messages: [{ role: 'user', content: 'do it' }],
+  }
+  const daemonArgs = buildCodexExecArgs(request, '/ws')
+  const runtimeArgs = buildCodexSpawnArgs({
+    agentMode: null,
+    mode: 'default',
+    model: 'gpt-test',
+    resumeThreadId: 'thread-parity',
+    userContent: 'do it',
+    workspaceDir: '/ws',
+  })
+
+  assert.deepEqual(
+    daemonArgs.slice(0, -1),
+    runtimeArgs.slice(0, -1),
+    'daemon and Electron Codex launches must apply the same exec options in the same order',
+  )
 })
 
 // ─── runtime Codex: multi-turn continuity (resume) — buildCodexSpawnArgs ──────
