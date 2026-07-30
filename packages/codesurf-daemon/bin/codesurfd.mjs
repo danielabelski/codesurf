@@ -23,7 +23,11 @@ const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'p
 const LOCK_PATH = join(HOME, 'daemon', 'daemon.lock')
 const PROTOCOL_VERSION = 1
 const APP_VERSION = String(process.env.CODESURF_APP_VERSION ?? '').trim() || null
+export const MAX_REQUEST_BODY_BYTES = 1024 * 1024
 const STARTED_AT = new Date().toISOString()
+const TEST_SHUTDOWN_DELAY_MS = process.env.NODE_ENV === 'test'
+  ? Math.min(10_000, Math.max(0, Number(process.env.CODESURF_TEST_SHUTDOWN_DELAY_MS) || 0))
+  : 0
 const LEGACY_CONFIG_PATH = join(HOME, 'config.json')
 const WORKSPACES_FILE = join(HOME, 'workspaces', 'workspaces.json')
 const PROJECTS_FILE = join(HOME, 'projects', 'projects.json')
@@ -2796,25 +2800,91 @@ async function healthcheck(info) {
 async function reuseExistingDaemonIfHealthy() {
   const existing = readPidInfo()
   if (!existing || !isProcessAlive(existing.pid)) return false
+  if (APP_VERSION && existing.appVersion !== APP_VERSION) return false
   return await healthcheck(existing)
+}
+
+class RequestBodyError extends Error {
+  constructor(statusCode, code, message) {
+    super(message)
+    this.name = 'RequestBodyError'
+    this.statusCode = statusCode
+    this.code = code
+  }
 }
 
 function parseRequestBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = []
-    req.on('data', chunk => chunks.push(Buffer.from(chunk)))
-    req.on('end', () => {
+    let byteCount = 0
+    let settled = false
+
+    const cleanup = () => {
+      req.off('data', onData)
+      req.off('end', onEnd)
+      req.off('error', onError)
+      req.off('aborted', onAborted)
+    }
+
+    const rejectBody = (error, drain = false) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      chunks.length = 0
+
+      if (drain && !req.complete && !req.destroyed) {
+        const ignoreDrainError = () => {}
+        req.on('error', ignoreDrainError)
+        req.once('close', () => {
+          req.off('error', ignoreDrainError)
+        })
+        req.resume()
+      }
+      reject(error)
+    }
+
+    const onData = chunk => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      byteCount += buffer.byteLength
+      if (byteCount > MAX_REQUEST_BODY_BYTES) {
+        rejectBody(
+          new RequestBodyError(413, 'REQUEST_BODY_TOO_LARGE', 'Request body too large'),
+          true,
+        )
+        return
+      }
+      chunks.push(buffer)
+    }
+
+    const onEnd = () => {
+      if (settled) return
+      settled = true
+      cleanup()
       if (chunks.length === 0) {
         resolve({})
         return
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
-      } catch (error) {
-        reject(error)
+        const body = Buffer.concat(chunks).toString('utf8')
+        chunks.length = 0
+        resolve(JSON.parse(body))
+      } catch {
+        reject(new RequestBodyError(400, 'INVALID_JSON', 'Malformed JSON request body'))
       }
-    })
-    req.on('error', reject)
+    }
+
+    const onError = error => {
+      rejectBody(error)
+    }
+
+    const onAborted = () => {
+      rejectBody(new RequestBodyError(400, 'REQUEST_ABORTED', 'Request body aborted'))
+    }
+
+    req.on('data', onData)
+    req.on('end', onEnd)
+    req.on('error', onError)
+    req.on('aborted', onAborted)
   })
 }
 
@@ -2910,6 +2980,7 @@ const server = createServer(async (req, res) => {
     if (method === 'GET' && url.pathname === '/health') {
       sendJson(res, 200, {
         ok: true,
+        shuttingDown,
         pid: process.pid,
         startedAt: STARTED_AT,
         protocolVersion: PROTOCOL_VERSION,
@@ -3841,6 +3912,18 @@ const server = createServer(async (req, res) => {
 
     sendJson(res, 404, { error: 'Not found' })
   } catch (error) {
+    if (res.headersSent || res.writableEnded) {
+      if (!res.writableEnded) res.end()
+      return
+    }
+    if (error instanceof RequestBodyError) {
+      sendJson(res, error.statusCode, {
+        error: error.message,
+        code: error.code,
+        ...(error.statusCode === 413 ? { maxBytes: MAX_REQUEST_BODY_BYTES } : {}),
+      })
+      return
+    }
     sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
   }
 })
@@ -3948,9 +4031,13 @@ function removeOwnedPidFile() {
 async function shutdown() {
   if (shuttingDown) return
   shuttingDown = true
-  try {
-    removeOwnedPidFile()
-  } catch {}
+  // Keep the authenticated health endpoint and owned PID/lock identity alive
+  // while jobs wind down. The manager may need to re-authenticate this exact
+  // process before bounded SIGKILL escalation. The synchronous `exit` handler
+  // below removes both identity files only when the process actually exits.
+  if (TEST_SHUTDOWN_DELAY_MS > 0) {
+    await new Promise(resolve => setTimeout(resolve, TEST_SHUTDOWN_DELAY_MS))
+  }
   // Cancel in-flight jobs (and kill their CLI children) before closing the
   // server, so a restart/SIGTERM does not orphan agent subprocesses.
   try {
