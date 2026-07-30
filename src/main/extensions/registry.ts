@@ -14,9 +14,11 @@ import { CODESURF_HOME } from '../paths'
 import { ExtensionContext } from './context'
 import { activatePowerExtension, type ExtensionScope } from './loader'
 import { bus } from '../event-bus'
-import { adapters, tryAdaptExtension } from './adapters'
+import { adapters, assertValidAdaptedManifest, tryAdaptExtension } from './adapters'
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
 import { resolveExtensionEnabled } from './activation-policy'
+import { assertValidExtensionId, isValidExtensionId } from './identity'
+import { openCanonicalResource, readOpenedCanonicalResourceText } from './resource-path'
 import { log } from '../utils/logger.ts'
 
 const extLog = log.scope('Extensions')
@@ -31,6 +33,11 @@ export interface AggregatedContributions {
   panels: OwnedContribution<ExtensionPanelContrib>[]
   settingsSections: OwnedContribution<ExtensionSettingsSectionContrib>[]
   layoutPresets: OwnedContribution<ExtensionLayoutPresetContrib>[]
+}
+
+interface LightweightManifestCandidate {
+  manifest: ExtensionManifest
+  adapted: boolean
 }
 
 // ── Persisted disabled-extension set ──────────────────────────────────────────
@@ -178,44 +185,69 @@ export class ExtensionRegistry {
   }
 
   async rescan(workspacePath?: string | null): Promise<void> {
+    const normalizedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
     const run = async (): Promise<void> => {
       this.deactivateAll()
       this.extensions.clear()
       this.extraMCPTools = []
-      this.activeWorkspacePath = workspacePath ?? null
+      this.activeWorkspacePath = normalizedWorkspacePath
       await this.scan()
-      if (workspacePath) {
-        await this.scanWorkspace(workspacePath)
+      if (normalizedWorkspacePath) {
+        await this.scanWorkspace(normalizedWorkspacePath)
       }
     }
 
-    this.rescanQueue = this.rescanQueue.then(run, run)
-    return this.rescanQueue
+    return this.enqueueTransition(run)
   }
 
   async scanLightweight(workspacePath?: string | null): Promise<ExtensionManifest[]> {
-    const disabledIds = await loadDisabledSet()
-    const manifests = new Map<string, ExtensionManifest>()
-    const targetWorkspacePath = workspacePath ?? this.activeWorkspacePath
+    const requestedWorkspacePath = workspacePath === undefined
+      ? undefined
+      : workspacePath === null
+        ? null
+        : resolve(workspacePath)
+    return this.enqueueTransition(async () => {
+      const [disabledIds, enabledCatalogIds] = await Promise.all([
+        loadDisabledSet(),
+        loadEnabledCatalogSet(),
+      ])
+      this.enabledCatalogIds = enabledCatalogIds
+      const manifests = new Map<string, ExtensionManifest>()
+      const targetWorkspacePath = requestedWorkspacePath === undefined
+        ? this.activeWorkspacePath
+        : requestedWorkspacePath
 
-    for (const bundledDir of this.bundledDirs) {
-      await this.scanDirLight(bundledDir, manifests, disabledIds)
-    }
-    await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
-    if (targetWorkspacePath) {
-      await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
-    }
-    // Catalog dirs — scanned last, default-disabled unless the user has
-    // explicitly enabled the id (reflected in disabledIds set membership).
-    for (const catalogDir of this.catalogDirs) {
-      await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
-    }
+      for (const bundledDir of this.bundledDirs) {
+        await this.scanDirLight(bundledDir, manifests, disabledIds)
+      }
+      await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
+      // Match full scan ordering: catalog candidates follow bundled/global,
+      // then the active workspace is considered last.
+      for (const catalogDir of this.catalogDirs) {
+        await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
+      }
+      if (targetWorkspacePath) {
+        await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
+      }
 
-    return [...manifests.values()]
+      if (requestedWorkspacePath !== undefined) {
+        this.activeWorkspacePath = requestedWorkspacePath
+      }
+      return [...manifests.values()]
+    })
   }
 
   getActiveWorkspacePath(): string | null {
     return this.activeWorkspacePath
+  }
+
+  private enqueueTransition<T>(run: () => Promise<T>): Promise<T> {
+    const result = this.rescanQueue.then(run, run)
+    this.rescanQueue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 
   private async scanDir(dir: string, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
@@ -233,17 +265,19 @@ export class ExtensionRegistry {
       if (!stat?.isDirectory()) continue
 
       try {
-        await this.loadExtension(extDir, opts)
-      } catch {
-        // Not a native codesurf extension — try adapters
-        try {
+        const hasNativeManifest = await fs.stat(join(extDir, 'extension.json'))
+          .then(info => info.isFile())
+          .catch(() => false)
+        if (hasNativeManifest) {
+          await this.loadExtension(extDir, opts)
+        } else {
           const adapted = await tryAdaptExtension(extDir)
           if (adapted) {
             await this.loadFromManifest(adapted, opts)
           }
-        } catch (err) {
-          console.error(`[Extensions] Failed to load ${extDir}:`, err)
         }
+      } catch (err) {
+        console.error(`[Extensions] Failed to load ${extDir}:`, err)
       }
     }
   }
@@ -267,60 +301,92 @@ export class ExtensionRegistry {
       const stat = await fs.stat(extDir).catch(() => null)
       if (!stat?.isDirectory()) continue
 
-      const manifest = await this.readManifestLight(extDir, disabledIds, opts)
-      if (!manifest) continue
-      // Catalog scans run last — do not overwrite an id that was already
-      // loaded from bundled or global, so bundled copies win.
-      if (manifests.has(manifest.id)) continue
+      const candidate = await this.readManifestLight(extDir, disabledIds, opts)
+      if (!candidate) continue
+      const { manifest, adapted } = candidate
+
+      if (manifests.has(manifest.id)) {
+        // Match the full loader exactly:
+        // - catalog candidates never replace installed/bundled/workspace ids;
+        // - adapted candidates keep the first loaded id;
+        // - later native manifests replace earlier native or adapted entries.
+        if (opts?.defaultEnabled === false || adapted) continue
+        manifests.delete(manifest.id)
+      }
       manifests.set(manifest.id, manifest)
     }
   }
 
-  private async readManifestLight(extDir: string, disabledIds: Set<string>, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<ExtensionManifest | null> {
-    try {
-      const raw = await fs.readFile(join(extDir, 'extension.json'), 'utf8')
-      const manifest: ExtensionManifest = JSON.parse(raw)
-      if (!manifest.id || !manifest.name || !manifest.version) {
-        return null
-      }
-      if (!manifest.tier) manifest.tier = 'safe'
-      normalizeManifestUi(manifest)
-      manifest._path = resolve(extDir)
-      // Catalog entries default to disabled unless the user has explicitly
-      // flipped them (persisted disabledIds treats presence==disabled; absence
-      // normally means enabled — for catalog we invert that default).
-      manifest._enabled = resolveExtensionEnabled({
-        untrustedScope: opts?.untrustedScope,
-        defaultEnabledOption: opts?.defaultEnabled,
-        tier: manifest.tier,
-        disabled: disabledIds.has(manifest.id),
-        enabledCatalogIds: this.enabledCatalogIds,
-        extensionId: manifest.id,
-        manifestEnabled: manifest._enabled,
-      })
-      normalizeTileTypes(manifest)
-      return manifest
-    } catch {
+  private async readManifestLight(
+    extDir: string,
+    disabledIds: Set<string>,
+    opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+  ): Promise<LightweightManifestCandidate | null> {
+    const nativeManifestPath = join(extDir, 'extension.json')
+    const hasNativeManifest = await fs.stat(nativeManifestPath)
+      .then(info => info.isFile())
+      .catch(() => false)
+
+    if (hasNativeManifest) {
       try {
-        let adapted: ExtensionManifest | null = null
-        for (const adapter of adapters) {
-          if (await adapter.canLoad(extDir)) {
-            adapted = await adapter.toManifest(extDir)
-            break
-          }
+        const raw = await fs.readFile(nativeManifestPath, 'utf8')
+        const manifest: ExtensionManifest = JSON.parse(raw)
+        if (
+          !isValidExtensionId(manifest.id)
+          || typeof manifest.name !== 'string'
+          || !manifest.name
+          || typeof manifest.version !== 'string'
+          || !manifest.version
+        ) {
+          return null
         }
-        if (!adapted) return null
-        normalizeManifestUi(adapted)
-        adapted._path = resolve(extDir)
-        const defaultEnabledAdapted = opts?.defaultEnabled !== false
-        adapted._enabled = disabledIds.has(adapted.id)
-          ? false
-          : (defaultEnabledAdapted ? (adapted._enabled !== false) : false)
-        normalizeTileTypes(adapted)
-        return adapted
+        if (!manifest.tier) manifest.tier = 'safe'
+        normalizeManifestUi(manifest)
+        manifest._path = resolve(extDir)
+        // Catalog entries default to disabled unless the user has explicitly
+        // flipped them (persisted disabledIds treats presence==disabled; absence
+        // normally means enabled — for catalog we invert that default).
+        manifest._enabled = resolveExtensionEnabled({
+          untrustedScope: opts?.untrustedScope,
+          defaultEnabledOption: opts?.defaultEnabled,
+          tier: manifest.tier,
+          disabled: disabledIds.has(manifest.id),
+          enabledCatalogIds: this.enabledCatalogIds,
+          extensionId: manifest.id,
+          manifestEnabled: manifest._enabled,
+        })
+        normalizeTileTypes(manifest)
+        return { manifest, adapted: false }
       } catch {
         return null
       }
+    }
+
+    try {
+      let adapted: ExtensionManifest | null = null
+      for (const adapter of adapters) {
+        if (await adapter.canLoad(extDir)) {
+          adapted = await adapter.toManifest(extDir)
+          break
+        }
+      }
+      if (!adapted) return null
+      assertValidAdaptedManifest(adapted, extDir)
+      normalizeManifestUi(adapted)
+      adapted._path = resolve(extDir)
+      adapted._enabled = resolveExtensionEnabled({
+        untrustedScope: opts?.untrustedScope,
+        defaultEnabledOption: opts?.defaultEnabled,
+        tier: adapted.tier,
+        disabled: disabledIds.has(adapted.id),
+        enabledCatalogIds: this.enabledCatalogIds,
+        extensionId: adapted.id,
+        manifestEnabled: adapted._enabled,
+      })
+      normalizeTileTypes(adapted)
+      return { manifest: adapted, adapted: true }
+    } catch {
+      return null
     }
   }
 
@@ -330,9 +396,15 @@ export class ExtensionRegistry {
     const manifest: ExtensionManifest = JSON.parse(raw)
 
     // Validate required fields
-    if (!manifest.id || !manifest.name || !manifest.version) {
+    if (
+      typeof manifest.name !== 'string'
+      || !manifest.name
+      || typeof manifest.version !== 'string'
+      || !manifest.version
+    ) {
       throw new Error(`Invalid manifest in ${extDir}: missing id, name, or version`)
     }
+    assertValidExtensionId(manifest.id, `manifest directory ${extDir}`)
     if (!manifest.tier) manifest.tier = 'safe'
     normalizeManifestUi(manifest)
 
@@ -398,6 +470,7 @@ export class ExtensionRegistry {
 
   /** Load an already-parsed manifest (used by adapters) */
   async loadFromManifest(manifest: ExtensionManifest, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
+    assertValidAdaptedManifest(manifest, manifest._path ?? '(unknown)')
     if (this.extensions.has(manifest.id)) return
 
     normalizeManifestUi(manifest)
@@ -442,6 +515,7 @@ export class ExtensionRegistry {
   }
 
   get(id: string): LoadedExtension | undefined {
+    if (!isValidExtensionId(id)) return undefined
     return this.extensions.get(id)
   }
 
@@ -580,7 +654,7 @@ export class ExtensionRegistry {
    *  html feed. If the entry is an MCP-UI createUIResource JSON, extract its html
    *  text. Path-guarded to the extension root. */
   async getSurfaceHtml(extId: string, kind: string, surfaceId: string): Promise<string | null> {
-    const ext = this.extensions.get(extId)
+    const ext = this.get(extId)
     if (!ext?.manifest._path || !ext.manifest._enabled) return null
     const c = ext.manifest.contributes
     let entry: string | undefined
@@ -589,11 +663,14 @@ export class ExtensionRegistry {
     else if (kind === 'tile') entry = c?.tiles?.find(t => t.type === surfaceId)?.entry
     else if (kind === 'chat') entry = c?.chatSurfaces?.find(s => s.id === surfaceId)?.entry
     if (!entry) return null
-    const root = resolve(ext.manifest._path)
+    const root = ext.manifest._path
     const abs = resolve(root, ...entry.split(/[\\/]/).filter(Boolean))
-    if (abs !== root && !abs.startsWith(root + '/')) return null // path-traversal guard
+    const resolvedResource = await openCanonicalResource(root, abs)
+    if (!resolvedResource.ok) return null
     try {
-      const raw = await fs.readFile(abs, 'utf8')
+      const textResource = await readOpenedCanonicalResourceText(resolvedResource)
+      if (!textResource.ok) return null
+      const raw = textResource.text
       if (raw.trimStart().startsWith('{')) {
         try {
           const obj = JSON.parse(raw) as { resource?: { contents?: Array<{ text?: string }> }; contents?: Array<{ text?: string }> }
