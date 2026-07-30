@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'child_process'
+import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 import { sep, resolve as resolvePath } from 'path'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
@@ -16,6 +16,12 @@ import {
 } from '../agents/agent-cli-contracts'
 import { resolveStoredPermission } from '../permissions'
 import { CODESURF_HOME } from '../paths'
+import {
+  RELAY_SUBPROCESS_STDERR_MAX_BYTES,
+  RELAY_SUBPROCESS_STDOUT_MAX_BYTES,
+  runBoundedSubprocess,
+  type BoundedSubprocessResult,
+} from './bounded-subprocess'
 
 // Daemon-produced paths that should be intrinsically Read-allowed without
 // requiring a workspace-level grant. These directories exist solely because
@@ -51,6 +57,21 @@ const hermesSessions = new Map<string, string>()
 const openClawSessions = new Map<string, string>()
 const openCodeSessions = new Map<string, string>()
 const OPENCLAW_AGENT_LIST_TIMEOUT_MS = 15_000
+const OPENCLAW_AGENT_LIST_MAX_BUFFER_BYTES = 1024 * 1024
+
+async function runRelayProviderCli(options: {
+  label: string
+  command: string
+  args: string[]
+  env: NodeJS.ProcessEnv
+  timeoutMs: number
+}): Promise<BoundedSubprocessResult> {
+  return await runBoundedSubprocess({
+    ...options,
+    stdoutMaxBytes: RELAY_SUBPROCESS_STDOUT_MAX_BYTES,
+    stderrMaxBytes: RELAY_SUBPROCESS_STDERR_MAX_BYTES,
+  })
+}
 
 function workspaceDirFromSpawnRequest(spawnRequest: RelaySpawnRequest): string | null {
   return typeof spawnRequest.metadata?.workspaceDir === 'string'
@@ -206,47 +227,24 @@ async function runCodexTurn(spawnRequest: RelaySpawnRequest, input: RelayTurnInp
       : mode === 'read-only' || mode === 'plan'
         ? ['--sandbox', 'read-only']
         : ['--sandbox', 'workspace-write']
-  return await new Promise<string>((resolve, reject) => {
-    const proc = spawn(codexBin, [
+  const result = await runRelayProviderCli({
+    label: 'Codex',
+    command: codexBin,
+    args: [
       'exec',
       '--model', spawnRequest.model ?? 'gpt-5.3-codex',
       ...modeArgs,
       '--skip-git-repo-check',
       ...(workspaceDir ? ['-C', workspaceDir] : []),
       input.prompt,
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-
-    const timer = setTimeout(() => {
-      timedOut = true
-      proc.kill('SIGTERM')
-      reject(new Error(`Codex turn timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    proc.stdout?.on('data', chunk => { stdout += chunk.toString() })
-    proc.stderr?.on('data', chunk => { stderr += chunk.toString() })
-
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-
-    proc.on('close', code => {
-      clearTimeout(timer)
-      if (timedOut) return
-      if (code !== 0) {
-        reject(new Error(sanitizeAgentCliDiagnostic(stderr.trim() || `Codex exited with ${code}`)))
-        return
-      }
-      resolve(stdout.trim())
-    })
+    ],
+    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    timeoutMs,
   })
+  if (result.code !== 0) {
+    throw new Error(sanitizeAgentCliDiagnostic(result.stderr.trim() || `Codex exited with ${result.code}`))
+  }
+  return result.stdout.trim()
 }
 
 async function runOpenCodeTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
@@ -260,52 +258,30 @@ async function runOpenCodeTurn(participantId: string, spawnRequest: RelaySpawnRe
       ? spawnRequest.metadata.agentName
       : null
 
-  return await new Promise<string>((resolve, reject) => {
-    const args = buildOpenCodeRunArgs({
-      prompt: input.prompt,
-      model: spawnRequest.model,
-      agent,
-      sessionId: existingSessionId,
-      cwd: workspaceDir,
-      bypassPermissions: spawnRequest.mode === 'bypassPermissions',
-    })
-
-    const proc = spawn(opencodeBin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-
-    const timer = setTimeout(() => {
-      timedOut = true
-      proc.kill('SIGTERM')
-      reject(new Error(`OpenCode turn timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    proc.stdout?.on('data', chunk => { stdout += chunk.toString() })
-    proc.stderr?.on('data', chunk => { stderr += chunk.toString() })
-
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-
-    proc.on('close', code => {
-      clearTimeout(timer)
-      if (timedOut) return
-      if (code !== 0) {
-        reject(new Error(sanitizeAgentCliDiagnostic(stderr.trim() || stdout.trim() || `OpenCode exited with ${code}`)))
-        return
-      }
-
-      const parsed = parseOpenCodeRunOutput(stdout)
-      if (parsed.sessionId) openCodeSessions.set(participantId, parsed.sessionId)
-      resolve(parsed.text || stdout.trim())
-    })
+  const args = buildOpenCodeRunArgs({
+    prompt: input.prompt,
+    model: spawnRequest.model,
+    agent,
+    sessionId: existingSessionId,
+    cwd: workspaceDir,
+    bypassPermissions: spawnRequest.mode === 'bypassPermissions',
   })
+  const result = await runRelayProviderCli({
+    label: 'OpenCode',
+    command: opencodeBin,
+    args,
+    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    timeoutMs,
+  })
+  if (result.code !== 0) {
+    throw new Error(sanitizeAgentCliDiagnostic(
+      result.stderr.trim() || result.stdout.trim() || `OpenCode exited with ${result.code}`,
+    ))
+  }
+
+  const parsed = parseOpenCodeRunOutput(result.stdout)
+  if (parsed.sessionId) openCodeSessions.set(participantId, parsed.sessionId)
+  return parsed.text || result.stdout.trim()
 }
 
 function normalizeOpenClawModelRef(model?: string | null): string {
@@ -318,6 +294,7 @@ function parseOpenClawAgents(openclawBin: string, shellPath?: string | null): Ar
       encoding: 'utf-8',
       env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
       timeout: OPENCLAW_AGENT_LIST_TIMEOUT_MS,
+      maxBuffer: OPENCLAW_AGENT_LIST_MAX_BUFFER_BYTES,
       windowsHide: true,
     }).trim()
     const parsed = JSON.parse(raw)
@@ -367,50 +344,28 @@ async function runOpenClawTurn(participantId: string, spawnRequest: RelaySpawnRe
     throw new Error(`OpenClaw model must match exactly: ${spawnRequest.model}.${details}`)
   }
 
-  return await new Promise<string>((resolve, reject) => {
-    const args = buildOpenClawAgentArgs({
-      prompt: input.prompt,
-      agentId,
-      sessionId: existingSessionId,
-      thinking: spawnRequest.thinking,
-    })
-
-    const proc = spawn(openclawBin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-
-    const timer = setTimeout(() => {
-      timedOut = true
-      proc.kill('SIGTERM')
-      reject(new Error(`OpenClaw turn timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (timedOut) return
-      if (code !== 0) {
-        reject(new Error(sanitizeAgentCliDiagnostic(stderr.trim() || stdout.trim() || `OpenClaw exited with ${code}`)))
-        return
-      }
-
-      const parsed = parseOpenClawOutput(stdout)
-      if (parsed.sessionId) openClawSessions.set(participantId, parsed.sessionId)
-      resolve(parsed.text || stdout.trim())
-    })
+  const args = buildOpenClawAgentArgs({
+    prompt: input.prompt,
+    agentId,
+    sessionId: existingSessionId,
+    thinking: spawnRequest.thinking,
   })
+  const result = await runRelayProviderCli({
+    label: 'OpenClaw',
+    command: openclawBin,
+    args,
+    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    timeoutMs,
+  })
+  if (result.code !== 0) {
+    throw new Error(sanitizeAgentCliDiagnostic(
+      result.stderr.trim() || result.stdout.trim() || `OpenClaw exited with ${result.code}`,
+    ))
+  }
+
+  const parsed = parseOpenClawOutput(result.stdout)
+  if (parsed.sessionId) openClawSessions.set(participantId, parsed.sessionId)
+  return parsed.text || result.stdout.trim()
 }
 
 async function runHermesTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
@@ -435,67 +390,42 @@ async function runHermesTurn(participantId: string, spawnRequest: RelaySpawnRequ
     ? spawnRequest.metadata.provider
     : null
 
-  return await new Promise<string>((resolve, reject) => {
-    const args = buildHermesChatArgs({
-      prompt: input.prompt,
-      model: spawnRequest.model,
-      provider,
-      toolsets,
-      resumeSessionId: existingSessionId,
-      ignoreRules: true,
-      bypassPermissions: spawnRequest.mode === 'bypassPermissions',
-      // Relay path is batch (Promise<string>); we still use --stream-json so
-      // the consumer sees a faithful event log if it ever taps stdout, and
-      // so a single Hermes binary version is required across both chat and
-      // relay paths. The NDJSON parser concatenates text deltas into the
-      // final string we return here.
-      streamJson: true,
-    })
-
-    const proc = spawn(hermesBin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-    })
-
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-
-    const timer = setTimeout(() => {
-      timedOut = true
-      proc.kill('SIGTERM')
-      reject(new Error(`Hermes turn timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    proc.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (timedOut) return
-      if (code !== 0) {
-        reject(new Error(sanitizeAgentCliDiagnostic(stderr.trim() || `Hermes exited with ${code}`)))
-        return
-      }
-      const parsed = parseHermesStreamJsonOutput(stdout)
-      if (parsed.sessionId) hermesSessions.set(participantId, parsed.sessionId)
-      // If --stream-json produced no parsable events (e.g. Hermes binary
-      // predates the flag), fall back to the legacy text parser so the
-      // relay turn returns something sensible.
-      if (!parsed.text && (!parsed.raw || parsed.raw.length === 0)) {
-        const legacy = parseHermesOutput(stdout)
-        if (legacy.sessionId) hermesSessions.set(participantId, legacy.sessionId)
-        resolve(legacy.text)
-        return
-      }
-      resolve(parsed.text)
-    })
+  const args = buildHermesChatArgs({
+    prompt: input.prompt,
+    model: spawnRequest.model,
+    provider,
+    toolsets,
+    resumeSessionId: existingSessionId,
+    ignoreRules: true,
+    bypassPermissions: spawnRequest.mode === 'bypassPermissions',
+    // Relay path is batch (Promise<string>); we still use --stream-json so
+    // the consumer sees a faithful event log if it ever taps stdout, and
+    // so a single Hermes binary version is required across both chat and
+    // relay paths. The NDJSON parser concatenates text deltas into the
+    // final string we return here.
+    streamJson: true,
   })
+  const result = await runRelayProviderCli({
+    label: 'Hermes',
+    command: hermesBin,
+    args,
+    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    timeoutMs,
+  })
+  if (result.code !== 0) {
+    throw new Error(sanitizeAgentCliDiagnostic(result.stderr.trim() || `Hermes exited with ${result.code}`))
+  }
+  const parsed = parseHermesStreamJsonOutput(result.stdout)
+  if (parsed.sessionId) hermesSessions.set(participantId, parsed.sessionId)
+  // If --stream-json produced no parsable events (e.g. Hermes binary
+  // predates the flag), fall back to the legacy text parser so the
+  // relay turn returns something sensible.
+  if (!parsed.text && (!parsed.raw || parsed.raw.length === 0)) {
+    const legacy = parseHermesOutput(result.stdout)
+    if (legacy.sessionId) hermesSessions.set(participantId, legacy.sessionId)
+    return legacy.text
+  }
+  return parsed.text
 }
 
 class MainProcessRelayExecutor implements RelayAgentExecutor {
