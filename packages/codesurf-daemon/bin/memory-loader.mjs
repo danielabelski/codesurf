@@ -3,6 +3,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path'
 import { buildContextBucketBundle, getIncludedContextBuckets } from './context-buckets.mjs'
 import {
   MAX_CONTEXT_FILE_BYTES,
+  MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS,
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
@@ -36,6 +37,7 @@ export async function loadMemoryContext({
     visited: new Set(),
     reportedOmissions: new Set(),
     selectedSectionCount: 0,
+    importCanonicalValidationAttempts: 0,
     importTraversalAttempts: 0,
     rootTraversalAttempts: 0,
     primaryRootTraversalAttempts: 0,
@@ -91,6 +93,7 @@ export async function loadMemoryContext({
     reservedBytes: memoryPromptReservedBytes(sections),
   })
   const omittedByDepth = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import depth')).length
+  const omittedByCanonicalValidationAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import canonical validation attempts')).length
   const omittedByTraversalAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum import traversal attempts')).length
   const omittedByRootTraversalAttempts = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum root traversal attempts')).length
   const omittedBySectionLimit = traversal.omissions.filter(item => item.truncationReason?.startsWith('maximum included instruction sections')).length
@@ -99,6 +102,9 @@ export async function loadMemoryContext({
   const extraNotices = []
   if (omittedByDepth > 0) {
     extraNotices.push(`${omittedByDepth} import${omittedByDepth === 1 ? '' : 's'} omitted by maximum import depth (${MAX_IMPORT_DEPTH}).`)
+  }
+  if (omittedByCanonicalValidationAttempts > 0) {
+    extraNotices.push(`Import privacy validation stopped after maximum import canonical validation attempts (${MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS}).`)
   }
   if (omittedByTraversalAttempts > 0) {
     extraNotices.push(`Lower-precedence import traversal stopped after maximum import traversal attempts (${MAX_IMPORT_TRAVERSAL_ATTEMPTS}).`)
@@ -130,6 +136,7 @@ export async function loadMemoryContext({
       ...budget,
       omissions: [...budget.omitted, ...traversal.omissions],
       omittedByDepth,
+      omittedByCanonicalValidationAttempts,
       omittedByTraversalAttempts,
       omittedByRootTraversalAttempts,
       omittedBySectionLimit,
@@ -137,7 +144,9 @@ export async function loadMemoryContext({
       untraversedImportCount,
       maxFileBytes: MAX_CONTEXT_FILE_BYTES,
       maxImportDepth: MAX_IMPORT_DEPTH,
+      maxImportCanonicalValidationAttempts: MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS,
       maxImportTraversalAttempts: MAX_IMPORT_TRAVERSAL_ATTEMPTS,
+      importCanonicalValidationAttempts: traversal.importCanonicalValidationAttempts,
       maxRootTraversalAttempts: MAX_ROOT_TRAVERSAL_ATTEMPTS,
       rootTraversalAttempts: traversal.rootTraversalAttempts,
       primaryRootTraversalAttempts: traversal.primaryRootTraversalAttempts,
@@ -195,6 +204,7 @@ export function describeMemoryContextForTool(context, promptOverride) {
     : []
   const omittedCount = Number(context?.budget?.omittedSectionCount ?? 0)
     + Number(context?.budget?.omittedByDepth ?? 0)
+    + Number(context?.budget?.omittedByCanonicalValidationAttempts ?? 0)
     + Number(context?.budget?.omittedByTraversalAttempts ?? 0)
     + Number(context?.budget?.omittedByRootTraversalAttempts ?? 0)
     + Number(context?.budget?.omittedBySectionLimit ?? 0)
@@ -446,6 +456,17 @@ async function readMemorySections(candidate, traversal, {
       })
       return []
     }
+    if (traversal.importCanonicalValidationAttempts >= MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS) {
+      recordGenericOmission(traversal, 'import-canonical-validation-limit', {
+        source: 'memory-import-canonical-validation',
+        displayPath: 'additional lower-precedence import paths',
+        scope: candidate.scope,
+        bucket: candidate.bucket,
+        reason: `maximum import canonical validation attempts (${MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS}); additional lower-precedence import paths not validated or traversed`,
+      })
+      return []
+    }
+    traversal.importCanonicalValidationAttempts += 1
     // Reserve an attempt before canonical privacy validation so missing paths
     // remain bounded. Canonical local-only aliases and canonical duplicates are
     // refunded immediately and therefore cannot suppress remote-safe content.

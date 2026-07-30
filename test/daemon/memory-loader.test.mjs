@@ -9,6 +9,7 @@ import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } fr
 import {
   MAX_AGGREGATE_INSTRUCTION_BYTES,
   MAX_CONTEXT_FILE_BYTES,
+  MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS,
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
@@ -712,4 +713,54 @@ test('cloud import privacy follows canonical paths through public symlink aliase
   assert.equal(imported?.bucket, 'local-only')
   assert.equal(imported?.displayPath, '.codesurf/secret.md')
   assert.match(local.prompt, /REMOTE-ROOT-SURVIVES[\s\S]*LOCAL-ONLY-ALIAS-SECRET/)
+})
+
+test('canonical import privacy validation has a non-refundable raw I/O cap', async t => {
+  const homeDir = await makeTestTempDir('memory-canonical-validation-cap-')
+  const workspaceDir = join(homeDir, 'workspace')
+  const localDir = join(workspaceDir, '.codesurf')
+  const outsideDir = join(homeDir, 'outside-canonical-cap')
+  await mkdir(localDir, { recursive: true })
+  await mkdir(outsideDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await writeFile(join(localDir, 'secret.md'), 'PRIVATE-CANONICAL-CAP-CONTENT', 'utf8')
+  const blockedPath = join(outsideDir, 'blocked.md')
+  await writeFile(blockedPath, 'OUTSIDE-MUST-NOT-BE-VALIDATED', 'utf8')
+  await symlink(blockedPath, join(workspaceDir, 'blocked-alias.md'))
+  const imports = ['@import ./blocked-alias.md']
+  for (let index = 0; index < MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS + 8; index += 1) {
+    const aliasName = `local-alias-${index}`
+    await symlink('.codesurf', join(workspaceDir, aliasName))
+    imports.push(`@import ./${aliasName}/secret.md`)
+  }
+  await writeFile(
+    join(workspaceDir, 'AGENTS.md'),
+    `ROOT-SURVIVES-CANONICAL-CAP\n${imports.join('\n')}`,
+    'utf8',
+  )
+
+  const context = await loadMemoryContext({
+    homeDir,
+    workspaceDir,
+    projectPaths: [workspaceDir],
+    executionTarget: 'cloud',
+  })
+
+  assert.deepEqual(context.sections.map(section => section.displayPath), ['AGENTS.md'])
+  assert.match(context.prompt, /ROOT-SURVIVES-CANONICAL-CAP/)
+  assert.match(context.prompt, /maximum import canonical validation attempts/)
+  assert.doesNotMatch(JSON.stringify(context), /PRIVATE-CANONICAL-CAP-CONTENT|OUTSIDE-MUST-NOT-BE-VALIDATED|blocked-alias|local-alias/)
+  assert.equal(
+    context.budget.importCanonicalValidationAttempts,
+    MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS,
+  )
+  assert.equal(context.budget.omittedByCanonicalValidationAttempts, 1)
+  assert.ok(context.budget.omissions.some(item =>
+    item.source === 'memory-import-canonical-validation'
+    && /additional lower-precedence import paths not validated/.test(item.truncationReason),
+  ))
+  assert.match(context.contextBuckets.inspect.summary, /omitted by context budgets/)
 })

@@ -3,6 +3,7 @@ import { StringDecoder } from 'node:string_decoder'
 export const MAX_CONTEXT_FILE_BYTES = 32 * 1024
 export const MAX_INSTRUCTION_SECTIONS = 32
 export const MAX_IMPORT_DEPTH = 8
+export const MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS = 512
 export const MAX_IMPORT_TRAVERSAL_ATTEMPTS = 128
 export const MAX_ROOT_TRAVERSAL_ATTEMPTS = 128
 export const MAX_AGGREGATE_INSTRUCTION_BYTES = 128 * 1024

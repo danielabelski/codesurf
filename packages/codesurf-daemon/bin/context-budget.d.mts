@@ -1,6 +1,7 @@
 export const MAX_CONTEXT_FILE_BYTES: number
 export const MAX_INSTRUCTION_SECTIONS: number
 export const MAX_IMPORT_DEPTH: number
+export const MAX_IMPORT_CANONICAL_VALIDATION_ATTEMPTS: number
 export const MAX_IMPORT_TRAVERSAL_ATTEMPTS: number
 export const MAX_ROOT_TRAVERSAL_ATTEMPTS: number
 export const MAX_AGGREGATE_INSTRUCTION_BYTES: number
