@@ -56,6 +56,64 @@ async function loadRegistryModule(codesurfHome: string) {
   }
 }
 
+async function loadExtensionIpcModule(
+  codesurfHome: string,
+  handlers: Map<string, (...args: unknown[]) => unknown>,
+) {
+  const bundleDir = await mkdtemp(join(tmpdir(), 'codesurf-extension-ipc-test-'))
+  const outfile = join(bundleDir, 'extensions-ipc.cjs')
+  Object.assign(globalThis, { __codesurfExtensionLoadingHandlers: handlers })
+  const electronStub: Plugin = {
+    name: 'electron-stub',
+    setup(builder) {
+      builder.onResolve({ filter: /^electron$/ }, () => ({
+        path: 'electron',
+        namespace: 'electron-stub',
+      }))
+      builder.onLoad({ filter: /.*/, namespace: 'electron-stub' }, () => ({
+        contents: [
+          'const handlers = globalThis.__codesurfExtensionLoadingHandlers',
+          'export const ipcMain = { handle(channel, handler) { handlers.set(channel, handler) }, removeHandler() {} }',
+          'export const BrowserWindow = { fromWebContents() { return null }, getFocusedWindow() { return null } }',
+          'export const dialog = {}',
+          'export const app = {}',
+          'export const net = {}',
+          'export const protocol = {}',
+          'export const safeStorage = {',
+          '  isEncryptionAvailable() { return false },',
+          '  encryptString(value) { return Buffer.from(value) },',
+          '  decryptString(value) { return Buffer.from(value).toString("utf8") },',
+          '}',
+          'export const session = {}',
+          'export const utilityProcess = {}',
+        ].join('\n'),
+        loader: 'js',
+      }))
+    },
+  }
+
+  await build({
+    absWorkingDir: process.cwd(),
+    entryPoints: ['src/main/ipc/extensions.ts'],
+    outfile,
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node24',
+    plugins: [electronStub],
+    logLevel: 'silent',
+  })
+
+  const previousHome = process.env.CODESURF_HOME
+  process.env.CODESURF_HOME = codesurfHome
+  try {
+    return await import(`${pathToFileURL(outfile).href}?test=${Date.now()}-${Math.random()}`)
+  } finally {
+    if (previousHome === undefined) delete process.env.CODESURF_HOME
+    else process.env.CODESURF_HOME = previousHome
+  }
+}
+
 async function writeWorkspaceExtension(
   workspace: string,
   directory: string,
@@ -170,11 +228,110 @@ test('lightweight discovery establishes the executable workspace and replaces it
     /^codesurf-ext:\/\/workspace-beta\/index\.html/,
   )
 
+  const lightweightWithoutWorkspace = await registry.scanLightweight(null)
+  assert.deepEqual(lightweightWithoutWorkspace, [])
+  assert.equal(registry.getActiveWorkspacePath(), null)
+  assert.deepEqual(await registry.scanLightweight(), [])
+  await registry.rescan(registry.getActiveWorkspacePath())
+  assert.equal(registry.getTileEntry('workspace-beta', 'ext:beta'), null)
+
   await Promise.all([
     registry.scanLightweight(workspaceA),
     registry.scanLightweight(workspaceB),
   ])
   assert.equal(registry.getActiveWorkspacePath(), resolve(workspaceB))
+})
+
+test('registered IPC keeps sidebar and executable collision precedence aligned', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-collision-'))
+  const codesurfHome = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const globalDir = join(codesurfHome, 'extensions', 'global-copy')
+  const workspaceDir = join(workspace, '.codesurf', 'extensions', 'workspace-copy')
+  await mkdir(globalDir, { recursive: true })
+  await mkdir(workspaceDir, { recursive: true })
+
+  await writeFile(join(globalDir, 'global.html'), '<html>global</html>')
+  await writeFile(join(globalDir, 'extension.json'), JSON.stringify({
+    id: 'collision-extension',
+    name: 'Trusted global metadata',
+    version: '1.0.0',
+    tier: 'safe',
+    contributes: {
+      actions: [{ name: 'global-action', description: 'Global action' }],
+      tiles: [{
+        type: 'shared',
+        label: 'Global tile',
+        entry: 'global.html',
+      }],
+    },
+  }))
+  await writeFile(join(workspaceDir, 'workspace.html'), '<html>workspace</html>')
+  await writeFile(join(workspaceDir, 'extension.json'), JSON.stringify({
+    id: 'collision-extension',
+    name: 'Workspace metadata',
+    version: '2.0.0',
+    tier: 'safe',
+    contributes: {
+      actions: [{ name: 'workspace-action', description: 'Workspace action' }],
+      tiles: [{
+        type: 'shared',
+        label: 'Workspace tile',
+        entry: 'workspace.html',
+      }],
+    },
+  }))
+
+  const { ExtensionRegistry } = await loadRegistryModule(codesurfHome)
+  const handlers = new Map<string, (...args: unknown[]) => unknown>()
+  const { registerExtensionIPC } = await loadExtensionIpcModule(codesurfHome, handlers)
+  const registry = new ExtensionRegistry()
+  registerExtensionIPC(registry)
+
+  const listSidebar = handlers.get('ext:list-sidebar')!
+  const listTiles = handlers.get('ext:list-tiles')!
+  const tileEntry = handlers.get('ext:tile-entry')!
+
+  const workspaceSidebar = await listSidebar({}, workspace) as {
+    entries: Array<{ name: string }>
+    tiles: Array<{
+      label: string
+      entry: string
+      actions?: Array<{ name: string }>
+    }>
+  }
+  assert.equal(workspaceSidebar.entries[0]?.name, 'Workspace metadata')
+  assert.equal(workspaceSidebar.tiles[0]?.label, 'Workspace tile')
+  assert.equal(workspaceSidebar.tiles[0]?.entry, 'workspace.html')
+  assert.deepEqual(workspaceSidebar.tiles[0]?.actions, [{
+    name: 'workspace-action',
+    description: 'Workspace action',
+  }])
+
+  const workspaceTiles = await listTiles({}) as Array<{ label: string }>
+  assert.deepEqual(workspaceTiles.map(tile => tile.label), ['Workspace tile'])
+  assert.match(
+    String(await tileEntry({}, 'collision-extension', 'ext:shared')),
+    /^codesurf-ext:\/\/collision-extension\/workspace\.html/,
+  )
+  assert.equal(registry.get('collision-extension')?.manifest._path, resolve(workspaceDir))
+
+  const globalSidebar = await listSidebar({}, null) as {
+    entries: Array<{ name: string }>
+    tiles: Array<{ label: string; entry: string }>
+  }
+  assert.equal(globalSidebar.entries[0]?.name, 'Trusted global metadata')
+  assert.equal(globalSidebar.tiles[0]?.label, 'Global tile')
+  assert.equal(globalSidebar.tiles[0]?.entry, 'global.html')
+  assert.equal(registry.getActiveWorkspacePath(), null)
+
+  const globalTiles = await listTiles({}) as Array<{ label: string }>
+  assert.deepEqual(globalTiles.map(tile => tile.label), ['Global tile'])
+  assert.match(
+    String(await tileEntry({}, 'collision-extension', 'ext:shared')),
+    /^codesurf-ext:\/\/collision-extension\/global\.html/,
+  )
+  assert.equal(registry.get('collision-extension')?.manifest._path, resolve(globalDir))
 })
 
 test('registry transition queue preserves request order and recovers after rejection', async () => {

@@ -112,19 +112,41 @@ export async function readOpenedCanonicalResourceText(
   resource: Extract<CanonicalResourceOpen, { ok: true }>,
   maxBytes = MAX_EXTENSION_TEXT_RESOURCE_BYTES,
 ): Promise<CanonicalResourceTextRead> {
+  if (
+    !Number.isSafeInteger(maxBytes)
+    || maxBytes < 0
+    || maxBytes > MAX_EXTENSION_TEXT_RESOURCE_BYTES
+  ) {
+    await resource.handle.close().catch(() => {})
+    throw new Error(`Text resource limit must be between 0 and ${MAX_EXTENSION_TEXT_RESOURCE_BYTES}`)
+  }
   if (resource.size > maxBytes) {
     await resource.handle.close().catch(() => {})
     return { ok: false, status: 413 }
   }
   try {
-    const bytes = await resource.handle.readFile()
-    if (bytes.byteLength > maxBytes) {
-      return { ok: false, status: 413 }
+    const chunks: Buffer[] = []
+    const readLimit = maxBytes + 1
+    let totalBytes = 0
+    while (totalBytes < readLimit) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, readLimit - totalBytes))
+      const { bytesRead } = await resource.handle.read(
+        chunk,
+        0,
+        chunk.byteLength,
+        totalBytes,
+      )
+      if (bytesRead === 0) break
+      totalBytes += bytesRead
+      if (totalBytes > maxBytes) {
+        return { ok: false, status: 413 }
+      }
+      chunks.push(chunk.subarray(0, bytesRead))
     }
     return {
       ok: true,
       path: resource.path,
-      text: bytes.toString('utf8'),
+      text: Buffer.concat(chunks, totalBytes).toString('utf8'),
       status: 200,
     }
   } catch {

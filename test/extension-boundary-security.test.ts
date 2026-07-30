@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
+import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -530,9 +530,12 @@ describe('canonical extension resource boundary', () => {
       await assert.rejects(canceled.handle.stat())
     }
 
-    const capped = await openCanonicalResource(root, entry)
+    const growingEntry = join(root, 'growing.txt')
+    await writeFile(growingEntry, 'tiny')
+    const capped = await openCanonicalResource(root, growingEntry)
     assert.equal(capped.ok, true)
     if (capped.ok) {
+      await appendFile(growingEntry, '-grew-after-open')
       assert.deepEqual(
         await readOpenedCanonicalResourceText(capped, 4),
         { ok: false, status: 413 },

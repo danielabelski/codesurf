@@ -35,6 +35,11 @@ export interface AggregatedContributions {
   layoutPresets: OwnedContribution<ExtensionLayoutPresetContrib>[]
 }
 
+interface LightweightManifestCandidate {
+  manifest: ExtensionManifest
+  adapted: boolean
+}
+
 // ── Persisted disabled-extension set ──────────────────────────────────────────
 
 const DISABLED_EXTS_PATH = join(CODESURF_HOME, 'disabled-extensions.json')
@@ -196,26 +201,36 @@ export class ExtensionRegistry {
   }
 
   async scanLightweight(workspacePath?: string | null): Promise<ExtensionManifest[]> {
-    const requestedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
+    const requestedWorkspacePath = workspacePath === undefined
+      ? undefined
+      : workspacePath === null
+        ? null
+        : resolve(workspacePath)
     return this.enqueueTransition(async () => {
-      const disabledIds = await loadDisabledSet()
+      const [disabledIds, enabledCatalogIds] = await Promise.all([
+        loadDisabledSet(),
+        loadEnabledCatalogSet(),
+      ])
+      this.enabledCatalogIds = enabledCatalogIds
       const manifests = new Map<string, ExtensionManifest>()
-      const targetWorkspacePath = requestedWorkspacePath ?? this.activeWorkspacePath
+      const targetWorkspacePath = requestedWorkspacePath === undefined
+        ? this.activeWorkspacePath
+        : requestedWorkspacePath
 
       for (const bundledDir of this.bundledDirs) {
         await this.scanDirLight(bundledDir, manifests, disabledIds)
       }
       await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
-      if (targetWorkspacePath) {
-        await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
-      }
-      // Catalog dirs — scanned last, default-disabled unless the user has
-      // explicitly enabled the id (reflected in disabledIds set membership).
+      // Match full scan ordering: catalog candidates follow bundled/global,
+      // then the active workspace is considered last.
       for (const catalogDir of this.catalogDirs) {
         await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
       }
+      if (targetWorkspacePath) {
+        await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
+      }
 
-      if (requestedWorkspacePath) {
+      if (requestedWorkspacePath !== undefined) {
         this.activeWorkspacePath = requestedWorkspacePath
       }
       return [...manifests.values()]
@@ -286,67 +301,92 @@ export class ExtensionRegistry {
       const stat = await fs.stat(extDir).catch(() => null)
       if (!stat?.isDirectory()) continue
 
-      const manifest = await this.readManifestLight(extDir, disabledIds, opts)
-      if (!manifest) continue
-      // Catalog scans run last — do not overwrite an id that was already
-      // loaded from bundled or global, so bundled copies win.
-      if (manifests.has(manifest.id)) continue
+      const candidate = await this.readManifestLight(extDir, disabledIds, opts)
+      if (!candidate) continue
+      const { manifest, adapted } = candidate
+
+      if (manifests.has(manifest.id)) {
+        // Match the full loader exactly:
+        // - catalog candidates never replace installed/bundled/workspace ids;
+        // - adapted candidates keep the first loaded id;
+        // - later native manifests replace earlier native or adapted entries.
+        if (opts?.defaultEnabled === false || adapted) continue
+        manifests.delete(manifest.id)
+      }
       manifests.set(manifest.id, manifest)
     }
   }
 
-  private async readManifestLight(extDir: string, disabledIds: Set<string>, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<ExtensionManifest | null> {
-    try {
-      const raw = await fs.readFile(join(extDir, 'extension.json'), 'utf8')
-      const manifest: ExtensionManifest = JSON.parse(raw)
-      if (
-        !isValidExtensionId(manifest.id)
-        || typeof manifest.name !== 'string'
-        || !manifest.name
-        || typeof manifest.version !== 'string'
-        || !manifest.version
-      ) {
-        return null
-      }
-      if (!manifest.tier) manifest.tier = 'safe'
-      normalizeManifestUi(manifest)
-      manifest._path = resolve(extDir)
-      // Catalog entries default to disabled unless the user has explicitly
-      // flipped them (persisted disabledIds treats presence==disabled; absence
-      // normally means enabled — for catalog we invert that default).
-      manifest._enabled = resolveExtensionEnabled({
-        untrustedScope: opts?.untrustedScope,
-        defaultEnabledOption: opts?.defaultEnabled,
-        tier: manifest.tier,
-        disabled: disabledIds.has(manifest.id),
-        enabledCatalogIds: this.enabledCatalogIds,
-        extensionId: manifest.id,
-        manifestEnabled: manifest._enabled,
-      })
-      normalizeTileTypes(manifest)
-      return manifest
-    } catch {
+  private async readManifestLight(
+    extDir: string,
+    disabledIds: Set<string>,
+    opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+  ): Promise<LightweightManifestCandidate | null> {
+    const nativeManifestPath = join(extDir, 'extension.json')
+    const hasNativeManifest = await fs.stat(nativeManifestPath)
+      .then(info => info.isFile())
+      .catch(() => false)
+
+    if (hasNativeManifest) {
       try {
-        let adapted: ExtensionManifest | null = null
-        for (const adapter of adapters) {
-          if (await adapter.canLoad(extDir)) {
-            adapted = await adapter.toManifest(extDir)
-            break
-          }
+        const raw = await fs.readFile(nativeManifestPath, 'utf8')
+        const manifest: ExtensionManifest = JSON.parse(raw)
+        if (
+          !isValidExtensionId(manifest.id)
+          || typeof manifest.name !== 'string'
+          || !manifest.name
+          || typeof manifest.version !== 'string'
+          || !manifest.version
+        ) {
+          return null
         }
-        if (!adapted) return null
-        if (!isValidExtensionId(adapted.id)) return null
-        normalizeManifestUi(adapted)
-        adapted._path = resolve(extDir)
-        const defaultEnabledAdapted = opts?.defaultEnabled !== false
-        adapted._enabled = disabledIds.has(adapted.id)
-          ? false
-          : (defaultEnabledAdapted ? (adapted._enabled !== false) : false)
-        normalizeTileTypes(adapted)
-        return adapted
+        if (!manifest.tier) manifest.tier = 'safe'
+        normalizeManifestUi(manifest)
+        manifest._path = resolve(extDir)
+        // Catalog entries default to disabled unless the user has explicitly
+        // flipped them (persisted disabledIds treats presence==disabled; absence
+        // normally means enabled — for catalog we invert that default).
+        manifest._enabled = resolveExtensionEnabled({
+          untrustedScope: opts?.untrustedScope,
+          defaultEnabledOption: opts?.defaultEnabled,
+          tier: manifest.tier,
+          disabled: disabledIds.has(manifest.id),
+          enabledCatalogIds: this.enabledCatalogIds,
+          extensionId: manifest.id,
+          manifestEnabled: manifest._enabled,
+        })
+        normalizeTileTypes(manifest)
+        return { manifest, adapted: false }
       } catch {
         return null
       }
+    }
+
+    try {
+      let adapted: ExtensionManifest | null = null
+      for (const adapter of adapters) {
+        if (await adapter.canLoad(extDir)) {
+          adapted = await adapter.toManifest(extDir)
+          break
+        }
+      }
+      if (!adapted) return null
+      assertValidAdaptedManifest(adapted, extDir)
+      normalizeManifestUi(adapted)
+      adapted._path = resolve(extDir)
+      adapted._enabled = resolveExtensionEnabled({
+        untrustedScope: opts?.untrustedScope,
+        defaultEnabledOption: opts?.defaultEnabled,
+        tier: adapted.tier,
+        disabled: disabledIds.has(adapted.id),
+        enabledCatalogIds: this.enabledCatalogIds,
+        extensionId: adapted.id,
+        manifestEnabled: adapted._enabled,
+      })
+      normalizeTileTypes(adapted)
+      return { manifest: adapted, adapted: true }
+    } catch {
+      return null
     }
   }
 

@@ -347,6 +347,21 @@ function requireRegisteredExtensionId(
   return validExtId
 }
 
+function getManifestActions(
+  manifest: { contributes?: unknown },
+): Array<{ name: string; description: string }> | undefined {
+  const contributes = manifest.contributes as {
+    actions?: Array<{ name?: unknown; description?: unknown }>
+  } | undefined
+  if (!Array.isArray(contributes?.actions) || contributes.actions.length === 0) {
+    return undefined
+  }
+  return contributes.actions.map(action => ({
+    name: String(action.name ?? ''),
+    description: String(action.description ?? ''),
+  }))
+}
+
 export function registerExtensionIPC(registry: ExtensionRegistry): void {
   let lastScannedWorkspacePath: string | null = null
   let hasScanned = false
@@ -360,7 +375,9 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       return
     }
 
-    const targetWorkspacePath = workspacePath ?? registry.getActiveWorkspacePath() ?? null
+    const targetWorkspacePath = workspacePath === undefined
+      ? registry.getActiveWorkspacePath()
+      : workspacePath
     if (!force && hasScanned && lastScannedWorkspacePath === targetWorkspacePath) return
 
     if (!force && inFlightLoad && inFlightLoad.workspacePath === targetWorkspacePath) {
@@ -406,7 +423,6 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
     }
 
     const manifests = await registry.scanLightweight(workspacePath)
-    const extActions = registry.getExtensionActions()
 
     return {
       entries: manifests.map(m => ({
@@ -426,7 +442,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
           defaultSize: tile.defaultSize ?? { w: 400, h: 300 },
           minSize: tile.minSize ?? { w: 200, h: 150 },
           uiMode: m.ui?.mode,
-          actions: extActions.get(m.id),
+          actions: getManifestActions(m),
         }))),
     }
   })
@@ -518,7 +534,7 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
       hasScanned = false
       return []
     }
-    await ensureLoaded(workspacePath ?? registry.getActiveWorkspacePath(), true)
+    await ensureLoaded(workspacePath, true)
     return registry.getAll().map(m => ({
       id: m.id,
       name: m.name,
