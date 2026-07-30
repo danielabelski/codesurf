@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -144,6 +146,124 @@ test('subscriber event and byte caps deterministically evict only the slow subsc
   byteRegistry.shutdown()
 })
 
+test('subscriber byte cap rejects oversized direct and replay entries before writing', async () => {
+  const directRegistry = createSseSubscriberRegistry({
+    heartbeatMs: 0,
+    maxQueuedBytes: 128,
+  })
+  const direct = new FakeResponse()
+  directRegistry.register('job-1', direct, { replaying: false })
+  directRegistry.publish('job-1', payload(1, 'x'.repeat(256)))
+
+  assert.equal(direct.writes.length, 0)
+  assert.equal(direct.destroyCalls, 1)
+  assert.equal(directRegistry.count('job-1'), 0)
+  directRegistry.shutdown()
+
+  const replayRegistry = createSseSubscriberRegistry({
+    heartbeatMs: 0,
+    maxQueuedBytes: 128,
+  })
+  const replay = new FakeResponse()
+  const record = replayRegistry.register('job-1', replay, { replaying: true })
+  assert.equal(await replayRegistry.sendReplay(record, payload(1, 'x'.repeat(256))), false)
+  assert.equal(replay.writes.length, 0)
+  assert.equal(replay.destroyCalls, 1)
+  assert.equal(replayRegistry.count('job-1'), 0)
+  replayRegistry.shutdown()
+})
+
+test('blocked terminal writes retain their destroy deadline and shutdown destroys blocked responses', async () => {
+  const registry = createSseSubscriberRegistry({
+    heartbeatMs: 0,
+    drainTimeoutMs: 20,
+    maxQueuedBytes: 1_000_000,
+  })
+  const response = new FakeResponse(() => false)
+  registry.register('job-1', response, { replaying: false })
+  registry.publish('job-1', {
+    jobId: 'job-1',
+    sequence: 1,
+    timestamp: 1,
+    type: 'done',
+  })
+
+  assert.equal(response.endCalls, 1)
+  assert.equal(registry.count('job-1'), 1)
+  await waitFor(() => response.destroyCalls === 1)
+  assert.equal(registry.count('job-1'), 0)
+
+  const shutdownRegistry = createSseSubscriberRegistry({ heartbeatMs: 0 })
+  const shutdownBlocked = new FakeResponse(() => false)
+  shutdownRegistry.register('job-1', shutdownBlocked, { replaying: false })
+  shutdownRegistry.publish('job-1', payload(1))
+  shutdownRegistry.shutdown()
+  assert.equal(shutdownBlocked.destroyCalls, 1)
+  assert.equal(shutdownRegistry.count(), 0)
+})
+
+test('registry shutdown lets a real HTTP server close when a client never drains a terminal frame', async t => {
+  const registry = createSseSubscriberRegistry({
+    heartbeatMs: 0,
+    drainTimeoutMs: 10_000,
+    maxQueuedBytes: 16 * 1024 * 1024,
+  })
+  const requestHandled = deferred()
+  let terminalWriteReturned
+  const server = createServer((_request, response) => {
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+    const originalWrite = response.write.bind(response)
+    response.write = (...args) => {
+      terminalWriteReturned = originalWrite(...args)
+      return terminalWriteReturned
+    }
+    registry.register('job-1', response, { replaying: false })
+    registry.publish('job-1', {
+      jobId: 'job-1',
+      sequence: 1,
+      timestamp: 1,
+      type: 'done',
+      padding: 'x'.repeat(8 * 1024 * 1024),
+    })
+    requestHandled.resolve()
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  const socket = createConnection({ host: '127.0.0.1', port: address.port })
+  t.after(() => {
+    registry.shutdown()
+    socket.destroy()
+    server.closeAllConnections?.()
+    server.close()
+  })
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve)
+    socket.once('error', reject)
+  })
+  socket.write('GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n')
+  socket.pause()
+  await requestHandled.promise
+
+  assert.equal(terminalWriteReturned, false)
+  assert.equal(registry.count('job-1'), 1)
+  registry.shutdown()
+
+  await Promise.race([
+    new Promise(resolve => server.close(resolve)),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('HTTP server close remained blocked by the SSE response')),
+      500,
+    )),
+  ])
+})
+
 test('heartbeat skips blocked subscribers, resumes after drain, and shutdown removes every listener', () => {
   const registry = createSseSubscriberRegistry({ heartbeatMs: 0 })
   const blocked = new FakeResponse((_chunk, writeNumber) => writeNumber !== 1)
@@ -223,25 +343,25 @@ test('replay includes an event that was enqueued but not yet persisted', async t
   await waitFor(async () => (await manager.getJobState(job.id))?.status === 'completed')
 })
 
-test('terminal append failure keeps durable metadata active and replays the pending done without a gap', async t => {
-  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-terminal-failure-'))
+test('timeline append retry recovers transient failure without poisoning later writes', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-transient-append-'))
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
-  const terminalAppendAttempted = deferred()
+  let appendAttempts = 0
 
   const manager = createChatJobManager({
     homeDir,
     heartbeatMs: 0,
+    timelineAppendMaxAttempts: 3,
+    timelineAppendRetryDelayMs: 0,
     timelineAppend: async (path, data) => {
-      const event = JSON.parse(data)
-      if (event.type === 'done') {
-        terminalAppendAttempted.resolve()
-        throw new Error('simulated terminal append failure')
-      }
+      appendAttempts += 1
+      if (appendAttempts === 1) throw new Error('simulated transient append failure')
       await appendFile(path, data, 'utf8')
     },
     claudeQuery: () => (async function* () {
-      yield textDelta('persisted text')
+      yield textDelta('one')
+      yield textDelta('two')
       yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
     })(),
   })
@@ -257,36 +377,169 @@ test('terminal append failure keeps durable metadata active and replays the pend
     workspaceDir,
     messages: [{ role: 'user', content: 'go' }],
   })
-  await terminalAppendAttempted.promise
-  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  await waitFor(async () => (await manager.getJobState(job.id))?.status === 'completed')
 
-  const durableState = await manager.getJobState(job.id)
-  assert.equal(durableState.status, 'running')
   const timelinePath = join(homeDir, 'timelines', `${job.id}.jsonl`)
-  const durableEvents = (await readFile(timelinePath, 'utf8'))
+  const events = (await readFile(timelinePath, 'utf8'))
     .trim()
     .split('\n')
     .map(line => JSON.parse(line))
-  assert.equal(durableEvents.some(event => event.type === 'done'), false)
+  assert.deepEqual(events.map(event => event.sequence), events.map((_, index) => index + 1))
+  assert.deepEqual(events.filter(event => event.type === 'text').map(event => event.text), ['one', 'two'])
+  assert.equal(events.at(-1)?.type, 'done')
+  assert.ok(appendAttempts > events.length)
+  assert.deepEqual(manager.getPersistenceState(job.id), {
+    failed: false,
+    queuedEvents: 0,
+    queuedBytes: 0,
+  })
+})
 
-  const response = new FakeResponse()
-  assert.equal(await manager.streamJob(job.id, 0, response), false)
-  const replayed = writtenEvents(response)
-  const sequences = replayed.map(event => event.sequence)
-  assert.deepEqual(
-    sequences,
-    Array.from({ length: sequences.length }, (_, index) => index + 1),
-  )
-  assert.equal(replayed.filter(event => event.type === 'done').length, 1)
-  assert.equal(replayed.at(-1)?.type, 'done')
-  assert.ok(Number(durableState.lastSequence ?? 0) < Number(replayed.at(-1)?.sequence ?? 0))
+test('outcome-uncertain timeline append is verified instead of duplicating the sequence', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-uncertain-append-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  let firstAppend = true
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineAppendMaxAttempts: 3,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      await appendFile(path, data, 'utf8')
+      if (firstAppend) {
+        firstAppend = false
+        throw new Error('simulated uncertain append outcome')
+      }
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('only once')
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
 
-  const upToDateResponse = new FakeResponse()
-  assert.equal(
-    await manager.streamJob(job.id, replayed.at(-1).sequence, upToDateResponse),
-    false,
-  )
-  assert.deepEqual(writtenEvents(upToDateResponse), [])
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(async () => (await manager.getJobState(job.id))?.status === 'completed')
+
+  const events = (await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+  assert.deepEqual(events.map(event => event.sequence), events.map((_, index) => index + 1))
+  assert.equal(events.filter(event => event.type === 'text' && event.text === 'only once').length, 1)
+})
+
+test('permanent timeline failure bounds pending state and stops a long provider stream fail-closed', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-permanent-append-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  let yielded = 0
+  let providerFinalized = false
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineMaxQueuedEvents: 6,
+    timelineMaxQueuedBytes: 2_048,
+    timelineAppendMaxAttempts: 2,
+    timelineAppendRetryDelayMs: 1,
+    timelineAppend: async () => {
+      throw new Error('simulated permanent append failure')
+    },
+    claudeQuery: () => (async function* () {
+      try {
+        for (let index = 0; index < 1_000; index += 1) {
+          yielded += 1
+          yield textDelta(`chunk-${index}`)
+        }
+      } finally {
+        providerFinalized = true
+      }
+    })(),
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+
+  const persistence = manager.getPersistenceState(job.id)
+  assert.equal(persistence.failed, true)
+  assert.match(persistence.error, /permanent append failure|queue limit/i)
+  assert.equal(persistence.queuedEvents, 0)
+  assert.equal(persistence.queuedBytes, 0)
+  assert.ok(yielded < 1_000)
+  assert.equal(providerFinalized, true)
+
+  const state = await manager.getJobState(job.id)
+  assert.equal(state.status, 'failed')
+  assert.match(state.error, /timeline persistence/i)
+  const durable = JSON.parse(await readFile(join(homeDir, 'jobs', `${job.id}.json`), 'utf8'))
+  assert.notEqual(durable.status, 'completed')
+})
+
+test('many failed jobs release their retained payload queues', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-many-failures-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    maxConcurrentJobs: 3,
+    timelineMaxQueuedEvents: 4,
+    timelineMaxQueuedBytes: 1_024,
+    timelineAppendMaxAttempts: 1,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async () => {
+      throw new Error('storage unavailable')
+    },
+    claudeQuery: () => (async function* () {
+      for (let index = 0; index < 100; index += 1) {
+        yield textDelta(`chunk-${index}`)
+      }
+    })(),
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const jobs = []
+  for (let index = 0; index < 12; index += 1) {
+    jobs.push(await manager.startJob({
+      provider: 'claude',
+      model: 'test',
+      mode: 'bypassPermissions',
+      workspaceDir,
+      messages: [{ role: 'user', content: `go-${index}` }],
+    }))
+  }
+  await waitFor(() => manager.listLiveJobIds().length === 0)
+
+  for (const job of jobs) {
+    const persistence = manager.getPersistenceState(job.id)
+    assert.equal(persistence.failed, true)
+    assert.equal(persistence.queuedEvents, 0)
+    assert.equal(persistence.queuedBytes, 0)
+    assert.equal((await manager.getJobState(job.id))?.status, 'failed')
+  }
 })
 
 test('replay buffers live and terminal events until drain, then emits each sequence exactly once', async t => {
@@ -398,4 +651,237 @@ test('completed timeline replay streams progressively under writable backpressur
   response.emit('drain')
   assert.equal(await streamPromise, false)
   assert.deepEqual(writtenEvents(response).map(event => event.sequence), events.map(event => event.sequence))
+})
+
+test('blocked terminal history replay keeps its deadline and cannot hang real HTTP shutdown', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-http-replay-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'blocked-history-job'
+  const doneEvent = {
+    jobId,
+    sequence: 1,
+    timestamp: 1,
+    type: 'done',
+    padding: 'x'.repeat(8 * 1024 * 1024),
+  }
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'completed',
+    lastSequence: 1,
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${jobId}.jsonl`), `${JSON.stringify(doneEvent)}\n`, 'utf8')
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    subscriberMaxQueuedBytes: 16 * 1024 * 1024,
+    subscriberDrainTimeoutMs: 10_000,
+  })
+  const requestHandled = deferred()
+  let terminalWriteReturned
+  const server = createServer(async (_request, response) => {
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+    const originalWrite = response.write.bind(response)
+    response.write = (...args) => {
+      const result = originalWrite(...args)
+      if (String(args[0]).startsWith('data: ')) terminalWriteReturned = result
+      return result
+    }
+    const keepOpen = await manager.streamJob(jobId, 0, response)
+    if (!keepOpen) response.end()
+    requestHandled.resolve()
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  const socket = createConnection({ host: '127.0.0.1', port: address.port })
+  t.after(async () => {
+    await manager.shutdown()
+    socket.destroy()
+    server.closeAllConnections?.()
+    server.close()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+  await new Promise((resolve, reject) => {
+    socket.once('connect', resolve)
+    socket.once('error', reject)
+  })
+  socket.write('GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n')
+  socket.pause()
+  await requestHandled.promise
+
+  assert.equal(terminalWriteReturned, false)
+  await manager.shutdown()
+  await Promise.race([
+    new Promise(resolve => server.close(resolve)),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('HTTP server close remained blocked by replayed terminal history')),
+      500,
+    )),
+  ])
+})
+
+test('restart reconciliation persists one terminal pair exactly once across concurrent and repeated opens', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-reconcile-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'interrupted-job'
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'running',
+    lastSequence: 2,
+    updatedAt: new Date(0).toISOString(),
+    completedAt: null,
+    error: null,
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${jobId}.jsonl`), [
+    JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+    JSON.stringify({ jobId, sequence: 2, timestamp: 2, type: 'text', text: 'two' }),
+    '',
+  ].join('\n'), 'utf8')
+
+  const manager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const first = new FakeResponse()
+  const second = new FakeResponse()
+  await Promise.all([
+    manager.streamJob(jobId, 0, first),
+    manager.streamJob(jobId, 0, second),
+  ])
+
+  const durableState = JSON.parse(await readFile(join(jobsDir, `${jobId}.json`), 'utf8'))
+  assert.equal(durableState.status, 'failed')
+  assert.equal(durableState.lastSequence, 4)
+  assert.match(durableState.error, /daemon restarted/i)
+  const durableEvents = (await readFile(join(timelinesDir, `${jobId}.jsonl`), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+  assert.deepEqual(durableEvents.map(event => event.sequence), [1, 2, 3, 4])
+  assert.equal(durableEvents.filter(event => event.type === 'error').length, 1)
+  assert.equal(durableEvents.filter(event => event.type === 'done').length, 1)
+  assert.deepEqual(writtenEvents(first), durableEvents)
+  assert.deepEqual(writtenEvents(second), durableEvents)
+
+  const repeated = new FakeResponse()
+  await manager.streamJob(jobId, 0, repeated)
+  assert.deepEqual(writtenEvents(repeated), durableEvents)
+
+  const farAhead = new FakeResponse()
+  await manager.streamJob(jobId, 999_999, farAhead)
+  assert.deepEqual(writtenEvents(farAhead), [])
+  const stateAfterFarAhead = JSON.parse(await readFile(join(jobsDir, `${jobId}.json`), 'utf8'))
+  assert.equal(stateAfterFarAhead.lastSequence, 4)
+})
+
+test('restart reconciliation preserves an existing provider error when only done was lost', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-real-error-reconcile-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'provider-error-job'
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'running',
+    lastSequence: 2,
+    completedAt: null,
+    error: 'provider exploded',
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${jobId}.jsonl`), [
+    JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+    JSON.stringify({ jobId, sequence: 2, timestamp: 2, type: 'error', error: 'provider exploded' }),
+    '',
+  ].join('\n'), 'utf8')
+  const manager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const response = new FakeResponse()
+  await manager.streamJob(jobId, 0, response)
+  const events = (await readFile(join(timelinesDir, `${jobId}.jsonl`), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+  assert.deepEqual(events.map(event => event.type), ['text', 'error', 'done'])
+  assert.equal(events.filter(event => event.type === 'error').length, 1)
+  assert.equal(events[1].error, 'provider exploded')
+  const metadata = JSON.parse(await readFile(join(jobsDir, `${jobId}.json`), 'utf8'))
+  assert.equal(metadata.status, 'failed')
+  assert.equal(metadata.error, 'provider exploded')
+  assert.equal(metadata.lastSequence, 3)
+})
+
+test('restart reconciliation resumes after a partial terminal append without duplicating its error', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-partial-reconcile-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'partially-reconciled-job'
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'running',
+    lastSequence: 1,
+    completedAt: null,
+    error: null,
+  }), 'utf8')
+  await writeFile(
+    join(timelinesDir, `${jobId}.jsonl`),
+    `${JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' })}\n`,
+    'utf8',
+  )
+  let blockDone = true
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineAppendMaxAttempts: 2,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      const event = JSON.parse(data)
+      if (blockDone && event.type === 'done') throw new Error('done append unavailable')
+      await appendFile(path, data, 'utf8')
+    },
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  await assert.rejects(
+    manager.streamJob(jobId, 0, new FakeResponse()),
+    /done append unavailable/,
+  )
+  const stillActive = JSON.parse(await readFile(join(jobsDir, `${jobId}.json`), 'utf8'))
+  assert.equal(stillActive.status, 'running')
+
+  blockDone = false
+  const recovered = new FakeResponse()
+  await manager.streamJob(jobId, 0, recovered)
+  const durableEvents = (await readFile(join(timelinesDir, `${jobId}.jsonl`), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+  assert.deepEqual(durableEvents.map(event => event.type), ['text', 'error', 'done'])
+  assert.deepEqual(durableEvents.map(event => event.sequence), [1, 2, 3])
+  assert.deepEqual(writtenEvents(recovered), durableEvents)
+  const terminal = JSON.parse(await readFile(join(jobsDir, `${jobId}.json`), 'utf8'))
+  assert.equal(terminal.status, 'failed')
+  assert.equal(terminal.lastSequence, 3)
 })

@@ -1204,6 +1204,7 @@ export function createSseSubscriberRegistry({
     clearDrainTimer(record)
     removeFromRegistry(record)
     record.res.off?.('drain', record.onDrain)
+    record.res.off?.('finish', record.onFinish)
     record.res.off?.('close', record.onClose)
     record.res.off?.('error', record.onError)
     record.queue.length = 0
@@ -1233,8 +1234,25 @@ export function createSseSubscriberRegistry({
     record.bufferedBytes = Math.max(0, record.bufferedBytes - entry.bytes)
   }
 
+  function entryFits(record, entry) {
+    if (entry.bytes <= byteLimit) return true
+    closeRecord(record, { destroy: true, end: false })
+    return false
+  }
+
+  function beginTerminalEnd(record) {
+    if (record.closed || record.terminalEnding) return
+    record.terminalEnding = true
+    try {
+      record.res.end?.()
+    } catch {
+      closeRecord(record, { destroy: true, end: false })
+    }
+  }
+
   function writeEntry(record, entry) {
     if (record.closed) return false
+    if (!entryFits(record, entry)) return false
     if (responseIsClosed(record.res)) {
       closeRecord(record, { end: false })
       return false
@@ -1253,7 +1271,14 @@ export function createSseSubscriberRegistry({
     }
     if (!writable) markBlocked(record)
     if (entry.terminal) {
-      closeRecord(record)
+      if (writable) {
+        closeRecord(record)
+      } else {
+        // `ServerResponse.end()` does not guarantee the buffered terminal frame
+        // reached a client that stopped reading. Keep the record and its drain
+        // deadline alive until `finish`/`close`; shutdown can then destroy it.
+        beginTerminalEnd(record)
+      }
       return false
     }
     return !record.closed
@@ -1261,6 +1286,7 @@ export function createSseSubscriberRegistry({
 
   function enqueue(record, entry, target) {
     if (record.closed) return false
+    if (!entryFits(record, entry)) return false
     if (
       record.bufferedEvents + 1 > eventLimit
       || record.bufferedBytes + entry.bytes > byteLimit
@@ -1285,6 +1311,10 @@ export function createSseSubscriberRegistry({
 
   function handleDrain(record) {
     if (record.closed) return
+    // A terminal frame that returned false is already ending. A `drain`
+    // notification alone is not proof the response finished, so retain the
+    // bounded destroy deadline until `finish` or `close`.
+    if (record.terminalEnding) return
     clearDrainTimer(record)
     record.blocked = false
     flushQueue(record)
@@ -1299,6 +1329,7 @@ export function createSseSubscriberRegistry({
       replayBuffer: [],
       replaying,
       blocked: false,
+      terminalEnding: false,
       closed: false,
       bufferedEvents: 0,
       bufferedBytes: 0,
@@ -1306,13 +1337,16 @@ export function createSseSubscriberRegistry({
       drainWaiters: new Set(),
       lastSentSequence: Math.max(0, Number(sinceSequence) || 0),
       onDrain: null,
+      onFinish: null,
       onClose: null,
       onError: null,
     }
     record.onDrain = () => handleDrain(record)
+    record.onFinish = () => closeRecord(record, { end: false })
     record.onClose = () => closeRecord(record, { end: false })
     record.onError = () => closeRecord(record, { destroy: true, end: false })
     res.on?.('drain', record.onDrain)
+    res.on?.('finish', record.onFinish)
     res.on?.('close', record.onClose)
     res.on?.('error', record.onError)
 
@@ -1357,6 +1391,7 @@ export function createSseSubscriberRegistry({
     const entry = sseEventEntry(payload)
     entry.bytes = Buffer.byteLength(entry.chunk)
     if (entry.sequence <= record.lastSentSequence) return true
+    if (!entryFits(record, entry)) return false
     if (!await waitForWritable(record)) return false
     return writeEntry(record, entry)
   }
@@ -1417,7 +1452,12 @@ export function createSseSubscriberRegistry({
     stopped = true
     if (heartbeatTimer) clearInterval(heartbeatTimer)
     const records = Array.from(subscribers.values()).flatMap(listeners => Array.from(listeners))
-    for (const record of records) closeRecord(record)
+    for (const record of records) {
+      closeRecord(record, {
+        destroy: record.blocked || record.terminalEnding,
+        end: !record.blocked && !record.terminalEnding,
+      })
+    }
     subscribers.clear()
   }
 
@@ -1449,6 +1489,10 @@ export function createChatJobManager({
   subscriberMaxQueuedBytes = 1024 * 1024,
   subscriberDrainTimeoutMs = 30_000,
   heartbeatMs = 15_000,
+  timelineMaxQueuedEvents = 512,
+  timelineMaxQueuedBytes = 4 * 1024 * 1024,
+  timelineAppendMaxAttempts = 3,
+  timelineAppendRetryDelayMs = 25,
   timelineAppend = (path, data) => fs.appendFile(path, data, 'utf8'),
 }) {
   const jobsDir = join(homeDir, 'jobs')
@@ -1488,39 +1532,219 @@ export function createChatJobManager({
     heartbeatMs,
   })
 
-  // daemon-07: debounce the full metadata rewrite. The timeline jsonl is still
-  // appended on every event (cheap, append-only), but the whole-object
-  // metadata file is only rewritten at most every METADATA_FLUSH_MS during a
-  // streaming turn. Terminal/session events flush immediately after their
-  // timeline entry is durable. If an append fails, metadata deliberately stays
-  // behind the timeline gap and same-process replay uses pendingTimelineEvents.
+  // Timeline persistence is a bounded, recoverable per-job queue. A rejected
+  // append is retried in-place so later writes are never chained to a poisoned
+  // promise. If retries or queue limits are exhausted, the provider is stopped
+  // and the job fails closed in memory; durable metadata remains behind the
+  // timeline gap rather than claiming a completion that cannot be replayed.
   const METADATA_FLUSH_MS = 250
+  const TIMELINE_EVENT_LIMIT = Math.max(1, Number(timelineMaxQueuedEvents) || 512)
+  const TIMELINE_BYTE_LIMIT = Math.max(1, Number(timelineMaxQueuedBytes) || 4 * 1024 * 1024)
+  const TIMELINE_APPEND_ATTEMPTS = Math.max(1, Number(timelineAppendMaxAttempts) || 3)
+  const TIMELINE_RETRY_DELAY_MS = Math.max(0, Number(timelineAppendRetryDelayMs) || 0)
   const metadataFlushTimers = new Map() // jobId -> timeout
-  const timelineWriteChains = new Map() // jobId -> Promise<void>
-  const pendingTimelineEvents = new Map() // jobId -> Map<sequence, payload>
+  const timelinePersistence = new Map() // jobId -> bounded queue record
+  const timelineWriteTails = new Map() // jobId -> latest queued entry promise
+  const reconciliationLocks = new Map() // jobId -> Promise<metadata>
+
+  class TimelinePersistenceError extends Error {
+    constructor(jobId, cause) {
+      const rawDetail = cause instanceof Error ? cause.message : String(cause)
+      const detail = truncateUtf8(rawDetail, 1_024, {
+        reason: 'maximum timeline persistence diagnostic bytes (1024)',
+      }).text
+      super(`Timeline persistence failed for job ${jobId}: ${detail}`)
+      this.name = 'TimelinePersistenceError'
+      this.cause = cause
+      this.detail = detail
+    }
+  }
+
+  function isTimelinePersistenceError(error) {
+    return error instanceof TimelinePersistenceError
+      || error?.name === 'TimelinePersistenceError'
+  }
+
+  function timelineRecord(jobId) {
+    let record = timelinePersistence.get(jobId)
+    if (!record) {
+      record = {
+        jobId,
+        entries: [],
+        queuedBytes: 0,
+        processing: false,
+        failed: false,
+        error: null,
+        failureEvents: [],
+        failureMetadata: null,
+      }
+      timelinePersistence.set(jobId, record)
+    }
+    return record
+  }
+
+  function failTimelinePersistence(record, cause) {
+    if (record.failed) return record.error
+    const failure = cause instanceof TimelinePersistenceError
+      ? cause
+      : new TimelinePersistenceError(record.jobId, cause)
+    record.failed = true
+    record.error = failure
+    clearMetadataFlush(record.jobId)
+
+    for (const entry of record.entries) entry.reject(failure)
+
+    const live = liveJobs.get(record.jobId)
+    if (live) {
+      try { live.cancel?.() } catch {}
+      cancelPendingToolPermissionsForJob(record.jobId, 'Timeline persistence failed')
+      const now = new Date().toISOString()
+      const baseSequence = Math.max(0, Number(live.metadata?.lastSequence) || 0)
+      const publicError = `Timeline persistence failed: ${failure.detail}`
+      const errorEvent = {
+        jobId: record.jobId,
+        sequence: baseSequence + 1,
+        timestamp: Date.now(),
+        type: 'error',
+        error: publicError,
+      }
+      const doneEvent = {
+        jobId: record.jobId,
+        sequence: baseSequence + 2,
+        timestamp: Date.now(),
+        type: 'done',
+      }
+      record.failureEvents = [errorEvent, doneEvent]
+      record.failureMetadata = {
+        ...live.metadata,
+        status: 'failed',
+        error: publicError,
+        updatedAt: now,
+        completedAt: now,
+        lastSequence: doneEvent.sequence,
+      }
+      live.metadata = record.failureMetadata
+      live.terminalEmitted = true
+      live.persistenceFailed = true
+      subscriberRegistry.publish(record.jobId, errorEvent)
+      subscriberRegistry.publish(record.jobId, doneEvent)
+    }
+
+    // The high-water and bounded terminal snapshot above are sufficient for
+    // same-process state/reporting. Do not retain every failed payload and its
+    // serialized line for the daemon lifetime (up to the per-job byte cap).
+    record.entries.length = 0
+    record.queuedBytes = 0
+    timelineWriteTails.delete(record.jobId)
+    return failure
+  }
+
+  async function waitBeforeTimelineRetry(attempt) {
+    if (TIMELINE_RETRY_DELAY_MS <= 0) return
+    await new Promise(resolve => setTimeout(
+      resolve,
+      Math.min(1_000, TIMELINE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1))),
+    ))
+  }
+
+  async function pumpTimelineWrites(record) {
+    if (record.processing || record.failed) return
+    record.processing = true
+    try {
+      while (!record.failed && record.entries.length > 0) {
+        const entry = record.entries[0]
+        let lastError = null
+        let persisted = false
+        for (let attempt = 1; attempt <= TIMELINE_APPEND_ATTEMPTS; attempt += 1) {
+          try {
+            await timelineAppend(jobTimelinePath(record.jobId), entry.line)
+            persisted = true
+            break
+          } catch (error) {
+            lastError = error
+            // appendFile-style failures can be outcome-uncertain. If the exact
+            // sequence is already visible at the ordered timeline high-water
+            // mark, treat it as committed instead of retrying a duplicate.
+            try {
+              const inspected = await inspectTimeline(record.jobId)
+              if (inspected.maxSequence >= Number(entry.payload?.sequence ?? 0)) {
+                persisted = true
+                break
+              }
+            } catch {}
+            if (attempt < TIMELINE_APPEND_ATTEMPTS) await waitBeforeTimelineRetry(attempt)
+          }
+        }
+        if (!persisted) {
+          failTimelinePersistence(record, lastError ?? new Error('timeline append failed'))
+          break
+        }
+
+        record.entries.shift()
+        record.queuedBytes = Math.max(0, record.queuedBytes - entry.bytes)
+        if (timelineWriteTails.get(record.jobId) === entry.promise && record.entries.length === 0) {
+          timelineWriteTails.delete(record.jobId)
+        }
+        entry.resolve()
+      }
+    } finally {
+      record.processing = false
+      if (!record.failed && record.entries.length === 0) {
+        timelinePersistence.delete(record.jobId)
+      }
+    }
+  }
 
   function enqueueTimelineWrite(jobId, payload) {
-    const pending = pendingTimelineEvents.get(jobId) ?? new Map()
-    pending.set(payload.sequence, payload)
-    pendingTimelineEvents.set(jobId, pending)
-    const previous = timelineWriteChains.get(jobId) ?? Promise.resolve()
-    const next = previous
-      .then(() => timelineAppend(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`))
-    timelineWriteChains.set(jobId, next)
-    next.then(() => {
-      const current = pendingTimelineEvents.get(jobId)
-      if (current?.get(payload.sequence) === payload) current.delete(payload.sequence)
-      if (current?.size === 0) pendingTimelineEvents.delete(jobId)
-      if (timelineWriteChains.get(jobId) === next) timelineWriteChains.delete(jobId)
-    }).catch(() => {})
-    return next
+    const record = timelineRecord(jobId)
+    if (record.failed) throw record.error
+    const line = `${JSON.stringify(payload)}\n`
+    const bytes = Buffer.byteLength(line)
+    if (
+      record.entries.length + 1 > TIMELINE_EVENT_LIMIT
+      || record.queuedBytes + bytes > TIMELINE_BYTE_LIMIT
+    ) {
+      throw failTimelinePersistence(
+        record,
+        new Error(
+          `pending timeline queue limit exceeded (${TIMELINE_EVENT_LIMIT} events, ${TIMELINE_BYTE_LIMIT} bytes)`,
+        ),
+      )
+    }
+
+    let resolveEntry
+    let rejectEntry
+    const promise = new Promise((resolve, reject) => {
+      resolveEntry = resolve
+      rejectEntry = reject
+    })
+    // Every promise has a rejection observer even for streaming events whose
+    // caller intentionally does not await disk latency.
+    promise.catch(() => {})
+    record.entries.push({
+      payload,
+      line,
+      bytes,
+      promise,
+      resolve: resolveEntry,
+      reject: rejectEntry,
+    })
+    record.queuedBytes += bytes
+    timelineWriteTails.set(jobId, promise)
+    void pumpTimelineWrites(record)
+    return promise
   }
 
   function snapshotPendingTimelineEvents(jobId, sinceSequence, throughSequence) {
     const events = []
     let maxSequence = Math.max(0, sinceSequence)
     let terminalSeen = false
-    for (const payload of pendingTimelineEvents.get(jobId)?.values() ?? []) {
+    const record = timelinePersistence.get(jobId)
+    const pending = [
+      ...(record?.entries.map(entry => entry.payload) ?? []),
+      ...(record?.failureEvents ?? []),
+    ]
+    for (const payload of pending) {
       const sequence = Number(payload?.sequence ?? 0)
       if (!Number.isFinite(sequence) || sequence <= 0 || sequence > throughSequence) continue
       maxSequence = Math.max(maxSequence, sequence)
@@ -1577,13 +1801,16 @@ export function createChatJobManager({
       metadataFlushTimers.delete(jobId)
       const live = liveJobs.get(jobId)
       if (!live?.metadata) return
-      const timelineWrite = timelineWriteChains.get(jobId)
+      const persistence = timelinePersistence.get(jobId)
+      if (persistence?.failed) return
+      const timelineWrite = timelineWriteTails.get(jobId)
       if (!timelineWrite) {
         void writeJobMetadata(live.metadata).catch(() => {})
         return
       }
       void timelineWrite.then(() => {
-        if (timelineWriteChains.has(jobId)) {
+        if (timelinePersistence.get(jobId)?.failed) return
+        if (timelineWriteTails.has(jobId)) {
           scheduleMetadataFlush(jobId)
           return
         }
@@ -1600,8 +1827,8 @@ export function createChatJobManager({
 
   async function appendEvent(jobId, event) {
     const live = liveJobs.get(jobId)
-    const metadata = live?.metadata ?? await readJobMetadata(jobId)
-    if (!metadata) return null
+    const currentMetadata = live?.metadata ?? await readJobMetadata(jobId)
+    if (!currentMetadata) return null
 
     // Idempotent terminals: once a 'done' has fired for a job, ignore further
     // terminal appends. Prevents the duplicate error+done pair when cancelJob
@@ -1611,6 +1838,10 @@ export function createChatJobManager({
       return null
     }
 
+    // Work on a copy until the event has been accepted by the bounded queue.
+    // A synchronous queue-limit failure must not advance metadata to a
+    // sequence that can never exist in the timeline.
+    const metadata = { ...currentMetadata }
     metadata.lastSequence = Number(metadata.lastSequence ?? 0) + 1
     metadata.updatedAt = new Date().toISOString()
     if (event.sessionId) metadata.sessionId = event.sessionId
@@ -1629,15 +1860,13 @@ export function createChatJobManager({
       ...event,
     }
 
+    // Accept into the bounded queue before fanout. The queue starts its append
+    // concurrently, but provider delivery does not await disk latency.
+    const timelineWrite = enqueueTimelineWrite(jobId, payload)
+
     if (live) {
       live.metadata = metadata
     }
-
-    // Fast path: deliver provider deltas to subscribers before touching disk.
-    // Timeline persistence is still ordered per job, but it runs behind the SSE
-    // fanout so token rendering latency is provider/network-bound, not fs-bound.
-    const timelineWrite = enqueueTimelineWrite(jobId, payload)
-
     subscriberRegistry.publish(jobId, payload)
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
@@ -3135,6 +3364,12 @@ export function createChatJobManager({
       // Contain the failure to this job: emit terminal events so the client is
       // not left hanging, then let the finally block free the concurrency slot.
       console.error(`[chat-jobs] runJob error for job ${job.id}:`, err)
+      if (isTimelinePersistenceError(err) || timelinePersistence.get(job.id)?.failed) {
+        // failTimelinePersistence already stopped the provider and emitted one
+        // bounded in-memory terminal pair. Retrying through appendEvent here
+        // would only feed a known-bad persistence queue.
+        return
+      }
       try {
         await appendEvent(job.id, { type: 'error', error: err instanceof Error ? err.message : String(err) })
         await appendEvent(job.id, { type: 'done' })
@@ -3230,7 +3465,155 @@ export function createChatJobManager({
   }
 
   async function getJobState(jobId) {
+    const failedPersistence = timelinePersistence.get(jobId)
+    if (failedPersistence?.failureMetadata) {
+      return { ...failedPersistence.failureMetadata }
+    }
     return await readJobMetadata(jobId)
+  }
+
+  function getPersistenceState(jobId) {
+    const record = timelinePersistence.get(jobId)
+    if (!record) {
+      return {
+        failed: false,
+        queuedEvents: 0,
+        queuedBytes: 0,
+      }
+    }
+    return {
+      failed: record.failed,
+      queuedEvents: record.entries.length,
+      queuedBytes: record.queuedBytes,
+      ...(record.error ? { error: record.error.message } : {}),
+    }
+  }
+
+  const INTERRUPTED_JOB_ERROR = 'Job was interrupted (the daemon restarted)'
+
+  async function inspectTimeline(jobId) {
+    const timelinePath = jobTimelinePath(jobId)
+    if (!existsSync(timelinePath)) {
+      return {
+        maxSequence: 0,
+        terminalSeen: false,
+        lastEventType: null,
+        lastError: null,
+      }
+    }
+
+    const input = createReadStream(timelinePath, { encoding: 'utf8' })
+    const lines = createInterface({ input, crlfDelay: Infinity })
+    let maxSequence = 0
+    let terminalSeen = false
+    let lastEventType = null
+    let lastError = null
+    try {
+      for await (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        let payload
+        try {
+          payload = JSON.parse(trimmed)
+        } catch {
+          continue
+        }
+        const sequence = Number(payload?.sequence ?? 0)
+        if (!Number.isFinite(sequence) || sequence <= 0) continue
+        if (sequence >= maxSequence) {
+          maxSequence = sequence
+          lastEventType = payload.type ?? null
+        }
+        if (payload.type === 'error' && sequence <= maxSequence) {
+          lastError = typeof payload.error === 'string' ? payload.error : 'Unknown error'
+        }
+        if (payload.type === 'done') terminalSeen = true
+      }
+    } finally {
+      lines.close()
+      input.destroy()
+    }
+    return { maxSequence, terminalSeen, lastEventType, lastError }
+  }
+
+  async function appendReconciliationEvent(jobId, event) {
+    const line = `${JSON.stringify(event)}\n`
+    let lastError = null
+    for (let attempt = 1; attempt <= TIMELINE_APPEND_ATTEMPTS; attempt += 1) {
+      try {
+        await timelineAppend(jobTimelinePath(jobId), line)
+        return
+      } catch (error) {
+        lastError = error
+        try {
+          const inspected = await inspectTimeline(jobId)
+          if (inspected.maxSequence >= Number(event.sequence ?? 0)) return
+        } catch {}
+        if (attempt < TIMELINE_APPEND_ATTEMPTS) await waitBeforeTimelineRetry(attempt)
+      }
+    }
+    throw new TimelinePersistenceError(jobId, lastError ?? new Error('timeline append failed'))
+  }
+
+  async function reconcileInterruptedJob(jobId) {
+    const existing = reconciliationLocks.get(jobId)
+    if (existing) return await existing
+
+    const reconciliation = (async () => {
+      const metadata = await readJobMetadata(jobId)
+      if (!metadata || liveJobs.has(jobId)) return metadata
+      const active = metadata.status === 'running' || metadata.status === 'queued'
+      if (!active) return metadata
+
+      const inspected = await inspectTimeline(jobId)
+      let maxSequence = inspected.maxSequence
+      let lastError = inspected.lastError
+      const now = new Date().toISOString()
+
+      if (!inspected.terminalSeen) {
+        if (inspected.lastEventType !== 'error') {
+          const errorEvent = {
+            jobId,
+            sequence: maxSequence + 1,
+            timestamp: Date.now(),
+            type: 'error',
+            error: INTERRUPTED_JOB_ERROR,
+          }
+          await appendReconciliationEvent(jobId, errorEvent)
+          maxSequence = errorEvent.sequence
+          lastError = INTERRUPTED_JOB_ERROR
+        }
+        const doneEvent = {
+          jobId,
+          sequence: maxSequence + 1,
+          timestamp: Date.now(),
+          type: 'done',
+        }
+        await appendReconciliationEvent(jobId, doneEvent)
+        maxSequence = doneEvent.sequence
+      }
+
+      const terminalMetadata = {
+        ...metadata,
+        status: lastError ? 'failed' : 'completed',
+        error: lastError,
+        updatedAt: now,
+        completedAt: metadata.completedAt ?? now,
+        lastSequence: maxSequence,
+      }
+      // Strict ordering: both timeline terminal records are durable before the
+      // metadata status and high-water mark advance.
+      await writeJobMetadata(terminalMetadata)
+      return terminalMetadata
+    })()
+    reconciliationLocks.set(jobId, reconciliation)
+    try {
+      return await reconciliation
+    } finally {
+      if (reconciliationLocks.get(jobId) === reconciliation) {
+        reconciliationLocks.delete(jobId)
+      }
+    }
   }
 
   async function replayTimeline(record, jobId, sinceSequence, throughSequence = Number.POSITIVE_INFINITY) {
@@ -3271,9 +3654,17 @@ export function createChatJobManager({
   }
 
   async function streamJob(jobId, sinceSequence, res) {
-    const persistedMetadata = await readJobMetadata(jobId)
+    let persistedMetadata = await readJobMetadata(jobId)
     const live = liveJobs.get(jobId)
-    const metadata = live?.metadata ?? persistedMetadata
+    const persistenceFailure = timelinePersistence.get(jobId)?.failureMetadata
+    if (
+      !live
+      && !persistenceFailure
+      && (persistedMetadata?.status === 'running' || persistedMetadata?.status === 'queued')
+    ) {
+      persistedMetadata = await reconcileInterruptedJob(jobId)
+    }
+    const metadata = live?.metadata ?? persistenceFailure ?? persistedMetadata
     if (!metadata) return false
 
     const normalizedSince = Math.max(0, Number(sinceSequence) || 0)
@@ -3297,20 +3688,13 @@ export function createChatJobManager({
     })
     subscriberRegistry.sendComment(subscriber, ': connected\n\n')
 
-    const replay = await replayTimeline(
+    await replayTimeline(
       subscriber,
       jobId,
       normalizedSince,
       replayThrough,
     )
-    let reconciledMaxSequence = Math.max(replay.maxSequence, pendingAtRegistration.maxSequence)
-    let reconciledTerminalSeen = replay.terminalSeen || pendingAtRegistration.terminalSeen
     for (const payload of pendingAtRegistration.events) {
-      const sequence = Number(payload?.sequence ?? 0)
-      if (Number.isFinite(sequence)) {
-        reconciledMaxSequence = Math.max(reconciledMaxSequence, sequence)
-      }
-      if (payload?.type === 'done') reconciledTerminalSeen = true
       if (!await subscriberRegistry.sendReplay(subscriber, payload)) break
     }
 
@@ -3318,32 +3702,12 @@ export function createChatJobManager({
       return subscriberRegistry.finishReplay(subscriber)
     }
 
-    // Post-crash wedge guard: metadata may say active even though no live
-    // runner exists. Re-read after replay so a terminal append racing the first
-    // metadata read is recognized rather than receiving a synthetic duplicate.
-    const latestMetadata = await readJobMetadata(jobId)
-    const latestStatusActive = latestMetadata?.status === 'running' || latestMetadata?.status === 'queued'
-    if (statusActive && latestStatusActive && !reconciledTerminalSeen) {
-      const baseSequence = Math.max(
-        reconciledMaxSequence,
-        Number(latestMetadata?.lastSequence ?? metadata.lastSequence ?? 0),
-      )
-      await subscriberRegistry.sendReplay(subscriber, {
-        jobId,
-        sequence: baseSequence + 1,
-        timestamp: Date.now(),
-        type: 'error',
-        error: 'Job was interrupted (the daemon restarted)',
-      })
-      await subscriberRegistry.sendReplay(subscriber, {
-        jobId,
-        sequence: baseSequence + 2,
-        timestamp: Date.now(),
-        type: 'done',
-      })
+    // A terminal replay can itself hit socket backpressure. In that case
+    // writeEntry has already called end() and retained a bounded destroy
+    // deadline. Do not clear that deadline/listeners here.
+    if (!subscriber.blocked && !subscriber.terminalEnding) {
+      subscriberRegistry.close(subscriber, { end: false })
     }
-
-    subscriberRegistry.close(subscriber, { end: false })
     return false
   }
 
@@ -3384,6 +3748,8 @@ export function createChatJobManager({
       try {
         await fs.rm(jobMetaPath(id), { force: true })
         await fs.rm(jobTimelinePath(id), { force: true })
+        timelinePersistence.delete(id)
+        timelineWriteTails.delete(id)
         pruned += 1
       } catch { /* best effort */ }
     }
@@ -3437,6 +3803,7 @@ export function createChatJobManager({
     cancelJob,
     answerToolPermission,
     getJobState,
+    getPersistenceState,
     streamJob,
     shutdown,
     sweepJobRetention,
