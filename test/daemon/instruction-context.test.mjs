@@ -35,6 +35,80 @@ async function loadWithCanonicalParity(options) {
   return legacy
 }
 
+function assertPromptIsDeterministicAndPure(context) {
+  const beforePrompt = structuredClone(context)
+  const prompt = buildInstructionPrompt(context)
+
+  assert.equal(buildInstructionPrompt(context), prompt)
+  assert.deepEqual(context, beforePrompt)
+  return prompt
+}
+
+async function captureRejection(operation) {
+  try {
+    await operation()
+  } catch (error) {
+    assert.ok(error instanceof Error)
+    return error
+  }
+
+  assert.fail('Expected operation to reject')
+}
+
+async function assertCanonicalRejectionParity(options, expectedPattern) {
+  const adapterError = await captureRejection(() => loadInstructionContext(options))
+  const canonicalError = await captureRejection(() => loadMemoryContext(options))
+
+  assert.equal(adapterError.name, canonicalError.name)
+  assert.equal(adapterError.message, canonicalError.message)
+  assert.match(adapterError.message, expectedPattern)
+}
+
+test('legacy manually constructed instruction context keeps a deterministic canonical prompt contract', () => {
+  const content = 'Preserve the public instruction context contract'
+  const section = {
+    scope: 'workspace',
+    bucket: 'remote-safe',
+    displayPath: 'AGENTS.md',
+    path: '/workspace/AGENTS.md',
+    source: '/workspace/AGENTS.md',
+    precedence: 0,
+    content,
+    originalBytes: Buffer.byteLength(content, 'utf8'),
+    includedBytes: Buffer.byteLength(content, 'utf8'),
+    truncated: false,
+    truncationReason: null,
+  }
+  const context = {
+    sections: [section],
+    budget: {
+      fragments: [section],
+      omitted: [],
+      originalSectionCount: 1,
+      includedSectionCount: 1,
+      omittedSectionCount: 0,
+      omittedByCount: 0,
+      omittedByAggregate: 0,
+      truncatedByAggregate: 0,
+      includedBytes: Buffer.byteLength(content, 'utf8'),
+      reservedBytes: 0,
+      maxSections: MAX_INSTRUCTION_SECTIONS,
+      maxBytes: 128 * 1024,
+    },
+  }
+
+  assert.equal(
+    assertPromptIsDeterministicAndPure(context),
+    [
+      '## Workspace Instructions',
+      'Follow these layered instructions in addition to the user request. If they conflict, later sections override earlier ones.',
+      '',
+      '### Workspace Instructions [remote-safe] (AGENTS.md)',
+      content,
+    ].join('\n'),
+  )
+})
+
 test('daemon local execution loads layered user and workspace instruction files in precedence order', async t => {
   const fixture = await makeFixture()
   t.after(async () => {
@@ -60,10 +134,7 @@ test('daemon local execution loads layered user and workspace instruction files 
     ],
   )
 
-  const beforePrompt = structuredClone(context)
-  const prompt = buildInstructionPrompt(context)
-  assert.equal(buildInstructionPrompt(context), prompt)
-  assert.deepEqual(context, beforePrompt)
+  const prompt = assertPromptIsDeterministicAndPure(context)
   assert.deepEqual(Object.keys(context).sort(), ['budget', 'sections'])
   assert.match(prompt, /^## Workspace Instructions/)
   assert.match(prompt, /### User Instructions \[local-only\] \(~\/\.codesurf\/AGENTS\.md\)/)
@@ -319,12 +390,12 @@ test('workspace instruction files must not follow symlinks outside the workspace
   await writeFile(escapedPath, 'Do not leak this file', 'utf8')
   await symlink(escapedPath, join(fixture.workspaceDir, 'AGENTS.md'))
 
-  await assert.rejects(
-    loadInstructionContext({
+  await assertCanonicalRejectionParity(
+    {
       homeDir: fixture.homeDir,
       workspaceDir: fixture.workspaceDir,
       executionTarget: 'local',
-    }),
+    },
     /outside the workspace root|symlink/i,
   )
 })
@@ -341,13 +412,40 @@ test('workspace instruction files must not escape through symlinked parent direc
   await rm(join(fixture.workspaceDir, '.codesurf'), { recursive: true, force: true })
   await symlink(escapedDir, join(fixture.workspaceDir, '.codesurf'))
 
-  await assert.rejects(
-    loadInstructionContext({
+  await assertCanonicalRejectionParity(
+    {
       homeDir: fixture.homeDir,
       workspaceDir: fixture.workspaceDir,
       executionTarget: 'local',
-    }),
+    },
     /outside the workspace root|symlink/i,
+  )
+})
+
+test('instruction imports cannot escape the workspace through symlinks', async t => {
+  const fixture = await makeFixture()
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true })
+  })
+
+  const rulesDir = join(fixture.workspaceDir, 'rules')
+  const escapedPath = join(fixture.root, 'escaped-import.md')
+  await mkdir(rulesDir, { recursive: true })
+  await writeFile(escapedPath, 'Do not import this file', 'utf8')
+  await symlink(escapedPath, join(rulesDir, 'escaped.md'))
+  await writeFile(
+    join(fixture.workspaceDir, 'AGENTS.md'),
+    'Workspace instruction\n@import ./rules/escaped.md',
+    'utf8',
+  )
+
+  await assertCanonicalRejectionParity(
+    {
+      homeDir: fixture.homeDir,
+      workspaceDir: fixture.workspaceDir,
+      executionTarget: 'local',
+    },
+    /outside the workspace root/i,
   )
 })
 
@@ -359,13 +457,36 @@ test('unexpected instruction file read errors are surfaced instead of silently i
 
   await mkdir(join(fixture.workspaceDir, '.codesurf', 'AGENTS.md'), { recursive: true })
 
-  await assert.rejects(
-    loadInstructionContext({
+  await assertCanonicalRejectionParity(
+    {
       homeDir: fixture.homeDir,
       workspaceDir: fixture.workspaceDir,
       executionTarget: 'local',
-    }),
+    },
     /AGENTS\.md|EISDIR/i,
+  )
+})
+
+test('unexpected imported instruction read errors match the canonical loader', async t => {
+  const fixture = await makeFixture()
+  t.after(async () => {
+    await rm(fixture.root, { recursive: true, force: true })
+  })
+
+  await mkdir(join(fixture.workspaceDir, 'rules', 'directory.md'), { recursive: true })
+  await writeFile(
+    join(fixture.workspaceDir, 'AGENTS.md'),
+    'Workspace instruction\n@import ./rules/directory.md',
+    'utf8',
+  )
+
+  await assertCanonicalRejectionParity(
+    {
+      homeDir: fixture.homeDir,
+      workspaceDir: fixture.workspaceDir,
+      executionTarget: 'local',
+    },
+    /directory\.md|EISDIR/i,
   )
 })
 
@@ -436,7 +557,8 @@ test('daemon instruction adapter exposes canonical depth, item, and I/O quota om
       && /maximum import depth/.test(item.truncationReason),
   ))
   assert.match(context.notices?.[0] ?? '', /omitted by maximum import depth/)
-  assert.doesNotMatch(buildInstructionPrompt(context), new RegExp(`Depth instruction ${MAX_IMPORT_DEPTH + 1}`))
+  const depthPrompt = assertPromptIsDeterministicAndPure(context)
+  assert.doesNotMatch(depthPrompt, new RegExp(`Depth instruction ${MAX_IMPORT_DEPTH + 1}`))
 
   const itemImports = []
   const itemDir = join(fixture.workspaceDir, 'items')
@@ -461,6 +583,7 @@ test('daemon instruction adapter exposes canonical depth, item, and I/O quota om
     /maximum included instruction sections/.test(item.truncationReason),
   ))
   assert.match(context.notices?.[0] ?? '', /maximum included instruction sections/)
+  assert.match(assertPromptIsDeterministicAndPure(context), /maximum included instruction sections/)
 
   const missingImports = Array.from(
     { length: MAX_IMPORT_TRAVERSAL_ATTEMPTS + 1 },
@@ -481,4 +604,5 @@ test('daemon instruction adapter exposes canonical depth, item, and I/O quota om
     /maximum import traversal attempts/.test(item.truncationReason),
   ))
   assert.match(context.notices?.[0] ?? '', /maximum import traversal attempts/)
+  assert.match(assertPromptIsDeterministicAndPure(context), /maximum import traversal attempts/)
 })
