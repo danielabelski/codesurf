@@ -15,8 +15,10 @@ import { existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { stopTestChild, trackTestChild } from '../helpers/child-process-shutdown.mjs'
+
 const __filename = fileURLToPath(import.meta.url)
-const projectRoot = resolve(dirname(__filename), '..')
+const projectRoot = resolve(dirname(__filename), '../..')
 const builtMain = resolve(projectRoot, 'dist-electron/main/index.js')
 const electronBin = resolve(projectRoot, 'node_modules/.bin/electron')
 
@@ -33,17 +35,17 @@ function preflight() {
 
 // Minimal JSON-RPC client over a child stdio pair.
 class StdioClient {
-  constructor(child) {
+  constructor(child, { killProcessGroup = false } = {}) {
     this.child = child
+    this.killProcessGroup = killProcessGroup
     this.nextId = 1
     this.pending = new Map()
     this.buffer = ''
     this.stderr = ''
-    this.exit = new Promise(resolveExit => {
-      child.once('exit', (code, signal) => resolveExit({ code, signal }))
-    })
+    this.exitError = null
+    trackTestChild(child)
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', chunk => {
+    this.onStdout = chunk => {
       this.buffer += chunk
       let idx
       while ((idx = this.buffer.indexOf('\n')) >= 0) {
@@ -51,12 +53,29 @@ class StdioClient {
         this.buffer = this.buffer.slice(idx + 1)
         if (line) this.#deliver(line)
       }
-    })
+    }
+    child.stdout.on('data', this.onStdout)
     child.stderr.setEncoding('utf8')
-    child.stderr.on('data', chunk => {
+    this.onStderr = chunk => {
       this.stderr += chunk
       if (this.stderr.length > 64 * 1024) this.stderr = this.stderr.slice(-64 * 1024)
-    })
+    }
+    child.stderr.on('data', this.onStderr)
+    this.onChildError = error => this.#fail(error)
+    this.onChildExit = (code, signal) => {
+      this.#fail(new Error(
+        `OWL host exited before RPC completion (code=${code}, signal=${signal}; stderr tail: ${this.stderr.slice(-400)})`,
+      ))
+    }
+    child.once('error', this.onChildError)
+    child.once('exit', this.onChildExit)
+  }
+
+  #fail(error) {
+    this.exitError = error
+    const pending = [...this.pending.values()]
+    this.pending.clear()
+    for (const request of pending) request.reject(error)
   }
 
   #deliver(line) {
@@ -75,6 +94,7 @@ class StdioClient {
   }
 
   call(method, params = {}, timeoutMs = 15000) {
+    if (this.exitError) return Promise.reject(this.exitError)
     const id = this.nextId++
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params })
     return new Promise((resolveCall, rejectCall) => {
@@ -100,17 +120,23 @@ class StdioClient {
     })
   }
 
-  stop() {
+  async stop() {
     try {
-      this.child.stdin.end()
-    } catch {}
-    try {
-      this.child.kill('SIGTERM')
-    } catch {}
+      return await stopTestChild(this.child, {
+        killProcessGroup: this.killProcessGroup,
+      })
+    } finally {
+      this.child.stdout.off('data', this.onStdout)
+      this.child.stderr.off('data', this.onStderr)
+      this.child.off('error', this.onChildError)
+      this.child.off('exit', this.onChildExit)
+      this.#fail(new Error('OWL host stopped'))
+    }
   }
 }
 
 function spawnOwlHost() {
+  const killProcessGroup = process.platform !== 'win32'
   const child = spawn(electronBin, [projectRoot], {
     cwd: projectRoot,
     env: {
@@ -122,9 +148,10 @@ function spawnOwlHost() {
       ELECTRON_DISABLE_SANDBOX: '1',
       ELECTRON_ENABLE_LOGGING: '1',
     },
+    detached: killProcessGroup,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  return new StdioClient(child)
+  return new StdioClient(child, { killProcessGroup })
 }
 
 test('OWL host: smoke + full webview lifecycle', { timeout: 60000 }, async t => {

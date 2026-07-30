@@ -146,7 +146,7 @@ export async function loadPowerExtension(
  * Returns true when a power extension should run in the brokered
  * utilityProcess tier rather than via the legacy raw require() path.
  *
- * Phase 1d status: proven green via test/broker-host-integration.test.mjs.
+ * Phase 1d status: proven green via test/hosts/broker-host-integration.test.mjs.
  * The default is brokered for global/catalog/workspace extensions; bundled
  * extensions remain legacy. CODESURF_POWER_BROKER=0 is the escape hatch.
  *

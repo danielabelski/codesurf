@@ -273,4 +273,7 @@ npm --prefix packages/codesurf-terminal-gateway test
 The integration suite starts the actual HTTP and WebSocket server, verifies
 tenant/origin/root enforcement, single-use attachment tokens, lifecycle and
 backpressure cleanup, mode-0600 Native runtime config output, Docker
-fail-closed configuration, and a real `node-pty` local shell.
+fail-closed configuration, and a real `node-pty` local shell. On Darwin,
+package install and test setup narrowly validate the current-architecture
+`node-pty` spawn helper and repair its executable mode when npm installs it as
+mode 0644.

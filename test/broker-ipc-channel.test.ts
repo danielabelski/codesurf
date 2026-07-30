@@ -3,7 +3,7 @@
  *
  * The actual enforcement lives in `host.ts` dispatch() → case 'ipc':, which is
  * private and requires a live Electron UtilityProcess to exercise end-to-end.
- * Full integration coverage is in broker-host-integration.test.mjs (requires
+ * Full integration coverage is in hosts/broker-host-integration.test.mjs (requires
  * `npm run build:main` and the Electron binary).
  *
  * What we CAN test here without Electron: the namespace-check predicate itself.

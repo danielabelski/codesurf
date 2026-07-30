@@ -6,7 +6,7 @@
 > the Atlas browser — adapted to Electron.
 >
 > Status: **engine complete and tested; no UI consumer yet.** The host, supervisor, IPC,
-> and preload bridge all work (`test/owl-host-integration.test.mjs`, 16/16). Nothing in
+> and preload bridge all work (`test/hosts/owl-host-integration.test.mjs`, 16/16). Nothing in
 > the renderer calls it — wiring OWL into a canvas tile is the open follow-up (§7).
 
 ---
@@ -157,14 +157,14 @@ The IPC layer fills defaults: `owl:session:create` defaults `appName` to `APP_NA
 
 ## 6. Testing
 
-`test/owl-host-integration.test.mjs` spawns the **real** built host
+`test/hosts/owl-host-integration.test.mjs` spawns the **real** built host
 (`electron .` with `CODESURF_OWL_HOST=1`), drives the full method surface over stdio
 JSON-RPC, and asserts on every response — including verifying `webview.capture` returns a
 real PNG (magic-byte check), profile-partition routing, and the post-destroy error path.
 
 ```bash
 npm run build:main          # the test runs against dist-electron/main/index.js
-node --test test/owl-host-integration.test.mjs
+node --test test/hosts/owl-host-integration.test.mjs
 ```
 
 The test acts *as* the supervisor (it spawns the child and speaks JSON-RPC directly), so it
