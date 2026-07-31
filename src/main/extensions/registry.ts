@@ -18,16 +18,27 @@ import { adapters, assertValidAdaptedManifest, tryAdaptExtension } from './adapt
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
 import { resolveExtensionEnabled } from './activation-policy'
 import { assertValidExtensionId, isValidExtensionId } from './identity'
-import { openCanonicalResource, readOpenedCanonicalResourceText } from './resource-path'
+import {
+  MAX_EXTENSION_TEXT_RESOURCE_BYTES,
+  openCanonicalResource,
+  readOpenedCanonicalResourceText,
+} from './resource-path'
 import { log } from '../utils/logger.ts'
 import {
+  getDeclaredSensitiveMediaDeclaration,
   getDeclaredSensitiveMediaCapabilities,
 } from '../../shared/extension-sensitive-media.ts'
 import {
   captureExtensionMediaRoot,
-  computeExtensionMediaIdentity,
+  computeExtensionMediaAttestation,
+  type ExtensionMediaAttestation,
+  type ExtensionMediaResourceAttestation,
   type ExtensionMediaRootBinding,
 } from './media-identity.ts'
+import {
+  extensionMediaResourceKey,
+  readAttestedExtensionResource,
+} from './media-resource-attestation.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -112,6 +123,7 @@ async function saveGrantsMap(grants: Record<string, string[]>): Promise<void> {
 export interface LoadedExtension {
   manifest: ExtensionManifest
   mediaIdentity: string | null
+  mediaAttestation: ExtensionMediaAttestation | null
   installRootBinding: ExtensionMediaRootBinding
   deactivate?: () => void
 }
@@ -122,6 +134,9 @@ export interface ExtensionMediaPermission {
   readonly name: string
   readonly enabled: boolean
   readonly declaredMedia: ReturnType<typeof getDeclaredSensitiveMediaCapabilities>
+  readonly declaredMediaReasons: ReturnType<
+    typeof getDeclaredSensitiveMediaDeclaration
+  >['reasons']
 }
 
 const EXTENSIONS_DIRNAME = 'extensions'
@@ -214,6 +229,35 @@ function sameRootBinding(
     && left.birthtimeMs === right.birthtimeMs
 }
 
+function sameMediaResourceAttestation(
+  left: ExtensionMediaResourceAttestation,
+  right: ExtensionMediaResourceAttestation,
+): boolean {
+  return left.digest === right.digest
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+function sameMediaAttestation(
+  left: ExtensionMediaAttestation,
+  right: ExtensionMediaAttestation,
+): boolean {
+  if (
+    left.identity !== right.identity
+    || left.resources.size !== right.resources.size
+  ) return false
+  for (const [path, resource] of left.resources) {
+    const other = right.resources.get(path)
+    if (!other || !sameMediaResourceAttestation(resource, other)) return false
+  }
+  return true
+}
+
 async function captureScanRoot(
   scanRoot: string,
   authorizedScope: string,
@@ -294,15 +338,18 @@ export class ExtensionRegistry {
   private catalogDirs: string[]
   private rescanQueue: Promise<void> = Promise.resolve()
   private readonly onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
+  private readonly activatePower: typeof activatePowerExtension
 
   constructor(opts?: {
     bundledDirs?: string[]
     catalogDirs?: string[]
     onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
+    activatePower?: typeof activatePowerExtension
   }) {
     this.bundledDirs = (opts?.bundledDirs ?? []).filter(Boolean)
     this.catalogDirs = (opts?.catalogDirs ?? []).filter(Boolean)
     this.onSensitiveMediaRevoked = opts?.onSensitiveMediaRevoked
+    this.activatePower = opts?.activatePower ?? activatePowerExtension
   }
 
   async scan(): Promise<void> {
@@ -679,9 +726,10 @@ export class ExtensionRegistry {
     }
 
     const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
-    const mediaIdentity = manifest._enabled && declaredMedia.length > 0
-      ? await computeExtensionMediaIdentity(extDir, manifest, rootBinding)
+    const mediaAttestation = manifest._enabled && declaredMedia.length > 0
+      ? await computeExtensionMediaAttestation(extDir, manifest, rootBinding)
       : null
+    const mediaIdentity = mediaAttestation?.identity ?? null
     await validateScanRoot?.()
     const finalRootBinding = await assertRegularExtensionRoot(extDir)
     if (!sameRootBinding(finalRootBinding, rootBinding)) {
@@ -698,6 +746,7 @@ export class ExtensionRegistry {
     const loaded: LoadedExtension = {
       manifest,
       mediaIdentity,
+      mediaAttestation,
       installRootBinding: rootBinding,
     }
 
@@ -717,7 +766,7 @@ export class ExtensionRegistry {
             ? 'bundled'
             : 'global'
       const ctx = new ExtensionContext(manifest, bus, this)
-      const deactivate = await activatePowerExtension(manifest, ctx, scope, this)
+      const deactivate = await this.activatePower(manifest, ctx, scope, this)
       loaded.deactivate = deactivate ?? undefined
       // NOTE: MCP tools are registered directly into this.extraMCPTools during
       // activate() via ExtensionContext.mcp.registerTool -> registry.registerMCPTool.
@@ -775,12 +824,14 @@ export class ExtensionRegistry {
     normalizeTileTypes(manifest)
 
     const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
-    const mediaIdentity = manifest._enabled && declaredMedia.length > 0
-      ? await computeExtensionMediaIdentity(manifest._path, manifest, rootBinding)
+    const mediaAttestation = manifest._enabled && declaredMedia.length > 0
+      ? await computeExtensionMediaAttestation(manifest._path, manifest, rootBinding)
       : null
+    const mediaIdentity = mediaAttestation?.identity ?? null
     const loaded: LoadedExtension = {
       manifest,
       mediaIdentity,
+      mediaAttestation,
       installRootBinding: rootBinding,
     }
 
@@ -796,7 +847,7 @@ export class ExtensionRegistry {
           ? 'catalog'
           : 'global'
       const ctx = new ExtensionContext(manifest, bus, this)
-      const deactivate = await activatePowerExtension(manifest, ctx, scope, this)
+      const deactivate = await this.activatePower(manifest, ctx, scope, this)
       loaded.deactivate = deactivate ?? undefined
       // NOTE: tools are registered directly via registerMCPTool during activate();
       // do not push ctx.getRegisteredTools() here to avoid double-registration.
@@ -828,11 +879,44 @@ export class ExtensionRegistry {
     return this.extensions.get(id)
   }
 
+  isExtensionMediaAttestationCurrent(
+    id: string,
+    expected: ExtensionMediaAttestation,
+  ): boolean {
+    const extension = this.get(id)
+    return Boolean(
+      extension
+      && extension.manifest._enabled === true
+      && extension.mediaAttestation === expected
+      && extension.mediaIdentity === expected.identity,
+    )
+  }
+
+  async invalidateExtensionMediaAttestation(
+    id: string,
+    expected: ExtensionMediaAttestation,
+  ): Promise<boolean> {
+    const extension = this.get(id)
+    if (
+      !extension
+      || extension.mediaAttestation !== expected
+      || extension.mediaIdentity !== expected.identity
+    ) return false
+    // Authorization disappears synchronously before revocation performs any
+    // disk or Electron work. The object-identity compare is a CAS: a late
+    // request from an older scan cannot revoke a newer installation.
+    extension.mediaAttestation = null
+    extension.mediaIdentity = null
+    await this.revokeSensitiveMedia(id)
+    return true
+  }
+
   getExtensionMediaPermission(id: string): ExtensionMediaPermission | undefined {
     const extension = this.get(id)
     if (!extension) return undefined
     const { manifest, mediaIdentity } = extension
-    const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
+    const mediaDeclaration = getDeclaredSensitiveMediaDeclaration(manifest.capabilities)
+    const declaredMedia = mediaDeclaration.capabilities
     if (!mediaIdentity || declaredMedia.length === 0) return undefined
     return {
       id: manifest.id,
@@ -840,6 +924,7 @@ export class ExtensionRegistry {
       name: manifest.name,
       enabled: manifest._enabled === true,
       declaredMedia,
+      declaredMediaReasons: mediaDeclaration.reasons,
     }
   }
 
@@ -995,12 +1080,60 @@ export class ExtensionRegistry {
     if (!entry) return null
     const root = ext.manifest._path
     const abs = resolve(root, ...entry.split(/[\\/]/).filter(Boolean))
+    const requiresMediaAttestation = getDeclaredSensitiveMediaCapabilities(
+      ext.manifest.capabilities,
+    ).length > 0
+    const mediaAttestation = ext.mediaAttestation
+    if (requiresMediaAttestation && !mediaAttestation) return null
+    const mediaResourceKey = mediaAttestation
+      ? extensionMediaResourceKey(ext.installRootBinding, abs)
+      : undefined
+    const expectedResource = mediaResourceKey
+      ? mediaAttestation?.resources.get(mediaResourceKey)
+      : undefined
     const resolvedResource = await openCanonicalResource(root, abs)
-    if (!resolvedResource.ok) return null
+    if (!resolvedResource.ok) {
+      if (mediaAttestation && expectedResource) {
+        await this.invalidateExtensionMediaAttestation(extId, mediaAttestation)
+      }
+      return null
+    }
+    if (mediaAttestation && (!mediaResourceKey || !expectedResource)) {
+      await resolvedResource.handle.close().catch(() => undefined)
+      await this.invalidateExtensionMediaAttestation(extId, mediaAttestation)
+      return null
+    }
+    if (
+      mediaAttestation
+      && expectedResource
+      && expectedResource.size > MAX_EXTENSION_TEXT_RESOURCE_BYTES
+    ) {
+      await resolvedResource.handle.close().catch(() => undefined)
+      return null
+    }
     try {
-      const textResource = await readOpenedCanonicalResourceText(resolvedResource)
-      if (!textResource.ok) return null
-      const raw = textResource.text
+      const raw = mediaAttestation && mediaResourceKey && expectedResource
+        ? await readAttestedExtensionResource(
+            resolvedResource,
+            ext.installRootBinding,
+            mediaResourceKey,
+            expectedResource,
+          ).then(async result => {
+            if (
+              !result.ok
+              || !this.isExtensionMediaAttestationCurrent(extId, mediaAttestation)
+            ) {
+              if (!result.ok) {
+                await this.invalidateExtensionMediaAttestation(extId, mediaAttestation)
+              }
+              return null
+            }
+            return result.bytes.toString('utf8')
+          })
+        : await readOpenedCanonicalResourceText(resolvedResource).then(result => {
+            return result.ok ? result.text : null
+          })
+      if (raw === null) return null
       if (raw.trimStart().startsWith('{')) {
         try {
           const obj = JSON.parse(raw) as { resource?: { contents?: Array<{ text?: string }> }; contents?: Array<{ text?: string }> }
@@ -1063,7 +1196,13 @@ export class ExtensionRegistry {
   async enable(id: string): Promise<boolean> {
     const ext = this.extensions.get(id)
     if (!ext) return false
-    if (ext.manifest._enabled !== true) {
+    const wasEnabled = ext.manifest._enabled === true
+    const previousMediaIdentity = ext.mediaIdentity
+    const previousMediaAttestation = ext.mediaAttestation
+    const previousDeactivate = ext.deactivate
+    const registeredToolsBefore = new Set(this.extraMCPTools)
+    let pendingMediaAttestation = ext.mediaAttestation
+    if (!wasEnabled) {
       if (!ext.manifest._path) {
         throw new Error(`Extension ${id} is missing its install path`)
       }
@@ -1075,15 +1214,18 @@ export class ExtensionRegistry {
       // consent state, even if an earlier disk revoke was interrupted.
       await this.revokeSensitiveMedia(id)
       const declaredMedia = getDeclaredSensitiveMediaCapabilities(ext.manifest.capabilities)
-      ext.mediaIdentity = declaredMedia.length > 0 && ext.manifest._path
-        ? await computeExtensionMediaIdentity(
+      pendingMediaAttestation = declaredMedia.length > 0 && ext.manifest._path
+        ? await computeExtensionMediaAttestation(
             ext.manifest._path,
             ext.manifest,
             ext.installRootBinding,
           )
         : null
     }
-    ext.manifest._enabled = true
+    const disabledBefore = this.disabledIds.has(id)
+    const catalogEnabledBefore = this.enabledCatalogIds.has(id)
+    const hadGrantsBefore = Object.hasOwn(this.grants, id)
+    const grantsBefore = hadGrantsBefore ? [...(this.grants[id] ?? [])] : undefined
     this.disabledIds.delete(id)
     // If this was installed from a catalog dir, persist that the user has
     // explicitly enabled it so future rescans do not revert the default-off.
@@ -1103,13 +1245,63 @@ export class ExtensionRegistry {
     if (persistGrants) {
       this.grants[id] = caps.map(c => c.name)
     }
+    const rollback = async (error: unknown): Promise<never> => {
+      if (ext.deactivate && ext.deactivate !== previousDeactivate) {
+        ext.deactivate()
+      }
+      ext.deactivate = previousDeactivate
+      this.extraMCPTools = this.extraMCPTools.filter(tool => {
+        return tool.extId !== id || registeredToolsBefore.has(tool)
+      })
+      ext.manifest._enabled = wasEnabled
+      ext.mediaIdentity = previousMediaIdentity
+      ext.mediaAttestation = previousMediaAttestation
+      if (disabledBefore) this.disabledIds.add(id)
+      else this.disabledIds.delete(id)
+      if (catalogEnabledBefore) this.enabledCatalogIds.add(id)
+      else this.enabledCatalogIds.delete(id)
+      if (hadGrantsBefore) this.grants[id] = grantsBefore ?? []
+      else delete this.grants[id]
+      await Promise.allSettled([
+        saveDisabledSet(this.disabledIds),
+        persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
+        persistGrants ? saveGrantsMap(this.grants) : Promise.resolve(),
+      ])
+      if (!wasEnabled) await this.revokeSensitiveMedia(id)
+      throw error
+    }
     // Await disk writes so a subsequent ext:refresh rescan reads the latest
     // sets from disk (scan() reloads both sets from files).
-    await Promise.allSettled([
-      saveDisabledSet(this.disabledIds),
-      persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
-      persistGrants ? saveGrantsMap(this.grants) : Promise.resolve(),
-    ])
+    try {
+      const persistenceResults = await Promise.allSettled([
+        saveDisabledSet(this.disabledIds),
+        persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
+        persistGrants ? saveGrantsMap(this.grants) : Promise.resolve(),
+      ])
+      const persistenceFailure = persistenceResults.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+      )
+      if (persistenceFailure) throw persistenceFailure.reason
+      const path = ext.manifest._path
+      if (!path) throw new Error(`Extension ${id} is missing its install path`)
+      const afterPersistenceRoot = await assertRegularExtensionRoot(path)
+      if (!sameRootBinding(afterPersistenceRoot, ext.installRootBinding)) {
+        throw new Error(`Extension root changed while enabling; rescan required: ${path}`)
+      }
+      if (pendingMediaAttestation) {
+        const verified = await computeExtensionMediaAttestation(
+          path,
+          ext.manifest,
+          ext.installRootBinding,
+        )
+        if (!sameMediaAttestation(verified, pendingMediaAttestation)) {
+          throw new Error(`Extension content changed while enabling; rescan required: ${path}`)
+        }
+        pendingMediaAttestation = verified
+      }
+    } catch (error) {
+      return rollback(error)
+    }
     // Power-tier extensions may not have been activated on first scan (catalog
     // or workspace default-off). Load the main script now that the user has
     // explicitly enabled it — this is the explicit user opt-in for untrusted scope.
@@ -1131,13 +1323,38 @@ export class ExtensionRegistry {
       )
       try {
         const ctx = new ExtensionContext(m, bus, this)
-        const deactivate = await activatePowerExtension(m, ctx, scope, this)
-        ext.deactivate = deactivate ?? undefined
+        const activationRoot = await assertRegularExtensionRoot(m._path)
+        if (!sameRootBinding(activationRoot, ext.installRootBinding)) {
+          throw new Error(`Extension root changed before activation; rescan required: ${m._path}`)
+        }
+        if (pendingMediaAttestation) {
+          const activationAttestation = await computeExtensionMediaAttestation(
+            m._path,
+            m,
+            ext.installRootBinding,
+          )
+          if (!sameMediaAttestation(activationAttestation, pendingMediaAttestation)) {
+            throw new Error(`Extension content changed before activation; rescan required: ${m._path}`)
+          }
+          pendingMediaAttestation = activationAttestation
+        }
+        ext.manifest._enabled = true
+        ext.mediaAttestation = pendingMediaAttestation
+        ext.mediaIdentity = pendingMediaAttestation?.identity ?? null
+        const deactivate = await this.activatePower(m, ctx, scope, this)
+        if (!deactivate) {
+          throw new Error(`Power extension activation failed: ${m.id}`)
+        }
+        ext.deactivate = deactivate
         // NOTE: tools are registered directly via registerMCPTool during activate();
         // do not push ctx.getRegisteredTools() here to avoid double-registration.
       } catch (err) {
-        console.error(`[Extensions] enable() failed to load power ext ${m.id}:`, err)
+        return rollback(err)
       }
+    } else {
+      ext.manifest._enabled = true
+      ext.mediaAttestation = pendingMediaAttestation
+      ext.mediaIdentity = pendingMediaAttestation?.identity ?? null
     }
     return true
   }
@@ -1158,6 +1375,7 @@ export class ExtensionRegistry {
       this.revokeSensitiveMedia(id),
     ])
     ext.mediaIdentity = null
+    ext.mediaAttestation = null
     if (ext.deactivate) {
       ext.deactivate()
       ext.deactivate = undefined
