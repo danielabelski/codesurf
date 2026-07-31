@@ -1,66 +1,215 @@
 /**
  * Tile chrome drawer activity persistence + bus event processing.
  */
-import type { SkillConfig } from '../../../../shared/types'
+import {
+  ACTIVITY_LIMITS,
+  type ActivityMetadata,
+  type ActivityUpsertInput,
+  type SkillConfig,
+} from '../../../../shared/types.ts'
+import { hasCapability } from '../../platform/capabilities.ts'
 import type { AvailableToolItem, DrawerData } from './types'
 import type React from 'react'
 
 // ─── Activity store persistence ─────────────────────────────────────────────
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g
+const TEXT_ENCODER = new TextEncoder()
+const MAX_DRAWER_METADATA_BYTES = 2048
+const MAX_DRAWER_METADATA_STRING = 256
+const DRAWER_METADATA_KEYS = [
+  'action',
+  'status',
+  'name',
+  'tool',
+  'path',
+  'file',
+  'source',
+  'task_id',
+  'tool_id',
+  'file_id',
+  'elapsed',
+] as const
+
+export interface ActivityClientHealthSignal {
+  source: 'renderer'
+  operation: 'upsert'
+  code: 'unavailable' | 'write_failed'
+  occurredAt: number
+}
+
+export function createActivityHealthReporter(options: {
+  intervalMs?: number
+  now?: () => number
+  emit: (signal: ActivityClientHealthSignal) => void
+}): (code: ActivityClientHealthSignal['code']) => void {
+  const intervalMs = options.intervalMs ?? 30_000
+  const now = options.now ?? Date.now
+  const lastEmitted = new Map<string, number>()
+  return code => {
+    const occurredAt = now()
+    const previous = lastEmitted.get(code)
+    if (previous !== undefined && occurredAt - previous < intervalMs) return
+    lastEmitted.set(code, occurredAt)
+    options.emit({ source: 'renderer', operation: 'upsert', code, occurredAt })
+  }
+}
+
+const reportActivityHealth = createActivityHealthReporter({
+  emit(signal) {
+    try {
+      window.dispatchEvent(new CustomEvent('codesurf:activity-health', { detail: signal }))
+    } catch {
+      // Health reporting must not interfere with tile event rendering.
+    }
+  },
+})
+
+function boundedText(value: unknown, fallback: string, maxLength: number): string {
+  const text = (
+    typeof value === 'string'
+      ? value
+      : typeof value === 'number' && Number.isFinite(value)
+        ? String(value)
+        : typeof value === 'boolean'
+          ? String(value)
+          : fallback
+  )
+    .replace(CONTROL_CHARACTERS, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return (text || fallback).slice(0, maxLength)
+}
+
+function optionalText(value: unknown, maxLength: number): string | undefined {
+  if (value === undefined || value === null) return undefined
+  const text = boundedText(value, '', maxLength)
+  return text || undefined
+}
+
+function identifier(value: unknown, fallback: unknown): string {
+  const normalized = boundedText(value, boundedText(fallback, 'activity', ACTIVITY_LIMITS.id), ACTIVITY_LIMITS.id)
+  return normalized === '.' || normalized === '..' ? `activity-${normalized.length}` : normalized
+}
+
+function metadataValue(value: unknown): string | number | boolean | null | undefined {
+  if (value === null || typeof value === 'boolean') return value
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string') return boundedText(value, '', MAX_DRAWER_METADATA_STRING)
+  return undefined
+}
+
+export function projectActivityMetadata(
+  eventType: string,
+  payload: Record<string, unknown>,
+): ActivityMetadata {
+  const metadata: ActivityMetadata = {
+    event_type: boundedText(eventType, 'unknown', 64),
+  }
+  if (payload.error !== undefined) metadata.has_error = Boolean(payload.error)
+  for (const key of DRAWER_METADATA_KEYS) {
+    const value = metadataValue(payload[key])
+    if (value === undefined) continue
+    const candidate = { ...metadata, [key]: value }
+    if (TEXT_ENCODER.encode(JSON.stringify(candidate)).byteLength > MAX_DRAWER_METADATA_BYTES) break
+    metadata[key] = value
+  }
+  return metadata
+}
+
+function toolInputDetail(input: unknown): string | undefined {
+  if (typeof input === 'string') return optionalText(input, 200)
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const value = input as Record<string, unknown>
+  return optionalText(
+    value.path ?? value.command ?? value.query ?? value.name,
+    200,
+  )
+}
+
+export function buildActivityUpsert(
+  tileIdValue: unknown,
+  evt: { type: string, payload: Record<string, unknown>, id: string },
+): ActivityUpsertInput | null {
+  const p = evt.payload
+  const tileId = identifier(tileIdValue, 'tile')
+  const metadata = projectActivityMetadata(evt.type, p)
+
+  if (evt.type === 'task') {
+    const detail = optionalText(p.detail, ACTIVITY_LIMITS.detail)
+    return {
+      id: identifier(p.task_id ?? p.id, evt.id),
+      tileId,
+      type: 'task',
+      status: p.status === 'done' ? 'done' : p.status === 'error' ? 'error' : p.status === 'in-progress' ? 'running' : 'pending',
+      title: boundedText(p.title, 'Untitled task', ACTIVITY_LIMITS.title),
+      ...(detail ? { detail } : {}),
+      metadata,
+    }
+  }
+
+  if (evt.type === 'tool_start' || evt.type === 'tool') {
+    const detail = toolInputDetail(p.input)
+    return {
+      id: identifier(p.tool_id ?? p.id, evt.id),
+      tileId,
+      type: 'tool',
+      status: evt.type === 'tool_start' ? 'running' : (p.error ? 'error' : 'done'),
+      title: boundedText(p.name ?? p.tool, 'Unknown tool', ACTIVITY_LIMITS.title),
+      ...(detail ? { detail } : {}),
+      metadata,
+    }
+  }
+
+  if (evt.type === 'file' || evt.type === 'file_activity') {
+    const detail = optionalText(p.action, ACTIVITY_LIMITS.detail)
+    return {
+      id: identifier(p.file_id, evt.id),
+      tileId,
+      type: 'skill',
+      status: 'done',
+      title: boundedText(p.path ?? p.file, 'unknown', ACTIVITY_LIMITS.title),
+      ...(detail ? { detail } : {}),
+      metadata,
+    }
+  }
+
+  if (evt.type === 'note' || evt.type === 'notification' || evt.type === 'progress') {
+    return {
+      id: identifier(evt.id, `${evt.type}-activity`),
+      tileId,
+      type: 'context',
+      status: 'done',
+      title: boundedText(
+        p.message ?? p.text ?? p.title ?? p.status,
+        'Activity update',
+        ACTIVITY_LIMITS.title,
+      ),
+      detail: boundedText(p.source, evt.type, ACTIVITY_LIMITS.detail),
+      metadata,
+    }
+  }
+
+  return null
+}
 
 export function persistToActivityStore(
   workspaceId: string | undefined,
   tileId: string,
   evt: { type: string; payload: Record<string, unknown>; id: string },
 ): void {
-  if (!workspaceId || !window.electron?.activity) return
-  const p = evt.payload as any
-
-  if (evt.type === 'task') {
-    window.electron.activity.upsert(workspaceId, {
-      id: p.task_id ?? p.id ?? evt.id,
-      tileId,
-      type: 'task',
-      status: p.status === 'done' ? 'done' : p.status === 'error' ? 'error' : p.status === 'in-progress' ? 'running' : 'pending',
-      title: p.title ?? 'Untitled task',
-      detail: p.detail,
-      metadata: p,
-    })
+  if (!workspaceId) return
+  if (!window.electron?.activity || !hasCapability('activity')) {
+    reportActivityHealth('unavailable')
+    return
   }
-
-  if (evt.type === 'tool_start' || evt.type === 'tool') {
-    window.electron.activity.upsert(workspaceId, {
-      id: p.tool_id ?? p.id ?? evt.id,
-      tileId,
-      type: 'tool',
-      status: evt.type === 'tool_start' ? 'running' : (p.error ? 'error' : 'done'),
-      title: p.name ?? p.tool ?? 'Unknown tool',
-      detail: p.input?.toString()?.slice(0, 200),
-      metadata: p,
-    })
-  }
-
-  if (evt.type === 'file' || evt.type === 'file_activity') {
-    window.electron.activity.upsert(workspaceId, {
-      id: p.file_id ?? evt.id,
-      tileId,
-      type: 'skill',
-      status: 'done',
-      title: p.path ?? p.file ?? 'unknown',
-      detail: p.action,
-      metadata: p,
-    })
-  }
-
-  if (evt.type === 'note' || evt.type === 'notification' || evt.type === 'progress') {
-    window.electron.activity.upsert(workspaceId, {
-      id: evt.id,
-      tileId,
-      type: 'context',
-      status: 'done',
-      title: p.message ?? p.text ?? p.title ?? p.status ?? JSON.stringify(p).slice(0, 200),
-      detail: p.source ?? evt.type,
-      metadata: p,
-    })
+  const data = buildActivityUpsert(tileId, evt)
+  if (!data) return
+  try {
+    void window.electron.activity.upsert(workspaceId, data)
+      .catch(() => reportActivityHealth('write_failed'))
+  } catch {
+    reportActivityHealth('write_failed')
   }
 }
 

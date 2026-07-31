@@ -2,9 +2,10 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { KanbanCard, KanbanCardData } from './KanbanCard'
 import { buildAgentBrief } from '../utils/agentBrief'
 import { ActivityFeed, ActivityEvent } from './ActivityFeed'
-import type { ActivityRecord } from '../../../shared/types'
+import type { ActivityHealthSnapshot, ActivityRecord } from '../../../shared/types'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { hasCapability } from '../platform/capabilities'
 
 interface KanbanColumn { id: string; title: string }
 
@@ -92,16 +93,27 @@ function AgentOverview({ workspaceId, onFocusTile }: {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [groups, setGroups] = useState<Record<string, ActivityRecord[]>>({})
-  const [loading, setLoading] = useState(true)
+  const [viewState, setViewState] = useState<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
+  const [health, setHealth] = useState<ActivityHealthSnapshot | null>(null)
   const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refresh = useCallback(() => {
-    if (!workspaceId || !window.electron?.activity) return
-    window.electron.activity.byAgent(workspaceId).then((result) => {
-      const groups = result as Record<string, ActivityRecord[]>
-      setGroups(groups)
-      setLoading(false)
-    }).catch(() => setLoading(false))
+    if (!workspaceId || !window.electron?.activity || !hasCapability('activity')) {
+      setGroups({})
+      setViewState('unavailable')
+      return
+    }
+    Promise.all([
+      window.electron.activity.byAgent(workspaceId),
+      window.electron.activity.health(workspaceId),
+    ]).then(([result, nextHealth]) => {
+      setGroups(result)
+      setHealth(nextHealth)
+      setViewState(nextHealth.available ? 'ready' : 'unavailable')
+    }).catch(() => {
+      setGroups({})
+      setViewState('error')
+    })
   }, [workspaceId])
 
   useEffect(() => {
@@ -118,8 +130,18 @@ function AgentOverview({ workspaceId, onFocusTile }: {
     return a.localeCompare(b)
   })
 
-  if (loading) {
+  if (viewState === 'loading') {
     return <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.disabled, fontSize: fonts.secondarySize }}>Loading activity...</div>
+  }
+
+  if (viewState === 'unavailable' || viewState === 'error') {
+    return (
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: fonts.secondarySize, textAlign: 'center', padding: 16 }}>
+        {viewState === 'unavailable'
+          ? 'Activity persistence is unavailable on this host'
+          : 'Activity storage could not be loaded'}
+      </div>
+    )
   }
 
   if (agentKeys.length === 0) {
@@ -129,9 +151,13 @@ function AgentOverview({ workspaceId, onFocusTile }: {
           <rect x="3" y="3" width="18" height="18" rx="4" />
           <path d="M9 12h6M12 9v6" strokeLinecap="round" />
         </svg>
-        <span style={{ fontSize: fonts.secondarySize }}>No activity yet</span>
+        <span style={{ fontSize: fonts.secondarySize }}>
+          {health?.status === 'degraded' ? 'Activity storage is degraded' : 'No activity yet'}
+        </span>
         <span style={{ fontSize: 10, color: theme.text.disabled, maxWidth: 200, textAlign: 'center', lineHeight: 1.4 }}>
-          Activity from terminals and chats will appear here automatically, grouped by agent
+          {health?.status === 'degraded'
+            ? 'Recent activity may not have been saved. Retry after storage recovers.'
+            : 'Activity from terminals and chats will appear here automatically, grouped by agent'}
         </span>
       </div>
     )

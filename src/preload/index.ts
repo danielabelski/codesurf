@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 import { homedir } from 'os'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../shared/session-types'
 import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
+import type { ActivityQuery, ActivityUpsertInput } from '../shared/activity-types'
 
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true
@@ -543,28 +544,13 @@ const electronApi = {
 
   // Activity store (persisted per-workspace)
   activity: {
-    upsert: (workspaceId: string, data: {
-      id?: string
-      tileId: string
-      type: 'task' | 'tool' | 'skill' | 'context'
-      status?: 'pending' | 'running' | 'done' | 'error' | 'paused'
-      title: string
-      detail?: string
-      metadata?: Record<string, unknown>
-      agent?: string
-    }) => ipcRenderer.invoke('activity:upsert', workspaceId, data),
-    query: (query: {
-      workspaceId: string
-      tileId?: string
-      type?: string
-      status?: string
-      agent?: string
-      limit?: number
-    }) => ipcRenderer.invoke('activity:query', query),
+    upsert: (workspaceId: string, data: ActivityUpsertInput) => ipcRenderer.invoke('activity:upsert', workspaceId, data),
+    query: (query: ActivityQuery) => ipcRenderer.invoke('activity:query', query),
     byTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('activity:byTile', workspaceId, tileId),
-    delete: (workspaceId: string, id: string) => ipcRenderer.invoke('activity:delete', workspaceId, id),
+    delete: (workspaceId: string, tileId: string, id: string) => ipcRenderer.invoke('activity:delete', workspaceId, tileId, id),
     clearTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('activity:clearTile', workspaceId, tileId),
     byAgent: (workspaceId: string) => ipcRenderer.invoke('activity:byAgent', workspaceId),
+    health: (workspaceId: string) => ipcRenderer.invoke('activity:health', workspaceId),
   },
 
   // CodeSurf protocol (.codesurf folder)

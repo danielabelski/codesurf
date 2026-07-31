@@ -3,7 +3,7 @@
 /// <reference types="vite-plugin-pwa/react" />
 
  import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
- import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
+ import type { ActivityHealthSnapshot, ActivityQuery, ActivityRecord, ActivityUpsertInput, ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
 
 interface ElectronAPI {
   appearance: {
@@ -367,28 +367,13 @@ interface ElectronAPI {
     clearAll(): Promise<{ path: string; grants: import('../../shared/types').ToolPermissionGrant[] }>
   }
   activity: {
-    upsert(workspaceId: string, data: {
-      id?: string
-      tileId: string
-      type: 'task' | 'tool' | 'skill' | 'context'
-      status?: 'pending' | 'running' | 'done' | 'error' | 'paused'
-      title: string
-      detail?: string
-      metadata?: Record<string, unknown>
-      agent?: string
-    }): Promise<unknown>
-    query(query: {
-      workspaceId: string
-      tileId?: string
-      type?: string
-      status?: string
-      agent?: string
-      limit?: number
-    }): Promise<unknown[]>
-    byTile(workspaceId: string, tileId: string): Promise<unknown[]>
-    delete(workspaceId: string, id: string): Promise<boolean>
+    upsert(workspaceId: string, data: ActivityUpsertInput): Promise<ActivityRecord>
+    query(query: ActivityQuery): Promise<ActivityRecord[]>
+    byTile(workspaceId: string, tileId: string): Promise<ActivityRecord[]>
+    delete(workspaceId: string, tileId: string, id: string): Promise<boolean>
     clearTile(workspaceId: string, tileId: string): Promise<number>
-    byAgent(workspaceId: string): Promise<Record<string, unknown[]>>
+    byAgent(workspaceId: string): Promise<Record<string, ActivityRecord[]>>
+    health(workspaceId: string): Promise<ActivityHealthSnapshot>
   }
   collab: {
     ensureDir(workspacePath: string, tileId: string): Promise<boolean>

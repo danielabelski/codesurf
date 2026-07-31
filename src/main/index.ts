@@ -24,6 +24,7 @@ import { registerJobsIPC } from './ipc/jobs'
 import { registerSkillsIPC, queuePendingSkillFile } from './ipc/skills'
 import { registerFileProtocol } from './file-protocol'
 import { flushAll as flushActivityStore } from './activity-store'
+import { runQuitDrains } from './quit-drain.ts'
 import { initializeAgentPathsCache, registerAgentPathsIPC } from './agent-paths'
 import { ExtensionRegistry } from './extensions/registry'
 import { registerExtensionProtocol } from './extensions/protocol'
@@ -970,7 +971,17 @@ app.whenReady().then(async () => {
 }
 
 async function runAppShutdownCleanup(): Promise<void> {
-  flushActivityStore()
+  // The app quit barrier has already settled every window/canvas challenge in
+  // deterministic ownership order. Join main-process persistence here rather
+  // than registering a competing before-quit listener.
+  await runQuitDrains({
+    drains: [{ name: 'activity', run: flushActivityStore }],
+    timeoutMs: 5_000,
+    onFailure: failure => indexLog.warn(
+      'quit drain continued after bounded failure',
+      failure,
+    ),
+  })
   const mcpShutdown = stopMCPServer()
   const relayShutdown = unregisterRelayIPC()
   stopAllCollabWatchers()

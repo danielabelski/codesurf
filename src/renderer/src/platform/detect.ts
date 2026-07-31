@@ -18,7 +18,15 @@ export function detectPlatform(): CodesurfPlatform {
     return w.__CODESURF_PLATFORM__
   }
   // Electron preload wins whenever no explicit renderer marker is present.
-  if (window.electron) return 'electron'
+  if (
+    window.electron
+    && (window.electron as typeof window.electron & { __codesurfHostKind?: string })
+      .__codesurfHostKind !== 'electrobun'
+  ) return 'electron'
+  if (
+    (window.electron as typeof window.electron & { __codesurfHostKind?: string } | undefined)
+      ?.__codesurfHostKind === 'electrobun'
+  ) return 'native'
   if (w.zero) return 'native'
   return 'web'
 }

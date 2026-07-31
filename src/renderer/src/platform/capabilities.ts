@@ -13,6 +13,7 @@ export type PlatformCapabilityKey =
   | 'settings'
   | 'chatJobs'
   | 'sessions'
+  | 'activity'
   | 'fs'
   | 'terminal'
   | 'extensions'
@@ -29,6 +30,7 @@ export const PLATFORM_CAPABILITY_KEYS: readonly PlatformCapabilityKey[] = [
   'settings',
   'chatJobs',
   'sessions',
+  'activity',
   'fs',
   'terminal',
   'extensions',
@@ -45,6 +47,7 @@ const ELECTRON_CAPABILITIES: PlatformCapabilities = {
   settings: true,
   chatJobs: true,
   sessions: true,
+  activity: true,
   fs: true,
   terminal: true,
   extensions: true,
@@ -73,6 +76,7 @@ export function defaultCapabilitiesFor(
     settings: true,
     chatJobs: true,
     sessions: true,
+    activity: false,
     fs: true,
     terminal: terminalAvailable,
     extensions: false,
