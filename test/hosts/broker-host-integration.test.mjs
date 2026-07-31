@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
@@ -50,9 +50,15 @@ function preflight() {
 
 // Minimal JSON-RPC client (copied from the adjacent OWL host fixture)
 class StdioClient {
-  constructor(child, { killProcessGroup = false } = {}) {
+  constructor(child, {
+    killProcessGroup = false,
+    profileRoot = null,
+    userDataDir = null,
+  } = {}) {
     this.child = child
     this.killProcessGroup = killProcessGroup
+    this.profileRoot = profileRoot
+    this.userDataDir = userDataDir
     this.nextId = 1
     this.pending = new Map()
     this.buffer = ''
@@ -130,30 +136,45 @@ class StdioClient {
   }
 
   async stop() {
+    let stopped = false
     try {
-      return await stopTestChild(this.child, {
+      const result = await stopTestChild(this.child, {
         killProcessGroup: this.killProcessGroup,
       })
+      stopped = true
+      return result
     } finally {
       this.child.stdout.off('data', this.onStdout)
       this.child.stderr.off('data', this.onStderr)
       this.child.off('error', this.onChildError)
       this.child.off('exit', this.onChildExit)
       this.#fail(new Error('broker host stopped'))
+      if (stopped && this.profileRoot) {
+        rmSync(this.profileRoot, { recursive: true, force: true })
+      }
     }
   }
 }
 
 function spawnBrokerTestHost({ userDataDir } = {}) {
   const killProcessGroup = process.platform !== 'win32'
+  const profileRoot = userDataDir
+    ? null
+    : mkdtempSync(join(tmpdir(), 'codesurf-broker-home-'))
+  const profileHome = profileRoot ?? userDataDir
+  const resolvedUserDataDir = userDataDir
+    ?? join(profileRoot, 'electron-user-data')
   const args = [
+    `--user-data-dir=${resolvedUserDataDir}`,
     projectRoot,
-    ...(userDataDir ? [`--user-data-dir=${userDataDir}`] : []),
   ]
   const child = spawn(electronBin, args, {
     cwd: projectRoot,
     env: {
       ...process.env,
+      HOME: profileHome,
+      USERPROFILE: profileHome,
+      CODESURF_HOME: join(profileHome, '.codesurf'),
       CODESURF_BROKER_TEST: '1',
       ELECTRON_DISABLE_SANDBOX: '1',
       ELECTRON_ENABLE_LOGGING: '1',
@@ -162,7 +183,20 @@ function spawnBrokerTestHost({ userDataDir } = {}) {
     detached: killProcessGroup,
     stdio: ['pipe', 'pipe', 'pipe'],
   })
-  return new StdioClient(child, { killProcessGroup })
+  return new StdioClient(child, {
+    killProcessGroup,
+    profileRoot,
+    userDataDir: resolvedUserDataDir,
+  })
+}
+
+function assertIsolatedBrokerHealth(client, health) {
+  assert.equal(health.ok, true, 'health.ok')
+  assert.equal(
+    resolve(health.userData),
+    resolve(client.userDataDir),
+    'broker host uses its isolated Electron profile',
+  )
 }
 
 function waitForLockHolder(child, timeoutMs = 15_000) {
@@ -267,7 +301,7 @@ test('Broker host bypasses a contested normal-app single-instance lock', { timeo
 
   client = spawnBrokerTestHost({ userDataDir })
   const health = await client.call('health', {}, 30_000)
-  assert.equal(health.ok, true, 'broker harness starts despite the contested app lock')
+  assertIsolatedBrokerHealth(client, health)
 })
 
 test('Broker host: IPC handler cleanup on deactivate (re-activate does not throw)', { timeout: 120_000 }, async t => {
@@ -277,7 +311,7 @@ test('Broker host: IPC handler cleanup on deactivate (re-activate does not throw
 
   await t.test('health responds', async () => {
     const health = await client.call('health', {}, 30_000)
-    assert.equal(health.ok, true, 'health.ok')
+    assertIsolatedBrokerHealth(client, health)
   })
 
   // ── Activate ipc-ext (first time) ──────────────────────────────────────
@@ -322,7 +356,7 @@ test('Broker host: lifecycle + capability-deny + crash-recovery', { timeout: 120
 
   await t.test('health responds', async () => {
     const health = await client.call('health', {}, 30_000)
-    assert.equal(health.ok, true, 'health.ok')
+    assertIsolatedBrokerHealth(client, health)
     assert.equal(typeof health.pid, 'number', 'health.pid is number')
   })
 
@@ -416,7 +450,7 @@ test('Broker host: IPC namespace enforcement — out-of-namespace channel is rej
 
   await t.test('health responds', async () => {
     const health = await client.call('health', {}, 30_000)
-    assert.equal(health.ok, true, 'health.ok')
+    assertIsolatedBrokerHealth(client, health)
   })
 
   await t.test('ipc-namespace-escape-ext activates', async () => {

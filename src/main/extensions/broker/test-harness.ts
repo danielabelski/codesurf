@@ -67,7 +67,11 @@ export async function runBrokerTestHost(): Promise<void> {
 async function handleHarnessCall(method: string, params: JsonObject): Promise<JsonValue> {
   switch (method) {
     case 'health':
-      return { ok: true, pid: process.pid }
+      return {
+        ok: true,
+        pid: process.pid,
+        userData: app.getPath('userData'),
+      }
 
     case 'activateFixture': {
       const { extDir, capabilities } = params as { extDir: string; capabilities?: Array<{ name: string }> }

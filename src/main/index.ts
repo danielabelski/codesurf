@@ -85,6 +85,7 @@ app.commandLine.appendSwitch('enable-native-gpu-memory-buffers')
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 
 const isOwlHost = isOwlHostProcess()
+const isBrokerTest = isBrokerTestProcess()
 
 // .skill file association support -----------------------------------------
 // Capture launch-via-Finder / `open "X.skill"` before app.whenReady so the
@@ -101,7 +102,9 @@ if (!isOwlHost) {
 // Single-instance lock so a second `open foo.skill` invocation reuses the
 // existing window instead of launching a new one. Argv inspection finds
 // `.skill` paths from Windows/Linux file associations (macOS uses open-file).
-const gotSingleInstanceLock = isOwlHost || isBrokerTestProcess() || app.requestSingleInstanceLock()
+const gotSingleInstanceLock = isOwlHost
+  || isBrokerTest
+  || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else if (!isOwlHost) {
@@ -711,7 +714,7 @@ if (isOwlHost) {
     console.error('[owl-host] failed to start:', error)
     app.quit()
   })
-} else if (isBrokerTestProcess()) {
+} else if (isBrokerTest) {
   void runBrokerTestHost().catch(error => {
     console.error('[broker-test] failed to start:', error)
     app.quit()
