@@ -1,4 +1,11 @@
-import { promises as fsPromises, readFileSync, realpathSync } from 'node:fs'
+import {
+  mkdirSync,
+  promises as fsPromises,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { mkdir, mkdtemp, open, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -402,6 +409,382 @@ test('registry transition queue preserves request order and recovers after rejec
   registry.scan = async () => {}
   await registry.rescan(workspaceB)
   assert.equal(registry.getActiveWorkspacePath(), resolve(workspaceB))
+})
+
+test('rescan clears tools and recovers after a disposer throws', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-disposer-failure-'))
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'bad-disposer')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'bad-disposer',
+    name: 'Bad Disposer',
+    version: '1.0.0',
+    tier: 'safe',
+  }))
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await registry.rescan()
+  registry.get('bad-disposer')!.deactivate = () => {
+    throw new Error('simulated disposer failure')
+  }
+  registry.registerMCPTool('bad-disposer', {
+    name: 'leaked-tool',
+    description: 'must be cleared',
+  })
+
+  await assert.rejects(
+    registry.rescan(),
+    /failed to deactivate/,
+  )
+  assert.equal(registry.get('bad-disposer'), undefined)
+  assert.deepEqual(
+    registry.getMCPTools().filter(
+      (tool: { extId: string }) => tool.extId === 'bad-disposer',
+    ),
+    [],
+  )
+  await registry.rescan()
+  assert.equal(registry.get('bad-disposer')?.manifest._enabled, true)
+})
+
+test('enable superseded by disable disposes partial activation and leaves no tools', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-enable-disable-race-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'racy-power')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'racy-power',
+    name: 'Racy Power',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+    capabilities: [{ name: 'chat' }],
+  }))
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+
+  let markActivationStarted: (() => void) | undefined
+  let releaseActivation: (() => void) | undefined
+  const activationStarted = new Promise<void>(resolveStarted => {
+    markActivationStarted = resolveStarted
+  })
+  const activationBlocked = new Promise<void>(resolveBlocked => {
+    releaseActivation = resolveBlocked
+  })
+  let activations = 0
+  let disposals = 0
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    activatePower: async (
+      manifest: { id: string },
+      _context: unknown,
+      _scope: unknown,
+      activeRegistry: {
+        registerMCPTool: (id: string, tool: { name: string; description: string }) => void
+      },
+    ) => {
+      activations += 1
+      activeRegistry.registerMCPTool(manifest.id, {
+        name: 'racy-tool',
+        description: 'must not leak',
+      })
+      markActivationStarted?.()
+      await activationBlocked
+      return () => {
+        disposals += 1
+      }
+    },
+  })
+  await registry.rescan(workspace)
+
+  const enable = registry.enable('racy-power')
+  await activationStarted
+  const disable = registry.disable('racy-power')
+  releaseActivation?.()
+
+  assert.deepEqual(await Promise.all([enable, disable]), [true, true])
+  assert.equal(activations, 1)
+  assert.equal(disposals, 1)
+  assert.equal(registry.get('racy-power')?.manifest._enabled, false)
+  assert.deepEqual(
+    registry.getMCPTools().filter((tool: { extId: string }) => tool.extId === 'racy-power'),
+    [],
+  )
+  const persisted = JSON.parse(
+    await fsPromises.readFile(join(home, 'extension-security-state.json'), 'utf8'),
+  ) as {
+    disabledExtensionIds: string[]
+    enabledCatalogExtensionIds: string[]
+    grants: Record<string, string[]>
+  }
+  assert.equal(persisted.disabledExtensionIds.includes('racy-power'), true)
+  assert.equal(persisted.enabledCatalogExtensionIds.includes('racy-power'), false)
+  assert.equal(Object.hasOwn(persisted.grants, 'racy-power'), false)
+})
+
+test('double enable serializes activation and disposes the superseded instance', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-double-enable-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'double-power')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'double-power',
+    name: 'Double Power',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+    capabilities: [{ name: 'chat' }],
+  }))
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+
+  let markFirstStarted: (() => void) | undefined
+  let releaseFirst: (() => void) | undefined
+  const firstStarted = new Promise<void>(resolveStarted => {
+    markFirstStarted = resolveStarted
+  })
+  const firstBlocked = new Promise<void>(resolveBlocked => {
+    releaseFirst = resolveBlocked
+  })
+  let activations = 0
+  let disposals = 0
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    activatePower: async (
+      manifest: { id: string },
+      _context: unknown,
+      _scope: unknown,
+      activeRegistry: {
+        registerMCPTool: (id: string, tool: { name: string; description: string }) => void
+      },
+    ) => {
+      activations += 1
+      const activation = activations
+      activeRegistry.registerMCPTool(manifest.id, {
+        name: `tool-${activation}`,
+        description: 'one live instance only',
+      })
+      if (activation === 1) {
+        markFirstStarted?.()
+        await firstBlocked
+      }
+      return () => {
+        disposals += 1
+      }
+    },
+  })
+  await registry.rescan(workspace)
+
+  const first = registry.enable('double-power')
+  await firstStarted
+  const second = registry.enable('double-power')
+  releaseFirst?.()
+
+  assert.deepEqual(await Promise.all([first, second]), [true, true])
+  assert.equal(activations, 2)
+  assert.equal(disposals, 1)
+  assert.equal(registry.get('double-power')?.manifest._enabled, true)
+  assert.equal(
+    registry.getMCPTools().filter(
+      (tool: { extId: string }) => tool.extId === 'double-power',
+    ).length,
+    1,
+  )
+})
+
+test('rescan removal supersedes in-flight enable and reinstall stays disabled', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-enable-rescan-race-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'removed-power')
+  const writeExtension = async (): Promise<void> => {
+    await mkdir(extensionDir, { recursive: true })
+    await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+      id: 'removed-power',
+      name: 'Removed Power',
+      version: '1.0.0',
+      tier: 'power',
+      main: 'main.cjs',
+      capabilities: [{ name: 'chat' }],
+    }))
+    await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+  }
+  await writeExtension()
+
+  let markActivationStarted: (() => void) | undefined
+  let releaseActivation: (() => void) | undefined
+  const activationStarted = new Promise<void>(resolveStarted => {
+    markActivationStarted = resolveStarted
+  })
+  const activationBlocked = new Promise<void>(resolveBlocked => {
+    releaseActivation = resolveBlocked
+  })
+  let activations = 0
+  let disposals = 0
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    activatePower: async () => {
+      activations += 1
+      if (activations === 1) {
+        markActivationStarted?.()
+        await activationBlocked
+      }
+      return () => {
+        disposals += 1
+      }
+    },
+  })
+  await registry.rescan(workspace)
+
+  const enable = registry.enable('removed-power')
+  await activationStarted
+  await rm(extensionDir, { recursive: true })
+  const rescan = registry.rescan(workspace)
+  releaseActivation?.()
+  assert.equal(await enable, true)
+  await rescan
+  assert.equal(disposals, 1)
+  assert.equal(registry.get('removed-power'), undefined)
+
+  await writeExtension()
+  await registry.rescan(workspace)
+  assert.equal(registry.get('removed-power')?.manifest._enabled, false)
+  assert.equal(await registry.enable('removed-power'), true)
+  assert.equal(registry.get('removed-power')?.manifest._enabled, true)
+  assert.equal(activations, 2)
+})
+
+test('a same-id replacement during rescan cannot execute before durable revocation', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-rescan-swap-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'swapped-power')
+  const writeExtension = (version: string): void => {
+    mkdirSync(extensionDir, { recursive: true })
+    writeFileSync(join(extensionDir, 'extension.json'), JSON.stringify({
+      id: 'swapped-power',
+      name: 'Swapped Power',
+      version,
+      tier: 'power',
+      main: 'main.cjs',
+      capabilities: [{ name: 'shell' }],
+    }))
+    writeFileSync(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+  }
+  writeExtension('1.0.0')
+
+  let activations = 0
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    activatePower: async () => {
+      activations += 1
+      return () => undefined
+    },
+  })
+  await registry.rescan(workspace)
+  assert.equal(await registry.enable('swapped-power'), true)
+  assert.equal(activations, 1)
+
+  const deactivateAll = registry.deactivateAll.bind(registry)
+  registry.deactivateAll = () => {
+    deactivateAll()
+    rmSync(extensionDir, { recursive: true })
+    writeExtension('2.0.0')
+  }
+
+  await registry.rescan(workspace)
+  assert.equal(activations, 1)
+  assert.equal(registry.get('swapped-power')?.manifest.version, '2.0.0')
+  assert.equal(registry.get('swapped-power')?.manifest._enabled, false)
+  const persisted = JSON.parse(
+    await fsPromises.readFile(join(home, 'extension-security-state.json'), 'utf8'),
+  ) as {
+    disabledExtensionIds: string[]
+    enabledCatalogExtensionIds: string[]
+    grants: Record<string, string[]>
+  }
+  assert.equal(persisted.disabledExtensionIds.includes('swapped-power'), true)
+  assert.equal(persisted.enabledCatalogExtensionIds.includes('swapped-power'), false)
+  assert.equal(Object.hasOwn(persisted.grants, 'swapped-power'), false)
+})
+
+test('a failed enable for a missing id does not poison a later installation', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-late-install-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'late-power')
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    activatePower: async () => () => undefined,
+  })
+  await registry.rescan(workspace)
+  assert.equal(await registry.enable('late-power'), false)
+
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'late-power',
+    name: 'Late Power',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+  }))
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+  await registry.rescan(workspace)
+  assert.equal(registry.get('late-power')?.manifest._enabled, false)
+  assert.equal(await registry.enable('late-power'), true)
+  assert.equal(registry.get('late-power')?.manifest._enabled, true)
+})
+
+test('capability gates distinguish absent and empty grants and drop stale declarations', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-capability-state-'))
+  const home = join(temp, 'home')
+  const bundledDir = join(temp, 'bundled')
+  const writeBundled = async (
+    id: string,
+    capabilities: string[],
+  ): Promise<void> => {
+    const extensionDir = join(bundledDir, id)
+    await mkdir(extensionDir, { recursive: true })
+    await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+      id,
+      name: id,
+      version: '1.0.0',
+      tier: 'safe',
+      capabilities: capabilities.map(name => ({ name })),
+    }))
+  }
+  await Promise.all([
+    writeBundled('absent-grants', ['chat', 'relay']),
+    writeBundled('empty-grants', ['chat']),
+    writeBundled('stale-grants', ['chat']),
+  ])
+  await mkdir(home)
+  await writeFile(join(home, 'extension-security-state.json'), JSON.stringify({
+    version: 1,
+    disabledExtensionIds: [],
+    enabledCatalogExtensionIds: [],
+    grants: {
+      'empty-grants': [],
+      'stale-grants': ['chat', 'relay'],
+    },
+  }))
+
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await registry.rescan()
+  assert.deepEqual(registry.getCapabilityGate('absent-grants'), {
+    enforced: true,
+    granted: ['chat', 'relay'],
+  })
+  assert.deepEqual(registry.getCapabilityGate('empty-grants'), {
+    enforced: true,
+    granted: [],
+  })
+  assert.deepEqual(registry.getCapabilityGate('stale-grants'), {
+    enforced: true,
+    granted: ['chat'],
+  })
 })
 
 test('registry exposes declared media and revokes sensitive consent on disable or removal', async () => {
