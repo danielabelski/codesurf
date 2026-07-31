@@ -59,6 +59,15 @@ describe('agent-room validation primitives', () => {
     assert.ok(Buffer.byteLength(json, 'utf8') <= MAX_METADATA_BYTES)
     assert.match(json, /truncated/i)
     assert.equal(json.includes('"self":{'), false)
+
+    const hostile: Record<string, unknown> = {}
+    Object.defineProperty(hostile, 'throwing', {
+      enumerable: true,
+      get() {
+        throw new Error('getter should not escape validation')
+      },
+    })
+    assert.match(JSON.stringify(boundMetadata(hostile)), /metadata access failed/i)
   })
 
   test('caps retained room bytes using newest events', () => {

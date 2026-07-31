@@ -8,6 +8,7 @@ export const MAX_DISPLAY_NAME_BYTES = 128
 export const MAX_MEMBER_TASK_BYTES = 4096
 export const MAX_MEMBER_FILES = 64
 export const MAX_MEMBER_FILE_BYTES = 1024
+export const MAX_TODOS_PER_TILE = 256
 export const MAX_EVENT_TEXT_BYTES = 4096
 export const MAX_EVENT_TARGETS = 32
 export const MAX_METADATA_BYTES = 16 * 1024
@@ -51,7 +52,13 @@ export function truncateUtf8(
   options: { marker?: string, trim?: boolean } = {},
 ): string {
   const marker = options.marker ?? TRUNCATION_MARKER
-  const value = options.trim === false ? String(rawValue ?? '') : String(rawValue ?? '').trim()
+  let value: string
+  try {
+    const coerced = String(rawValue ?? '')
+    value = options.trim === false ? coerced : coerced.trim()
+  } catch {
+    value = marker
+  }
   if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value
 
   const markerBytes = Buffer.byteLength(marker, 'utf8')
@@ -92,11 +99,15 @@ export function boundMemberTask(value: unknown): string {
 export function boundMemberFiles(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   const result: string[] = []
+  const limit = value.length > MAX_MEMBER_FILES
+    ? MAX_MEMBER_FILES - 1
+    : MAX_MEMBER_FILES
   for (const item of value) {
     if (typeof item !== 'string') continue
     result.push(truncateUtf8(item, MAX_MEMBER_FILE_BYTES))
-    if (result.length >= MAX_MEMBER_FILES) break
+    if (result.length >= limit) break
   }
+  if (value.length > MAX_MEMBER_FILES) result.push(TRUNCATION_MARKER)
   return result
 }
 
@@ -206,7 +217,12 @@ export function boundMetadata(value: unknown): Record<string, unknown> | undefin
     truncated: false,
     seen: new WeakSet(),
   }
-  const normalized = normalizeMetadataValue(value, 0, budget)
+  let normalized: unknown
+  try {
+    normalized = normalizeMetadataValue(value, 0, budget)
+  } catch {
+    return { __codesurfTruncated: metadataMarker('metadata access failed') }
+  }
   const record = normalized && typeof normalized === 'object' && !Array.isArray(normalized)
     ? normalized as Record<string, unknown>
     : { value: normalized }

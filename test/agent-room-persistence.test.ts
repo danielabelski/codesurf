@@ -132,6 +132,34 @@ describe('AgentRoomPersistenceQueue', () => {
     assert.ok(adapter.writes.length <= 2)
   })
 
+  test('restarts draining when a newer revision lands at the completion boundary', async () => {
+    const firstRelease = deferred()
+    const secondWritten = deferred()
+    const writes: string[] = []
+    const adapter: AgentRoomFileAdapter = {
+      async writeFileAtomic(_path, contents) {
+        writes.push(contents)
+        if (writes.length === 1) await firstRelease.promise
+        if (writes.length === 2) secondWritten.resolve()
+      },
+      async removeOwnedFile() {},
+    }
+    const queue = new AgentRoomPersistenceQueue(adapter)
+    const path = '/virtual/boundary.json'
+
+    queue.writeJson(path, { revision: 'A' })
+    firstRelease.resolve()
+    queueMicrotask(() => queue.writeJson(path, { revision: 'B' }))
+    await secondWritten.promise
+
+    assert.deepEqual(writes.map(value => JSON.parse(value)), [
+      { revision: 'A' },
+      { revision: 'B' },
+    ])
+    await queue.flush()
+    assert.equal(queue.getStats().pendingPaths, 0)
+  })
+
   test('preserves the old value on failure and retries the latest revision', async () => {
     const adapter = new MemoryAdapter()
     const scheduler = new ManualRetryScheduler()

@@ -196,11 +196,23 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     await this.io.unlink(target)
     await this.syncDirectory(directory)
 
-    if (options.pruneEmptyParent && directory !== this.root) {
-      await this.io.rmdir(directory).catch(error => {
-        const code = (error as NodeJS.ErrnoException | null)?.code
-        if (code !== 'ENOENT' && code !== 'ENOTEMPTY' && code !== 'EEXIST') throw error
-      })
+    if (options.pruneEmptyParent) {
+      let current = directory
+      while (current !== this.root) {
+        try {
+          await this.io.rmdir(current)
+          await this.syncDirectory(dirname(current))
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | null)?.code
+          if (code === 'ENOENT') {
+            current = dirname(current)
+            continue
+          }
+          if (code === 'ENOTEMPTY' || code === 'EEXIST') break
+          throw error
+        }
+        current = dirname(current)
+      }
     }
   }
 }
@@ -271,7 +283,8 @@ export class AgentRoomPersistenceQueue {
     createOperation: (revision: number) => PersistenceOperation,
   ): void {
     if (this.disposed) throw new Error('Agent-room persistence queue is disposed')
-    const state = this.states.get(path) ?? {
+    const normalizedPath = resolve(path)
+    const state = this.states.get(normalizedPath) ?? {
       nextRevision: 0,
       appliedRevision: 0,
       latest: null,
@@ -287,8 +300,8 @@ export class AgentRoomPersistenceQueue {
       this.retryScheduler.cancel(state.retryHandle)
       state.retryHandle = null
     }
-    this.states.set(path, state)
-    this.startDrain(path, state)
+    this.states.set(normalizedPath, state)
+    this.startDrain(normalizedPath, state)
   }
 
   private startDrain(path: string, state: PersistencePathState): void {
@@ -297,6 +310,14 @@ export class AgentRoomPersistenceQueue {
     state.running = running
     void running.finally(() => {
       if (state.running === running) state.running = null
+      if (
+        state.latest
+        && state.appliedRevision < state.latest.revision
+        && state.retryHandle === null
+      ) {
+        this.startDrain(path, state)
+        return
+      }
       if (
         state.latest
         && state.appliedRevision >= state.latest.revision
