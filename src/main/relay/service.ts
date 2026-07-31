@@ -3,6 +3,7 @@ import type {
   RelayDirectMessageDraft,
   RelayEvent,
   RelaySpawnRequest,
+  RelayWorkContext,
 } from '../../../packages/codesurf-relay/src'
 import {
   CodesurfRelay,
@@ -206,7 +207,7 @@ export function moveWorkspaceRelayMessage(
 export function setWorkspaceRelayWorkContext(
   workspacePath: string,
   participantId: string,
-  work: any,
+  work: RelayWorkContext,
 ) {
   return relayService.setWorkspaceRelayWorkContext(
     workspacePath,

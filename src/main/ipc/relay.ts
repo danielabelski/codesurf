@@ -26,6 +26,12 @@ import {
   activateCanvasRelayProjectionSync,
   deactivateCanvasRelayProjectionSync,
 } from '../relay/canvasProjection'
+import {
+  isRelayChannelMessageDraft,
+  isRelayDirectMessageDraft,
+  isRelaySpawnRequest,
+  isRelayWorkContext,
+} from '../relay/ipc-validation'
 
 const RELAY_CHANNELS = [
   'relay:init',
@@ -82,17 +88,23 @@ export function registerRelayIPC(): void {
     return readWorkspaceRelayMessage(workspacePath, participantId, mailbox, filename)
   })
 
-  ipcMain.handle('relay:sendDirectMessage', async (_, workspacePath: string, from: string, draft: any) => {
+  ipcMain.handle('relay:sendDirectMessage', async (_, workspacePath: string, from: string, draft: unknown) => {
     if (
       typeof workspacePath !== 'string' || typeof from !== 'string' ||
-      !draft || typeof draft !== 'object' || typeof draft.toParticipantId !== 'string'
+      !isRelayDirectMessageDraft(draft)
     ) {
       return { ok: false, error: 'Invalid sendDirectMessage payload' }
     }
     return sendWorkspaceDirectRelayMessage(workspacePath, from, draft)
   })
 
-  ipcMain.handle('relay:sendChannelMessage', async (_, workspacePath: string, from: string, draft: any) => {
+  ipcMain.handle('relay:sendChannelMessage', async (_, workspacePath: string, from: string, draft: unknown) => {
+    if (
+      typeof workspacePath !== 'string' || typeof from !== 'string' ||
+      !isRelayChannelMessageDraft(draft)
+    ) {
+      return { ok: false, error: 'Invalid sendChannelMessage payload' }
+    }
     return sendWorkspaceChannelRelayMessage(workspacePath, from, draft)
   })
 
@@ -104,7 +116,14 @@ export function registerRelayIPC(): void {
     return moveWorkspaceRelayMessage(workspacePath, participantId, fromMailbox, toMailbox, filename)
   })
 
-  ipcMain.handle('relay:setWorkContext', async (_, workspacePath: string, participantId: string, work: any) => {
+  ipcMain.handle('relay:setWorkContext', async (_, workspacePath: string, participantId: string, work: unknown) => {
+    if (
+      typeof workspacePath !== 'string' ||
+      typeof participantId !== 'string' ||
+      !isRelayWorkContext(work)
+    ) {
+      return { ok: false, error: 'Invalid setWorkContext payload' }
+    }
     return setWorkspaceRelayWorkContext(workspacePath, participantId, work)
   })
 
@@ -112,10 +131,10 @@ export function registerRelayIPC(): void {
     return analyzeWorkspaceRelayRelationships(workspacePath)
   })
 
-  ipcMain.handle('relay:spawnAgent', async (_, workspacePath: string, request: any) => {
+  ipcMain.handle('relay:spawnAgent', async (_, workspacePath: string, request: unknown) => {
     if (
       typeof workspacePath !== 'string' ||
-      !request || typeof request !== 'object' || typeof request.participantId !== 'string'
+      !isRelaySpawnRequest(request)
     ) {
       return { ok: false, error: 'Invalid spawnAgent payload' }
     }

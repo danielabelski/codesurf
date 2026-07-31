@@ -9,6 +9,7 @@ import type {
   RelayRuntimeOptions,
   RelaySpawnRequest,
   RelayTurnInput,
+  RelayWorkContext,
 } from '../../../packages/codesurf-relay/src/index.ts'
 import type { TileState } from '../../shared/types'
 
@@ -330,7 +331,7 @@ export class WorkspaceRelayService {
   async setWorkspaceRelayWorkContext(
     workspacePath: string,
     participantId: string,
-    work: any,
+    work: RelayWorkContext,
   ) {
     return this.withWorkspaceRelay(
       workspacePath,
