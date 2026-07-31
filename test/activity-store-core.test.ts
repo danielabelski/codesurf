@@ -233,6 +233,31 @@ describe('ActivityStore identity and query behavior', () => {
     await store.flushAll()
     assert.equal(persistence.saves.length, 0)
   })
+
+  test('measures only the changed record on hot mutations after initial accounting', async () => {
+    const persistence = new MemoryPersistence()
+    persistence.data.set('workspace-1', Array.from(
+      { length: 1_000 },
+      (_, index) => activity(`existing-${index}`, { updatedAt: 100 + index }),
+    ))
+    let measurements = 0
+    const store = new ActivityStore({
+      persistence,
+      measureRecordBytes(record) {
+        measurements += 1
+        return Buffer.byteLength(JSON.stringify(record), 'utf8')
+      },
+    })
+
+    await store.query({ workspaceId: 'workspace-1' })
+    const afterLoad = measurements
+    assert.equal(afterLoad, 1_000)
+    await store.upsert('workspace-1', upsertInput('new-tile', 'new-record'))
+    assert.equal(measurements - afterLoad, 1)
+    await store.delete('workspace-1', 'new-tile', 'new-record')
+    assert.equal(measurements - afterLoad, 1)
+    await store.flushAll()
+  })
 })
 
 describe('ActivityStore concurrency and lifecycle', () => {

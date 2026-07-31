@@ -4,8 +4,11 @@ import type {
   ActivityRecord,
 } from '../shared/activity-types.ts'
 import { capActivityRecords } from './activity-cap.ts'
+import {
+  activityDocumentByteLengthFromRecordBytes,
+  activityRecordByteLength,
+} from './activity-document-format.ts'
 import type { ActivityPersistence } from './activity-persistence.ts'
-import { serializeActivityDocument } from './activity-persistence.ts'
 import {
   MAX_ACTIVITY_FILE_BYTES,
   MAX_ACTIVITY_QUERY_LIMIT,
@@ -36,11 +39,14 @@ export interface ActivityStoreOptions {
   maxLoadedWorkspaces?: number
   maxFileBytes?: number
   maxQueryResponseBytes?: number
+  measureRecordBytes?: (record: ActivityRecord) => number
 }
 
 interface StoreState {
   workspaceId: string
   records: ActivityRecord[]
+  recordBytes: number[]
+  documentBytes: number
   generation: number
   persistedGeneration: number
   saveTimer: unknown | null
@@ -113,6 +119,7 @@ export class ActivityStore {
   private readonly maxLoadedWorkspaces: number
   private readonly maxFileBytes: number
   private readonly maxQueryResponseBytes: number
+  private readonly measureRecordBytes: (record: ActivityRecord) => number
   private readonly stores = new Map<string, StoreState>()
   private readonly loads = new Map<string, Promise<StoreState>>()
   private readonly pendingAcquires = new Map<string, number>()
@@ -147,6 +154,7 @@ export class ActivityStore {
       options.maxQueryResponseBytes ?? MAX_ACTIVITY_QUERY_RESPONSE_BYTES,
       'maxQueryResponseBytes',
     )
+    this.measureRecordBytes = options.measureRecordBytes ?? activityRecordByteLength
   }
 
   private touch(state: StoreState): void {
@@ -216,9 +224,12 @@ export class ActivityStore {
       const raced = this.stores.get(workspaceId)
       if (raced) return raced
       const needsRewrite = result.needsRewrite
+      const recordBytes = result.records.map(this.measureRecordBytes)
       const state: StoreState = {
         workspaceId,
         records: cloneRecords(result.records),
+        recordBytes,
+        documentBytes: activityDocumentByteLengthFromRecordBytes(recordBytes),
         generation: needsRewrite ? 1 : 0,
         persistedGeneration: 0,
         saveTimer: null,
@@ -315,10 +326,24 @@ export class ActivityStore {
     }
   }
 
-  private assertCandidateFits(workspaceId: string, records: ActivityRecord[]): void {
-    const bytes = Buffer.byteLength(serializeActivityDocument(workspaceId, records), 'utf8')
+  private assertCandidateFits(bytes: number): void {
     if (bytes > this.maxFileBytes) {
       throw new Error(`Activity store exceeds ${this.maxFileBytes} bytes`)
+    }
+  }
+
+  private bytesForCappedRecords(
+    records: ActivityRecord[],
+    byteByRecord: Map<ActivityRecord, number>,
+  ): { recordBytes: number[], documentBytes: number } {
+    const recordBytes = records.map(record => {
+      const bytes = byteByRecord.get(record)
+      if (bytes === undefined) throw new Error('Activity byte accounting lost a record')
+      return bytes
+    })
+    return {
+      recordBytes,
+      documentBytes: activityDocumentByteLengthFromRecordBytes(recordBytes),
     }
   }
 
@@ -372,6 +397,8 @@ export class ActivityStore {
         : state.records.findIndex(record => record.tileId === data.tileId && record.id === data.id)
       let record: ActivityRecord
       const candidate = [...state.records]
+      const candidateRecordBytes = [...state.recordBytes]
+      let candidateDocumentBytes = state.documentBytes
       if (index >= 0) {
         const existing = state.records[index]
         const metadata = mergeMetadata(existing.metadata, data.metadata)
@@ -385,6 +412,9 @@ export class ActivityStore {
           updatedAt: now,
         }
         candidate[index] = record
+        const measuredBytes = this.measureRecordBytes(record)
+        candidateDocumentBytes += measuredBytes - candidateRecordBytes[index]
+        candidateRecordBytes[index] = measuredBytes
       } else {
         record = {
           id: data.id ?? validateActivityId(this.createId()),
@@ -400,14 +430,30 @@ export class ActivityStore {
           updatedAt: now,
         }
         candidate.push(record)
+        const measuredBytes = this.measureRecordBytes(record)
+        candidateDocumentBytes += measuredBytes + (state.records.length === 0 ? 0 : 1)
+        candidateRecordBytes.push(measuredBytes)
       }
 
       let capped = capActivityRecords(candidate, now)
       if (!capped.includes(record)) {
         capped = [...capped.slice(0, -1), record]
       }
-      this.assertCandidateFits(workspaceId, capped)
+      const byteByRecord = new Map(
+        candidate.map((candidateRecord, candidateIndex) => (
+          [candidateRecord, candidateRecordBytes[candidateIndex]] as const
+        )),
+      )
+      const accounting = capped === candidate
+        ? {
+            recordBytes: candidateRecordBytes,
+            documentBytes: candidateDocumentBytes,
+          }
+        : this.bytesForCappedRecords(capped, byteByRecord)
+      this.assertCandidateFits(accounting.documentBytes)
       state.records = capped
+      state.recordBytes = accounting.recordBytes
+      state.documentBytes = accounting.documentBytes
       this.markDirty(state)
       return cloneRecord(record)
     })
@@ -439,8 +485,19 @@ export class ActivityStore {
       const index = state.records.findIndex(record => record.tileId === tileId && record.id === id)
       if (index === -1) return false
       const candidate = [...state.records.slice(0, index), ...state.records.slice(index + 1)]
-      this.assertCandidateFits(state.workspaceId, candidate)
+      const candidateRecordBytes = [
+        ...state.recordBytes.slice(0, index),
+        ...state.recordBytes.slice(index + 1),
+      ]
+      const documentBytes = (
+        state.documentBytes
+        - state.recordBytes[index]
+        - (state.records.length === 1 ? 0 : 1)
+      )
+      this.assertCandidateFits(documentBytes)
       state.records = candidate
+      state.recordBytes = candidateRecordBytes
+      state.documentBytes = documentBytes
       this.markDirty(state)
       return true
     })
@@ -449,11 +506,20 @@ export class ActivityStore {
   async clearTile(workspaceId: unknown, tileIdValue: unknown): Promise<number> {
     const tileId = validateActivityTileId(tileIdValue)
     return this.withStore(workspaceId, state => {
-      const candidate = state.records.filter(record => record.tileId !== tileId)
+      const candidate: ActivityRecord[] = []
+      const candidateRecordBytes: number[] = []
+      for (let index = 0; index < state.records.length; index += 1) {
+        if (state.records[index].tileId === tileId) continue
+        candidate.push(state.records[index])
+        candidateRecordBytes.push(state.recordBytes[index])
+      }
       const removed = state.records.length - candidate.length
       if (removed > 0) {
-        this.assertCandidateFits(state.workspaceId, candidate)
+        const documentBytes = activityDocumentByteLengthFromRecordBytes(candidateRecordBytes)
+        this.assertCandidateFits(documentBytes)
         state.records = candidate
+        state.recordBytes = candidateRecordBytes
+        state.documentBytes = documentBytes
         this.markDirty(state)
       }
       return removed
