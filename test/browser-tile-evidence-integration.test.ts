@@ -4,7 +4,11 @@ import { describe, test } from 'node:test'
 import { expect } from './node-expect.ts'
 
 const ROOT_DIR = process.cwd()
-const BROWSER_TILE_SOURCE = readFileSync(join(ROOT_DIR, 'src/renderer/src/components/BrowserTile.tsx'), 'utf8')
+const BROWSER_TILE_SOURCE = [
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/BrowserTile.tsx'), 'utf8'),
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/BrowserEvidenceDrawer.tsx'), 'utf8'),
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/browserEvidenceViewModel.ts'), 'utf8'),
+].join('\n')
 
 describe('BrowserTile browser evidence integration', () => {
   test('uses shared evidence helpers instead of ad-hoc diagnostics state', () => {

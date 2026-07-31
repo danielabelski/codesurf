@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, ArrowLeft, ArrowRight, Bug, ClipboardCheck, ClipboardList, Crosshair, Globe, Home, Monitor, RotateCcw, RotateCw, Smartphone, Trash2 } from 'lucide-react'
+import { Activity, ArrowLeft, ArrowRight, Crosshair, Globe, Home, Monitor, RotateCcw, RotateCw, Smartphone } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import { dispatchOpenLink } from '../utils/links'
@@ -33,6 +33,8 @@ import {
   normalizeUrl,
 } from './browser/webviewManager'
 import { ToolbarButton } from './browser/ToolbarButton'
+import { BrowserEvidenceDrawer } from './browser/BrowserEvidenceDrawer'
+import type { BrowserEvidenceFilter } from './browser/browserEvidenceViewModel'
 import { isElectronHost } from '../platform'
 import clusoEmbedJs from '../assets/cluso/cluso-embed.js?raw'
 import clusoEmbedCss from '../assets/cluso/cluso-embed.css?raw'
@@ -61,21 +63,6 @@ interface Props {
 }
 
 type BrowserMode = 'desktop' | 'mobile'
-type BrowserEvidenceFilter = 'all' | 'issues' | 'console' | 'load-failure' | 'lifecycle'
-
-const BROWSER_EVIDENCE_FILTERS: Array<{ id: BrowserEvidenceFilter; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'issues', label: 'Issues' },
-  { id: 'console', label: 'Console' },
-  { id: 'load-failure', label: 'Loads' },
-  { id: 'lifecycle', label: 'Lifecycle' },
-]
-
-function matchesEvidenceFilter(event: BrowserEvidenceEvent, filter: BrowserEvidenceFilter): boolean {
-  if (filter === 'all') return true
-  if (filter === 'issues') return event.severity === 'error' || event.severity === 'warning'
-  return event.kind === filter
-}
 
 
 // ---------------------------------------------------------------------------
@@ -226,10 +213,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
   const browserEvidenceSummary = summarizeBrowserEvidence(browserEvidence)
   const browserPageHealth = createBrowserPageHealth(browserEvidenceSummary, isLoading)
-  const filteredBrowserEvidence = browserEvidence
-    .filter(event => matchesEvidenceFilter(event, evidenceFilter))
-    .slice()
-    .reverse()
   const issueBadgeCount = browserEvidenceSummary.errorCount || browserEvidenceSummary.warningCount || browserEvidenceSummary.total
   const evidenceHealthColor = browserPageHealth.status === 'error'
     ? theme.status.danger
@@ -1192,231 +1175,30 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       )}
 
       {isEvidenceDrawerOpen && !hideNavbar && (
-        <div
-          aria-label="Evidence drawer"
-          onMouseDown={e => {
-            e.stopPropagation()
-            setIsToolbarHovered(true)
+        <BrowserEvidenceDrawer
+          width={width}
+          height={height}
+          state={{
+            events: browserEvidence,
+            filter: evidenceFilter,
+            health: browserPageHealth,
+            summary: browserEvidenceSummary,
+            pageLabel: pageTitle || currentUrl || 'No page title',
+            healthColor: evidenceHealthColor,
+            copyStatus,
+            lastSnapshotAt,
           }}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: 'absolute',
-            top: 42,
-            right: 8,
-            width: Math.min(Math.max(width - 24, 260), 430),
-            maxHeight: Math.max(160, height - 54),
-            zIndex: 4,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 8,
-            padding: 10,
-            borderRadius: 12,
-            border: `1px solid ${theme.border.strong}`,
-            background: theme.surface.panelElevated,
-            boxShadow: theme.shadow.modal,
-            color: theme.text.primary,
-            fontSize: fonts.secondarySize,
-            overflow: 'hidden',
+          actions={{
+            close: () => setIsEvidenceDrawerOpen(false),
+            selectFilter: setEvidenceFilter,
+            captureSnapshot: captureEvidenceSnapshot,
+            copyReport: copyEvidenceReport,
+            openQaWorkbench,
+            attachQaReportToChat,
+            clearEvidence: clearBrowserEvidence,
+            markInteracting: () => setIsToolbarHovered(true),
           }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-            <div style={{ minWidth: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 99, background: evidenceHealthColor }} />
-                Browser evidence
-              </div>
-              <div style={{ color: theme.text.muted, fontSize: fonts.secondarySize - 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {browserPageHealth.label} · {browserEvidenceSummary.total} events · {pageTitle || currentUrl || 'No page title'}
-              </div>
-            </div>
-            <button
-              type="button"
-              aria-label="Close evidence drawer"
-              onClick={() => setIsEvidenceDrawerOpen(false)}
-              style={{
-                border: 'none',
-                borderRadius: 6,
-                background: theme.surface.hover,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '3px 7px',
-                fontSize: fonts.secondarySize,
-              }}
-            >
-              Close
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-            {BROWSER_EVIDENCE_FILTERS.map(filter => (
-              <button
-                key={filter.id}
-                type="button"
-                onClick={() => setEvidenceFilter(filter.id)}
-                style={{
-                  border: `1px solid ${evidenceFilter === filter.id ? theme.border.accent : theme.border.default}`,
-                  borderRadius: 999,
-                  background: evidenceFilter === filter.id ? theme.surface.selection : 'transparent',
-                  color: evidenceFilter === filter.id ? theme.text.primary : theme.text.secondary,
-                  cursor: 'pointer',
-                  padding: '3px 8px',
-                  fontSize: fonts.secondarySize - 1,
-                }}
-              >
-                {filter.label}
-              </button>
-            ))}
-          </div>
-
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              title="Capture snapshot"
-              onClick={captureEvidenceSnapshot}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 5,
-                border: `1px solid ${theme.border.default}`,
-                borderRadius: 8,
-                background: theme.surface.input,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '6px 7px',
-                fontSize: fonts.secondarySize - 1,
-              }}
-            >
-              <ClipboardList size={12} />
-              Capture snapshot
-            </button>
-            <button
-              type="button"
-              title="Copy report"
-              onClick={copyEvidenceReport}
-              style={{
-                border: `1px solid ${theme.border.default}`,
-                borderRadius: 8,
-                background: theme.surface.input,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '6px 7px',
-                fontSize: fonts.secondarySize - 1,
-              }}
-            >
-              Copy report
-            </button>
-            <button
-              type="button"
-              title="Open QA Workbench"
-              onClick={openQaWorkbench}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 5,
-                border: `1px solid ${theme.border.default}`,
-                borderRadius: 8,
-                background: theme.surface.input,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '6px 7px',
-                fontSize: fonts.secondarySize - 1,
-              }}
-            >
-              <Bug size={12} />
-              Workbench
-            </button>
-            <button
-              type="button"
-              title="Attach QA report to chat"
-              onClick={attachQaReportToChat}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 5,
-                border: `1px solid ${theme.border.default}`,
-                borderRadius: 8,
-                background: theme.surface.input,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '6px 7px',
-                fontSize: fonts.secondarySize - 1,
-              }}
-            >
-              <ClipboardCheck size={12} />
-              Attach to chat
-            </button>
-            <button
-              type="button"
-              title="Clear evidence"
-              onClick={clearBrowserEvidence}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 5,
-                border: `1px solid ${theme.border.default}`,
-                borderRadius: 8,
-                background: theme.surface.input,
-                color: theme.text.secondary,
-                cursor: 'pointer',
-                padding: '6px 7px',
-                fontSize: fonts.secondarySize - 1,
-              }}
-            >
-              <Trash2 size={12} />
-              Clear evidence
-            </button>
-          </div>
-
-          {(copyStatus || lastSnapshotAt) && (
-            <div style={{ color: theme.text.muted, fontSize: fonts.secondarySize - 1 }}>
-              {copyStatus || 'Snapshot captured'}{lastSnapshotAt ? ` · ${new Date(lastSnapshotAt).toLocaleTimeString()}` : ''}
-            </div>
-          )}
-
-          <div style={{ overflow: 'auto', minHeight: 72, borderTop: `1px solid ${theme.border.subtle}`, paddingTop: 8 }}>
-            {filteredBrowserEvidence.length === 0 ? (
-              <div style={{ color: theme.text.muted, padding: '12px 4px' }}>
-                No browser evidence matches this filter yet.
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                {filteredBrowserEvidence.slice(0, 50).map(event => (
-                  <div
-                    key={event.id}
-                    style={{
-                      border: `1px solid ${theme.border.subtle}`,
-                      borderLeft: `3px solid ${event.severity === 'error' ? theme.status.danger : event.severity === 'warning' ? theme.status.warning : theme.border.accent}`,
-                      borderRadius: 8,
-                      background: theme.surface.panel,
-                      padding: '7px 8px',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                      <span style={{ color: event.severity === 'error' ? theme.status.danger : event.severity === 'warning' ? theme.status.warning : theme.text.secondary, fontWeight: 700 }}>
-                        {event.kind} · {event.severity}
-                      </span>
-                      <span style={{ color: theme.text.muted, fontSize: fonts.secondarySize - 2 }}>
-                        {new Date(event.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <div style={{ marginTop: 4, color: theme.text.primary, lineHeight: 1.35, wordBreak: 'break-word' }}>
-                      {event.message}
-                    </div>
-                    {(event.url || event.source || typeof event.line === 'number') && (
-                      <div style={{ marginTop: 4, color: theme.text.muted, fontSize: fonts.secondarySize - 1, lineHeight: 1.3, wordBreak: 'break-word' }}>
-                        {event.url || event.source}{typeof event.line === 'number' ? `:${event.line}` : ''}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        />
       )}
 
       {/* Webview container — starts below toolbar (or fills entire tile when navbar hidden) */}
