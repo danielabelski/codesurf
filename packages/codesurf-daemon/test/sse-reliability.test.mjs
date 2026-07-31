@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -776,6 +776,157 @@ test('terminal metadata failure prevents success publication and remains restart
   assert.equal((await restartedManager.getJobState(job.id))?.status, 'failed')
 })
 
+test('terminal metadata rename failure removes the uncommitted success terminal before failure replay', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-terminal-rename-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseProvider = deferred()
+  const appendedTypes = []
+  let removeCompletedStage = true
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    metadataWrite: async (path, data) => {
+      const metadata = JSON.parse(data)
+      await writeFile(path, data, 'utf8')
+      if (removeCompletedStage && metadata.status === 'completed') {
+        removeCompletedStage = false
+        await unlink(path)
+      }
+    },
+    timelineAppend: async (path, data) => {
+      appendedTypes.push(JSON.parse(data).type)
+      await appendFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('before terminal rename failure')
+      await releaseProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  let restartedManager = null
+  t.after(async () => {
+    releaseProvider.resolve()
+    await manager.shutdown()
+    await restartedManager?.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  ).includes('before terminal rename failure'))
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(job.id, 0, response), true)
+  releaseProvider.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  await waitFor(() => response.endCalls === 1)
+  await waitFor(async () => {
+    const events = (await readFile(
+      join(homeDir, 'timelines', `${job.id}.jsonl`),
+      'utf8',
+    )).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    return events.at(-2)?.type === 'error' && events.at(-1)?.type === 'done'
+  })
+
+  assert.deepEqual(appendedTypes.slice(-3), ['done', 'error', 'done'])
+  const streamed = writtenEvents(response)
+  assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.match(streamed.at(-2)?.error, /terminal metadata commit failed/i)
+  assert.equal(streamed.filter(event => event.type === 'done').length, 1)
+
+  const durable = (await readFile(
+    join(homeDir, 'timelines', `${job.id}.jsonl`),
+    'utf8',
+  )).trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(durable.map(event => event.sequence), durable.map((_, index) => index + 1))
+  assert.deepEqual(durable.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(durable.filter(event => event.type === 'done').length, 1)
+  assert.equal((await manager.getJobState(job.id))?.status, 'failed')
+
+  await manager.shutdown()
+  restartedManager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  const replay = new FakeResponse()
+  assert.equal(await restartedManager.streamJob(job.id, 0, replay), false)
+  assert.deepEqual(writtenEvents(replay), durable)
+  assert.equal((await restartedManager.getJobState(job.id))?.status, 'failed')
+})
+
+test('restart replaces an active metadata record paired with an uncommitted success terminal', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-uncommitted-terminal-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'uncommitted-success-terminal'
+  const old = new Date(0).toISOString()
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'running',
+    lastSequence: 1,
+    requestedAt: old,
+    updatedAt: old,
+    completedAt: null,
+    error: null,
+  }), 'utf8')
+  const textEvent = {
+    jobId,
+    sequence: 1,
+    timestamp: 1,
+    type: 'text',
+    text: 'before crash',
+  }
+  const uncommittedDone = {
+    jobId,
+    sequence: 2,
+    timestamp: 2,
+    type: 'done',
+  }
+  await writeFile(
+    join(timelinesDir, `${jobId}.jsonl`),
+    `${JSON.stringify(textEvent)}\n${JSON.stringify(uncommittedDone)}\n`,
+    'utf8',
+  )
+
+  const manager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  let restartedManager = null
+  t.after(async () => {
+    await manager.shutdown()
+    await restartedManager?.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(jobId, 0, response), false)
+  const recovered = writtenEvents(response)
+  assert.deepEqual(recovered.map(event => event.sequence), [1, 2, 3])
+  assert.deepEqual(recovered.map(event => event.type), ['text', 'error', 'done'])
+  assert.match(recovered[1].error, /terminal event was not committed by terminal metadata/i)
+  const state = await manager.getJobState(jobId)
+  assert.equal(state.status, 'failed')
+  assert.equal(state.lastSequence, 3)
+
+  const durable = (await readFile(
+    join(timelinesDir, `${jobId}.jsonl`),
+    'utf8',
+  )).trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(durable, recovered)
+  assert.equal(durable.filter(event => event.type === 'done').length, 1)
+
+  await manager.shutdown()
+  restartedManager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  const replay = new FakeResponse()
+  assert.equal(await restartedManager.streamJob(jobId, 0, replay), false)
+  assert.deepEqual(writtenEvents(replay), durable)
+})
+
 test('failed-record cap evicts oldest payload state after durable fail-closed finalization', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-many-failures-'))
   const workspaceDir = join(homeDir, 'workspace')
@@ -1196,7 +1347,7 @@ test('completed timeline replay streams progressively under writable backpressur
   assert.deepEqual(writtenEvents(response).map(event => event.sequence), events.map(event => event.sequence))
 })
 
-test('replay repairs malformed or gapped terminal history into contiguous failure semantics', async t => {
+test('replay repairs strict timeline integrity violations into contiguous failure semantics', async t => {
   for (const scenario of [
     {
       name: 'malformed',
@@ -1216,6 +1367,57 @@ test('replay repairs malformed or gapped terminal history into contiguous failur
           JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
           JSON.stringify({ jobId, sequence: 3, timestamp: 3, type: 'done' }),
           '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'wrong-job',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          JSON.stringify({ jobId: 'different-job', sequence: 2, timestamp: 2, type: 'done' }),
+          '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'invalid-sequence',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          JSON.stringify({ jobId, sequence: 0, timestamp: 2, type: 'done' }),
+          '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'empty-record',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          '',
+          JSON.stringify({ jobId, sequence: 3, timestamp: 3, type: 'done' }),
+          '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'post-terminal',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          JSON.stringify({ jobId, sequence: 2, timestamp: 2, type: 'done' }),
+          JSON.stringify({ jobId, sequence: 3, timestamp: 3, type: 'text', text: 'late' }),
+          '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'incomplete-residue',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          '{"jobId":"incomplete"',
         ].join('\n')
       },
     },
@@ -1518,6 +1720,18 @@ test('startup retention reconciles stale active artifacts without opening SSE an
     }), 'utf8')
     await writeFile(join(timelinesDir, `${id}.jsonl`), '', 'utf8')
   }
+  const reconciledId = 'stale-active-reconciled'
+  const recent = new Date().toISOString()
+  await writeFile(join(jobsDir, `${reconciledId}.json`), JSON.stringify({
+    id: reconciledId,
+    status: 'running',
+    lastSequence: 0,
+    requestedAt: recent,
+    updatedAt: recent,
+    completedAt: null,
+    error: null,
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${reconciledId}.jsonl`), '', 'utf8')
 
   const releaseLive = deferred()
   const manager = createChatJobManager({
@@ -1548,15 +1762,66 @@ test('startup retention reconciles stale active artifacts without opening SSE an
     await readFile(join(timelinesDir, `${liveJob.id}.jsonl`), 'utf8')
   ).includes('still live'))
 
-  const result = await manager.sweepJobRetention({ maxAgeMs: 1, keepRecent: 0 })
+  const result = await manager.sweepJobRetention({ maxAgeMs: 1, keepRecent: 1 })
   assert.equal(result.pruned, 6)
   for (let index = 0; index < 6; index += 1) {
     const id = `stale-active-${index}`
     await assert.rejects(readFile(join(jobsDir, `${id}.json`), 'utf8'), { code: 'ENOENT' })
     await assert.rejects(readFile(join(timelinesDir, `${id}.jsonl`), 'utf8'), { code: 'ENOENT' })
   }
+  const reconciledMetadata = JSON.parse(
+    await readFile(join(jobsDir, `${reconciledId}.json`), 'utf8'),
+  )
+  assert.equal(reconciledMetadata.status, 'failed')
+  const reconciledTimeline = (await readFile(
+    join(timelinesDir, `${reconciledId}.jsonl`),
+    'utf8',
+  )).trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(reconciledTimeline.map(event => event.sequence), [1, 2])
+  assert.deepEqual(reconciledTimeline.map(event => event.type), ['error', 'done'])
   assert.equal(manager.listLiveJobIds().includes(liveJob.id), true)
   assert.equal((await manager.getJobState(liveJob.id))?.status, 'running')
+})
+
+test('startup retention prunes old non-live active artifacts when reconciliation storage fails', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-retention-failed-reconcile-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'stale-active-storage-failure'
+  const old = new Date(0).toISOString()
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'running',
+    lastSequence: 0,
+    requestedAt: old,
+    updatedAt: old,
+    completedAt: null,
+    error: null,
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${jobId}.jsonl`), '', 'utf8')
+  let appendAttempts = 0
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineAppendMaxAttempts: 2,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async () => {
+      appendAttempts += 1
+      throw new Error('reconciliation storage unavailable')
+    },
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const result = await manager.sweepJobRetention({ maxAgeMs: 1, keepRecent: 0 })
+  assert.equal(result.pruned, 1)
+  assert.equal(appendAttempts, 2)
+  await assert.rejects(readFile(join(jobsDir, `${jobId}.json`), 'utf8'), { code: 'ENOENT' })
+  await assert.rejects(readFile(join(timelinesDir, `${jobId}.jsonl`), 'utf8'), { code: 'ENOENT' })
 })
 
 test('startup retention does not scan healthy terminal timeline history', async t => {
