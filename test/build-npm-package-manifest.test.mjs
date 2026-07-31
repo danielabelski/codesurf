@@ -30,6 +30,45 @@ test('npm package build preserves the authoritative root Node engine', async t =
   await writeFixtureFile(fixtureRoot, 'dist-electron/preload/index.js')
   await writeFixtureFile(fixtureRoot, 'bin/codesurf.cjs')
   await writeFixtureFile(fixtureRoot, 'bin/codesurfd.mjs')
+  const daemonExports = Object.fromEntries(
+    [
+      ['.', 'index'],
+      ['./manager', 'manager'],
+      ['./client', 'client'],
+      ['./sse', 'sse'],
+      ['./chat-cli', 'chat-cli'],
+      ['./chat-session-store', 'chat-session-store'],
+      ['./paths', 'paths'],
+    ].map(([subpath, stem]) => [
+      subpath,
+      {
+        types: `./dist/${stem}.d.ts`,
+        import: `./dist/${stem}.js`,
+        default: `./dist/${stem}.js`,
+      },
+    ]),
+  )
+  await writeFixtureFile(
+    fixtureRoot,
+    'packages/codesurf-daemon/package.json',
+    `${JSON.stringify({
+      name: '@codesurf/daemon',
+      version: '0.1.0',
+      type: 'module',
+      exports: daemonExports,
+      scripts: {
+        build: 'node -e "process.exit(0)"',
+        'verify:dist': 'node -e "process.exit(0)"',
+      },
+    })}\n`,
+  )
+  await writeFixtureFile(fixtureRoot, 'packages/codesurf-daemon/README.md')
+  await writeFixtureFile(fixtureRoot, 'packages/codesurf-daemon/bin/codesurfd.mjs')
+  await writeFixtureFile(fixtureRoot, 'packages/codesurf-daemon/vendor/dreaming.mjs')
+  for (const target of Object.values(daemonExports)) {
+    await writeFixtureFile(fixtureRoot, `packages/codesurf-daemon/${target.import}`, 'export {}\n')
+    await writeFixtureFile(fixtureRoot, `packages/codesurf-daemon/${target.types}`, 'export {}\n')
+  }
 
   const result = spawnSync(
     process.execPath,
@@ -43,4 +82,11 @@ test('npm package build preserves the authoritative root Node engine', async t =
   )
   assert.deepEqual(publishManifest.engines, rootManifest.engines)
   assert.equal(publishManifest.engines?.node, '>=22')
+  assert.equal(
+    await readFile(
+      join(fixtureRoot, 'release', 'npm', 'package', 'packages', 'codesurf-daemon', 'dist', 'index.js'),
+      'utf8',
+    ),
+    'export {}\n',
+  )
 })

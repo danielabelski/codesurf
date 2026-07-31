@@ -68,6 +68,16 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
   let daemon = null
 
   try {
+    const tarballEntries = run('tar', ['-tzf', tarball])
+      .split('\n')
+      .filter(Boolean)
+    if (tarballEntries.some(path => /\/packages\/codesurf-daemon\/src(?:\/|$)/.test(path))) {
+      throw new Error('Packaged npm tarball contains daemon source TypeScript')
+    }
+    if (!tarballEntries.some(path => path.endsWith('/packages/codesurf-daemon/dist/index.js'))) {
+      throw new Error('Packaged npm tarball is missing compiled daemon dist')
+    }
+
     writeFileSync(
       join(fixtureRoot, 'package.json'),
       `${JSON.stringify({ name: 'codesurf-package-smoke', private: true })}\n`,
@@ -81,16 +91,59 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
     const installedRoot = join(fixtureRoot, 'node_modules', 'codesurf')
     const cliOutput = run(
       process.execPath,
-      [join(installedRoot, 'bin', 'codesurf.cjs'), '--version'],
+      ['--no-experimental-strip-types', join(installedRoot, 'bin', 'codesurf.cjs'), '--version'],
       { cwd: fixtureRoot },
     )
     if (!/^codesurf v\d+\.\d+\.\d+$/.test(cliOutput)) {
       throw new Error(`Unexpected packaged CLI version output: ${cliOutput}`)
     }
 
+    const chatHelp = run(
+      process.execPath,
+      ['--no-experimental-strip-types', join(installedRoot, 'bin', 'codesurf.cjs'), 'chat', '--help'],
+      { cwd: fixtureRoot },
+    )
+    if (!chatHelp.includes('CodeSurf chat') || !chatHelp.includes('Usage:')) {
+      throw new Error(`Unexpected packaged chat help output: ${chatHelp}`)
+    }
+
+    const daemonPackage = join(installedRoot, 'packages', 'codesurf-daemon')
+    if (existsSync(join(daemonPackage, 'src'))) {
+      throw new Error('Installed npm package contains daemon source TypeScript')
+    }
+    if (!existsSync(join(daemonPackage, 'dist', 'index.js'))) {
+      throw new Error('Installed npm package is missing compiled daemon dist')
+    }
+    const publicExports = [
+      '@codesurf/daemon',
+      '@codesurf/daemon/manager',
+      '@codesurf/daemon/client',
+      '@codesurf/daemon/sse',
+      '@codesurf/daemon/chat-cli',
+      '@codesurf/daemon/chat-session-store',
+      '@codesurf/daemon/paths',
+    ]
+    const importProbe = [
+      `const exportsToLoad = ${JSON.stringify(publicExports)}`,
+      'await Promise.all(exportsToLoad.map(specifier => import(specifier)))',
+      "process.stdout.write('compiled-exports-ok')",
+    ].join(';')
+    const importOutput = run(
+      process.execPath,
+      ['--no-experimental-strip-types', '--input-type=module', '-e', importProbe],
+      { cwd: fixtureRoot },
+    )
+    if (importOutput !== 'compiled-exports-ok') {
+      throw new Error(`Packaged daemon export smoke failed: ${importOutput}`)
+    }
+
     const nativeOutput = run(
       process.execPath,
-      ['-e', "require('better-sqlite3');require('node-pty');process.stdout.write('native-load-ok')"],
+      [
+        '--no-experimental-strip-types',
+        '-e',
+        "const Database=require('better-sqlite3');const db=new Database(':memory:');db.close();require('node-pty');process.stdout.write('native-load-ok')",
+      ],
       { cwd: fixtureRoot },
     )
     if (nativeOutput !== 'native-load-ok') {
@@ -98,7 +151,7 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
     }
 
     const daemonEntry = join(installedRoot, 'bin', 'codesurfd.mjs')
-    daemon = spawn(process.execPath, [daemonEntry], {
+    daemon = spawn(process.execPath, ['--no-experimental-strip-types', daemonEntry], {
       cwd: fixtureRoot,
       env: {
         ...process.env,
@@ -118,6 +171,8 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
 
     console.log(`[smoke-npm-package] installed ${basename(tarball)}`)
     console.log(`[smoke-npm-package] ${cliOutput}`)
+    console.log('[smoke-npm-package] chat help and compiled exports loaded')
+    console.log('[smoke-npm-package] tarball contains dist and no daemon src')
     console.log('[smoke-npm-package] native modules loaded')
     console.log(`[smoke-npm-package] daemon healthy on protocol ${health.protocolVersion}`)
   } finally {
