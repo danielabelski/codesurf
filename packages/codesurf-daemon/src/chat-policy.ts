@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export const MAX_PERSONA_DOCUMENT_BYTES = 256 * 1024
 export const MAX_PERSONA_COUNT = 128
@@ -192,6 +192,19 @@ function normalizeToolName(name: string): string {
   return String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
+function clonePersona(persona: PolicyPersona): PolicyPersona {
+  return {
+    ...persona,
+    tools: persona.tools === null ? null : [...persona.tools],
+    ...(persona.defaultBinding ? { defaultBinding: { ...persona.defaultBinding } } : {}),
+    ...(persona.skills ? { skills: [...persona.skills] } : {}),
+  }
+}
+
+function cloneDefaultPersonas(): PolicyPersona[] {
+  return DEFAULT_PERSONAS.map(clonePersona)
+}
+
 function assertNoToolWidening(base: string[] | null, child: string[] | null, label: string): void {
   if (base === null) return
   if (child === null) invalid(`${label} cannot widen a restricted base to unrestricted tools`)
@@ -230,7 +243,7 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
     const builtin = builtins.get(id)
     if (!overlay) {
       if (!builtin) invalid(`persona ${id} is not defined`)
-      const clone = { ...builtin, tools: builtin.tools === null ? null : [...builtin.tools] }
+      const clone = clonePersona(builtin)
       resolved.set(id, clone)
       return clone
     }
@@ -268,10 +281,10 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
         ? { defaultNextMode: overlay.defaultNextMode ?? base?.defaultNextMode }
         : {}),
       ...(overlay.defaultBinding ?? base?.defaultBinding
-        ? { defaultBinding: overlay.defaultBinding ?? base?.defaultBinding }
+        ? { defaultBinding: { ...(overlay.defaultBinding ?? base?.defaultBinding) } }
         : {}),
       ...(explicitBaseId ? { extends: explicitBaseId } : {}),
-      ...(overlay.skills ?? base?.skills ? { skills: overlay.skills ?? base?.skills } : {}),
+      ...(overlay.skills ?? base?.skills ? { skills: [...(overlay.skills ?? base?.skills ?? [])] } : {}),
       ...(overlay.source ?? base?.source ? { source: overlay.source ?? base?.source } : {}),
     }
     resolved.set(id, persona)
@@ -288,7 +301,7 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
 
 function pathIsWithin(root: string, candidate: string): boolean {
   const rel = relative(root, candidate)
-  return rel === '' || (!rel.startsWith('..') && !rel.includes(`..${process.platform === 'win32' ? '\\' : '/'}`))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 
 function stableFileTuple(left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>['stat']>>, right: typeof left): boolean {
@@ -360,7 +373,7 @@ export async function resolveAuthoritativePersona(options: {
     personas = overlayAuthoritativePersonas(JSON.parse(raw))
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
-      personas = DEFAULT_PERSONAS.map(persona => ({ ...persona, tools: persona.tools === null ? null : [...persona.tools] }))
+      personas = cloneDefaultPersonas()
     } else {
       return { ok: false, error: AGENT_MODE_RESOLUTION_DENIED_ERROR }
     }
@@ -373,13 +386,13 @@ export async function resolveAuthoritativePersona(options: {
 
 export async function listAuthoritativePersonas(workspaceRoot: unknown): Promise<PolicyPersona[]> {
   const root = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : ''
-  if (!root) return DEFAULT_PERSONAS.map(persona => ({ ...persona }))
+  if (!root) return cloneDefaultPersonas()
   try {
     return overlayAuthoritativePersonas(
       JSON.parse(await readBoundedPersonaFile(root)),
     )
   } catch {
-    return DEFAULT_PERSONAS.map(persona => ({ ...persona }))
+    return cloneDefaultPersonas()
   }
 }
 

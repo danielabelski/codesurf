@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 export const MAX_PERSONA_DOCUMENT_BYTES = 256 * 1024;
 export const MAX_PERSONA_COUNT = 128;
 export const MAX_PERSONA_ID_BYTES = 64;
@@ -159,6 +159,17 @@ function parseOverlay(value, index) {
 function normalizeToolName(name) {
     return String(name ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
+function clonePersona(persona) {
+    return {
+        ...persona,
+        tools: persona.tools === null ? null : [...persona.tools],
+        ...(persona.defaultBinding ? { defaultBinding: { ...persona.defaultBinding } } : {}),
+        ...(persona.skills ? { skills: [...persona.skills] } : {}),
+    };
+}
+function cloneDefaultPersonas() {
+    return DEFAULT_PERSONAS.map(clonePersona);
+}
 function assertNoToolWidening(base, child, label) {
     if (base === null)
         return;
@@ -202,7 +213,7 @@ export function overlayAuthoritativePersonas(document) {
         if (!overlay) {
             if (!builtin)
                 invalid(`persona ${id} is not defined`);
-            const clone = { ...builtin, tools: builtin.tools === null ? null : [...builtin.tools] };
+            const clone = clonePersona(builtin);
             resolved.set(id, clone);
             return clone;
         }
@@ -239,10 +250,10 @@ export function overlayAuthoritativePersonas(document) {
                 ? { defaultNextMode: overlay.defaultNextMode ?? base?.defaultNextMode }
                 : {}),
             ...(overlay.defaultBinding ?? base?.defaultBinding
-                ? { defaultBinding: overlay.defaultBinding ?? base?.defaultBinding }
+                ? { defaultBinding: { ...(overlay.defaultBinding ?? base?.defaultBinding) } }
                 : {}),
             ...(explicitBaseId ? { extends: explicitBaseId } : {}),
-            ...(overlay.skills ?? base?.skills ? { skills: overlay.skills ?? base?.skills } : {}),
+            ...(overlay.skills ?? base?.skills ? { skills: [...(overlay.skills ?? base?.skills ?? [])] } : {}),
             ...(overlay.source ?? base?.source ? { source: overlay.source ?? base?.source } : {}),
         };
         resolved.set(id, persona);
@@ -257,7 +268,7 @@ export function overlayAuthoritativePersonas(document) {
 }
 function pathIsWithin(root, candidate) {
     const rel = relative(root, candidate);
-    return rel === '' || (!rel.startsWith('..') && !rel.includes(`..${process.platform === 'win32' ? '\\' : '/'}`));
+    return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 function stableFileTuple(left, right) {
     return left.dev === right.dev
@@ -325,7 +336,7 @@ export async function resolveAuthoritativePersona(options) {
     }
     catch (error) {
         if (error?.code === 'ENOENT') {
-            personas = DEFAULT_PERSONAS.map(persona => ({ ...persona, tools: persona.tools === null ? null : [...persona.tools] }));
+            personas = cloneDefaultPersonas();
         }
         else {
             return { ok: false, error: AGENT_MODE_RESOLUTION_DENIED_ERROR };
@@ -339,12 +350,12 @@ export async function resolveAuthoritativePersona(options) {
 export async function listAuthoritativePersonas(workspaceRoot) {
     const root = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : '';
     if (!root)
-        return DEFAULT_PERSONAS.map(persona => ({ ...persona }));
+        return cloneDefaultPersonas();
     try {
         return overlayAuthoritativePersonas(JSON.parse(await readBoundedPersonaFile(root)));
     }
     catch {
-        return DEFAULT_PERSONAS.map(persona => ({ ...persona }));
+        return cloneDefaultPersonas();
     }
 }
 export async function bindChatRequestToWorkspace(request, workspace) {

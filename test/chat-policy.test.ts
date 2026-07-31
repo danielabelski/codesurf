@@ -11,6 +11,7 @@ import {
   assertProviderPersonaEnforceable,
   bindChatRequestToWorkspace,
   codexExecPermissionArgs,
+  listAuthoritativePersonas,
   overlayAuthoritativePersonas,
   resolveAuthoritativePersona,
 } from '@codesurf/daemon/chat-policy'
@@ -81,6 +82,21 @@ test('strict persona inheritance is bounded, acyclic, and cannot widen tools', (
   ]).find(entry => entry.id === 'ask')
   assert.deepEqual(narrowed?.tools, ['Read'])
   assert.equal(narrowed?.name, 'Safer Ask')
+})
+
+test('default persona listings do not expose mutable policy arrays', async () => {
+  const first = await listAuthoritativePersonas('')
+  const ask = first.find(entry => entry.id === 'ask')!
+  ask.tools!.push('Write')
+
+  const second = await listAuthoritativePersonas('')
+  assert.deepEqual(second.find(entry => entry.id === 'ask')?.tools, [
+    'Read',
+    'Glob',
+    'Grep',
+    'WebSearch',
+    'WebFetch',
+  ])
 })
 
 test('provider policy refuses restrictions a backend cannot honestly enforce', () => {
