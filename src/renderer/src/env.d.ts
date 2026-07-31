@@ -55,6 +55,7 @@ interface ElectronAPI {
     start(req: { cardId: string; agentId: string; url: string; method?: string; headers?: Record<string, string>; body?: string }): Promise<void>
     stop(cardId: string): Promise<void>
     onChunk(cb: (event: {
+      workspaceId: string
       cardId: string
       jobId?: string
       sequence?: number
@@ -74,7 +75,7 @@ interface ElectronAPI {
     saveWorkspaceServers(workspaceId: string, servers: Record<string, unknown>): Promise<void>
     getMergedConfig(workspaceId: string): Promise<unknown>
     onKanban(cb: (event: string, data: unknown) => void): () => void
-    onInject(cb: (cardId: string, message: string, appendNewline: boolean) => void): () => void
+    onInject(cb: (workspaceId: string, cardId: string, message: string, appendNewline: boolean) => void): () => void
     inject(cardId: string, message: string): Promise<void>
   }
   tileContext?: {
@@ -85,15 +86,15 @@ interface ElectronAPI {
     onChanged?(tileId: string, cb: (data: { tileId: string; key: string; value: unknown }) => void): () => void
   }
   image?: {
-    edit(req: { tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>
+    edit(req: { workspaceId: string; tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>
   }
   chat?: {
     send(req: unknown): Promise<{ ok: boolean; jobId?: string; detached?: boolean }>
     resumeJob?(req: unknown): Promise<{ ok: boolean; resumed?: boolean; jobId?: string | null }>
-    steer?(payload: { cardId: string; message: string }): Promise<{ ok: boolean; error?: string }>
-    stop(cardId: string): Promise<void>
-    clearSession(cardId: string): Promise<{ ok: boolean }>
-    disposeCard(cardId: string): Promise<{ ok: boolean }>
+    steer?(payload: { workspaceId: string; cardId: string; message: string }): Promise<{ ok: boolean; error?: string }>
+    stop(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }>
+    clearSession(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }>
+    disposeCard(workspaceId: string, cardId: string): Promise<{ ok: boolean }>
     opencodeModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }>; source?: string; loading?: boolean }>
     onOpencodeModelsUpdated(cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void): () => void
     openclawAgents(): Promise<{ agents: Array<{ id: string; label: string; description?: string }> }>
@@ -101,18 +102,20 @@ interface ElectronAPI {
     selectFiles(): Promise<string[]>
     writeTempAttachment(payload: { data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; path: string } | { ok: false; error: string }>
     answerUserQuestion(payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       answers: Record<string, string>
       annotations?: Record<string, { notes?: string; preview?: string }>
     }): Promise<{ ok: boolean; error?: string }>
     answerToolPermission(payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       // `never` persists a deny-grant so subsequent calls auto-reject.
       decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
     }): Promise<{ ok: boolean; error?: string }>
-    setPermissionMode(payload: { cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
+    setPermissionMode(payload: { workspaceId: string; cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
     loadSessionHistory(payload: {
       workspaceId?: string
       sessionEntryId?: string
@@ -293,12 +296,12 @@ interface ElectronAPI {
     save(workspaceId: string, tileId: string, state: { columns: Array<{ id: string; title: string }>; cards: import('./components/KanbanCard').KanbanCardData[] }): Promise<void>
   }
   terminal: {
-    create(tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number; rows: number; buffer?: string }>
+    create(tileId: string, workspaceId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number; rows: number; buffer?: string }>
     write(tileId: string, data: string): Promise<void>
     resize(tileId: string, cols: number, rows: number): Promise<void>
-    destroy(tileId: string): Promise<void>
+    destroy(tileId: string, workspaceId: string): Promise<void>
     detach(tileId: string): Promise<void>
-    updatePeers(tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>): Promise<void>
+    updatePeers(tileId: string, workspaceId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>): Promise<void>
     onData(tileId: string, cb: (data: string) => void): () => void
     onActive(tileId: string, cb: () => void): () => void
     onExit(tileId: string, cb: (exitCode: number) => void): () => void
@@ -588,7 +591,7 @@ interface ElectronAPI {
     onIndexUpdated(callback: (payload: { workspacePath: string | null; count: number; tombstoned: number; durationMs: number }) => void): () => void
   }
   system: {
-    cleanupTile(tileId: string): Promise<{ ok: boolean; channelsDropped?: number }>
+    cleanupTile(workspaceId: string, tileId: string): Promise<{ ok: boolean; channelsDropped?: number }>
     gc(): Promise<{ ok: boolean; exposed: boolean }>
     memStats(): Promise<{
       rss: number

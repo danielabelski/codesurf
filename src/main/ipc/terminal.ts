@@ -2,6 +2,7 @@ import { ipcMain, WebContents } from 'electron'
 import { existsSync, chmodSync } from 'fs'
 import { promises as fsP } from 'fs'
 import { execFileSync } from 'child_process'
+import { createHash } from 'node:crypto'
 import { join } from 'path'
 import { bus } from '../event-bus'
 import { writeMCPConfigToWorkspace, writeTileMcpConfig, getTileToken, revokeTileToken } from '../mcp-server'
@@ -13,6 +14,7 @@ import { isAllowedBinary, expandHome, buildSafeSpawnEnv, ALLOWED_AGENT_BINS } fr
 import { handlePtyExit } from './terminal-exit.ts'
 import { log } from '../utils/logger.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
+import { isValidAgentRoomId } from '../agent-room/validation.ts'
 
 const terminalLog = log.scope('terminal')
 
@@ -99,8 +101,12 @@ function ensureTmuxConf(): void {
 
 const TMUX_PREFIX = 'codesurf-'
 
-function tmuxSessionName(tileId: string): string {
-  return `${TMUX_PREFIX}${tileId}`
+function tmuxSessionName(workspaceId: string, tileId: string): string {
+  const workspaceScope = createHash('sha256')
+    .update(workspaceId)
+    .digest('hex')
+    .slice(0, 12)
+  return `${TMUX_PREFIX}${workspaceScope}-${tileId}`
 }
 
 function tmuxSessionExists(sessionName: string): boolean {
@@ -173,6 +179,7 @@ interface PtyInstance {
 }
 
 interface TerminalSession {
+  workspaceId: string
   pty: PtyInstance
   listeners: Set<WebContents>
   buffer: string
@@ -214,18 +221,21 @@ function flushTerminalToBus(tileId: string): void {
   const clean = data.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim()
   if (!clean) return
   const truncated = clean.length > 200 ? clean.slice(-200) : clean
+  const workspaceId = terminals.get(tileId)?.workspaceId
+  if (!workspaceId) return
   bus.publish({
-    channel: `tile:${tileId}`,
+    channel: `tile:${workspaceId}:${tileId}`,
     type: 'activity',
     source: `terminal:${tileId}`,
-    payload: { output: truncated }
+    payload: { workspaceId, output: truncated }
   })
 }
 
 export function registerTerminalIPC(): void {
   // Register PTY notifier — updates tmux status bar for peer state
-  setTerminalNotifier((tileId: string, _line: string) => {
+  setTerminalNotifier((workspaceId: string, tileId: string, _line: string) => {
     const session = terminals.get(tileId)
+    if (session?.workspaceId !== workspaceId) return
     if (!session?.tmuxSession) return
     updateTmuxStatus(session.tmuxSession, tileId)
   })
@@ -234,10 +244,14 @@ export function registerTerminalIPC(): void {
     args: [
       ipcSchemas.boundedString(),
       ipcSchemas.boundedString(),
+      ipcSchemas.boundedString(),
       ipcSchemas.optionalString,
       ipcSchemas.stringArray.optional(),
     ] as const,
-    handler: async (event, tileId, workspaceDir, launchBin, launchArgs) => {
+    handler: async (event, tileId, workspaceId, workspaceDir, launchBin, launchArgs) => {
+    if (!isValidAgentRoomId(workspaceId) || !isValidAgentRoomId(tileId)) {
+      return { error: 'Invalid terminal workspace or tile ID' }
+    }
     // Validate workspaceDir against path traversal — the renderer supplies this
     // and it controls where the PTY spawns, where .codesurf dirs are created, and
     // where the MCP bearer token (.mcp.json) is written.
@@ -251,6 +265,9 @@ export function registerTerminalIPC(): void {
 
     const existing = terminals.get(tileId)
     if (existing) {
+      if (existing.workspaceId !== workspaceId) {
+        return { error: 'Terminal tile ID is already active in another workspace' }
+      }
       existing.listeners.add(event.sender)
       trackTerminalSender(event.sender, tileId)
       return { cols: 80, rows: 24, buffer: existing.buffer }
@@ -273,28 +290,27 @@ export function registerTerminalIPC(): void {
     // from the spawn allowlist so the two never drift (SEC-04 + M3).
     const launchBase = (bin.split(/[/\\]/).pop() || '').replace(/\.(exe|cmd|bat|ps1)$/i, '')
     const isAgent = ALLOWED_AGENT_BINS.includes(launchBase)
-    const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ CARD_ID: tileId })
+    const spawnEnv: Record<string, string> = buildSafeSpawnEnv({
+      CARD_ID: tileId,
+      CODESURF_WORKSPACE_ID: workspaceId,
+    })
 
     // Set CODESURF_DIR so agents know where their per-tile .codesurf folder is
     const contexDir = workspaceTileDir(workspaceDir, tileId)
     const legacyContexDir = legacyWorkspaceTileDir(workspaceDir, tileId)
     spawnEnv.CODESURF_DIR = contexDir
     spawnEnv.COLLAB_DIR = contexDir
+    // Shell-launched agents inherit only this workspace/tile principal. Never
+    // expose the global bearer or use it as a fallback.
+    spawnEnv.CODESURF_MCP_TILE_TOKEN = getTileToken(workspaceId, tileId)
+    try {
+      const tileConfig = await writeTileMcpConfig(workspaceId, tileId)
+      if (tileConfig) spawnEnv.CODESURF_MCP_CONFIG = tileConfig
+    } catch {
+      // MCP remains unavailable for this terminal when scoped setup fails.
+    }
 
     if (isAgent) {
-      // Per-tile MCP token — limits blast radius if leaked from this terminal
-      const tileToken = getTileToken(tileId)
-      spawnEnv.CODESURF_MCP_TILE_TOKEN = tileToken
-
-      // Prefer a tile-scoped config (Bearer = tile token) over the global
-      // mcp-server.json so scope guards from plan 010 actually apply (SEC-05).
-      let mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
-      try {
-        const tileConfig = await writeTileMcpConfig(tileId)
-        if (tileConfig) mcpConfigPath = tileConfig
-      } catch { /* fall back to global config */ }
-      spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
-
       // Ensure .codesurf dir exists before reading/spawning
       await fsP.mkdir(join(contexDir, 'context'), { recursive: true })
 
@@ -318,7 +334,7 @@ export function registerTerminalIPC(): void {
         '## Agent Room (canvas wires)',
         'Blocks wired to you on the canvas share an agent room. Room traffic is real-time (bus) and durable (ledger).',
         `Your block ID is $CARD_ID (always set). Per-tile dir: ${contexDir}`,
-        `Room inbox file (updated live): ~/.codesurf/room-inboxes/$CARD_ID/ROOM.md`,
+        `Room inbox file (updated live): ~/.codesurf/workspaces/${workspaceId}/agent-rooms/inboxes/$CARD_ID/ROOM.md`,
         '',
         'Collaboration tools (MCP prefix mcp__codesurf__):',
         '- `room_status` — room id, members, unread count (start here)',
@@ -329,7 +345,7 @@ export function registerTerminalIPC(): void {
         '- `peer_send_message` — direct message a room member',
         '',
         'Workflow: On start call room_status + peer_set_state(status=working). Use room_consume when you need peer traffic. room_post handoffs when you need another block to act. Do not poll endlessly — room files and MCP stay current.',
-        `Reference: ${contexDir}/peers.md and ~/.codesurf/room-inboxes/$CARD_ID/ROOM.md`,
+        `Reference: ${contexDir}/peers.md and ~/.codesurf/workspaces/${workspaceId}/agent-rooms/inboxes/$CARD_ID/ROOM.md`,
       ].join('\n')
       args.push('-p', preamble)
 
@@ -348,7 +364,9 @@ export function registerTerminalIPC(): void {
       if (isClaude) {
         // Point Claude Code at the tile-scoped MCP config (not just workspace
         // .mcp.json which still carries the global token for human CLI use).
-        args.push('--mcp-config', mcpConfigPath)
+        if (spawnEnv.CODESURF_MCP_CONFIG) {
+          args.push('--mcp-config', spawnEnv.CODESURF_MCP_CONFIG)
+        }
         const mcpToolNames = [
           'mcp__codesurf__canvas_create_tile', 'mcp__codesurf__canvas_open_file',
           'mcp__codesurf__canvas_pan_to', 'mcp__codesurf__canvas_list_tiles',
@@ -389,19 +407,20 @@ export function registerTerminalIPC(): void {
       }
 
       bus.publish({
-        channel: `tile:${tileId}`,
+        channel: `tile:${workspaceId}:${tileId}`,
         type: 'system',
         source: `terminal:${tileId}`,
-        payload: { action: 'agent_launched', agent: launchBin }
+        payload: { action: 'agent_launched', workspaceId, agent: launchBin }
       })
     }
 
-    // Ensure .mcp.json exists in workspace so Claude Code auto-discovers codesurf tools
+    // Remove legacy workspace-global CodeSurf credentials; scoped config is
+    // supplied explicitly through CODESURF_MCP_CONFIG.
     writeMCPConfigToWorkspace(workspaceDir).catch(() => {})
 
     // --- tmux persistence: reattach or create a new tmux session ---------------
     const tmux = getTmuxPath()
-    const sessName = tmuxSessionName(tileId)
+    const sessName = tmuxSessionName(workspaceId, tileId)
     let useTmux = false
     let reattaching = false
 
@@ -454,6 +473,7 @@ export function registerTerminalIPC(): void {
     }
 
     const session: TerminalSession = {
+      workspaceId,
       pty: term,
       listeners: new Set([event.sender]),
       buffer: '',
@@ -464,10 +484,15 @@ export function registerTerminalIPC(): void {
     trackTerminalSender(event.sender, tileId)
 
     bus.publish({
-      channel: `tile:${tileId}`,
+      channel: `tile:${workspaceId}:${tileId}`,
       type: 'system',
       source: `terminal:${tileId}`,
-      payload: { action: reattaching ? 'reattached' : 'created', workspaceDir, tmux: useTmux }
+      payload: {
+        action: reattaching ? 'reattached' : 'created',
+        workspaceId,
+        workspaceDir,
+        tmux: useTmux,
+      }
     })
 
     term.onData((data: string) => {
@@ -558,8 +583,10 @@ export function registerTerminalIPC(): void {
   })
 
   // terminal:destroy — kills the PTY attachment AND the tmux session (tile deleted)
-  ipcMain.handle('terminal:destroy', (_, tileId: string) => {
+  ipcMain.handle('terminal:destroy', (_, tileId: string, workspaceId: string) => {
     const session = terminals.get(tileId)
+    const sessionWorkspaceId = session?.workspaceId ?? workspaceId
+    if (session && session.workspaceId !== workspaceId) return
     if (session) {
       // Kill the tmux session if this terminal was tmux-backed
       if (session.tmuxSession) {
@@ -569,19 +596,19 @@ export function registerTerminalIPC(): void {
       terminals.delete(tileId)
     }
     bus.publish({
-      channel: `tile:${tileId}`,
+      channel: `tile:${sessionWorkspaceId}:${tileId}`,
       type: 'system',
       source: `terminal:${tileId}`,
-      payload: { action: 'destroyed' }
+      payload: { action: 'destroyed', workspaceId: sessionWorkspaceId }
     })
     // Clean up buffer and peer state
     const buf = terminalBuffers.get(tileId)
     if (buf?.timer) clearTimeout(buf.timer)
     terminalBuffers.delete(tileId)
-    removePeerTile(tileId)
+    removePeerTile(sessionWorkspaceId, tileId)
     
     // Revoke the tile's MCP token since the tile is being destroyed
-    revokeTileToken(tileId)
+    revokeTileToken(sessionWorkspaceId, tileId)
   })
 
   // terminal:detach — disconnects the PTY attachment but leaves tmux session alive
@@ -598,10 +625,21 @@ export function registerTerminalIPC(): void {
   })
 
   // terminal:update-peers — sync agent room membership + write peers.md / room status
-  ipcMain.handle('terminal:update-peers', async (_, tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>) => {
+  ipcMain.handle('terminal:update-peers', async (
+    _,
+    tileId: string,
+    workspaceId: string,
+    workspaceDir: string,
+    peers: Array<{ peerId: string; peerType: string; tools: string[] }>,
+  ) => {
     const tileTypes: Record<string, string> = { [tileId]: 'terminal' }
     for (const p of peers ?? []) tileTypes[p.peerId] = p.peerType || 'unknown'
-    const room = updateLinks(tileId, (peers ?? []).map(p => p.peerId), tileTypes)
+    const room = updateLinks(
+      workspaceId,
+      tileId,
+      (peers ?? []).map(p => p.peerId),
+      tileTypes,
+    )
 
     // Also update this tile's own tmux status bar
     const session = terminals.get(tileId)
@@ -615,10 +653,10 @@ export function registerTerminalIPC(): void {
     if (!peers || peers.length === 0) {
       try { await fsP.unlink(peersPath) } catch { /* didn't exist or not permitted */ }
       bus.publish({
-        channel: `tile:${tileId}`,
+        channel: `tile:${workspaceId}:${tileId}`,
         type: 'system',
         source: `terminal:${tileId}`,
-        payload: { action: 'peers_updated', count: 0, roomId: null }
+        payload: { action: 'peers_updated', workspaceId, count: 0, roomId: null }
       })
       return
     }
@@ -629,7 +667,7 @@ export function registerTerminalIPC(): void {
       room ? `Room id: \`${room.id}\`` : 'Room: (pending)',
       '',
       'These blocks share an agent room with you. Prefer MCP `room_status` / `room_post` / `room_consume`.',
-      `Live inbox: ~/.codesurf/room-inboxes/${tileId}/ROOM.md`,
+      `Live inbox: ~/.codesurf/workspaces/${workspaceId}/agent-rooms/inboxes/${tileId}/ROOM.md`,
       '',
     ]
     for (const peer of peers) {
@@ -656,10 +694,16 @@ export function registerTerminalIPC(): void {
     }
 
     bus.publish({
-      channel: `tile:${tileId}`,
+      channel: `tile:${workspaceId}:${tileId}`,
       type: 'system',
       source: `terminal:${tileId}`,
-      payload: { action: 'peers_updated', count: peers.length, peerIds: peers.map(p => p.peerId), persisted }
+      payload: {
+        action: 'peers_updated',
+        workspaceId,
+        count: peers.length,
+        peerIds: peers.map(p => p.peerId),
+        persisted,
+      }
     })
   })
 }

@@ -24,7 +24,7 @@ describe('Electrobun window.electron facade', () => {
     await facade.window.isFresh()
     await facade.shell.openExternal('https://example.com')
     await facade.canvas.queuedMessages.append({ id: 'msg-1' })
-    await facade.terminal.updatePeers('tile-1', '/tmp/project', [])
+    await facade.terminal.updatePeers('tile-1', 'workspace-1', '/tmp/project', [])
     await facade.fs.readFile('/tmp/project/README.md', 'ws-1')
     await facade.fs.watch('/tmp/project', () => {}, 'ws-1')()
 
@@ -34,7 +34,10 @@ describe('Electrobun window.electron facade', () => {
       { channel: 'window:isFresh', args: [] },
       { channel: 'shell:openExternal', args: ['https://example.com'] },
       { channel: 'canvas:queuedMessages:append', args: [{ id: 'msg-1' }] },
-      { channel: 'terminal:update-peers', args: ['tile-1', '/tmp/project', []] },
+      {
+        channel: 'terminal:update-peers',
+        args: ['tile-1', 'workspace-1', '/tmp/project', []],
+      },
       { channel: 'fs:readFile', args: ['/tmp/project/README.md', 'ws-1'] },
       { channel: 'fs:watchStart', args: ['/tmp/project', 'ws-1'] },
       { channel: 'fs:watchStop', args: ['/tmp/project', 'ws-1'] },

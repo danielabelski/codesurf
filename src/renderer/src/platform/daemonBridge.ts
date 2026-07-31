@@ -704,10 +704,11 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     terminal: {
       create: async (
         tileId: string,
+        workspaceId: string,
         workspaceDir: string,
         launchBin?: string,
         launchArgs?: string[],
-        options?: { workspaceId?: string, cols?: number, rows?: number },
+        options?: { cols?: number, rows?: number },
       ) => {
         // The public gateway protocol deliberately does not accept an arbitrary
         // executable. Sandboxes select an allowlisted shell/server-side image.
@@ -716,7 +717,7 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         }
         const session = await terminalTransport.create(tileId, {
           cwd: workspaceDir,
-          workspaceId: options?.workspaceId,
+          workspaceId,
           cols: options?.cols,
           rows: options?.rows,
         })
@@ -730,13 +731,14 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         return terminalTransport.write(tileId, `\x15cd '${escaped}'\r`)
       },
       resize: (tileId: string, cols: number, rows: number) => terminalTransport.resize(tileId, cols, rows),
-      destroy: (tileId: string) => terminalTransport.close(tileId),
+      destroy: (tileId: string, _workspaceId: string) => terminalTransport.close(tileId),
       dispose: (tileId: string) => terminalTransport.close(tileId),
       detach: (tileId: string) => terminalTransport.close(tileId),
       // Agent-room metadata is an Electron/tmux concern. It never grants a
       // remote terminal new capabilities, so retain the harmless renderer hook.
       updatePeers: async (
         _tileId: string,
+        _workspaceId: string,
         _workspaceDir: string,
         _peers: Array<{ peerId: string; peerType: string; tools: string[] }>,
       ) => undefined,
