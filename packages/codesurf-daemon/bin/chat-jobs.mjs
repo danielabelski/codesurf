@@ -18,6 +18,7 @@ import {
   truncateUtf8,
 } from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,
   buildCodexSdkThreadOptions,
@@ -965,7 +966,7 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
 
 // Providers the @ai-sdk/harness backend can host. Module-level mirror of the
 // closure-local set, so shouldUseHarness() stays a pure, exported predicate.
-const HARNESS_CAPABLE_PROVIDERS = new Set(['claude', 'codex', 'pi'])
+const HARNESS_CAPABLE_PROVIDERS = new Set(['claude', 'codex'])
 
 // Decide whether a request routes through the harness backend vs a native
 // provider path. Pure + exported so the daemon test can assert the routing
@@ -2813,6 +2814,9 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         await runHermesJob(job, request, workspaceDir, instructionPrompt)
       } else if (request.provider === 'omnigent') {
         await runOmnigentJob(job, request, workspaceDir, instructionPrompt)
+      } else if (request.provider === 'pi') {
+        await appendEvent(job.id, { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR })
+        await appendEvent(job.id, { type: 'done' })
       } else {
         await appendEvent(job.id, { type: 'error', error: `Daemon execution is only implemented for Claude, Codex, OpenCode, Hermes, and Omnigent right now. Requested: ${request.provider}` })
         await appendEvent(job.id, { type: 'done' })

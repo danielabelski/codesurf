@@ -1,15 +1,12 @@
 # Tasks
 
-## Needs Manual Action
-- [ ] `bun install` — pulls in elkjs, lucide-react, react-file-icon
-
 ## Done
 - [x] Everything from this session (see memory/2026-03-17.md)
 - [x] lineHeight fixed (0.5 was invalid, back to 1)
 - [x] Git status Map → plain object (HMR-safe)
 
 ## Up Next
-- [ ] react-file-icon proper icons (after bun install)
+- [ ] react-file-icon proper icons
 - [ ] Git status in sidebar — test with a real repo
 - [ ] Send to back / bring to front in tile context menu
 - [ ] Save/restore expanded sidebar folder state

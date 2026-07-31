@@ -21,6 +21,7 @@ import { isAbsolute, join, dirname } from 'node:path'
 import { HarnessAgent } from '@ai-sdk/harness/agent'
 import { claudeCode } from '@ai-sdk/harness-claude-code'
 import { codex } from '@ai-sdk/harness-codex'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   createSessionWorktree,
   changedFiles,
@@ -39,10 +40,9 @@ import {
 // keep resolving `isToolAllowedByAgent` from here. Source of truth and the
 // null/[]/names semantics live in agent-mode-tools.mjs.
 export { isToolAllowedByAgent } from './agent-mode-tools.mjs'
+export { PI_HARNESS_UNAVAILABLE_ERROR }
 
 export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex'])
-export const PI_HARNESS_UNAVAILABLE_ERROR =
-  'Pi harness support is temporarily unavailable because the published adapter includes a high-severity vulnerable dependency. Upgrade CodeSurf after a patched @ai-sdk/harness-pi release is available.'
 
 // Auth strategy: KEEP the real $HOME (inherited) so the Claude/Codex CLI finds
 // the user's existing OAuth login / keychain credentials. The harness adapter's
