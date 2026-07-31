@@ -36,6 +36,7 @@ jobs:
           npm --prefix packages/codesurf-daemon ci
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
+          npm --prefix apps/chat-app ci
 
       - name: Audit dependency trees
         run: |
@@ -44,6 +45,7 @@ jobs:
           npm --prefix packages/codesurf-daemon audit --audit-level=low
           npm --prefix packages/codesurf-relay audit --audit-level=low
           npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+          npm --prefix apps/chat-app audit --audit-level=low
 
       - name: Typecheck
         run: npm run typecheck
@@ -56,6 +58,9 @@ jobs:
 
       - name: Build and verify web/PWA artifacts
         run: npm run build:web && npm run verify:web-build
+
+      - name: Build standalone chat app
+        run: npm --prefix apps/chat-app run build
 
       - name: Build, install, and smoke npm package
         run: npm run test:npm-package

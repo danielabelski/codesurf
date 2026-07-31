@@ -73,6 +73,7 @@ jobs:
           npm --prefix packages/codesurf-daemon ci
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
+          npm --prefix apps/chat-app ci
 
       - name: Audit dependency trees
         run: |
@@ -81,6 +82,7 @@ jobs:
           npm --prefix packages/codesurf-daemon audit --audit-level=low
           npm --prefix packages/codesurf-relay audit --audit-level=low
           npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+          npm --prefix apps/chat-app audit --audit-level=low
 
       - name: Run release gate tests
         run: npm test

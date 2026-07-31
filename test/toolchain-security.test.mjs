@@ -13,6 +13,7 @@ import { patchBraceExpansion } from '../scripts/patch-brace-expansion-compat.mjs
 
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const RELAY_DIR = resolve(ROOT_DIR, 'packages/codesurf-relay')
+const CHAT_APP_DIR = resolve(ROOT_DIR, 'apps/chat-app')
 const require = createRequire(import.meta.url)
 const ensureElectron = require('../scripts/ensure-electron.js')
 const NODE_FLOOR = '>=22.12.0'
@@ -113,12 +114,15 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
     assert.match(workflow, /npm audit --audit-level=low/)
     assert.match(workflow, /npm audit --omit=dev --audit-level=low/)
     assert.match(workflow, /npm --prefix packages\/codesurf-relay audit --audit-level=low/)
+    assert.match(workflow, /npm --prefix apps\/chat-app ci/)
+    assert.match(workflow, /npm --prefix apps\/chat-app audit --audit-level=low/)
   }
 
   const ciWorkflow = await readFile(workflowPaths[0], 'utf8')
   assert.match(ciWorkflow, /npm ci --omit=dev/)
   assert.match(ciWorkflow, /npm run build:web && npm run verify:web-build/)
   assert.match(ciWorkflow, /npm run test:npm-package/)
+  assert.match(ciWorkflow, /npm --prefix apps\/chat-app run build/)
 
   const manifest = await readJson(resolve(ROOT_DIR, 'package.json'))
   assert.match(manifest.scripts?.['test:unit:core'] ?? '', /node --experimental-strip-types --test/)
@@ -150,6 +154,48 @@ test('relay test toolchain remains on the audited Node, Vite, and Vitest line', 
     assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version)
   }
   assert.deepEqual(packageVersions(lock, 'esbuild'), ['0.28.1'])
+})
+
+test('standalone chat app lock and audited build tools remain authoritative', async () => {
+  const [manifest, lock] = await Promise.all([
+    readJson(resolve(CHAT_APP_DIR, 'package.json')),
+    readJson(resolve(CHAT_APP_DIR, 'package-lock.json')),
+  ])
+
+  assert.equal(manifest.packageManager, 'npm@10.9.0')
+  assert.equal(manifest.engines?.node, NODE_FLOOR)
+  assert.deepEqual(lock.packages?.['']?.engines, manifest.engines)
+  assert.equal(
+    manifest.dependencies?.['@codesurf/chat-bridge'],
+    'file:../../packages/codesurf-chat-bridge',
+  )
+  assert.equal(
+    lock.packages?.['']?.dependencies?.['@codesurf/chat-bridge'],
+    manifest.dependencies['@codesurf/chat-bridge'],
+  )
+  assert.equal(lock.packages?.['../../packages/codesurf-chat-bridge']?.name, '@codesurf/chat-bridge')
+  assert.equal(lock.packages?.['node_modules/@codesurf/chat-bridge']?.link, true)
+  assert.equal(lock.packages?.['node_modules/@contex/chat-bridge'], undefined)
+
+  const expectedDevTools = {
+    '@babel/core': '7.29.7',
+    '@vitejs/plugin-react': '5.2.0',
+    esbuild: '0.28.1',
+    postcss: '8.5.25',
+    vite: '7.3.6',
+  }
+  for (const [name, version] of Object.entries(expectedDevTools)) {
+    assert.equal(manifest.devDependencies?.[name], version)
+    assert.equal(lock.packages?.[`node_modules/${name}`]?.version, version)
+  }
+  assert.deepEqual(manifest.overrides, {
+    '@babel/core': '7.29.7',
+    esbuild: '0.28.1',
+    postcss: '8.5.25',
+  })
+  assert.deepEqual(packageVersions(lock, '@babel/core'), ['7.29.7'])
+  assert.deepEqual(packageVersions(lock, 'esbuild'), ['0.28.1'])
+  assert.deepEqual(packageVersions(lock, 'postcss'), ['8.5.25'])
 })
 
 test('native rebuild keeps package authority and handles production-only installs explicitly', () => {
