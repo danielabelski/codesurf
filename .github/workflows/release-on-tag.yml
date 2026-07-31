@@ -84,6 +84,9 @@ jobs:
           npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
           npm --prefix apps/chat-app audit --audit-level=low
 
+      - name: Lint and verify formatting
+        run: npm run lint && npm run format:check
+
       - name: Run release gate tests
         run: npm test
 

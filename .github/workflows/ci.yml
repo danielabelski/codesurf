@@ -31,6 +31,38 @@ jobs:
       - name: Verify Windows process-tree termination contract
         run: node --test test/relay-windows-process-tree.test.ts
 
+  linux-core-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+
+      - name: Build the main-process test prerequisite
+        run: npm run build:main
+
+      - name: Verify portable type and test contracts
+        run: |
+          npm run typecheck
+          npm run test:unit:core
+          npm run test:packages
+
+      - name: Build and verify portable web/PWA artifacts
+        run: npm run build:web && npm run verify:web-build
+
   build-and-test:
     runs-on: macos-latest
     steps:
@@ -67,6 +99,9 @@ jobs:
           npm --prefix packages/codesurf-relay audit --audit-level=low
           npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
           npm --prefix apps/chat-app audit --audit-level=low
+
+      - name: Lint and verify formatting
+        run: npm run lint && npm run format:check
 
       - name: Typecheck
         run: npm run typecheck

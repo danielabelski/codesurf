@@ -25,13 +25,19 @@ const EXPECTED_TOOLCHAIN = {
   devDependencies: {
     '@babel/core': '7.29.7',
     '@electron/rebuild': '4.2.0',
+    '@eslint/js': '9.39.1',
     '@vitejs/plugin-react': '5.2.0',
     'brace-expansion': '5.0.9',
     'ejs': '5.0.2',
     'electron-builder': '26.15.3',
+    'eslint': '9.39.1',
+    'eslint-plugin-react-hooks': '7.1.1',
     'esbuild': '0.28.1',
+    'globals': '17.8.0',
     'node-gyp': '12.4.0',
     'postcss': '8.5.25',
+    'prettier': '3.9.6',
+    'typescript-eslint': '8.65.0',
     'vite': '7.3.6',
     'vite-plugin-pwa': '1.2.0',
   },
@@ -116,9 +122,14 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
     assert.match(workflow, /npm --prefix packages\/codesurf-relay audit --audit-level=low/)
     assert.match(workflow, /npm --prefix apps\/chat-app ci/)
     assert.match(workflow, /npm --prefix apps\/chat-app audit --audit-level=low/)
+    assert.match(workflow, /npm run lint && npm run format:check/)
   }
 
   const ciWorkflow = await readFile(workflowPaths[0], 'utf8')
+  assert.match(ciWorkflow, /linux-core-contract:/)
+  assert.match(ciWorkflow, /runs-on: ubuntu-latest/)
+  assert.match(ciWorkflow, /npm run test:unit:core/)
+  assert.match(ciWorkflow, /npm run test:packages/)
   assert.match(ciWorkflow, /npm ci --omit=dev/)
   assert.match(ciWorkflow, /npm run build:web && npm run verify:web-build/)
   assert.match(ciWorkflow, /npm run test:npm-package/)
