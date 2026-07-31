@@ -45,6 +45,12 @@ import {
   readAttestedExtensionResource,
 } from './media-resource-attestation.ts'
 import { applyMediaExtensionHtmlPolicy } from './media-html-policy.ts'
+import {
+  createExtensionSecurityState,
+  loadExtensionSecurityState,
+  persistExtensionSecurityState,
+  type ExtensionSecurityState,
+} from './security-state.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -63,67 +69,6 @@ export interface AggregatedContributions {
 interface LightweightManifestCandidate {
   manifest: ExtensionManifest
   adapted: boolean
-}
-
-// ── Persisted disabled-extension set ──────────────────────────────────────────
-
-const DISABLED_EXTS_PATH = join(CODESURF_HOME, 'disabled-extensions.json')
-/** Catalog extensions the user has explicitly enabled via the Gallery. Without
- *  this, a rescan would re-apply the catalog default-off and silently
- *  uninstall what the user just installed. */
-const ENABLED_CATALOG_PATH = join(CODESURF_HOME, 'enabled-catalog-extensions.json')
-/** Capability grants (P1): extId -> consented capability names (see loadGrantsMap). */
-const GRANTS_PATH = join(CODESURF_HOME, 'plugin-capability-grants.json')
-
-async function loadDisabledSet(): Promise<Set<string>> {
-  try {
-    const raw = await fs.readFile(DISABLED_EXTS_PATH, 'utf8')
-    const arr = JSON.parse(raw)
-    return new Set(Array.isArray(arr) ? arr : [])
-  } catch {
-    return new Set()
-  }
-}
-
-async function saveDisabledSet(ids: Set<string>): Promise<void> {
-  await fs.mkdir(CODESURF_HOME, { recursive: true })
-  await fs.writeFile(DISABLED_EXTS_PATH, JSON.stringify([...ids], null, 2))
-}
-
-async function loadEnabledCatalogSet(): Promise<Set<string>> {
-  try {
-    const raw = await fs.readFile(ENABLED_CATALOG_PATH, 'utf8')
-    const arr = JSON.parse(raw)
-    return new Set(Array.isArray(arr) ? arr : [])
-  } catch {
-    return new Set()
-  }
-}
-
-async function saveEnabledCatalogSet(ids: Set<string>): Promise<void> {
-  await fs.mkdir(CODESURF_HOME, { recursive: true })
-  await fs.writeFile(ENABLED_CATALOG_PATH, JSON.stringify([...ids], null, 2))
-}
-
-/**
- * Capability grants (P1). Maps extId -> the capability names the user consented
- * to at enable time. Authoritative + persisted so activation/the bridge gate
- * survive restarts. A plugin update that adds a capability is NOT auto-granted —
- * the new capability stays ungranted until the user re-enables (re-consents).
- */
-async function loadGrantsMap(): Promise<Record<string, string[]>> {
-  try {
-    const raw = await fs.readFile(GRANTS_PATH, 'utf8')
-    const obj = JSON.parse(raw)
-    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {}
-  } catch {
-    return {}
-  }
-}
-
-async function saveGrantsMap(grants: Record<string, string[]>): Promise<void> {
-  await fs.mkdir(CODESURF_HOME, { recursive: true })
-  await fs.writeFile(GRANTS_PATH, JSON.stringify(grants, null, 2))
 }
 
 export interface LoadedExtension {
@@ -367,7 +312,13 @@ export class ExtensionRegistry {
    *  so their power-tier main scripts do not execute. They appear in the
    *  gallery as available-to-install entries. */
   private catalogDirs: string[]
-  private rescanQueue: Promise<void> = Promise.resolve()
+  private transitionQueue: Promise<void> = Promise.resolve()
+  private requestedRescanGeneration = 0
+  private lifecycleRequestSequence = 0
+  private readonly requestedEnabled = new Map<
+    string,
+    { readonly token: number; readonly enabled: boolean }
+  >()
   private rescanPriorRootBindings:
     ReadonlyMap<string, PriorRootAuthority> | null = null
   private readonly onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
@@ -385,10 +336,47 @@ export class ExtensionRegistry {
     this.activatePower = opts?.activatePower ?? activatePowerExtension
   }
 
+  private getSecurityState(): ExtensionSecurityState {
+    return createExtensionSecurityState({
+      disabledExtensionIds: this.disabledIds,
+      enabledCatalogExtensionIds: this.enabledCatalogIds,
+      grants: this.grants,
+    })
+  }
+
+  private replaceSecurityState(state: ExtensionSecurityState): void {
+    const disabledIds = new Set(state.disabledExtensionIds)
+    const enabledCatalogIds = new Set(state.enabledCatalogExtensionIds)
+    const grants = Object.fromEntries(
+      Object.entries(state.grants).map(([id, capabilities]) => [
+        id,
+        [...capabilities],
+      ]),
+    )
+    this.disabledIds = disabledIds
+    this.enabledCatalogIds = enabledCatalogIds
+    this.grants = grants
+  }
+
+  private async persistSecurityState(base: ExtensionSecurityState): Promise<void> {
+    await persistExtensionSecurityState(
+      CODESURF_HOME,
+      base,
+      this.getSecurityState(),
+    )
+  }
+
+  private async persistExactSecurityState(
+    target: ExtensionSecurityState,
+  ): Promise<void> {
+    const current = await loadExtensionSecurityState(CODESURF_HOME)
+    if (JSON.stringify(current) === JSON.stringify(target)) return
+    await persistExtensionSecurityState(CODESURF_HOME, current, target)
+  }
+
   async scan(): Promise<void> {
-    this.disabledIds = await loadDisabledSet()
-    this.enabledCatalogIds = await loadEnabledCatalogSet()
-    this.grants = await loadGrantsMap()
+    const securityState = await loadExtensionSecurityState(CODESURF_HOME)
+    this.replaceSecurityState(securityState)
     for (const bundledDir of this.bundledDirs) {
       await this.scanDir(bundledDir, undefined, bundledDir)
     }
@@ -410,29 +398,154 @@ export class ExtensionRegistry {
   }
 
   async rescan(workspacePath?: string | null): Promise<void> {
+    this.requestedRescanGeneration += 1
     const normalizedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
     const run = async (): Promise<void> => {
+      const previousExtensions = new Map(this.extensions)
       const previousIdentities = new Map(
-        [...this.extensions].map(([id, extension]) => [id, extension.mediaIdentity]),
+        [...previousExtensions].map(([id, extension]) => [id, extension.mediaIdentity]),
       )
-      this.deactivateAll()
+      const preRevokedIds = new Set<string>()
+      for (const [id, extension] of previousExtensions) {
+        const path = extension.manifest._path
+        if (!path) {
+          preRevokedIds.add(id)
+          continue
+        }
+        const currentRoot = await captureExtensionMediaRoot(path).catch(() => null)
+        if (!currentRoot || !sameRootBinding(currentRoot, extension.installRootBinding)) {
+          preRevokedIds.add(id)
+        }
+      }
+      if (preRevokedIds.size > 0) {
+        const securityStateBefore = this.getSecurityState()
+        const failures: unknown[] = []
+        for (const id of preRevokedIds) {
+          const extension = this.extensions.get(id)
+          if (extension) {
+            extension.manifest._enabled = false
+            extension.mediaIdentity = null
+            extension.mediaAttestation = null
+            if (extension.deactivate) {
+              try {
+                extension.deactivate()
+              } catch (error) {
+                failures.push(error)
+              }
+              extension.deactivate = undefined
+            }
+          }
+          this.extraMCPTools = this.extraMCPTools.filter(tool => tool.extId !== id)
+          this.disabledIds.add(id)
+          this.enabledCatalogIds.delete(id)
+          delete this.grants[id]
+        }
+        const results = await Promise.allSettled([
+          this.persistSecurityState(securityStateBefore),
+          ...[...preRevokedIds].map(id => this.revokeSensitiveMedia(id)),
+        ])
+        for (const result of results) {
+          if (result.status === 'rejected') failures.push(result.reason)
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            'Failed to durably revoke removed extension authority',
+          )
+        }
+      }
+      let deactivationFailure: unknown
+      try {
+        this.deactivateAll()
+      } catch (error) {
+        deactivationFailure = error
+      }
       this.extensions.clear()
       this.extraMCPTools = []
+      if (deactivationFailure) throw deactivationFailure
       this.activeWorkspacePath = normalizedWorkspacePath
-      await this.scan()
-      if (normalizedWorkspacePath) {
-        await this.scanWorkspace(normalizedWorkspacePath)
+      this.rescanPriorRootBindings = new Map(
+        [...previousExtensions].map(([id, extension]) => [
+          id,
+          {
+            root: extension.installRootBinding,
+            power: extension.manifest.tier === 'power',
+          },
+        ]),
+      )
+      try {
+        await this.scan()
+        if (normalizedWorkspacePath) {
+          await this.scanWorkspace(normalizedWorkspacePath)
+        }
+      } finally {
+        this.rescanPriorRootBindings = null
+      }
+      const replacedOrRemovedIds = new Set(preRevokedIds)
+      for (const [id, previous] of previousExtensions) {
+        const current = this.extensions.get(id)
+        if (
+          current
+          && rootReplacementRequiresRestriction(
+            {
+              root: previous.installRootBinding,
+              power: previous.manifest.tier === 'power',
+            },
+            current.installRootBinding,
+            current.manifest.tier === 'power',
+          )
+        ) {
+          replacedOrRemovedIds.add(id)
+        }
+      }
+      if (replacedOrRemovedIds.size > 0) {
+        const securityStateBefore = this.getSecurityState()
+        const failures: unknown[] = []
+        for (const id of replacedOrRemovedIds) {
+          const extension = this.extensions.get(id)
+          if (extension) {
+            extension.manifest._enabled = false
+            extension.mediaIdentity = null
+            extension.mediaAttestation = null
+            if (extension.deactivate) {
+              try {
+                extension.deactivate()
+              } catch (error) {
+                failures.push(error)
+              }
+              extension.deactivate = undefined
+            }
+          }
+          this.extraMCPTools = this.extraMCPTools.filter(tool => tool.extId !== id)
+          this.disabledIds.add(id)
+          this.enabledCatalogIds.delete(id)
+          delete this.grants[id]
+        }
+        try {
+          await this.persistSecurityState(securityStateBefore)
+        } catch (error) {
+          failures.push(error)
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            'Failed to disable replaced extension authority',
+          )
+        }
       }
       const revokedIds = [
         ...[...previousIdentities].filter(([id, identity]) => {
           return this.extensions.get(id)?.mediaIdentity !== identity
         }).map(([id]) => id),
+        ...replacedOrRemovedIds,
         ...[...this.extensions.values()]
           .filter(extension => !extension.manifest._enabled)
           .map(extension => extension.manifest.id),
       ]
-      await Promise.allSettled(
-        [...new Set(revokedIds)].map(id => this.revokeSensitiveMedia(id)),
+      const pendingRevocations = new Set(revokedIds)
+      for (const id of preRevokedIds) pendingRevocations.delete(id)
+      await Promise.all(
+        [...pendingRevocations].map(id => this.revokeSensitiveMedia(id)),
       )
     }
 
@@ -446,11 +559,9 @@ export class ExtensionRegistry {
         ? null
         : resolve(workspacePath)
     return this.enqueueTransition(async () => {
-      const [disabledIds, enabledCatalogIds] = await Promise.all([
-        loadDisabledSet(),
-        loadEnabledCatalogSet(),
-      ])
-      this.enabledCatalogIds = enabledCatalogIds
+      const securityState = await loadExtensionSecurityState(CODESURF_HOME)
+      this.replaceSecurityState(securityState)
+      const disabledIds = new Set(securityState.disabledExtensionIds)
       const manifests = new Map<string, ExtensionManifest>()
       const targetWorkspacePath = requestedWorkspacePath === undefined
         ? this.activeWorkspacePath
@@ -499,8 +610,8 @@ export class ExtensionRegistry {
   }
 
   private enqueueTransition<T>(run: () => Promise<T>): Promise<T> {
-    const result = this.rescanQueue.then(run, run)
-    this.rescanQueue = result.then(
+    const result = this.transitionQueue.then(run, run)
+    this.transitionQueue = result.then(
       () => undefined,
       () => undefined,
     )
@@ -1271,9 +1382,36 @@ export class ExtensionRegistry {
     })
   }
 
-  async enable(id: string): Promise<boolean> {
+  enable(id: string): Promise<boolean> {
+    const request = {
+      token: ++this.lifecycleRequestSequence,
+      enabled: true,
+    } as const
+    this.requestedEnabled.set(id, request)
+    const rescanGeneration = this.requestedRescanGeneration
+    const result = this.enqueueTransition(() => {
+      return this.enableWithinTransition(id, rescanGeneration, request)
+    })
+    return result.finally(() => {
+      if (this.requestedEnabled.get(id) === request) {
+        this.requestedEnabled.delete(id)
+      }
+    })
+  }
+
+  private async enableWithinTransition(
+    id: string,
+    rescanGeneration: number,
+    request: { readonly token: number; readonly enabled: true },
+  ): Promise<boolean> {
     const ext = this.extensions.get(id)
     if (!ext) return false
+    const requestIsCurrent = (): boolean => {
+      return this.extensions.get(id) === ext
+        && this.requestedEnabled.get(id) === request
+        && this.requestedRescanGeneration === rescanGeneration
+    }
+    if (!requestIsCurrent()) return true
     const wasEnabled = ext.manifest._enabled === true
     const previousMediaIdentity = ext.mediaIdentity
     const previousMediaAttestation = ext.mediaAttestation
@@ -1300,10 +1438,18 @@ export class ExtensionRegistry {
           )
         : null
     }
-    const disabledBefore = this.disabledIds.has(id)
-    const catalogEnabledBefore = this.enabledCatalogIds.has(id)
-    const hadGrantsBefore = Object.hasOwn(this.grants, id)
-    const grantsBefore = hadGrantsBefore ? [...(this.grants[id] ?? [])] : undefined
+    if (!requestIsCurrent()) return true
+    const securityStateBefore = this.getSecurityState()
+    const caps = ext.manifest.capabilities
+    const requestedCapabilities = Array.isArray(caps)
+      ? caps.map(capability => capability.name)
+      : []
+    if (
+      requestedCapabilities.some(capability => !isPluginCapabilityName(capability))
+      || new Set(requestedCapabilities).size !== requestedCapabilities.length
+    ) {
+      throw new Error(`Extension ${id} requests an unsupported or duplicate capability`)
+    }
     this.disabledIds.delete(id)
     // If this was installed from a catalog dir, persist that the user has
     // explicitly enabled it so future rescans do not revert the default-off.
@@ -1318,14 +1464,19 @@ export class ExtensionRegistry {
     // P1 consent: enabling a plugin that declares capabilities grants exactly
     // those, recorded authoritatively + persisted. The "Wants: <cap>" row in the
     // gallery is the consent surface; clicking Add/enable is the consent.
-    const caps = ext.manifest.capabilities
-    const persistGrants = Array.isArray(caps) && caps.length > 0
-    if (persistGrants) {
-      this.grants[id] = caps.map(c => c.name)
+    if (requestedCapabilities.length > 0) {
+      this.grants[id] = requestedCapabilities
+    } else {
+      delete this.grants[id]
     }
-    const rollback = async (error: unknown): Promise<never> => {
+    const restorePreviousState = async (): Promise<void> => {
+      const failures: unknown[] = []
       if (ext.deactivate && ext.deactivate !== previousDeactivate) {
-        ext.deactivate()
+        try {
+          ext.deactivate()
+        } catch (error) {
+          failures.push(error)
+        }
       }
       ext.deactivate = previousDeactivate
       this.extraMCPTools = this.extraMCPTools.filter(tool => {
@@ -1334,32 +1485,36 @@ export class ExtensionRegistry {
       ext.manifest._enabled = wasEnabled
       ext.mediaIdentity = previousMediaIdentity
       ext.mediaAttestation = previousMediaAttestation
-      if (disabledBefore) this.disabledIds.add(id)
-      else this.disabledIds.delete(id)
-      if (catalogEnabledBefore) this.enabledCatalogIds.add(id)
-      else this.enabledCatalogIds.delete(id)
-      if (hadGrantsBefore) this.grants[id] = grantsBefore ?? []
-      else delete this.grants[id]
-      await Promise.allSettled([
-        saveDisabledSet(this.disabledIds),
-        persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
-        persistGrants ? saveGrantsMap(this.grants) : Promise.resolve(),
+      this.replaceSecurityState(securityStateBefore)
+      const persistenceResults = await Promise.allSettled([
+        this.persistExactSecurityState(securityStateBefore),
+        !wasEnabled ? this.revokeSensitiveMedia(id) : Promise.resolve(),
       ])
-      if (!wasEnabled) await this.revokeSensitiveMedia(id)
+      for (const result of persistenceResults) {
+        if (result.status === 'rejected') failures.push(result.reason)
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          `Failed to durably roll back extension ${id}`,
+        )
+      }
+    }
+    const rollback = async (error: unknown): Promise<never> => {
+      try {
+        await restorePreviousState()
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Extension ${id} failed and its rollback was not durable`,
+        )
+      }
       throw error
     }
     // Await disk writes so a subsequent ext:refresh rescan reads the latest
     // sets from disk (scan() reloads both sets from files).
     try {
-      const persistenceResults = await Promise.allSettled([
-        saveDisabledSet(this.disabledIds),
-        persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
-        persistGrants ? saveGrantsMap(this.grants) : Promise.resolve(),
-      ])
-      const persistenceFailure = persistenceResults.find(
-        (result): result is PromiseRejectedResult => result.status === 'rejected',
-      )
-      if (persistenceFailure) throw persistenceFailure.reason
+      await this.persistSecurityState(securityStateBefore)
       const path = ext.manifest._path
       if (!path) throw new Error(`Extension ${id} is missing its install path`)
       const afterPersistenceRoot = await assertRegularExtensionRoot(path)
@@ -1380,6 +1535,10 @@ export class ExtensionRegistry {
     } catch (error) {
       return rollback(error)
     }
+    if (!requestIsCurrent()) {
+      await restorePreviousState()
+      return true
+    }
     // Power-tier extensions may not have been activated on first scan (catalog
     // or workspace default-off). Load the main script now that the user has
     // explicitly enabled it — this is the explicit user opt-in for untrusted scope.
@@ -1399,6 +1558,7 @@ export class ExtensionRegistry {
         `[Security] User explicitly enabled power extension "${m.name}" (${m.id}) ` +
         `from scope "${scope}" — runs with full main-process privileges.`,
       )
+      let activationSuperseded = false
       try {
         const ctx = new ExtensionContext(m, bus, this)
         const activationRoot = await assertRegularExtensionRoot(m._path)
@@ -1424,12 +1584,24 @@ export class ExtensionRegistry {
           throw new Error(`Power extension activation failed: ${m.id}`)
         }
         ext.deactivate = deactivate
+        activationSuperseded = (
+          !requestIsCurrent()
+          || ext.manifest._enabled !== true
+        )
         // NOTE: tools are registered directly via registerMCPTool during activate();
         // do not push ctx.getRegisteredTools() here to avoid double-registration.
       } catch (err) {
         return rollback(err)
       }
+      if (activationSuperseded) {
+        await restorePreviousState()
+        return true
+      }
     } else {
+      if (!requestIsCurrent()) {
+        await restorePreviousState()
+        return true
+      }
       ext.manifest._enabled = true
       ext.mediaAttestation = pendingMediaAttestation
       ext.mediaIdentity = pendingMediaAttestation?.identity ?? null
@@ -1437,30 +1609,56 @@ export class ExtensionRegistry {
     return true
   }
 
-  async disable(id: string): Promise<boolean> {
+  disable(id: string): Promise<boolean> {
+    const request = {
+      token: ++this.lifecycleRequestSequence,
+      enabled: false,
+    } as const
+    this.requestedEnabled.set(id, request)
+    const result = this.enqueueTransition(() => {
+      return this.disableWithinTransition(id, request)
+    })
+    return result.finally(() => {
+      if (this.requestedEnabled.get(id) === request) {
+        this.requestedEnabled.delete(id)
+      }
+    })
+  }
+
+  private async disableWithinTransition(
+    id: string,
+    request: { readonly token: number; readonly enabled: false },
+  ): Promise<boolean> {
+    if (this.requestedEnabled.get(id) !== request) return true
     const ext = this.extensions.get(id)
     if (!ext) return false
+    const securityStateBefore = this.getSecurityState()
     ext.manifest._enabled = false
-    this.disabledIds.add(id)
-    const isCatalog = this.isCatalogExtension(ext.manifest)
-    const persistEnabled = isCatalog || ext.manifest.tier === 'power'
-    if (persistEnabled) {
-      this.enabledCatalogIds.delete(id)
-    }
-    await Promise.allSettled([
-      saveDisabledSet(this.disabledIds),
-      persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
-      this.revokeSensitiveMedia(id),
-    ])
     ext.mediaIdentity = null
     ext.mediaAttestation = null
+    const failures: unknown[] = []
     if (ext.deactivate) {
-      ext.deactivate()
+      try {
+        ext.deactivate()
+      } catch (error) {
+        failures.push(error)
+      }
       ext.deactivate = undefined
     }
-    // Drop any MCP tools the extension programmatically registered.
+    // Drop any MCP tools before persistence so a disable request cannot leave
+    // a callable capability while durable state is being updated.
     this.extraMCPTools = this.extraMCPTools.filter(t => t.extId !== id)
-    return true
+    this.disabledIds.add(id)
+    this.enabledCatalogIds.delete(id)
+    delete this.grants[id]
+    const persistenceResults = await Promise.allSettled([
+      this.persistSecurityState(securityStateBefore),
+      this.revokeSensitiveMedia(id),
+    ])
+    for (const result of persistenceResults) {
+      if (result.status === 'rejected') failures.push(result.reason)
+    }
+    return failures.length === 0
   }
 
   private async revokeSensitiveMedia(id: string): Promise<void> {
@@ -1468,8 +1666,22 @@ export class ExtensionRegistry {
   }
 
   deactivateAll(): void {
+    const failures: unknown[] = []
     for (const ext of this.extensions.values()) {
-      if (ext.deactivate) ext.deactivate()
+      const deactivate = ext.deactivate
+      ext.deactivate = undefined
+      if (!deactivate) continue
+      try {
+        deactivate()
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        'One or more extensions failed to deactivate',
+      )
     }
   }
 
