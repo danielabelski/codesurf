@@ -8,6 +8,10 @@ import {
 import {
   applyResizeDragToTile,
   computeTileDragPosition,
+  getIndexedCanvasTile,
+  indexCanvasDragSnapshots,
+  indexCanvasTiles,
+  updateIndexedCanvasTiles,
 } from '../src/renderer/src/hooks/useCanvasDragSync.ts'
 import { buildCanvasContextMenuItems } from '../src/renderer/src/hooks/useCanvasContextMenus.ts'
 import {
@@ -81,6 +85,92 @@ describe('app canvas interaction behavior', () => {
       minWidth: 100,
       minHeight: 80,
     }), tile('tile-1', 30, 30, 280, 170))
+  })
+
+  test('drag snapshots are indexed once and targeted updates skip unrelated tiles', () => {
+    const tiles = Array.from(
+      { length: 10_000 },
+      (_, index) => tile(`tile-${index}`, index * 10, index * 5, 100, 80),
+    )
+    const tileIndex = indexCanvasTiles(tiles)
+    const dragState = {
+      type: 'group',
+      groupId: 'group-1',
+      startX: 0,
+      startY: 0,
+      snapshots: [
+        { id: 'tile-25', x: 250, y: 125 },
+        { id: 'tile-9999', x: 99_990, y: 49_995 },
+      ],
+    } as const
+    const snapshots = indexCanvasDragSnapshots(dragState)
+    let updateCount = 0
+    const updated = updateIndexedCanvasTiles(
+      tiles,
+      tileIndex,
+      snapshots.values(),
+      (source, snapshot) => {
+        updateCount += 1
+        return { ...source, x: snapshot.x + 10, y: snapshot.y + 20 }
+      },
+    )
+
+    assert.equal(updateCount, 2)
+    assert.notEqual(updated, tiles)
+    assert.equal(updated[24], tiles[24])
+    assert.equal(updated[25].x, 260)
+    assert.equal(updated[9999].y, 50_015)
+
+    // A concurrent reorder invalidates cached slots. The exceptional fallback
+    // repairs only the requested id instead of applying an update to the wrong tile.
+    const reordered = [tiles[9999], ...tiles.slice(0, 9999)]
+    const repaired = updateIndexedCanvasTiles(
+      reordered,
+      tileIndex,
+      [{ id: 'tile-9999' }],
+      source => ({ ...source, x: -1 }),
+    )
+    assert.equal(repaired[0].id, 'tile-9999')
+    assert.equal(repaired[0].x, -1)
+    assert.equal(tileIndex.get('tile-9999'), 0)
+    assert.equal(getIndexedCanvasTile(repaired, tileIndex, 'missing'), null)
+    assert.equal(
+      updateIndexedCanvasTiles(repaired, tileIndex, [{ id: 'missing' }], source => source),
+      repaired,
+    )
+  })
+
+  test('tile and group-resize indexes preserve every gesture snapshot field', () => {
+    const tileSnapshots = indexCanvasDragSnapshots({
+      type: 'tile',
+      tileId: 'tile-1',
+      startX: 0,
+      startY: 0,
+      initX: 10,
+      initY: 20,
+      groupSnapshots: [{ id: 'tile-2', x: 30, y: 40 }],
+    })
+    assert.deepEqual([...tileSnapshots.values()], [
+      { id: 'tile-2', x: 30, y: 40 },
+      { id: 'tile-1', x: 10, y: 20 },
+    ])
+
+    const resizeSnapshots = indexCanvasDragSnapshots({
+      type: 'group-resize',
+      groupId: 'group-1',
+      dir: 'se',
+      startX: 0,
+      startY: 0,
+      initBounds: { x: 0, y: 0, w: 100, h: 100 },
+      snapshots: [{ id: 'tile-1', x: 10, y: 20, width: 30, height: 40 }],
+    })
+    assert.deepEqual(resizeSnapshots.get('tile-1'), {
+      id: 'tile-1',
+      x: 10,
+      y: 20,
+      width: 30,
+      height: 40,
+    })
   })
 
   test('canvas context menu exposes extension, clipboard, group, and executable actions', () => {
