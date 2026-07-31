@@ -489,38 +489,65 @@ export class CodesurfRelay {
     sender?: RelayParticipant | null
     recipient?: RelayParticipant | null
     channelId?: string
-  }): Promise<RelayMessage> {
+  }, context?: RelayOperationContext): Promise<RelayMessage> {
     const content = renderRelayMessage(options.meta, options.body, options.data)
+    const files: Array<{ path: string; content: string }> = []
 
     if (options.meta.scope === 'direct' || options.meta.scope === 'system') {
-      await Promise.all([
-        ensureDir(this.participantMailboxDir(options.meta.from, 'sent')),
-        fs.writeFile(join(this.participantMailboxDir(options.meta.from, 'sent'), options.filename), content),
-        options.sender?.tileId
-          ? (ensureDir(this.tileMailboxDir(options.sender.tileId, 'sent')).then(() => fs.writeFile(join(this.tileMailboxDir(options.sender!.tileId!, 'sent'), options.filename), content)))
-          : Promise.resolve(),
-      ])
+      files.push({
+        path: join(
+          this.participantMailboxDir(options.meta.from, 'sent'),
+          options.filename,
+        ),
+        content,
+      })
+      if (options.sender?.tileId) {
+        files.push({
+          path: join(
+            this.tileMailboxDir(options.sender.tileId, 'sent'),
+            options.filename,
+          ),
+          content,
+        })
+      }
 
       if (options.meta.to) {
         const inboxMeta: RelayMessageMeta = { ...options.meta, status: 'unread' }
         const inboxContent = renderRelayMessage(inboxMeta, options.body, options.data)
-        await Promise.all([
-          ensureDir(this.participantMailboxDir(options.meta.to, 'inbox')),
-          fs.writeFile(join(this.participantMailboxDir(options.meta.to, 'inbox'), options.filename), inboxContent),
-          options.recipient?.tileId
-            ? (ensureDir(this.tileMailboxDir(options.recipient.tileId, 'inbox')).then(() => fs.writeFile(join(this.tileMailboxDir(options.recipient!.tileId!, 'inbox'), options.filename), inboxContent)))
-            : Promise.resolve(),
-        ])
+        files.push({
+          path: join(
+            this.participantMailboxDir(options.meta.to, 'inbox'),
+            options.filename,
+          ),
+          content: inboxContent,
+        })
+        if (options.recipient?.tileId) {
+          files.push({
+            path: join(
+              this.tileMailboxDir(options.recipient.tileId, 'inbox'),
+              options.filename,
+            ),
+            content: inboxContent,
+          })
+        }
       }
     }
 
     if (options.meta.scope === 'channel' && options.channelId) {
-      await ensureDir(this.channelMessagesDir(options.channelId))
-      await fs.writeFile(join(this.channelMessagesDir(options.channelId), options.filename), content)
+      files.push({
+        path: join(
+          this.channelMessagesDir(options.channelId),
+          options.filename,
+        ),
+        content,
+      })
     }
 
-    await ensureDir(this.paths.archive)
-    await fs.writeFile(join(this.paths.archive, options.filename), content)
+    files.push({
+      path: join(this.paths.archive, options.filename),
+      content,
+    })
+    await writeFilesAtomically(files, context)
 
     return {
       mailbox: options.meta.scope === 'channel' ? 'channel' : 'sent',
@@ -531,10 +558,15 @@ export class CodesurfRelay {
     }
   }
 
-  async sendDirectMessage(from: string, draft: RelayDirectMessageDraft): Promise<RelayMessage> {
-    await this.init()
-    const sender = await this.getParticipant(from)
-    const recipient = await this.getParticipant(draft.to)
+  async sendDirectMessage(
+    from: string,
+    draft: RelayDirectMessageDraft,
+    context?: RelayOperationContext,
+  ): Promise<RelayMessage> {
+    assertActive(context)
+    await this.init(context)
+    const sender = await this.getParticipant(from, context)
+    const recipient = await this.getParticipant(draft.to, context)
     if (!sender) throw new Error(`Unknown sender: ${from}`)
     if (!recipient) throw new Error(`Unknown recipient: ${draft.to}`)
 
@@ -567,18 +599,27 @@ export class CodesurfRelay {
       data: draft.data,
       sender,
       recipient,
-    })
+    }, context)
 
-    this.emit('direct_message', { from, to: draft.to, message })
-    this.emit('central_message', { message: { ...message, mailbox: 'central' } })
+    this.emit('direct_message', { from, to: draft.to, message }, context)
+    this.emit(
+      'central_message',
+      { message: { ...message, mailbox: 'central' } },
+      context,
+    )
     return message
   }
 
-  async sendChannelMessage(from: string, draft: RelayChannelMessageDraft): Promise<RelayMessage> {
-    await this.init()
-    const sender = await this.getParticipant(from)
+  async sendChannelMessage(
+    from: string,
+    draft: RelayChannelMessageDraft,
+    context?: RelayOperationContext,
+  ): Promise<RelayMessage> {
+    assertActive(context)
+    await this.init(context)
+    const sender = await this.getParticipant(from, context)
     if (!sender) throw new Error(`Unknown sender: ${from}`)
-    const channel = await this.joinChannel(draft.channel, from)
+    const channel = await this.joinChannel(draft.channel, from, context)
 
     const stamp = nowStamp()
     const id = randomUUID()
@@ -609,15 +650,30 @@ export class CodesurfRelay {
       data: draft.data,
       sender,
       channelId: channel.id,
-    })
+    }, context)
 
-    this.emit('channel_message', { from, channel: channel.id, message })
-    this.emit('central_message', { message: { ...message, mailbox: 'central' } })
+    this.emit(
+      'channel_message',
+      { from, channel: channel.id, message },
+      context,
+    )
+    this.emit(
+      'central_message',
+      { message: { ...message, mailbox: 'central' } },
+      context,
+    )
     return message
   }
 
-  async storeMemory(participantId: string, subject: string, body: string, data?: Record<string, unknown>): Promise<RelayMessage> {
-    const participant = await this.getParticipant(participantId)
+  async storeMemory(
+    participantId: string,
+    subject: string,
+    body: string,
+    data?: Record<string, unknown>,
+    context?: RelayOperationContext,
+  ): Promise<RelayMessage> {
+    assertActive(context)
+    const participant = await this.getParticipant(participantId, context)
     if (!participant) throw new Error(`Unknown participant: ${participantId}`)
     const stamp = nowStamp()
     const id = randomUUID()
@@ -640,14 +696,26 @@ export class CodesurfRelay {
       bcc: 'central',
     }
     const content = renderRelayMessage(meta, body, data)
-    await Promise.all([
-      ensureDir(this.participantMailboxDir(participantId, 'memory')),
-      fs.writeFile(join(this.participantMailboxDir(participantId, 'memory'), filename), content),
-      participant.tileId
-        ? ensureDir(this.tileMailboxDir(participant.tileId, 'memory')).then(() => fs.writeFile(join(this.tileMailboxDir(participant.tileId!, 'memory'), filename), content))
-        : Promise.resolve(),
-      fs.writeFile(join(this.paths.archive, filename), content),
-    ])
+    const files = [{
+      path: join(
+        this.participantMailboxDir(participantId, 'memory'),
+        filename,
+      ),
+      content,
+    }, {
+      path: join(this.paths.archive, filename),
+      content,
+    }]
+    if (participant.tileId) {
+      files.push({
+        path: join(
+          this.tileMailboxDir(participant.tileId, 'memory'),
+          filename,
+        ),
+        content,
+      })
+    }
+    await writeFilesAtomically(files, context)
     return { mailbox: 'memory', filename, meta, body, data }
   }
 
@@ -671,9 +739,19 @@ export class CodesurfRelay {
     return readMessage(join(this.participantMailboxDir(participantId, mailbox), filename), mailbox, filename)
   }
 
-  async updateMessageStatus(participantId: string, mailbox: Exclude<RelayMailbox, 'channel' | 'central'>, filename: string, status: RelayMessageStatus): Promise<boolean> {
+  async updateMessageStatus(
+    participantId: string,
+    mailbox: Exclude<RelayMailbox, 'channel' | 'central'>,
+    filename: string,
+    status: RelayMessageStatus,
+    context?: RelayOperationContext,
+  ): Promise<boolean> {
+    assertActive(context)
     validateMessageFilename(filename)
-    const existing = await this.readParticipantMessage(participantId, mailbox, filename)
+    const existing = await awaitActive(
+      () => this.readParticipantMessage(participantId, mailbox, filename),
+      context,
+    )
     if (!existing) return false
     const stamp = nowStamp()
     const next: RelayMessage = {
@@ -686,12 +764,24 @@ export class CodesurfRelay {
       },
     }
     const content = renderRelayMessage(next.meta, next.body, next.data)
-    await fs.writeFile(join(this.participantMailboxDir(participantId, mailbox), filename), content)
-    const participant = await this.getParticipant(participantId)
+    const participant = await this.getParticipant(participantId, context)
+    const files = [{
+      path: join(
+        this.participantMailboxDir(participantId, mailbox),
+        filename,
+      ),
+      content,
+    }]
     if (participant?.tileId) {
-      await ensureDir(this.tileMailboxDir(participant.tileId, mailbox))
-      await fs.writeFile(join(this.tileMailboxDir(participant.tileId, mailbox), filename), content)
+      files.push({
+        path: join(
+          this.tileMailboxDir(participant.tileId, mailbox),
+          filename,
+        ),
+        content,
+      })
     }
+    await writeFilesAtomically(files, context)
     return true
   }
 
@@ -748,12 +838,34 @@ export class CodesurfRelay {
     return all.sort((a, b) => a.meta.createdTs - b.meta.createdTs)
   }
 
-  async markDirectMessagesRead(participantId: string, messages: RelayMessage[]): Promise<void> {
-    await Promise.all(messages.map(message => this.updateMessageStatus(participantId, 'inbox', message.filename, 'read')))
+  async markDirectMessagesRead(
+    participantId: string,
+    messages: RelayMessage[],
+    context?: RelayOperationContext,
+  ): Promise<void> {
+    await awaitActive(
+      () => Promise.all(messages.map(message => this.updateMessageStatus(
+        participantId,
+        'inbox',
+        message.filename,
+        'read',
+        context,
+      ))).then(() => undefined),
+      context,
+    )
   }
 
-  async advanceChannelCursor(participantId: string, channelId: string, timestamp: number): Promise<void> {
-    await writeJson(this.participantCursorFile(participantId, channelId), { lastReadTs: timestamp })
+  async advanceChannelCursor(
+    participantId: string,
+    channelId: string,
+    timestamp: number,
+    context?: RelayOperationContext,
+  ): Promise<void> {
+    await writeJson(
+      this.participantCursorFile(participantId, channelId),
+      { lastReadTs: timestamp },
+      context,
+    )
   }
 
   async analyzeRelationships(): Promise<RelayRelationshipHint[]> {
