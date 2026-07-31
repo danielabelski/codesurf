@@ -44,6 +44,7 @@ import {
   extensionMediaResourcePathExists,
   readAttestedExtensionResource,
 } from './media-resource-attestation.ts'
+import { applyMediaExtensionHtmlPolicy } from './media-html-policy.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -1155,7 +1156,7 @@ export class ExtensionRegistry {
               !result.ok
               || !this.isExtensionMediaAttestationCurrent(extId, mediaAttestation)
             ) {
-              if (!result.ok) {
+              if (!result.ok && result.reason === 'changed') {
                 await this.invalidateExtensionMediaAttestation(extId, mediaAttestation)
               }
               return null
@@ -1166,14 +1167,17 @@ export class ExtensionRegistry {
             return result.ok ? result.text : null
           })
       if (raw === null) return null
+      let html = raw
       if (raw.trimStart().startsWith('{')) {
         try {
           const obj = JSON.parse(raw) as { resource?: { contents?: Array<{ text?: string }> }; contents?: Array<{ text?: string }> }
           const text = obj?.resource?.contents?.[0]?.text ?? obj?.contents?.[0]?.text
-          if (typeof text === 'string') return text
+          if (typeof text === 'string') html = text
         } catch { /* not mcp-ui resource json; serve raw */ }
       }
-      return raw
+      return requiresMediaAttestation
+        ? applyMediaExtensionHtmlPolicy(html, { injectMeta: true }).html
+        : html
     } catch {
       return null
     }
