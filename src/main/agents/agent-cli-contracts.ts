@@ -299,12 +299,35 @@ export function parseOpenClawOutput(stdout: string): ParsedAgentCliOutput {
       || ''
     return {
       text: String(text).trim(),
-      sessionId: extractSessionId(parsed),
+      sessionId: extractSessionId(parsed)
+        ?? extractSessionId(parsed?.meta)
+        ?? extractSessionId(parsed?.result?.meta),
       raw: [parsed],
     }
   } catch {
     return { text: stdout.trim(), sessionId: null }
   }
+}
+
+export type BoundedOpenClawOutput =
+  | { ok: true, output: ParsedAgentCliOutput }
+  | { ok: false, error: string }
+
+/**
+ * OpenClaw returns one JSON envelope after the process exits. A retained tail
+ * is not a valid envelope, so it must never be surfaced as assistant text.
+ */
+export function parseBoundedOpenClawOutput(
+  stdout: string,
+  truncated: boolean,
+): BoundedOpenClawOutput {
+  if (truncated) {
+    return {
+      ok: false,
+      error: 'OpenClaw response exceeded the output limit and was discarded',
+    }
+  }
+  return { ok: true, output: parseOpenClawOutput(stdout) }
 }
 
 export function buildOpenCodeRunArgs(request: {

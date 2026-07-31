@@ -5,7 +5,10 @@
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
-import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
+import {
+  normalizeOpenClawThinking,
+  parseBoundedOpenClawOutput,
+} from '../../agents/agent-cli-contracts'
 import {
   BoundedTextAccumulator,
   MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES,
@@ -82,21 +85,6 @@ function selectOpenClawAgentId(openclawBin: string, shellPath?: string | null, p
   }
 
   return agents.find(agent => agent.isDefault)?.id ?? agents[0]?.id ?? 'main'
-}
-
-function extractOpenClawTextPayload(payload: any): string {
-  if (!payload || typeof payload !== 'object') return ''
-  if (typeof payload.text === 'string') return payload.text
-  if (typeof payload.content === 'string') return payload.content
-  if (typeof payload.message === 'string') return payload.message
-  if (typeof payload.summary === 'string') return payload.summary
-  if (Array.isArray(payload.parts)) {
-    return payload.parts
-      .map((part: { text?: string }) => typeof part?.text === 'string' ? part.text : '')
-      .filter(Boolean)
-      .join('')
-  }
-  return ''
 }
 
 export function clearOpenclawSession(scope: ChatStreamScope): void {
@@ -212,29 +200,15 @@ export function chatOpenclaw(req: ChatRequest): void {
       return
     }
 
-    let sessionId: string | undefined
-    let resultText = stdoutBuf.value.trim()
-    try {
-      if (stdoutBuf.truncated) throw new Error('OpenClaw output exceeded the parse buffer')
-      const parsed = JSON.parse(stdoutBuf.value)
-      const meta = parsed?.meta ?? parsed?.result?.meta
-      const payloads = Array.isArray(parsed?.payloads)
-        ? parsed.payloads
-        : Array.isArray(parsed?.result?.payloads)
-          ? parsed.result.payloads
-          : []
-      sessionId = meta?.sessionId ?? meta?.session_id ?? parsed?.sessionId ?? parsed?.session_id
-      resultText = payloads
-        .map((payload: any) => extractOpenClawTextPayload(payload))
-        .filter(Boolean)
-        .join('\n\n')
-        || parsed?.summary
-        || parsed?.result?.summary
-        || resultText
-    } catch {
-      // Fall back to plain stdout
+    const parsed = parseBoundedOpenClawOutput(stdoutBuf.value, stdoutBuf.truncated)
+    if (!parsed.ok) {
+      sendStream(scope, { type: 'error', error: parsed.error })
+      sendStream(scope, { type: 'done' })
+      return
     }
 
+    const sessionId = parsed.output.sessionId ?? undefined
+    const resultText = parsed.output.text
     if (sessionId) {
       openclawSessionIds.set(scopeKey, sessionId)
       sendStream(scope, { type: 'session', sessionId })
