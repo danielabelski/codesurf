@@ -12,9 +12,82 @@ import {
 
 const READ_CHUNK_BYTES = 64 * 1024
 
+export const MAX_EXTENSION_MEDIA_INFLIGHT_READS = 8
+export const MAX_EXTENSION_MEDIA_INFLIGHT_BYTES = 32 * 1024 * 1024
+export const MAX_SINGLE_EXTENSION_MEDIA_INFLIGHT_READS = 4
+export const MAX_SINGLE_EXTENSION_MEDIA_INFLIGHT_BYTES = 16 * 1024 * 1024
+
 export type AttestedResourceRead =
   | { readonly ok: true; readonly bytes: Buffer }
-  | { readonly ok: false; readonly reason: 'changed' }
+  | {
+      readonly ok: false
+      readonly reason: 'changed' | 'extension-busy' | 'global-busy'
+    }
+
+type MediaReadLease =
+  | { readonly ok: true; readonly release: () => void }
+  | { readonly ok: false; readonly reason: 'extension-busy' | 'global-busy' }
+
+interface ExtensionReadUsage {
+  reads: number
+  bytes: number
+}
+
+export class ExtensionMediaReadBudget {
+  private reads = 0
+  private bytes = 0
+  private readonly extensions = new Map<string, ExtensionReadUsage>()
+
+  acquire(extensionKey: string, bytes: number): MediaReadLease {
+    const extension = this.extensions.get(extensionKey) ?? { reads: 0, bytes: 0 }
+    if (
+      extension.reads + 1 > MAX_SINGLE_EXTENSION_MEDIA_INFLIGHT_READS
+      || extension.bytes + bytes > MAX_SINGLE_EXTENSION_MEDIA_INFLIGHT_BYTES
+    ) {
+      return { ok: false, reason: 'extension-busy' }
+    }
+    if (
+      this.reads + 1 > MAX_EXTENSION_MEDIA_INFLIGHT_READS
+      || this.bytes + bytes > MAX_EXTENSION_MEDIA_INFLIGHT_BYTES
+    ) {
+      return { ok: false, reason: 'global-busy' }
+    }
+
+    this.reads += 1
+    this.bytes += bytes
+    extension.reads += 1
+    extension.bytes += bytes
+    this.extensions.set(extensionKey, extension)
+
+    let released = false
+    return {
+      ok: true,
+      release: () => {
+        if (released) return
+        released = true
+        this.reads -= 1
+        this.bytes -= bytes
+        extension.reads -= 1
+        extension.bytes -= bytes
+        if (extension.reads === 0) this.extensions.delete(extensionKey)
+      },
+    }
+  }
+
+  snapshot(): {
+    readonly reads: number
+    readonly bytes: number
+    readonly extensions: number
+  } {
+    return {
+      reads: this.reads,
+      bytes: this.bytes,
+      extensions: this.extensions.size,
+    }
+  }
+}
+
+const extensionMediaReadBudget = new ExtensionMediaReadBudget()
 
 function sameRootBinding(
   left: ExtensionMediaRootBinding,
@@ -107,7 +180,9 @@ export async function readAttestedExtensionResource(
   root: ExtensionMediaRootBinding,
   resourceKey: string,
   expected: ExtensionMediaResourceAttestation,
+  budget = extensionMediaReadBudget,
 ): Promise<AttestedResourceRead> {
+  let releaseBudget: (() => void) | undefined
   try {
     if (
       expected.size > MAX_EXTENSION_IDENTITY_FILE_BYTES
@@ -131,6 +206,13 @@ export async function readAttestedExtensionResource(
     if (!sameResource(opened, expected)) {
       return { ok: false, reason: 'changed' }
     }
+
+    const lease = budget.acquire(
+      root.canonicalRoot,
+      expected.size,
+    )
+    if (!lease.ok) return lease
+    releaseBudget = lease.release
 
     const bytes = Buffer.allocUnsafe(expected.size)
     const digest = createHash('sha256')
@@ -171,6 +253,7 @@ export async function readAttestedExtensionResource(
   } catch {
     return { ok: false, reason: 'changed' }
   } finally {
+    releaseBudget?.()
     await resource.handle.close().catch(() => undefined)
   }
 }

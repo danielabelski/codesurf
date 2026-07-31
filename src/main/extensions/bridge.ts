@@ -21,11 +21,29 @@ export interface BridgeCapabilityGate {
 /** Iframe-bridge namespaces that are gated by a same-named capability. */
 const CAPABILITY_GATED_NAMESPACES = ['chat', 'relay', 'canvas'] as const
 
+/**
+ * JSON is valid JavaScript syntax, but raw HTML script elements terminate at
+ * `</script` before the JavaScript parser runs. Escape every HTML-significant
+ * code point plus the two JavaScript line separators before embedding values.
+ */
+export function serializeForInlineScript(value: unknown): string {
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) {
+    throw new TypeError('Inline script values must be JSON-serializable')
+  }
+  return serialized
+    .replaceAll('<', '\\u003c')
+    .replaceAll('>', '\\u003e')
+    .replaceAll('&', '\\u0026')
+    .replaceAll('\u2028', '\\u2028')
+    .replaceAll('\u2029', '\\u2029')
+}
+
 export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapabilityGate): string {
   return `
 ;(function() {
-  const _tileId = ${JSON.stringify(tileId)};
-  const _extId = ${JSON.stringify(extId)};
+  const _tileId = ${serializeForInlineScript(tileId)};
+  const _extId = ${serializeForInlineScript(extId)};
   let _reqId = 0;
   const _pending = new Map();
   const _listeners = new Map();
@@ -264,8 +282,8 @@ export function getBridgeScript(tileId: string, extId: string, gate?: BridgeCapa
   // namespaces it was granted at enable time. Baseline namespaces stay; only the
   // capability-gated ones (${CAPABILITY_GATED_NAMESPACES.join(', ')}) are pruned.
   (function() {
-    var _granted = ${JSON.stringify(gate.granted)};
-    ${JSON.stringify([...CAPABILITY_GATED_NAMESPACES])}.forEach(function(ns) {
+    var _granted = ${serializeForInlineScript(gate.granted)};
+    ${serializeForInlineScript([...CAPABILITY_GATED_NAMESPACES])}.forEach(function(ns) {
       if (_granted.indexOf(ns) === -1 && window.codesurf[ns]) { delete window.codesurf[ns]; }
     });
   })();

@@ -31,6 +31,15 @@ function sameFile(
   return left.dev === right.dev && left.ino === right.ino
 }
 
+export function canonicalResourceOpenFlags(
+  noFollow: number | null | undefined = constants.O_NOFOLLOW,
+  nonBlock: number | null | undefined = constants.O_NONBLOCK,
+): number {
+  return constants.O_RDONLY
+    | (typeof noFollow === 'number' ? noFollow : 0)
+    | (typeof nonBlock === 'number' ? nonBlock : 0)
+}
+
 /**
  * Open a regular file through one retained, no-follow handle.
  *
@@ -57,10 +66,15 @@ export async function openCanonicalResource(
     return { ok: false, status: 403 }
   }
 
+  const candidateInfo = await fs.lstat(canonicalCandidate).catch(() => null)
+  if (!candidateInfo?.isFile() || candidateInfo.isSymbolicLink()) {
+    return { ok: false, status: 404 }
+  }
+
   let handle: FileHandle | undefined
   let transferred = false
   try {
-    handle = await fs.open(canonicalCandidate, constants.O_RDONLY | constants.O_NOFOLLOW)
+    handle = await fs.open(canonicalCandidate, canonicalResourceOpenFlags())
   } catch (error) {
     return {
       ok: false,
