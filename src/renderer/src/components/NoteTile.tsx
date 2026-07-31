@@ -4,10 +4,14 @@ import { Type } from 'lucide-react'
 import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { useTileColor } from '../TileColorContext'
-import { FileNoteTile } from './FileNoteTile'
+import { createLoadableModuleTile } from '../lib/loadableTile'
 
 export { renderMarkdown } from './noteMarkdown'
 
+const LazyFileNoteTile = createLoadableModuleTile(
+  () => import('./FileNoteTile'),
+  module => module.FileNoteTile,
+)
 
 export type NoteTileProps = {
   tileId?: string
@@ -397,7 +401,7 @@ export function StickyColorPicker(): JSX.Element {
 
 export function NoteTile({ tileId, filePath, initialContent = '', workspacePath }: NoteTileProps): JSX.Element {
   if (filePath) {
-    return <FileNoteTile tileId={tileId} filePath={filePath} initialContent={initialContent} />
+    return <LazyFileNoteTile tileId={tileId} filePath={filePath} initialContent={initialContent} />
   }
   return <StickyNote initialContent={initialContent} tileId={tileId} workspacePath={workspacePath} />
 }
