@@ -149,4 +149,42 @@ describe('writeFilesAtomically', () => {
     expect(await fs.readFile(second, 'utf8')).toBe('second-before')
     expect((await fs.readdir(root)).sort()).toEqual(['first.md', 'second.md'])
   })
+
+  it('keeps a completed commit when obsolete backup cleanup fails', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codesurf-relay-cleanup-'))
+    temporaryRoots.push(root)
+    const first = join(root, 'first.md')
+    const second = join(root, 'second.md')
+    await fs.writeFile(first, 'first-before')
+    await fs.writeFile(second, 'second-before')
+    const dependencies: RelayAtomicWriteDependencies = {
+      createId: (() => {
+        let id = 0
+        return () => `cleanup-${++id}`
+      })(),
+      ensureDirectory: async path => {
+        await fs.mkdir(path, { recursive: true })
+      },
+      writeTemporaryFile: async (path, content) => {
+        await fs.writeFile(path, content)
+      },
+      commitTemporaryFile: (temporaryPath, path) => {
+        renameSync(temporaryPath, path)
+      },
+      removeTemporaryFile: path => {
+        if (path.endsWith('.bak')) throw new Error('injected backup cleanup failure')
+        rmSync(path, { force: true })
+      },
+    }
+
+    await expect(writeFilesAtomically([
+      { path: first, content: 'first-after' },
+      { path: second, content: 'second-after' },
+    ], undefined, dependencies)).resolves.toBeUndefined()
+
+    expect(await fs.readFile(first, 'utf8')).toBe('first-after')
+    expect(await fs.readFile(second, 'utf8')).toBe('second-after')
+    expect((await fs.readdir(root)).filter(path => path.endsWith('.bak')))
+      .toHaveLength(2)
+  })
 })

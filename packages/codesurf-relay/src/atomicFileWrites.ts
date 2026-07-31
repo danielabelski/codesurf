@@ -122,10 +122,18 @@ export async function writeFilesAtomically(
       dependencies.commitTemporaryFile(file.temporaryPath, file.path)
       file.committed = true
     }
+    // All destinations now expose the new generation. Backup removal is
+    // cleanup, not part of the transaction: reporting a failure here would
+    // invite callers to retry an operation that already committed, while
+    // attempting rollback after earlier backups were removed could destroy
+    // valid destinations. A failed cleanup therefore leaves a uniquely named
+    // recovery artifact but never changes or misreports the committed state.
     for (const file of staged) {
       if (!file.backupCreated) continue
-      dependencies.removeTemporaryFile(file.backupPath)
-      file.backupCreated = false
+      try {
+        dependencies.removeTemporaryFile(file.backupPath)
+        file.backupCreated = false
+      } catch {}
     }
   } catch (error) {
     const rollbackErrors: unknown[] = []
