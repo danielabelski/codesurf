@@ -21,9 +21,13 @@ export interface AskUserQuestionPayload {
   metadata?: Record<string, unknown>
 }
 
-// Context provides the cardId so ToolBlockView (defined outside ChatTile) can
-// submit answers back to main via IPC without prop-drilling through groups.
-export const AskUserQuestionContext = React.createContext<{ cardId: string } | null>(null)
+// Context provides the immutable workspace/card scope so ToolBlockView
+// (defined outside ChatTile) can submit answers back to main via IPC without
+// prop-drilling through groups.
+export const AskUserQuestionContext = React.createContext<{
+  workspaceId: string
+  cardId: string
+} | null>(null)
 
 /**
  * Parses a ToolBlock.input string (streamed JSON, potentially partial) and
@@ -145,7 +149,7 @@ export function AskUserQuestionForm({ toolId, payload, onSubmitted }: AskUserQue
   }, [payload.questions, singleChoice, multiChoice, otherText])
 
   const handleSubmit = useCallback(async () => {
-    if (!ctx?.cardId) { setError('Chat context unavailable'); return }
+    if (!ctx?.workspaceId || !ctx.cardId) { setError('Chat context unavailable'); return }
     if (!allAnswered || submitting) return
     setSubmitting(true)
     setError(null)
@@ -175,6 +179,7 @@ export function AskUserQuestionForm({ toolId, payload, onSubmitted }: AskUserQue
     })
     try {
       const res = await window.electron?.chat?.answerUserQuestion?.({
+        workspaceId: ctx.workspaceId,
         cardId: ctx.cardId,
         toolId,
         answers,
@@ -190,7 +195,7 @@ export function AskUserQuestionForm({ toolId, payload, onSubmitted }: AskUserQue
       setError((err as Error).message || 'Failed to submit')
       setSubmitting(false)
     }
-  }, [ctx?.cardId, toolId, payload.questions, singleChoice, multiChoice, otherText, previewIdx, allAnswered, submitting, onSubmitted])
+  }, [ctx?.workspaceId, ctx?.cardId, toolId, payload.questions, singleChoice, multiChoice, otherText, previewIdx, allAnswered, submitting, onSubmitted])
 
   return (
     <div style={{

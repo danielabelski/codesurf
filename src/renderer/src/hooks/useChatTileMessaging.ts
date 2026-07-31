@@ -330,7 +330,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     latestStateRef.current = optimisticState
     persistLatestState(optimisticState)
 
-    window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+    window.electron?.bus?.publish(`tile:${workspaceId}:${tileId}`, 'activity', `chat:${workspaceId}:${tileId}`, {
       message: `User: ${userMsg.content.slice(0, 100)}`, role: 'user',
     })
 
@@ -641,26 +641,30 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
       ]
     })
     stickToBottomRef.current = true
-    window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+    window.electron?.bus?.publish(`tile:${workspaceId}:${tileId}`, 'activity', `chat:${workspaceId}:${tileId}`, {
       message: `User steered: ${trimmed.slice(0, 100)}`,
       role: 'user',
     })
-  }, [setMessagesSafe, tileId, stickToBottomRef])
+  }, [setMessagesSafe, workspaceId, tileId, stickToBottomRef])
 
   const stopStreaming = useCallback(() => {
-    window.electron?.chat?.stop?.(tileId)
+    window.electron?.chat?.stop?.(workspaceId, tileId)
     setIsStreaming(false)
     setJobId(null)
     setMessagesSafe(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
     focusComposer()
-  }, [tileId, focusComposer, setIsStreaming, setJobId, setMessagesSafe])
+  }, [workspaceId, tileId, focusComposer, setIsStreaming, setJobId, setMessagesSafe])
 
   const handleQueuedTurnSteer = useCallback(async (turn: QueuedChatTurn) => {
     const content = turn.content.trim()
     if (!content) return
 
     if (isStreaming) {
-      const result = await window.electron?.chat?.steer?.({ cardId: tileId, message: content })
+      const result = await window.electron?.chat?.steer?.({
+        workspaceId,
+        cardId: tileId,
+        message: content,
+      })
       if (!result?.ok) {
         setMessagesSafe(prev => [...prev, {
           id: `msg-steer-error-${Date.now()}`,
@@ -689,7 +693,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
       setInput(current => current.trim() ? current : content)
     }
   }, [
-    isStreaming, tileId, queuedTurns, flushQueueStateNow, logQueueEvent, insertSteerMessageIntoStream,
+    isStreaming, workspaceId, tileId, queuedTurns, flushQueueStateNow, logQueueEvent, insertSteerMessageIntoStream,
     dispatchMessageContent, setMessagesSafe, setQueuedTurns, setInput,
   ])
 

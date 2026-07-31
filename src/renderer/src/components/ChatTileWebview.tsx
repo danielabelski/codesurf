@@ -8,6 +8,7 @@ import {
   type RequestMethod,
 } from '@codesurf/chat-bridge'
 import type { AppSettings } from '../../../shared/types'
+import { scopeChatWebviewParams } from './chatWebviewScope'
 import { useTheme } from '../ThemeContext'
 
 interface DiscoveryPeer {
@@ -72,18 +73,30 @@ export function ChatTileWebview(props: Props): React.ReactNode {
   // ported.
   const methods = useMemo<Partial<Record<RequestMethod, MethodHandler>>>(() => {
     const e = window.electron as any
+    const scopedChatParams = (params: unknown): Record<string, unknown> =>
+      scopeChatWebviewParams(params, props.workspaceId, props.tileId)
     return {
-      'chat.send': (params) => e?.chat?.send?.(params),
-      'chat.steer': (params) => e?.chat?.steer?.(params),
-      'chat.stop': (params) => e?.chat?.stop?.(params),
-      'chat.clearSession': (params) => e?.chat?.clearSession?.(params),
-      'chat.setPermissionMode': (params) => e?.chat?.setPermissionMode?.(params),
-      'chat.resumeJob': (params) => e?.chat?.resumeJob?.(params),
-      'chat.loadSessionHistory': (params) => e?.chat?.loadSessionHistory?.(params),
+      'chat.send': (params) => e?.chat?.send?.(scopedChatParams(params)),
+      'chat.steer': (params) => e?.chat?.steer?.(scopedChatParams(params)),
+      'chat.stop': (params) => {
+        const scoped = scopedChatParams(params)
+        return e?.chat?.stop?.(scoped.workspaceId, scoped.cardId)
+      },
+      'chat.clearSession': (params) => {
+        const scoped = scopedChatParams(params)
+        return e?.chat?.clearSession?.(scoped.workspaceId, scoped.cardId)
+      },
+      'chat.setPermissionMode': (params) =>
+        e?.chat?.setPermissionMode?.(scopedChatParams(params)),
+      'chat.resumeJob': (params) => e?.chat?.resumeJob?.(scopedChatParams(params)),
+      'chat.loadSessionHistory': (params) =>
+        e?.chat?.loadSessionHistory?.(scopedChatParams(params)),
       'chat.opencodeModels': () => e?.chat?.opencodeModels?.(),
       'chat.openclawAgents': () => e?.chat?.openclawAgents?.(),
-      'chat.answerToolPermission': (params) => e?.chat?.answerToolPermission?.(params),
-      'chat.answerUserQuestion': (params) => e?.chat?.answerUserQuestion?.(params),
+      'chat.answerToolPermission': (params) =>
+        e?.chat?.answerToolPermission?.(scopedChatParams(params)),
+      'chat.answerUserQuestion': (params) =>
+        e?.chat?.answerUserQuestion?.(scopedChatParams(params)),
       'chat.selectFiles': () => e?.chat?.selectFiles?.(),
       'canvas.saveTileState': (params: any) => e?.canvas?.saveTileState?.(params?.workspaceId, params?.tileId, params?.state),
       'canvas.loadTileState': (params: any) => e?.canvas?.loadTileState?.(params?.workspaceId, params?.tileId),
@@ -108,7 +121,7 @@ export function ChatTileWebview(props: Props): React.ReactNode {
       'window.openMiniChat': (params) => e?.window?.openMiniChat?.(params),
       'bus.publish': (params: any) => e?.bus?.publish?.(params?.channel, params?.eventType, params?.source, params?.payload),
     }
-  }, [])
+  }, [props.tileId, props.workspaceId])
 
   // Channel patterns. The bridge invokes the matching starter when the
   // chat-app subscribes to a runtime channel like `stream:tile-abc`.

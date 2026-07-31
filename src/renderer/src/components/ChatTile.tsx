@@ -429,6 +429,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     <Suspense fallback={null}>
       <LazyTerminalTile
         tileId={`${tileId}-terminal`}
+        workspaceId={workspaceId ?? ''}
         workspaceDir={_workspaceDir}
         width={width}
         height={height}
@@ -459,7 +460,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     <ChatDispatchProvider value={chatDispatchValue}>
     <FontCtx.Provider value={fontCtxValue}>
     <AskUserQuestionFontsContext.Provider value={fontCtxValue}>
-    <AskUserQuestionContext.Provider value={{ cardId: tileId }}>
+    <AskUserQuestionContext.Provider value={{ workspaceId, cardId: tileId }}>
     <CheckpointRestoreContext.Provider value={checkpointRestoreContextValue}>
     <ToolPermissionProvider
       cardId={tileId}

@@ -92,6 +92,7 @@ export function useChatTileSessionCore(options: UseChatTileSessionCoreOptions) {
   }, [jobId])
 
   useChatStreamHandler({
+    workspaceId,
     tileId,
     setMessagesSafe,
     // Prefer commitSessionId so provider session maps stay in sync (same as ChatTile).

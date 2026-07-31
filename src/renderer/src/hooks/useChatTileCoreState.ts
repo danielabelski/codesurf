@@ -207,9 +207,12 @@ export function useChatTileCoreState({
     toolId: string
     decision: ToolPermissionDecision
   }) => {
-    const res = await window.electron?.chat?.answerToolPermission?.(args)
+    const res = await window.electron?.chat?.answerToolPermission?.({
+      workspaceId,
+      ...args,
+    })
     return res ?? { ok: true }
-  }, [])
+  }, [workspaceId])
   const [executionTarget, setExecutionTarget] = useState<'local' | 'cloud'>(() => initialExecutionTarget)
   const [cloudHostId, setCloudHostId] = useState<string | null>(() => initialCloudHostId)
   const [provider, setProvider] = useState<string>(() => initialProvider)

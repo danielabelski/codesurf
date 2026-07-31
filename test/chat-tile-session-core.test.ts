@@ -65,7 +65,7 @@ describe('ChatTile session core + stream demux wiring', () => {
   test('chatStreamHub exports demux API used by production path', () => {
     const src = read('src/renderer/src/components/chat/chatStreamHub.ts')
     assert.match(src, /export function subscribeChatStream/)
-    assert.match(src, /listenersByTile/)
+    assert.match(src, /listenersByScope/)
     assert.match(src, /ensureTransport/)
   })
 
@@ -85,4 +85,3 @@ describe('ChatTile session core + stream demux wiring', () => {
     assert.match(chrome, /useAppThemeCssVars/)
   })
 })
-
