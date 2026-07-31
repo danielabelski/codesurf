@@ -1,191 +1,59 @@
-import { promises as fs } from 'fs'
-import { join } from 'path'
-import { randomUUID } from 'node:crypto'
-import type { ActivityRecord, ActivityQuery, ActivityType, ActivityStatus } from '../shared/types'
-import { CODESURF_HOME } from './paths'
-import { capActivityRecords } from './activity-cap.ts'
+import type {
+  ActivityQuery,
+  ActivityRecord,
+  ActivityUpsertInput,
+} from '../shared/activity-types.ts'
+import { CODESURF_HOME } from './paths.ts'
+import { createFileActivityPersistence } from './activity-persistence.ts'
+import { ActivityStore } from './activity-store-core.ts'
 
-export { MAX_ACTIVITY_RECORDS, MAX_ACTIVITY_AGE_MS, capActivityRecords } from './activity-cap.ts'
+export {
+  MAX_ACTIVITY_RECORDS,
+  MAX_ACTIVITY_AGE_MS,
+  capActivityRecords,
+} from './activity-cap.ts'
 
-const CODESURF_DIR = CODESURF_HOME
-const SAVE_DEBOUNCE_MS = 1000
+const activityStore = new ActivityStore({
+  persistence: createFileActivityPersistence({ homeDir: CODESURF_HOME }),
+})
 
-interface StoreState {
-  records: ActivityRecord[]
-  dirty: boolean
-  saveTimer: ReturnType<typeof setTimeout> | null
-}
-
-// Per-workspace in-memory state, lazy-loaded from disk
-const stores = new Map<string, StoreState>()
-
-function storePath(workspaceId: string): string {
-  return join(CODESURF_DIR, 'workspaces', workspaceId, '.codesurf', 'activity.json')
-}
-
-async function ensureDir(workspaceId: string): Promise<void> {
-  await fs.mkdir(join(CODESURF_DIR, 'workspaces', workspaceId, '.codesurf'), { recursive: true })
-}
-
-async function loadStore(workspaceId: string): Promise<StoreState> {
-  const existing = stores.get(workspaceId)
-  if (existing) return existing
-
-  let records: ActivityRecord[] = []
-  try {
-    const raw = await fs.readFile(storePath(workspaceId), 'utf8')
-    records = JSON.parse(raw)
-  } catch {
-    // No file yet — start empty
-  }
-
-  // Cap on load so legacy unbounded files shrink on first open.
-  const capped = capActivityRecords(records)
-  const dirty = capped !== records
-  const state: StoreState = { records: capped, dirty, saveTimer: null }
-  stores.set(workspaceId, state)
-  if (dirty) scheduleSave(workspaceId, state)
-  return state
-}
-
-function scheduleSave(workspaceId: string, state: StoreState): void {
-  state.dirty = true
-  if (state.saveTimer) return
-  state.saveTimer = setTimeout(async () => {
-    state.saveTimer = null
-    if (!state.dirty) return
-    state.dirty = false
-    try {
-      await ensureDir(workspaceId)
-      await fs.writeFile(storePath(workspaceId), JSON.stringify(state.records, null, 2))
-    } catch {
-      // Write failed — will retry on next change
-      state.dirty = true
-    }
-  }, SAVE_DEBOUNCE_MS)
-}
-
-// ─── Public API ──────────────────────────────────────────────────────────────
-
-export async function upsertActivity(
+export function upsertActivity(
   workspaceId: string,
-  data: {
-    id?: string
-    tileId: string
-    type: ActivityType
-    status?: ActivityStatus
-    title: string
-    detail?: string
-    metadata?: Record<string, unknown>
-    agent?: string
-  },
+  data: ActivityUpsertInput,
 ): Promise<ActivityRecord> {
-  const store = await loadStore(workspaceId)
-  const now = Date.now()
-
-  // Update existing record if ID matches
-  if (data.id) {
-    const idx = store.records.findIndex(r => r.id === data.id)
-    if (idx !== -1) {
-      const existing = store.records[idx]
-      store.records[idx] = {
-        ...existing,
-        status: data.status ?? existing.status,
-        title: data.title ?? existing.title,
-        detail: data.detail ?? existing.detail,
-        metadata: data.metadata ? { ...existing.metadata, ...data.metadata } : existing.metadata,
-        agent: data.agent ?? existing.agent,
-        updatedAt: now,
-      }
-      scheduleSave(workspaceId, store)
-      return store.records[idx]
-    }
-  }
-
-  // Create new record
-  const record: ActivityRecord = {
-    id: data.id ?? randomUUID(),
-    tileId: data.tileId,
-    workspaceId,
-    type: data.type,
-    status: data.status ?? 'pending',
-    title: data.title,
-    detail: data.detail,
-    metadata: data.metadata,
-    agent: data.agent,
-    createdAt: now,
-    updatedAt: now,
-  }
-  store.records.push(record)
-  store.records = capActivityRecords(store.records)
-  scheduleSave(workspaceId, store)
-  // Return the created record even if a concurrent cap could theoretically
-  // drop older rows — the just-inserted row is always newest and retained.
-  return record
+  return activityStore.upsert(workspaceId, data)
 }
 
-export async function queryActivity(query: ActivityQuery): Promise<ActivityRecord[]> {
-  const store = await loadStore(query.workspaceId)
-  let results = store.records
-
-  if (query.tileId) results = results.filter(r => r.tileId === query.tileId)
-  if (query.type) results = results.filter(r => r.type === query.type)
-  if (query.status) results = results.filter(r => r.status === query.status)
-  if (query.agent) results = results.filter(r => r.agent === query.agent)
-
-  // Most recent first
-  results = results.sort((a, b) => b.updatedAt - a.updatedAt)
-
-  if (query.limit) results = results.slice(0, query.limit)
-  return results
+export function queryActivity(query: ActivityQuery): Promise<ActivityRecord[]> {
+  return activityStore.query(query)
 }
 
-export async function getActivityByTile(workspaceId: string, tileId: string): Promise<ActivityRecord[]> {
-  return queryActivity({ workspaceId, tileId })
+export function getActivityByTile(
+  workspaceId: string,
+  tileId: string,
+): Promise<ActivityRecord[]> {
+  return activityStore.byTile(workspaceId, tileId)
 }
 
-export async function deleteActivity(workspaceId: string, id: string): Promise<boolean> {
-  const store = await loadStore(workspaceId)
-  const idx = store.records.findIndex(r => r.id === id)
-  if (idx === -1) return false
-  store.records.splice(idx, 1)
-  scheduleSave(workspaceId, store)
-  return true
+export function deleteActivity(
+  workspaceId: string,
+  tileId: string,
+  id: string,
+): Promise<boolean> {
+  return activityStore.delete(workspaceId, tileId, id)
 }
 
-export async function clearTileActivity(workspaceId: string, tileId: string): Promise<number> {
-  const store = await loadStore(workspaceId)
-  const before = store.records.length
-  store.records = store.records.filter(r => r.tileId !== tileId)
-  const removed = before - store.records.length
-  if (removed > 0) scheduleSave(workspaceId, store)
-  return removed
+export function clearTileActivity(workspaceId: string, tileId: string): Promise<number> {
+  return activityStore.clearTile(workspaceId, tileId)
 }
 
-/** Aggregate activity grouped by agent across all tiles in a workspace */
-export async function getActivityByAgent(workspaceId: string): Promise<Record<string, ActivityRecord[]>> {
-  const store = await loadStore(workspaceId)
-  const groups: Record<string, ActivityRecord[]> = {}
-  for (const r of store.records) {
-    const key = r.agent ?? `tile:${r.tileId}`
-    if (!groups[key]) groups[key] = []
-    groups[key].push(r)
-  }
-  return groups
+export function getActivityByAgent(
+  workspaceId: string,
+): Promise<Record<string, ActivityRecord[]>> {
+  return activityStore.byAgent(workspaceId)
 }
 
-/** Flush all pending writes (call on app quit) */
-export async function flushAll(): Promise<void> {
-  for (const [workspaceId, state] of stores) {
-    if (state.saveTimer) clearTimeout(state.saveTimer)
-    if (state.dirty) {
-      try {
-        await ensureDir(workspaceId)
-        await fs.writeFile(storePath(workspaceId), JSON.stringify(state.records, null, 2))
-        state.dirty = false
-      } catch {
-        // Best effort on shutdown
-      }
-    }
-  }
+/** Enter the shutdown barrier and durably drain every accepted mutation. */
+export function flushAll(): Promise<void> {
+  return activityStore.flushAll()
 }
