@@ -162,11 +162,11 @@ export async function writeFilesAtomically(
         rollbackErrors.push(cleanupError)
       }
       if (file.backupCreated) {
-        try {
-          dependencies.removeTemporaryFile(file.backupPath)
-        } catch (cleanupError) {
-          rollbackErrors.push(cleanupError)
-        }
+        // Restoration failed, so this backup may be the only intact copy of
+        // the pre-transaction destination. Preserve it for reconciliation.
+        // Deleting it here would turn a recoverable rollback failure into data
+        // loss, especially on Windows where rename cannot replace a locked
+        // destination.
       }
     }
     if (rollbackErrors.length > 0) {

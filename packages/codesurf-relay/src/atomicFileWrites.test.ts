@@ -187,4 +187,57 @@ describe('writeFilesAtomically', () => {
     expect((await fs.readdir(root)).filter(path => path.endsWith('.bak')))
       .toHaveLength(2)
   })
+
+  it('preserves the original backup when rollback cannot replace a destination', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'codesurf-relay-reconcile-'))
+    temporaryRoots.push(root)
+    const first = join(root, 'first.md')
+    const second = join(root, 'second.md')
+    await fs.writeFile(first, 'first-before')
+    await fs.writeFile(second, 'second-before')
+    let commitCount = 0
+    const dependencies: RelayAtomicWriteDependencies = {
+      createId: (() => {
+        let id = 0
+        return () => `reconcile-${++id}`
+      })(),
+      ensureDirectory: async path => {
+        await fs.mkdir(path, { recursive: true })
+      },
+      writeTemporaryFile: async (path, content) => {
+        await fs.writeFile(path, content)
+      },
+      commitTemporaryFile: (temporaryPath, path) => {
+        commitCount += 1
+        if (commitCount === 2) throw new Error('injected second commit failure')
+        renameSync(temporaryPath, path)
+      },
+      removeTemporaryFile: path => {
+        if (path === first) throw new Error('injected locked destination')
+        rmSync(path, { force: true })
+      },
+      destinationExists: path => path === first || path === second,
+      moveDestinationFile: (from, to) => {
+        if (from.endsWith('.bak') && to === first) {
+          throw new Error('injected Windows-style restore failure')
+        }
+        renameSync(from, to)
+      },
+    }
+
+    await expect(writeFilesAtomically([
+      { path: first, content: 'first-after' },
+      { path: second, content: 'second-after' },
+    ], undefined, dependencies)).rejects.toBeInstanceOf(AggregateError)
+
+    const backup = join(root, '.first.md.reconcile-2.bak')
+    expect(await fs.readFile(first, 'utf8')).toBe('first-after')
+    expect(await fs.readFile(second, 'utf8')).toBe('second-before')
+    expect(await fs.readFile(backup, 'utf8')).toBe('first-before')
+    expect((await fs.readdir(root)).sort()).toEqual([
+      '.first.md.reconcile-2.bak',
+      'first.md',
+      'second.md',
+    ])
+  })
 })
