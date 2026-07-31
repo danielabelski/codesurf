@@ -49,9 +49,10 @@ describe('TileChrome split', () => {
     assert.equal(/function processEvent\(/.test(shell), false)
   })
 
-  test('canvas tile consumer still loads public TileChrome path', () => {
+  test('canvas tile consumer statically loads the public TileChrome path', () => {
     const consumer = read('src/renderer/src/components/canvas/CanvasTileItem.tsx')
-    assert.match(consumer, /import\(['"]\.\.\/TileChrome['"]\)/)
+    assert.match(consumer, /import\s+\{\s*TileChrome\s*\}\s+from\s+['"]\.\.\/TileChrome['"]/)
+    assert.doesNotMatch(consumer, /LazyTileChrome/)
   })
 
   test('shipped fileLabel returns type label for bare tiles', async () => {

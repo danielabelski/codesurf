@@ -29,7 +29,8 @@ describe('wave 24 canvas tiles extraction', () => {
   })
 
   test('CanvasTileItem owns tile chrome, link sensors, and connection handles, and is memoized', () => {
-    expect(ITEM_SOURCE).toContain('LazyTileChrome')
+    expect(ITEM_SOURCE).toContain("import { TileChrome } from '../TileChrome'")
+    expect(ITEM_SOURCE).not.toContain('LazyTileChrome')
     expect(ITEM_SOURCE).toContain('link-sensor-')
     expect(ITEM_SOURCE).toContain('Drag to link blocks')
     expect(ITEM_SOURCE).toContain('getConnectionHandlePoint')
