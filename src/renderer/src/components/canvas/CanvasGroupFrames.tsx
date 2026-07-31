@@ -4,6 +4,8 @@ import {
   Grid2x2X,
   Scissors,
   ClipboardPaste,
+  GripVertical,
+  Link2,
   Maximize2,
   LayoutGrid,
 } from 'lucide-react'
@@ -135,6 +137,7 @@ export function CanvasGroupFrames({
             <div
               key={g.id}
               data-canvas-group-frame="true"
+              data-canvas-group-id={g.id}
               style={{
                 position: 'absolute',
                 left: lb.x,
@@ -310,6 +313,7 @@ export function CanvasGroupFrames({
           <div
             key={g.id}
             data-canvas-group-frame="true"
+            data-canvas-group-id={g.id}
             style={{
               position: 'absolute',
               left: b.x,
@@ -334,22 +338,7 @@ export function CanvasGroupFrames({
             }}
           >
             <div
-              draggable
               onMouseDown={event => event.stopPropagation()}
-              onDragStart={event => {
-                event.stopPropagation()
-                const memberTiles = tiles.filter(tile => tile.groupId === g.id)
-                event.dataTransfer.setData('application/group-id', g.id)
-                event.dataTransfer.setData('application/group-label', g.label ?? 'group')
-                event.dataTransfer.setData('application/group-tile-ids', JSON.stringify(memberTiles.map(tile => tile.id)))
-                event.dataTransfer.setData('application/group-tile-types', JSON.stringify(memberTiles.map(tile => tile.type)))
-                event.dataTransfer.effectAllowed = 'link'
-                const ghost = document.createElement('div')
-                ghost.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px'
-                document.body.appendChild(ghost)
-                event.dataTransfer.setDragImage(ghost, 0, 0)
-                setTimeout(() => ghost.remove(), 0)
-              }}
               style={{
                 position: 'absolute',
                 top: -36 / viewport.zoom,
@@ -368,6 +357,70 @@ export function CanvasGroupFrames({
                 zIndex: 99995,
               }}
             >
+              <div
+                data-group-move-handle="true"
+                title="Move group"
+                onMouseDown={event => {
+                  event.stopPropagation()
+                  event.preventDefault()
+                  const ids = collectGroupTileIds(g.id)
+                  const snapshots = tiles
+                    .filter(tile => ids.includes(tile.id))
+                    .map(tile => ({ id: tile.id, x: tile.x, y: tile.y }))
+                  setDragState({
+                    type: 'group',
+                    groupId: g.id,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    snapshots,
+                  })
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 18,
+                  height: 20,
+                  color: labelColor,
+                  cursor: isDraggingThis ? 'grabbing' : 'grab',
+                  opacity: 0.72,
+                }}
+              >
+                <GripVertical size={14} />
+              </div>
+
+              <div
+                draggable
+                title="Drag group to another block"
+                onMouseDown={event => event.stopPropagation()}
+                onDragStart={event => {
+                  event.stopPropagation()
+                  const memberTiles = tiles.filter(tile => tile.groupId === g.id)
+                  event.dataTransfer.setData('application/group-id', g.id)
+                  event.dataTransfer.setData('application/group-label', g.label ?? 'group')
+                  event.dataTransfer.setData('application/group-tile-ids', JSON.stringify(memberTiles.map(tile => tile.id)))
+                  event.dataTransfer.setData('application/group-tile-types', JSON.stringify(memberTiles.map(tile => tile.type)))
+                  event.dataTransfer.effectAllowed = 'link'
+                  const ghost = document.createElement('div')
+                  ghost.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px'
+                  document.body.appendChild(ghost)
+                  event.dataTransfer.setDragImage(ghost, 0, 0)
+                  setTimeout(() => ghost.remove(), 0)
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 18,
+                  height: 20,
+                  color: labelColor,
+                  cursor: 'alias',
+                  opacity: 0.72,
+                }}
+              >
+                <Link2 size={12} />
+              </div>
+
               <div style={{ position: 'relative' }}>
                 <div
                   style={{

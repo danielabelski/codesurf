@@ -195,7 +195,10 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
           const sensorStyle: React.CSSProperties = {
             position: 'absolute',
             pointerEvents: (connectionDragActive || isSelectedImageTile) ? 'none' : 'all',
-            zIndex: 99991,
+            // Discovery hit areas extend beyond their tile. Keep them below
+            // tile chrome so a nearby tile's invisible sensor cannot steal
+            // resize, titlebar, or content input from the visible tile.
+            zIndex: Math.max(0, tile.zIndex - 1),
           }
           if (side === 'left') Object.assign(sensorStyle, {
             left: tile.x - sensorThickness,
