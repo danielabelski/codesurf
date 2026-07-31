@@ -19,6 +19,7 @@ import {
 import { createElectrobunDbRuntime } from './runtime-db.ts'
 import { builtInDaemonHosts, createElectrobunDaemonRuntime, sanitizeDaemonStatusError, summarizeDaemonDashboard } from './runtime-daemon.ts'
 import { parseClaudeStreamJsonLine, parseCodexJsonLine, parseOpenClawOutput, parseOpenCodeJsonLine, type ElectrobunStreamEvent } from './chat-streams.ts'
+import { electrobunCodexPermissionArgs } from './chat-policy.ts'
 import {
   galleryLocal as listPetsGalleryLocal,
   getPetManifest,
@@ -1105,10 +1106,7 @@ async function runCodexChat(req: ChatRequest, prompt: string): Promise<{ ok: boo
   }
 
   const args = ['exec', '--json', '--model', req.model || 'gpt-5.5']
-  const mode = req.mode === 'auto' || req.mode === 'read-only' || req.mode === 'full-access' ? req.mode : 'full-access'
-  if (mode === 'full-access') args.push('--dangerously-bypass-approvals-and-sandbox')
-  else if (mode === 'auto') args.push('--full-auto')
-  else args.push('--sandbox', 'read-only')
+  args.push(...electrobunCodexPermissionArgs(req.mode))
   args.push('-c', 'mcp_servers={}', '--skip-git-repo-check')
   if (req.workspaceDir) args.push('-C', req.workspaceDir)
   args.push(prompt)
