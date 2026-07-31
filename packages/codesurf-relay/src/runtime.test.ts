@@ -1,7 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import type { RelayParticipant, RelayAgentExecutor, RelayTurnInput, RelayMessage, RelayEvent } from './types'
+import type {
+  RelayAgentExecutor,
+  RelayEvent,
+  RelayMessage,
+  RelayOperationContext,
+  RelayParticipant,
+  RelayTurnInput,
+} from './types'
 import type { CodesurfRelay } from './relay'
-import { RelayRuntime, RelayTimeoutError } from './runtime'
+import {
+  RelayRuntime,
+  RelayRuntimeDisposedError,
+  RelayTimeoutError,
+} from './runtime'
 
 // Mock relay that properly handles events
 function createMockRelay(): CodesurfRelay {
@@ -83,7 +94,10 @@ describe('runtime', () => {
           name: 'Test Agent',
           kind: 'agent',
           status: 'spawning',
-        })
+        }),
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
       )
 
       expect(mockRelay.sendDirectMessage).toHaveBeenCalledWith(
@@ -93,7 +107,10 @@ describe('runtime', () => {
           subject: 'Initial task',
           body: 'Do something',
           kind: 'system',
-        })
+        }),
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
       )
 
       runtime.destroy()
@@ -203,7 +220,13 @@ describe('runtime', () => {
       // Wait for async operations
       await new Promise(r => setTimeout(r, 50))
 
-      expect(mockRelay.setParticipantStatus).toHaveBeenCalledWith('agent-1', 'error')
+      expect(mockRelay.setParticipantStatus).toHaveBeenCalledWith(
+        'agent-1',
+        'error',
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
+      )
       expect(mockRelay.events.emit).toHaveBeenCalledWith(
         'event',
         expect.objectContaining({
@@ -270,7 +293,13 @@ describe('runtime', () => {
       // Wait for timeout
       await new Promise(r => setTimeout(r, 100))
 
-      expect(mockRelay.setParticipantStatus).toHaveBeenCalledWith('agent-1', 'error')
+      expect(mockRelay.setParticipantStatus).toHaveBeenCalledWith(
+        'agent-1',
+        'error',
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
+      )
 
       runtime.destroy()
     })
@@ -342,7 +371,9 @@ describe('runtime', () => {
       expect(mockRelay.updateWorkContext).toHaveBeenCalledWith('agent-1', {
         summary: 'Working on auth',
         files: ['src/auth.ts'],
-      })
+      }, expect.objectContaining({
+        assertActive: expect.any(Function),
+      }))
 
       expect(mockRelay.sendDirectMessage).toHaveBeenCalledWith(
         'agent-1',
@@ -351,10 +382,234 @@ describe('runtime', () => {
           subject: 'Coordination needed',
           body: 'I need to discuss the auth changes',
           priority: 'high',
-        })
+        }),
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
       )
 
       runtime.destroy()
+    })
+
+    it('cancels deferred spawn boundaries before later publication or provider work', async () => {
+      for (const deferredBoundary of ['upsert', 'send', 'schedule'] as const) {
+        let release!: () => void
+        const released = new Promise<void>(resolve => {
+          release = resolve
+        })
+        let markEntered!: () => void
+        const entered = new Promise<void>(resolve => {
+          markEntered = resolve
+        })
+        const listeners = new Set<(event: RelayEvent) => void>()
+        const participants = new Map<string, RelayParticipant>()
+        let stopped = false
+        let postStopPublishInvocations = 0
+        let postStopBackingCommits = 0
+        let postStopMutationCalls = 0
+        let executorCreations = 0
+        let processStarts = 0
+        let sendCalls = 0
+        let scheduleReads = 0
+
+        const publish = (event: RelayEvent) => {
+          if (stopped) postStopPublishInvocations += 1
+          for (const listener of listeners) {
+            listener(event)
+          }
+        }
+        const recordMutation = () => {
+          if (stopped) postStopMutationCalls += 1
+        }
+
+        const relay = {
+          events: {
+            emit(_type: string, event: RelayEvent) {
+              publish(event)
+            },
+          },
+          on(listener: (event: RelayEvent) => void) {
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          },
+          async upsertParticipant(
+            input: RelayParticipant,
+            context?: RelayOperationContext,
+          ) {
+            recordMutation()
+            if (deferredBoundary === 'upsert') {
+              markEntered()
+              await released
+            }
+            context?.assertActive()
+            if (stopped) postStopBackingCommits += 1
+            const participant = {
+              ...input,
+              channels: input.channels ?? [],
+            }
+            participants.set(input.id, participant)
+            publish({
+              type: 'participant_upserted',
+              timestamp: Date.now(),
+              payload: { participant },
+            })
+            return participant
+          },
+          async sendDirectMessage(
+            from: string,
+            draft: { to: string; body: string },
+            context?: RelayOperationContext,
+          ) {
+            recordMutation()
+            sendCalls += 1
+            if (deferredBoundary === 'send') {
+              markEntered()
+              await released
+            }
+            context?.assertActive()
+            if (stopped) postStopBackingCommits += 1
+            const message = {
+              mailbox: 'sent' as const,
+              filename: 'initial-task.md',
+              meta: {
+                protocol: 'codesurf-relay/v1' as const,
+                id: 'initial-task',
+                threadId: 'initial-task',
+                scope: 'system' as const,
+                kind: 'system' as const,
+                priority: 'high' as const,
+                from,
+                to: draft.to,
+                subject: 'Initial task',
+                status: 'sent' as const,
+                createdAt: new Date().toISOString(),
+                createdTs: Date.now(),
+                updatedAt: new Date().toISOString(),
+                updatedTs: Date.now(),
+                bcc: 'central' as const,
+              },
+              body: draft.body,
+            }
+            publish({
+              type: 'direct_message',
+              timestamp: Date.now(),
+              payload: { from, to: draft.to, message },
+            })
+            return message
+          },
+          async getParticipant(id: string) {
+            scheduleReads += 1
+            if (deferredBoundary === 'schedule') {
+              markEntered()
+              await released
+            }
+            return participants.get(id) ?? null
+          },
+          async listUnreadDirectMessages() {
+            return []
+          },
+          async listUnreadChannelMessages() {
+            return []
+          },
+          async analyzeRelationships() {
+            return []
+          },
+          async setParticipantStatus(
+            id: string,
+            status: RelayParticipant['status'],
+            context?: RelayOperationContext,
+          ) {
+            recordMutation()
+            context?.assertActive()
+            if (stopped) postStopBackingCommits += 1
+            const participant = { ...participants.get(id)!, status }
+            participants.set(id, participant)
+            publish({
+              type: 'participant_status',
+              timestamp: Date.now(),
+              payload: { participantId: id, status },
+            })
+            return participant
+          },
+          async updateWorkContext() {
+            recordMutation()
+          },
+          async sendChannelMessage() {
+            recordMutation()
+          },
+          async storeMemory() {
+            recordMutation()
+          },
+          async markDirectMessagesRead() {
+            recordMutation()
+          },
+          async advanceChannelCursor() {
+            recordMutation()
+          },
+          async listParticipants() {
+            return Array.from(participants.values())
+          },
+        } as unknown as CodesurfRelay
+
+        const runtime = new RelayRuntime(relay, {
+          executorFactory: () => {
+            executorCreations += 1
+            return {
+              async runTurn() {
+                processStarts += 1
+                return '{}'
+              },
+            }
+          },
+          assertActive: () => {
+            if (stopped) throw new Error('stale runtime generation')
+          },
+        })
+
+        let spawnSettled = false
+        const spawn = runtime.spawn({
+          id: `agent-${deferredBoundary}`,
+          name: `Agent ${deferredBoundary}`,
+          provider: 'codex',
+          task: 'must stop at the deferred boundary',
+        })
+        void spawn.then(
+          () => { spawnSettled = true },
+          () => { spawnSettled = true },
+        )
+
+        await entered
+        expect(spawnSettled).toBe(false)
+        stopped = true
+        runtime.destroy()
+
+        await expect(spawn).rejects.toBeInstanceOf(
+          RelayRuntimeDisposedError,
+        )
+
+        release()
+        await new Promise(resolve => setTimeout(resolve, 0))
+
+        expect(postStopPublishInvocations).toBe(0)
+        expect(postStopBackingCommits).toBe(0)
+        expect(postStopMutationCalls).toBe(0)
+        expect(processStarts).toBe(0)
+        expect(listeners.size).toBe(0)
+
+        if (deferredBoundary === 'upsert') {
+          expect(sendCalls).toBe(0)
+          expect(executorCreations).toBe(0)
+          expect(scheduleReads).toBe(0)
+        } else if (deferredBoundary === 'send') {
+          expect(sendCalls).toBe(1)
+          expect(executorCreations).toBe(1)
+          expect(scheduleReads).toBe(0)
+        } else {
+          expect(sendCalls).toBe(1)
+          expect(executorCreations).toBe(1)
+          expect(scheduleReads).toBeGreaterThanOrEqual(1)
+        }
+      }
     })
   })
 

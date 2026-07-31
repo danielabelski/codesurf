@@ -5,6 +5,7 @@ import type {
   RelayDirectMessageDraft,
   RelayEvent,
   RelayMessage,
+  RelayOperationContext,
   RelayParticipant,
   RelaySpawnRequest,
   RelayTurnInput,
@@ -14,12 +15,20 @@ import { CodesurfRelay } from './relay'
 export interface RelayRuntimeOptions {
   executorFactory: (participant: RelayParticipant, spawn: RelaySpawnRequest) => RelayAgentExecutor
   turnTimeoutMs?: number
+  assertActive?: () => void
 }
 
 export class RelayTimeoutError extends Error {
   constructor(participantId: string, timeoutMs: number) {
     super(`Agent ${participantId} turn timed out after ${timeoutMs}ms`)
     this.name = 'RelayTimeoutError'
+  }
+}
+
+export class RelayRuntimeDisposedError extends Error {
+  constructor() {
+    super('Relay runtime was disposed during an active operation')
+    this.name = 'RelayRuntimeDisposedError'
   }
 }
 
@@ -126,100 +135,157 @@ function buildPrompt(input: RelayTurnInput, task: string): string {
 export class RelayRuntime {
   private readonly relay: CodesurfRelay
   private readonly options: RelayRuntimeOptions
+  private readonly operationContext: RelayOperationContext
   private readonly agents = new Map<string, RuntimeAgentState>()
   private readonly unsubscribe: () => void
+  private readonly cancelled: Promise<never>
+  private cancel!: (error: Error) => void
+  private destroyed = false
 
   constructor(relay: CodesurfRelay, options: RelayRuntimeOptions) {
     this.relay = relay
     this.options = options
-    this.unsubscribe = this.relay.on(event => { void this.onRelayEvent(event) })
+    this.operationContext = {
+      assertActive: () => this.assertActive(),
+    }
+    this.cancelled = new Promise<never>((_resolve, reject) => {
+      this.cancel = reject
+    })
+    void this.cancelled.catch(() => {})
+    this.unsubscribe = this.relay.on(event => {
+      if (!this.isActive()) return
+      void this.onRelayEvent(event).catch(error => {
+        if (!this.isActive()) return
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        this.relay.events.emit('event', {
+          type: 'error',
+          timestamp: Date.now(),
+          payload: { error: errorMessage },
+        } satisfies RelayEvent)
+      })
+    })
   }
 
   destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
+    this.cancel(new RelayRuntimeDisposedError())
     this.unsubscribe()
     this.agents.clear()
   }
 
   async spawn(request: RelaySpawnRequest): Promise<RelayParticipant> {
+    this.assertActive()
     const id = request.id ?? request.tileId ?? request.name
-    const participant = await this.relay.upsertParticipant({
-      id,
-      name: request.name,
-      kind: 'agent',
-      status: 'spawning',
-      tileId: request.tileId,
-      provider: request.provider ?? 'unknown',
-      model: request.model,
-      task: request.task,
-      channels: request.channels ?? [],
-      metadata: {
-        ...(request.metadata ?? {}),
-        relayMode: request.mode,
-        relayThinking: request.thinking,
-      },
-    })
+    const participant = await this.awaitActive(
+      () => this.relay.upsertParticipant({
+        id,
+        name: request.name,
+        kind: 'agent',
+        status: 'spawning',
+        tileId: request.tileId,
+        provider: request.provider ?? 'unknown',
+        model: request.model,
+        task: request.task,
+        channels: request.channels ?? [],
+        metadata: {
+          ...(request.metadata ?? {}),
+          relayMode: request.mode,
+          relayThinking: request.thinking,
+        },
+      }, this.operationContext),
+    )
 
+    this.assertActive()
     const executor = this.options.executorFactory(participant, { ...request, id })
-    this.agents.set(id, {
+    this.assertActive()
+    const state: RuntimeAgentState = {
       spawn: { ...request, id },
       running: true,
       busy: false,
       ready: false,
       executor,
-    })
+    }
+    this.agents.set(id, state)
+    try {
+      await this.awaitActive(
+        () => this.relay.sendDirectMessage('system', {
+          to: id,
+          subject: 'Initial task',
+          body: request.task,
+          kind: 'system',
+          priority: 'high',
+          data: {
+            relaySpawn: true,
+            channels: request.channels ?? [],
+            provider: request.provider,
+            model: request.model,
+          },
+        }, this.operationContext),
+      )
 
-    await this.relay.sendDirectMessage('system', {
-      to: id,
-      subject: 'Initial task',
-      body: request.task,
-      kind: 'system',
-      priority: 'high',
-      data: {
-        relaySpawn: true,
-        channels: request.channels ?? [],
-        provider: request.provider,
-        model: request.model,
-      },
-    })
-
-    await this.schedule(id)
+      await this.awaitActive(() => this.schedule(id))
+    } catch (error) {
+      if (this.agents.get(id) === state) this.agents.delete(id)
+      throw error
+    }
+    this.assertActive()
     return participant
   }
 
   async stop(participantId: string): Promise<void> {
+    this.assertActive()
     const state = this.agents.get(participantId)
     if (!state) return
     state.running = false
-    await this.relay.setParticipantStatus(participantId, 'stopped')
+    await this.awaitActive(
+      () => this.relay.setParticipantStatus(
+        participantId,
+        'stopped',
+        this.operationContext,
+      ),
+    )
   }
 
   async start(participantId: string): Promise<void> {
+    this.assertActive()
     const state = this.agents.get(participantId)
     if (!state) return
     state.running = true
-    await this.schedule(participantId)
+    await this.awaitActive(() => this.schedule(participantId))
   }
 
   async schedule(participantId: string): Promise<void> {
+    this.assertActive()
     const state = this.agents.get(participantId)
     if (!state || !state.running || state.busy) return
     state.busy = true
     try {
-      await this.runAgentTickWithErrorHandling(participantId, state)
+      await this.awaitActive(
+        () => this.runAgentTickWithErrorHandling(participantId, state),
+      )
     } finally {
       state.busy = false
     }
   }
 
   private async tick(participantId: string, state: RuntimeAgentState): Promise<void> {
-    const participant = await this.relay.getParticipant(participantId)
+    const participant = await this.awaitActive(
+      () => this.relay.getParticipant(participantId, this.operationContext),
+    )
     if (!participant) return
 
-    const unreadDirectMessages = await this.relay.listUnreadDirectMessages(participantId)
-    const unreadChannelMessages = await this.relay.listUnreadChannelMessages(participantId)
+    const unreadDirectMessages = await this.awaitActive(
+      () => this.relay.listUnreadDirectMessages(participantId),
+    )
+    const unreadChannelMessages = await this.awaitActive(
+      () => this.relay.listUnreadChannelMessages(participantId),
+    )
     if (unreadDirectMessages.length === 0 && unreadChannelMessages.length === 0 && state.ready) return
 
-    const relationships = (await this.relay.analyzeRelationships()).filter(hint => hint.participants.includes(participantId))
+    const relationships = (await this.awaitActive(
+      () => this.relay.analyzeRelationships(),
+    )).filter(hint => hint.participants.includes(participantId))
     const prompt = buildPrompt({
       participant,
       prompt: '',
@@ -235,21 +301,47 @@ export class RelayRuntime {
       unreadChannelMessages,
       relationships,
     }
-    await this.relay.setParticipantStatus(participantId, state.ready ? 'running' : 'spawning')
+    await this.awaitActive(
+      () => this.relay.setParticipantStatus(
+        participantId,
+        state.ready ? 'running' : 'spawning',
+        this.operationContext,
+      ),
+    )
 
     const turnTimeoutMs = this.options.turnTimeoutMs ?? 300_000 // 5 minutes default
-    const raw = await this.runTurnWithTimeout(participantId, state, input, turnTimeoutMs)
+    const raw = await this.awaitActive(
+      () => this.runTurnWithTimeout(participantId, state, input, turnTimeoutMs),
+    )
     const output = parseTurnOutput(raw)
 
     if (output.work) {
-      await this.relay.updateWorkContext(participantId, output.work)
+      await this.awaitActive(
+        () => this.relay.updateWorkContext(
+          participantId,
+          output.work!,
+          this.operationContext,
+        ),
+      )
     }
 
     if (!state.ready && (output.ready ?? true)) {
       state.ready = true
-      await this.relay.setParticipantStatus(participantId, output.status ?? 'ready')
+      await this.awaitActive(
+        () => this.relay.setParticipantStatus(
+          participantId,
+          output.status ?? 'ready',
+          this.operationContext,
+        ),
+      )
     } else if (output.status) {
-      await this.relay.setParticipantStatus(participantId, output.status)
+      await this.awaitActive(
+        () => this.relay.setParticipantStatus(
+          participantId,
+          output.status!,
+          this.operationContext,
+        ),
+      )
     }
 
     for (const message of output.messages ?? []) {
@@ -264,7 +356,13 @@ export class RelayRuntime {
           replyToId: message.replyToId,
           data: message.data,
         }
-        await this.relay.sendDirectMessage(participantId, draft)
+        await this.awaitActive(
+          () => this.relay.sendDirectMessage(
+            participantId,
+            draft,
+            this.operationContext,
+          ),
+        )
       } else {
         const draft: RelayChannelMessageDraft = {
           channel: message.channel,
@@ -276,16 +374,36 @@ export class RelayRuntime {
           replyToId: message.replyToId,
           data: message.data,
         }
-        await this.relay.sendChannelMessage(participantId, draft)
+        await this.awaitActive(
+          () => this.relay.sendChannelMessage(
+            participantId,
+            draft,
+            this.operationContext,
+          ),
+        )
       }
     }
 
     for (const memory of output.memory ?? []) {
-      await this.relay.storeMemory(participantId, memory.subject, memory.body, memory.data)
+      await this.awaitActive(
+        () => this.relay.storeMemory(
+          participantId,
+          memory.subject,
+          memory.body,
+          memory.data,
+          this.operationContext,
+        ),
+      )
     }
 
     if (unreadDirectMessages.length > 0) {
-      await this.relay.markDirectMessagesRead(participantId, unreadDirectMessages)
+      await this.awaitActive(
+        () => this.relay.markDirectMessagesRead(
+          participantId,
+          unreadDirectMessages,
+          this.operationContext,
+        ),
+      )
     }
     if (unreadChannelMessages.length > 0) {
       const latestByChannel = new Map<string, number>()
@@ -294,24 +412,38 @@ export class RelayRuntime {
         latestByChannel.set(message.meta.channel, Math.max(latestByChannel.get(message.meta.channel) ?? 0, message.meta.createdTs))
       }
       for (const [channel, timestamp] of latestByChannel) {
-        await this.relay.advanceChannelCursor(participantId, channel, timestamp)
+        await this.awaitActive(
+          () => this.relay.advanceChannelCursor(
+            participantId,
+            channel,
+            timestamp,
+            this.operationContext,
+          ),
+        )
       }
     }
   }
 
   private async onRelayEvent(event: RelayEvent): Promise<void> {
+    this.assertActive()
     if (event.type === 'direct_message') {
       const target = (event.payload as { to: string }).to
-      if (this.agents.has(target)) await this.schedule(target)
+      if (this.agents.has(target)) {
+        await this.awaitActive(() => this.schedule(target))
+      }
       return
     }
 
     if (event.type === 'channel_message') {
       const channel = (event.payload as { channel: string }).channel
-      const participants = await this.relay.listParticipants()
-      await Promise.all(participants
-        .filter(participant => participant.channels.includes(channel))
-        .map(participant => this.schedule(participant.id)))
+      const participants = await this.awaitActive(
+        () => this.relay.listParticipants(this.operationContext),
+      )
+      await this.awaitActive(
+        () => Promise.all(participants
+          .filter(participant => participant.channels.includes(channel))
+          .map(participant => this.schedule(participant.id))),
+      )
     }
   }
 
@@ -341,9 +473,11 @@ export class RelayRuntime {
 
   private async runAgentTickWithErrorHandling(participantId: string, state: RuntimeAgentState): Promise<void> {
     try {
-      await this.tick(participantId, state)
+      await this.awaitActive(() => this.tick(participantId, state))
     } catch (error) {
+      if (!this.isActive()) return
       const errorMessage = error instanceof Error ? error.message : String(error)
+      this.assertActive()
       this.relay.events.emit('event', {
         type: 'error',
         timestamp: Date.now(),
@@ -354,11 +488,45 @@ export class RelayRuntime {
       // from schedule() (not awaited), so a throw here becomes an unhandled
       // rejection — guard it so error recovery can never itself reject.
       try {
-        await this.relay.setParticipantStatus(participantId, 'error')
+        await this.awaitActive(
+          () => this.relay.setParticipantStatus(
+            participantId,
+            'error',
+            this.operationContext,
+          ),
+        )
       } catch {
+        if (!this.isActive()) return
         // Participant gone — nothing left to mark.
       }
       state.running = false
+    }
+  }
+
+  private assertActive(): void {
+    if (this.destroyed) throw new RelayRuntimeDisposedError()
+    this.options.assertActive?.()
+  }
+
+  private isActive(): boolean {
+    try {
+      this.assertActive()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async awaitActive<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertActive()
+    const pending = operation()
+    try {
+      const result = await Promise.race([pending, this.cancelled])
+      this.assertActive()
+      return result
+    } catch (error) {
+      this.assertActive()
+      throw error
     }
   }
 }
