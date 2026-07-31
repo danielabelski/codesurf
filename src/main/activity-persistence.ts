@@ -349,6 +349,7 @@ async function loadActivityFile(
     if (openedInfo.size > BigInt(maxFileBytes)) {
       throw persistenceError('file_too_large', `Activity store exceeds ${maxFileBytes} bytes`, filePath)
     }
+    const needsPermissionRepair = (openedInfo.mode & 0o777n) !== 0o600n
     const bytes = await handle.readFile()
     if (bytes.byteLength > maxFileBytes) {
       throw persistenceError('file_too_large', `Activity store exceeds ${maxFileBytes} bytes`, filePath)
@@ -381,7 +382,7 @@ async function loadActivityFile(
       const capped = capActivityRecords(recovered.records)
       return {
         records: capped,
-        needsRewrite: recovered.needsRewrite || capped !== recovered.records,
+        needsRewrite: needsPermissionRepair || recovered.needsRewrite || capped !== recovered.records,
       }
     } catch (error) {
       if (error instanceof ActivityValidationError && error.code === 'future_document_version') {

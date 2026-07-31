@@ -117,6 +117,47 @@ describe('file activity persistence', () => {
     }
   })
 
+  test('repairs exposed permissions on current and legacy stores through the normal writer', async () => {
+    const cases = [
+      {
+        name: 'current',
+        document: {
+          version: ACTIVITY_DOCUMENT_VERSION,
+          records: [record('current')],
+        },
+      },
+      {
+        name: 'legacy',
+        document: [record('legacy')],
+      },
+    ]
+
+    for (const testCase of cases) {
+      const { homeDir, cleanup } = await fixture()
+      try {
+        const filePath = activityStorePath(homeDir, testCase.name)
+        await mkdir(dirname(filePath), { recursive: true })
+        await writeFile(filePath, JSON.stringify(testCase.document))
+        await chmod(filePath, 0o644)
+
+        const persistence = createFileActivityPersistence({ homeDir })
+        const store = new ActivityStore({ persistence })
+        assert.equal((await store.query({ workspaceId: testCase.name })).length, 1)
+        await store.flushAll()
+
+        assert.equal((await stat(filePath)).mode & 0o777, 0o600)
+        const repaired = JSON.parse(await readFile(filePath, 'utf8')) as {
+          version: number
+          records: ActivityRecord[]
+        }
+        assert.equal(repaired.version, ACTIVITY_DOCUMENT_VERSION)
+        assert.equal(repaired.records[0]?.workspaceId, testCase.name)
+      } finally {
+        await cleanup()
+      }
+    }
+  })
+
   test('leaves future and oversized files untouched without quarantining or rewriting them', async () => {
     const cases: Array<{ name: string, raw: string, maxFileBytes?: number }> = [
       {
