@@ -24,9 +24,9 @@ export function joinPromptSections(...sections: Array<string | undefined | null>
 export const CODESURF_OUTPUT_CONVENTION = [
   '## CodeSurf Task-Completion Convention',
   '',
-  'Default to a short natural-language completion. For simple edits, one sentence plus any verification result is enough.',
+  'Default to a short natural-language completion. For simple work, one sentence plus verification is enough.',
   '',
-  'Only use the structured completion card for substantial work: multi-file changes, long-running tasks, risky edits, migrations, debugging sessions, or work where the user needs a durable handoff. When you do use it, use this exact format (literal uppercase section headers inside a fenced code block):',
+  'For substantial multi-file, risky, migration, or debugging work, use this exact fenced handoff:',
   '',
   '```',
   'CHANGES MADE:',
@@ -37,17 +37,10 @@ export const CODESURF_OUTPUT_CONVENTION = [
   '  <path or area>: <one-line why you left it alone>',
   '',
   'CONCERNS:',
-  '  - <risk, assumption, or follow-up the user should verify>',
+  '  - <risk, assumption, or follow-up>',
   '```',
   '',
-  'Rules:',
-  '- Do NOT use the structured card for trivial changes such as copy tweaks, captions, one-line edits, formatting, or small visual adjustments.',
-  '- For simple tasks, say what changed and whether verification passed, then stop.',
-  '- Include CHANGES MADE only when the structured card is warranted. Skip the block entirely for pure Q&A turns.',
-  '- DIDN\'T TOUCH is only useful when there were adjacent risky areas you deliberately left alone.',
-  '- CONCERNS is never empty if you had to make a judgment call, guess a value, or skip verification. If there are truly no concerns, write "CONCERNS: none".',
-  '- One line per entry. No prose paragraphs inside the block.',
-  '- Put the block inside a single fenced code block so the host UI can render it as a structured card.',
+  'Do NOT use the structured card for trivial changes. Skip it for Q&A. Keep one line per entry. Omit DIDN\'T TOUCH unless useful. CONCERNS must name judgments or skipped verification; otherwise write "CONCERNS: none".',
 ].join('\n')
 
 export function buildCodeSurfOutputConvention(): string {

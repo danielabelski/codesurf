@@ -92,6 +92,10 @@ export interface ChatRequest {
   roomContext?: string
   /** Main-process-only cursor reservation; never trusted from renderer input. */
   roomAckSequence?: number
+  /** Host-composed provider system context. Stripped at every inbound boundary. */
+  contextPrompt?: string
+  /** Host-expanded workspace file content, delivered as untrusted user data. */
+  fileReferencePrompt?: string
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle

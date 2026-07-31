@@ -19,3 +19,20 @@ export function appendUntrustedRoomContextToLatestUser(
       }
     : message)
 }
+
+/** Append an already-framed host composition exactly once to the latest user turn. */
+export function appendComposedUserContextToLatestUser(
+  messages: ChatMessage[],
+  userSuffix: string | undefined,
+): ChatMessage[] {
+  const suffix = String(userSuffix ?? '').trim()
+  if (!suffix) return messages
+  const index = messages.findLastIndex(message => message.role === 'user')
+  if (index < 0) return messages
+  return messages.map((message, messageIndex) => messageIndex === index
+    ? {
+        ...message,
+        content: `${message.content}\n\n${suffix}`,
+      }
+    : message)
+}
