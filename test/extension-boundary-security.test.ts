@@ -664,8 +664,11 @@ describe('canonical extension resource boundary', () => {
     const entry = join(root, 'entry.txt')
     const movedEntry = join(root, 'entry-original.txt')
     const alias = join(root, 'alias.txt')
+    const componentAlias = join(root, 'linked-directory')
     const newEntry = join(root, 'new.txt')
     const largeHtml = join(root, 'large.html')
+    const externalDirectory = join(temp, 'external')
+    const externalEntry = join(externalDirectory, 'secret.txt')
     await mkdir(root)
     const manifest = {
       id: 'media-extension',
@@ -876,5 +879,25 @@ describe('canonical extension resource boundary', () => {
     })
     assert.equal(aliasResponse.status, 409)
     assert.doesNotMatch(await aliasResponse.text(), /trusted/)
+
+    await fs.rm(alias)
+    await refresh()
+    await mkdir(externalDirectory)
+    await writeFile(externalEntry, 'external-secret')
+    await symlink(externalEntry, alias)
+    const externalAliasResponse = await handle({
+      url: 'codesurf-ext://media-extension/alias.txt',
+    })
+    assert.equal(externalAliasResponse.status, 409)
+    assert.doesNotMatch(await externalAliasResponse.text(), /external-secret/)
+
+    await fs.rm(alias)
+    await refresh()
+    await symlink(externalDirectory, componentAlias)
+    const componentAliasResponse = await handle({
+      url: 'codesurf-ext://media-extension/linked-directory/secret.txt',
+    })
+    assert.equal(componentAliasResponse.status, 409)
+    assert.doesNotMatch(await componentAliasResponse.text(), /external-secret/)
   })
 })
