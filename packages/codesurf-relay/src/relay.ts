@@ -4,6 +4,13 @@ import { promises as fs, renameSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { writeFilesAtomically } from './atomicFileWrites'
 import { parseRelayMessage, renderRelayMessage } from './markdown'
+import {
+  safeSlug,
+  validateChannelId,
+  validateMessageFilename,
+  validateParticipantId,
+  validateTileId,
+} from './validation'
 import type {
   RelayChannel,
   RelayChannelMessageDraft,
@@ -32,8 +39,6 @@ interface RelayPaths {
   relationships: string
 }
 
-const INVALID_ID_PATTERN = /\.\.|\/|\\|^\.|\0/
-
 export interface CodesurfRelayOptions {
   workspacePath: string
 }
@@ -43,43 +48,8 @@ function nowStamp(): { iso: string; ts: number } {
   return { iso: now.toISOString(), ts: now.getTime() }
 }
 
-function safeSlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48) || 'message'
-}
-
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items))
-}
-
-function validateParticipantId(id: string): void {
-  if (!id || typeof id !== 'string') throw new Error('Participant ID is required')
-  if (INVALID_ID_PATTERN.test(id)) throw new Error(`Invalid participant ID: ${id}`)
-  if (id.length > 128) throw new Error('Participant ID too long (max 128 chars)')
-}
-
-function validateChannelId(id: string): void {
-  if (!id || typeof id !== 'string') throw new Error('Channel ID is required')
-  if (INVALID_ID_PATTERN.test(id)) throw new Error(`Invalid channel ID: ${id}`)
-  if (id.length > 128) throw new Error('Channel ID too long (max 128 chars)')
-}
-
-function validateTileId(id: string): void {
-  if (!id || typeof id !== 'string') throw new Error('Tile ID is required')
-  if (INVALID_ID_PATTERN.test(id)) throw new Error(`Invalid tile ID: ${id}`)
-  if (id.length > 128) throw new Error('Tile ID too long (max 128 chars)')
-}
-
-// Mailbox filenames are joined into mailbox dirs and are renderer-supplied
-// through relay:* IPC — they must stay plain basenames (no separators, no
-// '..'), otherwise moveMessage/readMessage become arbitrary file primitives.
-function validateMessageFilename(filename: string): void {
-  if (!filename || typeof filename !== 'string') throw new Error('Message filename is required')
-  if (INVALID_ID_PATTERN.test(filename)) throw new Error(`Invalid message filename: ${filename}`)
 }
 
 async function ensureDir(path: string): Promise<void> {

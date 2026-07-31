@@ -11,6 +11,7 @@ import type {
   RelayTurnInput,
 } from './types'
 import { CodesurfRelay } from './relay'
+import { sanitizeForPrompt } from './validation'
 
 export interface RelayRuntimeOptions {
   executorFactory: (participant: RelayParticipant, spawn: RelaySpawnRequest) => RelayAgentExecutor
@@ -75,14 +76,6 @@ function extractJsonBlock(raw: string): string {
   const end = raw.lastIndexOf('}')
   if (start !== -1 && end !== -1 && end > start) return raw.slice(start, end + 1)
   return raw
-}
-
-function sanitizeForPrompt(text: string, maxLength = 4000): string {
-  return text
-    .replace(/```/g, '\\`\\`\\`')
-    .replace(/<\|/g, '\\<\\|')
-    .replace(/\|>/g, '\\|\\>')
-    .slice(0, maxLength)
 }
 
 function sanitizeMessageForPrompt(msg: RelayMessage): { meta: RelayMessage['meta']; body: string; data?: Record<string, unknown> } {
