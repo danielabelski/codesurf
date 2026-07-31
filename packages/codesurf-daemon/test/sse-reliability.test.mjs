@@ -689,6 +689,93 @@ test('done remains invisible until durable and append failure streams only the f
   assert.equal((await manager.getJobState(job.id))?.status, 'failed')
 })
 
+test('terminal metadata failure prevents success publication and remains restart-recoverable', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-terminal-metadata-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseProvider = deferred()
+  const terminalMetadataStarted = deferred()
+  const releaseTerminalMetadata = deferred()
+  let rejectCompletedMetadata = true
+  const metadataWrites = []
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    metadataWrite: async (path, data) => {
+      const metadata = JSON.parse(data)
+      metadataWrites.push(metadata.status)
+      if (rejectCompletedMetadata && metadata.status === 'completed') {
+        rejectCompletedMetadata = false
+        terminalMetadataStarted.resolve()
+        await releaseTerminalMetadata.promise
+        throw new Error('simulated terminal metadata failure')
+      }
+      await writeFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('before metadata failure')
+      await releaseProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  let restartedManager = null
+  t.after(async () => {
+    releaseProvider.resolve()
+    releaseTerminalMetadata.resolve()
+    await manager.shutdown()
+    await restartedManager?.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  ).includes('before metadata failure'))
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(job.id, 0, response), true)
+  releaseProvider.resolve()
+  await terminalMetadataStarted.promise
+  assert.equal(writtenEvents(response).some(event => event.type === 'done'), false)
+  assert.equal(response.endCalls, 0)
+  const timelineBeforeMetadataFailure = await readFile(
+    join(homeDir, 'timelines', `${job.id}.jsonl`),
+    'utf8',
+  )
+  assert.equal(timelineBeforeMetadataFailure.includes('"type":"done"'), false)
+
+  releaseTerminalMetadata.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  await waitFor(async () => (await manager.getJobState(job.id))?.status === 'failed')
+
+  const streamed = writtenEvents(response)
+  assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.match(streamed.at(-2)?.error, /terminal metadata failure|timeline persistence/i)
+  assert.equal(streamed.filter(event => event.type === 'done').length, 1)
+  assert.ok(metadataWrites.includes('completed'))
+  assert.ok(metadataWrites.includes('failed'))
+
+  const durableBeforeRestart = (await readFile(
+    join(homeDir, 'timelines', `${job.id}.jsonl`),
+    'utf8',
+  )).trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(durableBeforeRestart.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(durableBeforeRestart.filter(event => event.type === 'done').length, 1)
+
+  await manager.shutdown()
+  restartedManager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  const replay = new FakeResponse()
+  assert.equal(await restartedManager.streamJob(job.id, 0, replay), false)
+  assert.deepEqual(writtenEvents(replay), durableBeforeRestart)
+  assert.equal((await restartedManager.getJobState(job.id))?.status, 'failed')
+})
+
 test('failed-record cap evicts oldest payload state after durable fail-closed finalization', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-many-failures-'))
   const workspaceDir = join(homeDir, 'workspace')

@@ -1546,6 +1546,7 @@ export function createChatJobManager({
   const TIMELINE_APPEND_ATTEMPTS = Math.max(1, Number(timelineAppendMaxAttempts) || 3)
   const TIMELINE_RETRY_DELAY_MS = Math.max(0, Number(timelineAppendRetryDelayMs) || 0)
   const metadataFlushTimers = new Map() // jobId -> timeout
+  const metadataWriteTails = new Map() // jobId -> serialized atomic write
   const timelinePersistence = new Map() // jobId -> bounded queue record
   const timelineWriteTails = new Map() // jobId -> latest queued entry promise
   const reconciliationLocks = new Map() // jobId -> Promise<metadata>
@@ -1892,7 +1893,7 @@ export function createChatJobManager({
     }
   }
 
-  async function writeJobMetadata(job) {
+  async function writeJobMetadataNow(job) {
     // Atomic write: a crash/SIGKILL mid-write must not leave a truncated
     // {jobId}.json — a corrupt record is invisible to the dashboard AND
     // un-prunable by retention sweep (it skips on parse error), leaking the
@@ -1905,6 +1906,42 @@ export function createChatJobManager({
     } catch (err) {
       try { await fs.unlink(tmpPath) } catch {}
       throw err
+    }
+  }
+
+  async function writeJobMetadata(job) {
+    const snapshot = { ...job }
+    const previous = metadataWriteTails.get(job.id)
+    const write = (previous ? previous.catch(() => {}) : Promise.resolve())
+      .then(() => writeJobMetadataNow(snapshot))
+    metadataWriteTails.set(job.id, write)
+    try {
+      await write
+    } finally {
+      if (metadataWriteTails.get(job.id) === write) {
+        metadataWriteTails.delete(job.id)
+      }
+    }
+  }
+
+  async function stageJobMetadata(job) {
+    const pendingWrite = metadataWriteTails.get(job.id)
+    if (pendingWrite) await pendingWrite.catch(() => {})
+    const finalPath = jobMetaPath(job.id)
+    const tmpPath = `${finalPath}.tmp-${randomUUID()}`
+    try {
+      await metadataWrite(tmpPath, `${JSON.stringify(job, null, 2)}\n`)
+    } catch (error) {
+      try { await fs.unlink(tmpPath) } catch {}
+      throw error
+    }
+    return {
+      async commit() {
+        await fs.rename(tmpPath, finalPath)
+      },
+      async discard() {
+        try { await fs.unlink(tmpPath) } catch {}
+      },
     }
   }
 
@@ -1921,7 +1958,7 @@ export function createChatJobManager({
     const timer = setTimeout(() => {
       metadataFlushTimers.delete(jobId)
       const live = liveJobs.get(jobId)
-      if (!live?.metadata) return
+      if (!live?.metadata || live.terminalFinalizing || live.terminalEmitted) return
       const persistence = timelinePersistence.get(jobId)
       if (persistence?.failed) return
       const timelineWrite = timelineWriteTails.get(jobId)
@@ -1936,7 +1973,13 @@ export function createChatJobManager({
           return
         }
         const currentLive = liveJobs.get(jobId)
-        if (currentLive?.metadata) return writeJobMetadata(currentLive.metadata)
+        if (
+          currentLive?.metadata
+          && !currentLive.terminalFinalizing
+          && !currentLive.terminalEmitted
+        ) {
+          return writeJobMetadata(currentLive.metadata)
+        }
       }).catch(() => {
         // Fail closed: never advance durable metadata beyond a timeline gap.
         // The pending event map remains available for same-process SSE replay.
@@ -1955,7 +1998,7 @@ export function createChatJobManager({
     // terminal appends. Prevents the duplicate error+done pair when cancelJob
     // and the runner's own catch both emit terminals (the second pair would
     // otherwise write a confusing duplicate timeline + re-run status logic).
-    if ((event.type === 'done' || event.type === 'error') && live?.terminalEmitted) {
+    if (live?.terminalEmitted || live?.terminalFinalizing) {
       return null
     }
 
@@ -1971,7 +2014,6 @@ export function createChatJobManager({
     } else if (event.type === 'done') {
       metadata.status = metadata.error ? 'failed' : 'completed'
       metadata.completedAt = new Date().toISOString()
-      if (live) live.terminalEmitted = true
     }
 
     const payload = {
@@ -1981,17 +2023,88 @@ export function createChatJobManager({
       ...event,
     }
 
-    // Accept into the bounded queue before fanout. The queue starts its append
-    // concurrently, but provider delivery does not await disk latency.
-    const timelineWrite = enqueueTimelineWrite(jobId, payload)
-    const publishAfterPersistence = event.type === 'done'
+    if (event.type === 'done') {
+      if (live) live.terminalFinalizing = true
+      clearMetadataFlush(jobId)
+      const pendingTimelineWrite = timelineWriteTails.get(jobId)
+      if (pendingTimelineWrite) await pendingTimelineWrite
 
-    if (live && !publishAfterPersistence) {
-      live.metadata = metadata
-    }
-    if (!publishAfterPersistence) {
+      // Prepare terminal metadata in a private temp file before the closing
+      // timeline event, then atomically install it only after that exact event
+      // is durable. A crash therefore leaves either active metadata (which
+      // startup reconciliation fails closed) or a fully committed terminal.
+      let stagedMetadata
+      try {
+        stagedMetadata = await stageJobMetadata(metadata)
+      } catch (error) {
+        throw failTimelinePersistence(
+          timelineRecord(jobId),
+          new Error(
+            `terminal metadata persistence failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
+      }
+
+      let terminalStartByte
+      try {
+        terminalStartByte = (await fs.stat(jobTimelinePath(jobId))).size
+      } catch (error) {
+        await stagedMetadata.discard()
+        throw failTimelinePersistence(
+          timelineRecord(jobId),
+          new Error(
+            `terminal timeline inspection failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
+      }
+
+      try {
+        await enqueueTimelineWrite(jobId, payload)
+      } catch (error) {
+        await stagedMetadata.discard()
+        console.error(
+          `[chat-jobs] timeline append failed for job ${jobId} at sequence ${payload.sequence}:`,
+          error,
+        )
+        return payload
+      }
+
+      try {
+        await stagedMetadata.commit()
+      } catch (error) {
+        await stagedMetadata.discard()
+        try { await fs.truncate(jobTimelinePath(jobId), terminalStartByte) } catch {}
+        const record = timelineRecord(jobId)
+        record.repairByteLength = terminalStartByte
+        throw failTimelinePersistence(
+          record,
+          new Error(
+            `terminal metadata commit failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
+      }
+
+      if (live) {
+        live.metadata = metadata
+        live.terminalEmitted = true
+      }
       subscriberRegistry.publish(jobId, payload)
+      cancelPendingToolPermissionsForJob(jobId, 'Job completed')
+      return payload
     }
+
+    // Accept non-closing events into the bounded queue before fanout. The queue
+    // starts its append concurrently, but provider delivery does not await disk
+    // latency.
+    const timelineWrite = enqueueTimelineWrite(jobId, payload)
+    if (live) live.metadata = metadata
+    subscriberRegistry.publish(jobId, payload)
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
     // completedAt, sessionId must be durable right away) or when the job has no
@@ -2009,19 +2122,7 @@ export function createChatJobManager({
           error,
         )
       }
-      if (timelinePersisted) {
-        if (live && publishAfterPersistence) {
-          live.metadata = metadata
-        }
-        if (publishAfterPersistence) {
-          // A successful terminal closes subscribers, so it must be the final
-          // step after the exact timeline entry is known durable. If the append
-          // fails, failTimelinePersistence publishes the failure terminal pair
-          // while the original subscribers are still registered.
-          subscriberRegistry.publish(jobId, payload)
-        }
-        await writeJobMetadata(metadata)
-      }
+      if (timelinePersisted) await writeJobMetadata(metadata)
     } else {
       scheduleMetadataFlush(jobId)
     }
