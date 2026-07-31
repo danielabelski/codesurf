@@ -494,6 +494,9 @@ test('outcome-uncertain partial terminal append never concatenates or publishes 
   assert.match(streamed.at(-2)?.error, /partial append without newline|timeline persistence/i)
   assert.equal(streamed.filter(event => event.type === 'done').length, 1)
 
+  await waitFor(async () => (
+    await manager.getJobState(job.id)
+  )?.timelinePersistenceFailed === false)
   const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
   assert.equal(timelineText.endsWith('\n'), true)
   const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
@@ -556,6 +559,9 @@ test('outcome-uncertain append rejects a different record at the same sequence',
   assert.equal(streamed.filter(event => event.type === 'done').length, 1)
   assert.equal((await manager.getJobState(job.id))?.status, 'failed')
 
+  await waitFor(async () => (
+    await manager.getJobState(job.id)
+  )?.timelinePersistenceFailed === false)
   const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
   assert.equal(timelineText.endsWith('\n'), true)
   const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
