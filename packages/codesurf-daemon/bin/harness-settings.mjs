@@ -8,11 +8,12 @@
 // - enabled:   master toggle (default off)
 // - providers: optional allow-list (default: claude + codex)
 
-export const HARNESS_DEFAULT_PROVIDERS = ['claude', 'codex', 'pi']
+export const HARNESS_DEFAULT_PROVIDERS = ['claude', 'codex']
+const HARNESS_AVAILABLE_PROVIDERS = new Set(HARNESS_DEFAULT_PROVIDERS)
 
 export function isHarnessEnabled({ settings, env, provider } = {}) {
   const p = String(provider ?? '').trim()
-  if (!p) return false
+  if (!p || !HARNESS_AVAILABLE_PROVIDERS.has(p)) return false
 
   const envRaw = String(env ?? '').trim().toLowerCase()
   const envOn = envRaw === '1' || envRaw === 'true' || envRaw === 'on'

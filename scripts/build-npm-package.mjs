@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -98,9 +98,7 @@ function sanitizeManifest(rootManifest) {
     ...(Object.keys(filteredOptionalDependencies).length > 0
       ? { optionalDependencies: filteredOptionalDependencies }
       : {}),
-    engines: {
-      node: '>=20.0.0',
-    },
+    engines: { ...(rootManifest.engines ?? {}) },
   }
 }
 
@@ -109,7 +107,7 @@ function main() {
 
   if (!skipAppBuild) {
     log('Building Electron app...')
-    run(process.platform === 'win32' ? 'bun.exe' : 'bun', ['run', 'build'])
+    run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'])
   } else {
     log('Skipping app build')
   }

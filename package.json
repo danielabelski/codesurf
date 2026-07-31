@@ -54,7 +54,7 @@
     "build:preload": "cross-env EV_BUILD_TARGET=preload electron-vite build",
     "build:renderer": "cross-env EV_BUILD_TARGET=renderer electron-vite build",
     "build": "cross-env EV_BUILD_TARGET=main electron-vite build && cross-env EV_BUILD_TARGET=preload electron-vite build && cross-env EV_BUILD_TARGET=renderer electron-vite build",
-    "build:npm": "bun run scripts/build-npm-package.mjs",
+    "build:npm": "node scripts/build-npm-package.mjs",
     "dist:npm": "npm run build:npm --",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
     "release:mac": "node scripts/verify-mac-release-env.mjs && npm run build && electron-builder --mac dmg zip",
@@ -77,6 +77,9 @@
   "keywords": [],
   "author": "Jason",
   "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=22"
+  },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",
     "@electron-toolkit/utils": "^4.0.0",
@@ -106,7 +109,7 @@
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.176",
-    "@anthropic-ai/claude-agent-sdk": "^0.2.118",
+    "@anthropic-ai/claude-agent-sdk": "0.2.141",
     "@codesurf/daemon": "file:packages/codesurf-daemon",
     "@mcp-ui/client": "^7.1.1",
     "@monaco-editor/react": "^4.7.0",
@@ -136,7 +139,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "electrobun": "^1.16.0",
-    "electron-updater": "^6.8.3",
+    "electron-updater": "6.8.9",
     "elkjs": "^0.11.1",
     "embla-carousel-react": "^8.6.0",
     "lucide-react": "^0.468.0",

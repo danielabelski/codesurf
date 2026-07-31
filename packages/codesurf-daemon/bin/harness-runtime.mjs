@@ -21,7 +21,7 @@ import { isAbsolute, join, dirname } from 'node:path'
 import { HarnessAgent } from '@ai-sdk/harness/agent'
 import { claudeCode } from '@ai-sdk/harness-claude-code'
 import { codex } from '@ai-sdk/harness-codex'
-import { pi } from '@ai-sdk/harness-pi'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   createSessionWorktree,
   changedFiles,
@@ -40,8 +40,9 @@ import {
 // keep resolving `isToolAllowedByAgent` from here. Source of truth and the
 // null/[]/names semantics live in agent-mode-tools.mjs.
 export { isToolAllowedByAgent } from './agent-mode-tools.mjs'
+export { PI_HARNESS_UNAVAILABLE_ERROR }
 
-export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex', 'pi'])
+export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex'])
 
 // Auth strategy: KEEP the real $HOME (inherited) so the Claude/Codex CLI finds
 // the user's existing OAuth login / keychain credentials. The harness adapter's
@@ -87,7 +88,6 @@ function workdirInstruction(workspaceDir) {
 function resolveHarness(provider) {
   if (provider === 'claude') return claudeCode
   if (provider === 'codex') return codex
-  if (provider === 'pi') return pi
   return null
 }
 
@@ -380,6 +380,12 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
   const makeAgent = createAgent || (opts => new HarnessAgent(opts))
 
   async function runHarnessJob(job, request, workspaceDir, instructionPrompt, { appendEvent, createCheckpoint, awaitToolPermission } = {}) {
+    if (request.provider === 'pi') {
+      await appendEvent(job.id, { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR })
+      await appendEvent(job.id, { type: 'done' })
+      return
+    }
+
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(m => m.role === 'user')
     if (!lastUserMsg) {
       await appendEvent(job.id, { type: 'error', error: 'No user message' })

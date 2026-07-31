@@ -17,4 +17,4 @@ echo "→ Rebuilding node-pty for Electron..."
 npx electron-rebuild -f -w node-pty
 
 echo "→ Starting dev server..."
-bun run dev
+npm run dev

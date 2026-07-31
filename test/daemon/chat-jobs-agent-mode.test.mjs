@@ -16,6 +16,7 @@ import {
   createHarnessRunner,
   isToolAllowedByAgent,
 } from '../../packages/codesurf-daemon/bin/harness-runtime.mjs'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from '../../packages/codesurf-daemon/bin/harness-policy.mjs'
 import {
   createChatJobManager,
   buildCodexExecArgs,
@@ -767,14 +768,51 @@ test('shouldUseHarness: FOREGROUND Claude falls back to native (continuity); bac
   assert.equal(shouldUseHarness({ useHarness: true, provider: 'codex' }), false)
   assert.equal(shouldUseHarness({ useHarness: true, provider: 'codex', runMode: 'background' }), false)
 
-  // pi has no native fallback path → keeps the harness regardless of runMode.
-  assert.equal(shouldUseHarness({ useHarness: true, provider: 'pi' }), true)
-  assert.equal(shouldUseHarness({ useHarness: true, provider: 'pi', runMode: 'foreground' }), true)
+  // Pi is unavailable until its published adapter dependency chain is safe.
+  assert.equal(shouldUseHarness({ useHarness: true, provider: 'pi' }), false)
+  assert.equal(shouldUseHarness({ useHarness: true, provider: 'pi', runMode: 'foreground' }), false)
 
   // Harness off / non-harness providers → never the harness.
   assert.equal(shouldUseHarness({ useHarness: false, provider: 'claude', runMode: 'background' }), false)
   assert.equal(shouldUseHarness({ provider: 'claude', runMode: 'background' }), false, 'useHarness unset → false')
   assert.equal(shouldUseHarness({ useHarness: true, provider: 'hermes' }), false)
+})
+
+test('daemon rejects Pi consistently without loading or launching the removed harness adapter', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-pi-unavailable-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdirP(workspaceDir, { recursive: true })
+  t.after(async () => { await rmP(homeDir, { recursive: true, force: true }) })
+
+  const manager = createChatJobManager({ homeDir })
+  for (const useHarness of [undefined, false, true]) {
+    const request = {
+      cardId: `pi-${String(useHarness)}`,
+      workspaceId: 'pi-workspace',
+      provider: 'pi',
+      model: 'pi-test',
+      mode: 'default',
+      workspaceDir,
+      messages: [{ role: 'user', content: 'hi' }],
+      ...(useHarness === undefined ? {} : { useHarness }),
+    }
+    const job = await manager.startJob(request)
+    const completed = await waitForCompletedJob(manager, job.id)
+    assert.equal(completed.status, 'failed')
+    assert.equal(completed.error, PI_HARNESS_UNAVAILABLE_ERROR)
+
+    const timeline = readFileSync(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line))
+      .filter(event => event.type === 'error' || event.type === 'done')
+      .map(({ type, error }) => ({ type, ...(error ? { error } : {}) }))
+    assert.deepEqual(timeline, [
+      { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR },
+      { type: 'done' },
+    ])
+  }
 })
 
 // ─── daemon Hermes: AgentMode.tools → toolsets (#2) ───────────────────────────

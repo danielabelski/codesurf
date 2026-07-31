@@ -15,6 +15,15 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
 
+async function readJsonIfPresent(path) {
+  try {
+    return await readJson(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
 test('daemon declares the Node 22 runtime floor required by its harness dependencies', async () => {
   const daemonPackage = await readJson(resolve(DAEMON_DIR, 'package.json'))
   const daemonLock = await readJson(resolve(DAEMON_DIR, 'package-lock.json'))
@@ -31,27 +40,44 @@ test('daemon declares the Node 22 runtime floor required by its harness dependen
   }
 })
 
-test('daemon SDK dependency pins and lock resolutions follow the root lock authority', async () => {
-  const rootLock = await readJson(resolve(ROOT_DIR, 'package-lock.json'))
+test('daemon dependency pins retain standalone self-authority and SDKs match the monorepo root when present', async () => {
+  const rootLock = await readJsonIfPresent(resolve(ROOT_DIR, 'package-lock.json'))
   const daemonPackage = await readJson(resolve(DAEMON_DIR, 'package.json'))
   const daemonLock = await readJson(resolve(DAEMON_DIR, 'package-lock.json'))
 
-  for (const dependency of SDK_DEPENDENCIES) {
-    const rootResolution = rootLock.packages?.[`node_modules/${dependency}`]?.version
-    assert.ok(rootResolution, `${dependency} must have a root lock resolution`)
-    assert.equal(
-      daemonPackage.dependencies?.[dependency],
-      rootResolution,
-      `${dependency} daemon dependency must pin the root lock resolution`,
-    )
+  assert.deepEqual(
+    daemonLock.packages?.['']?.dependencies,
+    daemonPackage.dependencies,
+    'the nested lock root must exactly mirror the standalone daemon manifest',
+  )
+
+  for (const [dependency, manifestVersion] of Object.entries(daemonPackage.dependencies ?? {})) {
+    assert.match(manifestVersion ?? '', /^\d+\.\d+\.\d+$/, `${dependency} must be pinned exactly`)
     assert.equal(
       daemonLock.packages?.['']?.dependencies?.[dependency],
-      daemonPackage.dependencies?.[dependency],
+      manifestVersion,
       `${dependency} nested lock spec must match the daemon package`,
     )
     assert.equal(
       daemonLock.packages?.[`node_modules/${dependency}`]?.version,
-      rootLock.packages?.[`node_modules/${dependency}`]?.version,
+      manifestVersion,
+      `${dependency} nested resolution must match the standalone manifest`,
+    )
+  }
+
+  for (const dependency of SDK_DEPENDENCIES) {
+    const manifestVersion = daemonPackage.dependencies?.[dependency]
+    if (!rootLock) continue
+    const rootResolution = rootLock.packages?.[`node_modules/${dependency}`]?.version
+    assert.ok(rootResolution, `${dependency} must have a root lock resolution`)
+    assert.equal(
+      manifestVersion,
+      rootResolution,
+      `${dependency} daemon dependency must pin the monorepo root resolution`,
+    )
+    assert.equal(
+      daemonLock.packages?.[`node_modules/${dependency}`]?.version,
+      rootResolution,
       `${dependency} nested resolution must match the root lock`,
     )
   }
