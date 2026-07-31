@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { constants, promises as fs } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,9 +13,15 @@ import {
   MAX_EXTENSION_IDENTITY_MANIFEST_BYTES,
   MAX_EXTENSION_IDENTITY_TOTAL_BYTES,
   captureExtensionMediaRoot,
+  computeExtensionMediaAttestation,
   computeExtensionMediaIdentity,
   extensionIdentityOpenFlags,
 } from '../src/main/extensions/media-identity.ts'
+import {
+  extensionMediaResourceKey,
+  readAttestedExtensionResource,
+} from '../src/main/extensions/media-resource-attestation.ts'
+import { openCanonicalResource } from '../src/main/extensions/resource-path.ts'
 
 const manifest: ExtensionManifest = {
   id: 'media-test',
@@ -84,6 +91,92 @@ async function computeWithForbiddenAccessProbe(
     fs.opendir = originalOpendir
   }
 }
+
+test('captures bounded per-resource digests with the overall install identity', async () => {
+  const root = await makeRoot('codesurf-media-attestation-')
+  try {
+    const content = Buffer.from('trusted-resource')
+    await fs.mkdir(join(root, 'assets'))
+    await fs.writeFile(join(root, 'assets', 'entry.bin'), content)
+    const attestation = await computeExtensionMediaAttestation(root, manifest)
+    assert.equal(
+      attestation.identity,
+      await computeExtensionMediaIdentity(root, manifest),
+    )
+    assert.equal(
+      attestation.resources.get('assets/entry.bin')?.digest,
+      `sha256:${createHash('sha256').update(content).digest('hex')}`,
+    )
+    assert.equal(attestation.resources.get('assets/entry.bin')?.size, content.byteLength)
+    assert.equal(attestation.resources.has('extension.json'), true)
+    assert.equal(Object.isFrozen(attestation), true)
+    assert.equal(Object.isFrozen(attestation.resources), true)
+    assert.equal('set' in attestation.resources, false)
+    assert.equal(
+      Object.isFrozen(attestation.resources.get('assets/entry.bin')),
+      true,
+    )
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('serves only attested retained-handle bytes and rejects later path or inode changes', async () => {
+  const root = await makeRoot('codesurf-media-resource-read-')
+  const target = join(root, 'entry.bin')
+  const moved = join(root, 'entry-original.bin')
+  try {
+    await fs.writeFile(target, 'trusted')
+    const binding = await captureExtensionMediaRoot(root)
+    const attestation = await computeExtensionMediaAttestation(root, manifest, binding)
+    const key = extensionMediaResourceKey(binding, target)
+    assert.equal(key, 'entry.bin')
+    const expected = attestation.resources.get(key!)
+    assert.ok(expected)
+
+    const valid = await openCanonicalResource(root, target)
+    assert.equal(valid.ok, true)
+    if (valid.ok) {
+      const read = await readAttestedExtensionResource(valid, binding, key!, expected)
+      assert.equal(read.ok, true)
+      if (read.ok) assert.equal(read.bytes.toString('utf8'), 'trusted')
+      await assert.rejects(valid.handle.stat())
+    }
+
+    const sameInode = await openCanonicalResource(root, target)
+    assert.equal(sameInode.ok, true)
+    if (sameInode.ok) {
+      await fs.writeFile(target, 'changed')
+      assert.deepEqual(
+        await readAttestedExtensionResource(sameInode, binding, key!, expected),
+        { ok: false, reason: 'changed' },
+      )
+    }
+
+    await fs.writeFile(target, 'trusted')
+    const refreshedBinding = await captureExtensionMediaRoot(root)
+    const refreshed = await computeExtensionMediaAttestation(root, manifest, refreshedBinding)
+    const refreshedExpected = refreshed.resources.get(key!)
+    assert.ok(refreshedExpected)
+    const replaced = await openCanonicalResource(root, target)
+    assert.equal(replaced.ok, true)
+    if (replaced.ok) {
+      await fs.rename(target, moved)
+      await fs.writeFile(target, 'replacement')
+      assert.deepEqual(
+        await readAttestedExtensionResource(
+          replaced,
+          refreshedBinding,
+          key!,
+          refreshedExpected,
+        ),
+        { ok: false, reason: 'changed' },
+      )
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
 
 test('external file, directory, and home symlinks are records, never content roots', { concurrency: false }, async () => {
   const root = await makeRoot('codesurf-media-links-')
