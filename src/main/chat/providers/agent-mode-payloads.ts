@@ -20,8 +20,6 @@ import type { Persona } from '../../../shared/types'
 // allowImportingTsExtensions, and esbuild/tsgo resolve these the same way.
 import { buildHermesChatArgs } from '../../agents/agent-cli-contracts.ts'
 import { buildHermesTurnPrompt } from './hermes-prompt.ts'
-import { buildAsyncExecutionPrompt } from '../prompt-builders.ts'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions.ts'
 import {
   resolveAgentToolAllowList,
   hermesToolsetsFromAllowList,
@@ -30,8 +28,6 @@ import {
   agentModeUnresolved,
   AGENT_MODE_UNRESOLVED_ERROR,
 } from '../agent-mode-tools.ts'
-
-type AsyncExecutionInput = Parameters<typeof buildAsyncExecutionPrompt>[0]
 
 interface AgentModeSelection {
   agentId?: string | null
@@ -54,7 +50,7 @@ export interface HermesSpawnInput extends AgentModeSelection {
   model: string
   userContent: string
   existingSessionId?: string | null
-  peerPrompt?: string
+  contextPrompt?: string
 }
 
 // Build the `hermes chat` argv chatHermes spawns. AgentMode.tools maps onto
@@ -64,13 +60,9 @@ export function buildHermesSpawnArgs(input: HermesSpawnInput): string[] {
   if (agentModeUnresolved(input)) throw new Error(AGENT_MODE_UNRESOLVED_ERROR)
   const agentToolsets = hermesToolsetsFromAllowList(resolveAgentToolAllowList(input.agentMode))
   const toolsets = agentToolsets ?? (HERMES_MODE_TOOLSETS[input.mode ?? ''] ?? 'terminal,file,web')
-  const agentPersona = input.agentMode?.systemPrompt?.trim() || undefined
   const prompt = buildHermesTurnPrompt({
     userContent: input.userContent,
-    agentPersona,
-    peerPrompt: input.peerPrompt,
-    isFirstTurn: !input.existingSessionId,
-    outputConvention: joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention()),
+    contextPrompt: input.contextPrompt,
   })
   return buildHermesChatArgs({
     prompt,
@@ -85,19 +77,9 @@ export function buildHermesSpawnArgs(input: HermesSpawnInput): string[] {
 
 function buildCodexPrompt(
   userText: string,
-  asyncExecution: AsyncExecutionInput,
-  basePrompt: string | undefined,
-  memoryPrompt: string | undefined,
-  skillsPrompt: string | undefined,
-  agentPersona: string | undefined,
+  contextPrompt: string | undefined,
 ): string {
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const outputConvention = buildCodeSurfOutputConvention()
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  // Persona leads the preamble — Codex has no system-prompt flag, so it rides
-  // along ahead of memory/skills in the prompt.
-  const preamble = joinPromptSections(agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention, basePrompt)
+  const preamble = contextPrompt?.trim() || undefined
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
@@ -107,10 +89,12 @@ export interface CodexSpawnInput extends AgentModeSelection {
   userContent: string
   resumeThreadId?: string | null
   workspaceDir?: string
+  contextPrompt?: string
+  /** Legacy fields are intentionally ignored; only host composition is model-visible. */
   peerPrompt?: string
   memoryPrompt?: string
   skillsPrompt?: string
-  asyncExecution?: AsyncExecutionInput
+  asyncExecution?: unknown
 }
 
 // Build the `codex exec` argv chatCodex spawns. Codex's CLI has no per-tool
@@ -124,14 +108,9 @@ export function buildCodexSpawnArgs(input: CodexSpawnInput): string[] {
     ? input.mode
     : 'default'
   const sandboxApprovalFlags = codexSandboxApprovalFlags(codexMode, resolveAgentToolAllowList(input.agentMode))
-  const agentPersona = input.agentMode?.systemPrompt?.trim() || undefined
   const promptText = buildCodexPrompt(
     input.userContent,
-    input.asyncExecution,
-    input.peerPrompt,
-    input.memoryPrompt,
-    input.skillsPrompt,
-    agentPersona,
+    input.contextPrompt,
   )
 
   // Codex CLI grammar is `codex exec [OPTIONS] resume <SESSION_ID> [PROMPT]`:

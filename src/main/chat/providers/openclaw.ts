@@ -15,7 +15,6 @@ import {
   MAX_PROVIDER_DIAGNOSTIC_BYTES,
   boundProviderHistoryText,
 } from '../bounded-output'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
 import {
   log,
@@ -159,13 +158,11 @@ export function chatOpenclaw(req: ChatRequest): void {
     args.push('--thinking', thinking)
   }
 
-  // First-turn injection: OpenClaw has no system-prompt channel on the CLI,
-  // so the CodeSurf output convention rides along with the first user message.
-  // Session history carries it forward on subsequent turns.
-  const openClawIsFirstTurn = !existingSessionId
-  const openClawConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
-  const openClawMessage = openClawIsFirstTurn
-    ? `${openClawConvention}\n\n---\n\n${lastUserMsg.content}`
+  // OpenClaw has no system channel, so prepend the one host composition on
+  // every turn; this keeps volatile peer/room context parity with SDK paths.
+  const contextPrompt = req.contextPrompt?.trim()
+  const openClawMessage = contextPrompt
+    ? `${contextPrompt}\n\n---\n\n${lastUserMsg.content}`
     : lastUserMsg.content
   args.push('--message', openClawMessage)
 

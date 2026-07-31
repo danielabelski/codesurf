@@ -18,8 +18,6 @@ import {
   boundProviderHistoryText,
 } from '../bounded-output'
 import { formatClaudeSdkError } from '../output-sanitizers'
-import { buildAsyncExecutionPrompt, buildPeerSystemPrompt } from '../prompt-builders'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import { buildClaudeAgentModeOptions } from './agent-mode-payloads'
 import { getDisconnectedPeerBridgeMcpToolNames } from '../../../shared/nodeTools'
 import { type ToolPermissionRequest } from '../../permissions'
@@ -292,22 +290,6 @@ export function buildClaudeTextInput(text: string, priority: SDKUserMessage['pri
   return generator()
 }
 
-function buildClaudeAgentPrompt(
-  basePrompt: string | undefined,
-  memoryPrompt: string | undefined,
-  skillsPrompt: string | undefined,
-  asyncExecution: ChatRequest['asyncExecution'],
-  agentPersona?: string | undefined,
-): string | undefined {
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const outputConvention = buildCodeSurfOutputConvention()
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  // Persona (AgentMode.systemPrompt) leads ahead of memory/skills, matching the
-  // daemon Claude path so the agent definition frames the turn the same way.
-  return joinPromptSections(agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention, basePrompt)
-}
-
 // --- Anthropic file-change summaries -----------------------------------------
 
 interface AnthropicFileChange {
@@ -510,18 +492,13 @@ export function chatClaude(req: ChatRequest): void {
     ? []
     : getDisconnectedPeerBridgeMcpToolNames(req.negotiatedTools ?? req.peers?.flatMap(peer => peer.tools) ?? [])
 
-  // Build system prompt context about connected peer blocks and their tools
+  // The canonical host composes every model-visible context fragment once.
   if (req.peers && req.peers.length > 0) {
     log('Peer data:', JSON.stringify(req.peers.map(p => ({ id: p.peerId, type: p.peerType, tools: p.tools.length, actions: p.actions?.length ?? 0 }))))
   }
-  let systemPrompt = buildPeerSystemPrompt(req.peers)
-  if (req.roomContext?.trim()) {
-    systemPrompt = systemPrompt
-      ? `${systemPrompt}\n\n${req.roomContext.trim()}`
-      : req.roomContext.trim()
-  }
+  const systemPrompt = req.contextPrompt?.trim() || undefined
   if (systemPrompt) {
-    log('systemPrompt built for', req.peers?.length ?? 0, 'peers, codesurf tools:', contexToolNames.length, 'room=', Boolean(req.roomContext))
+    log('host context attached for', req.peers?.length ?? 0, 'peers, codesurf tools:', contexToolNames.length)
   }
   // Resolved AgentMode (selected agent definition): persona → system prompt,
   // tools allow-list → SDK tool restriction. The shared builder FAILS CLOSED
@@ -529,17 +506,14 @@ export function chatClaude(req: ChatRequest): void {
   // BLOCKING-1) — surface it instead of launching unrestricted. Mirrors the
   // daemon Claude path.
   let agentTools: string[] | undefined
-  let agentPersona: string | undefined
   try {
-    ({ tools: agentTools, persona: agentPersona } = buildClaudeAgentModeOptions(req))
+    ({ tools: agentTools } = buildClaudeAgentModeOptions(req))
   } catch (err) {
     sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
     sendStream(scope, { type: 'done' })
     cardAbortControllers.delete(scopeKey)
     return
   }
-  systemPrompt = buildClaudeAgentPrompt(systemPrompt, req.memoryPrompt, req.skillsPrompt, req.asyncExecution, agentPersona)
-
   // Resolve claude binary from startup detection
   const claudePath = getAgentPath('claude')
 

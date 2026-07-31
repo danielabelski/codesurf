@@ -80,6 +80,10 @@ test('real daemon chat boundary canonicalizes workspaces and discards caller per
         contextBuckets: { inspect: { summary: 'CALLER-CONTEXT-INJECTION' } },
         skillsPrompt: 'CALLER-SKILLS-INJECTION',
         skillsSummary: 'CALLER-SKILLS-SUMMARY-INJECTION',
+        roomContext: 'CALLER-ROOM-INJECTION',
+        roomAckSequence: 999,
+        contextPrompt: 'CALLER-COMPOSED-INJECTION',
+        fileReferencePrompt: 'CALLER-FILE-INJECTION',
       }),
     },
   })
@@ -92,7 +96,7 @@ test('real daemon chat boundary canonicalizes workspaces and discards caller per
   )
   assert.doesNotMatch(
     canonicalTimeline,
-    /CALLER-(?:MEMORY|CONTEXT|SKILLS)/,
+    /CALLER-(?:MEMORY|CONTEXT|SKILLS|ROOM|COMPOSED|FILE)/,
     'daemon-owned prompt sections must be rebuilt instead of trusting caller text',
   )
 

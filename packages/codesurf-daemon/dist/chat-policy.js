@@ -434,6 +434,13 @@ const PRIVILEGED_CHAT_CONTEXT_FIELDS = [
     'contextBuckets',
     'skillsPrompt',
     'skillsSummary',
+    'roomContext',
+    'roomAckSequence',
+    'contextPrompt',
+    'fileReferencePrompt',
+    'expandedMessages',
+    'imageAttachments',
+    'asyncExecution',
 ];
 export function stripUntrustedPrivilegedChatContext(request) {
     const stripped = { ...request };

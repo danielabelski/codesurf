@@ -38,8 +38,6 @@ import {
   createChatStreamScope,
   type ChatStreamScope,
 } from './room-stream-scope.ts'
-import { buildAsyncExecutionPrompt, type AsyncExecutionContext } from './prompt-builders'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
 
 /** Internal provider id (neutral). Never surface 'pi'/'earendil' to users. */
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
@@ -70,10 +68,7 @@ export interface CsagentRunRequest {
   thinking?: string
   /** Last user text to send. If omitted, derived by the caller. */
   prompt: string
-  agentPersona?: string
-  memoryPrompt?: string
-  skillsPrompt?: string
-  asyncExecution?: AsyncExecutionContext
+  contextPrompt?: string
   imageAttachments?: CsagentImageAttachment[]
 }
 
@@ -207,7 +202,6 @@ let _csagentModels: any = null // ModelRegistry singleton
 const csagentSessions = new Map<string, PiAgentSession>()
 const csagentUnsubs = new Map<string, () => void>()
 const csagentSessionIds = new Map<string, string>()
-const csagentContextKeys = new Map<string, string>()
 
 function csagentScope(req: Pick<CsagentRunRequest, 'workspaceId' | 'cardId'>): ChatStreamScope {
   return createChatStreamScope(req.workspaceId, req.cardId)
@@ -349,15 +343,7 @@ function mapThinking(thinking: string | undefined): string {
 }
 
 function buildCsagentContextPreamble(req: CsagentRunRequest): string | undefined {
-  return joinPromptSections(
-    req.agentPersona,
-    req.memoryPrompt,
-    req.skillsPrompt,
-    buildAsyncExecutionPrompt(req.asyncExecution),
-    buildCodeSurfOutputConvention(),
-    buildCodeSurfInsightConvention(),
-    buildCodeSurfActivityConvention(),
-  )
+  return req.contextPrompt?.trim() || undefined
 }
 
 /** Read + base64-encode image attachments into the runtime's image shape. */
@@ -623,12 +609,9 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
     // First/idle prompt: NO streamingBehavior (only required while streaming).
     const images = await buildCsagentImages(req.imageAttachments)
     const contextPreamble = buildCsagentContextPreamble(req)
-    const contextKey = String(contextPreamble ?? '').trim()
-    const shouldInjectContext = Boolean(contextKey) && (!storedId || csagentContextKeys.get(scopeKey) !== contextKey)
-    const promptText = shouldInjectContext
+    const promptText = contextPreamble
       ? `${contextPreamble}\n\n---\n\n${req.prompt}`
       : req.prompt
-    if (shouldInjectContext) csagentContextKeys.set(scopeKey, contextKey)
     await session.prompt(promptText, {
       ...(images.length > 0 ? { images } : {}),
       source: 'interactive',
@@ -703,7 +686,6 @@ export function disposeCsagent(scope: ChatStreamScope): void {
   csagentUnsubs.delete(scopeKey)
   csagentSessions.delete(scopeKey)
   csagentSessionIds.delete(scopeKey)
-  csagentContextKeys.delete(scopeKey)
 }
 
 /**
@@ -715,7 +697,6 @@ export function clearCsagentSession(scope: ChatStreamScope): void {
   csagentUnsubs.delete(scopeKey)
   csagentSessions.delete(scopeKey)
   csagentSessionIds.delete(scopeKey)
-  csagentContextKeys.delete(scopeKey)
 }
 
 /** True if a live CodeSurf Agent session exists for the card (for dispatch). */

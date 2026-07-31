@@ -55,6 +55,7 @@ export function chatLocalProxy(req: ChatRequest): void {
       model: req.model,
       stream: true,
       max_tokens: 4096,
+      ...(req.contextPrompt ? { system: req.contextPrompt } : {}),
       messages: getPreparedMessages(req).map(message => ({
         role: message.role,
         content: message.content,

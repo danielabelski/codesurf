@@ -760,6 +760,8 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     }): Promise<{
       changed: boolean
       message: string
+      bodyText: string
+      contextText?: string
       references: Array<{
         source: string
         displayPath: string

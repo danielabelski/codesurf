@@ -18,7 +18,6 @@ import {
   boundProviderHistoryText,
   boundRecentText,
 } from '../bounded-output'
-import { buildPeerSystemPrompt } from '../prompt-builders'
 import { sanitizeToolOutputText } from '../output-sanitizers'
 import { createRuntimeCheckpoint } from '../runtime-checkpoints'
 import { buildCodexSpawnArgs } from './agent-mode-payloads'
@@ -266,7 +265,6 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
 
   const codexBin = getAgentPath('codex') || 'codex'
   const shellPath = getShellEnvPath()
-  const peerPrompt = buildPeerSystemPrompt(req.peers)
   const runtimeMessages = cloneChatMessages(req.messages)
   const resumeThreadId = req.sessionId ?? getCardSessionId(scope, req.provider) ?? null
   const runtimeSession: RuntimeChatSessionState = {
@@ -299,10 +297,7 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
       userContent: lastUserMsg.content,
       resumeThreadId,
       workspaceDir: req.workspaceDir,
-      peerPrompt,
-      memoryPrompt: req.memoryPrompt,
-      skillsPrompt: req.skillsPrompt,
-      asyncExecution: req.asyncExecution,
+      contextPrompt: req.contextPrompt,
     })
   } catch (err) {
     // Clear isStreaming before returning — we already upserted true above.

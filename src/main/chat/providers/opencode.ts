@@ -12,8 +12,7 @@ import { broadcastToRenderer } from '../../utils/broadcast'
 import { errorMessage } from '../../../shared/errors.ts'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
-import { buildPeerAwareTurnPrompt, buildPeerSystemPrompt } from '../prompt-builders'
+import { buildPeerAwareTurnPrompt } from '../prompt-builders'
 import type { ChatRequest } from '../types'
 import {
   chatRequestScope,
@@ -448,16 +447,11 @@ export function chatOpencode(req: ChatRequest): void {
       const userMessageIds = new Set<string>() // message IDs that are user messages
 
       // Fire prompt without waiting — response arrives via SSE.
-      // On the first turn of a fresh session we prepend the CodeSurf output
-      // convention so OpenCode matches the structured-summary behaviour of
-      // Claude/Codex. On subsequent turns the session already carries the
-      // convention in its running history.
-      const isFirstTurn = !existingSessionId
-      const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
+      // OpenCode has no separate system channel in this call; prepend the one
+      // host composition on every turn so volatile peer/room context stays live.
       const promptText = buildPeerAwareTurnPrompt(
         lastUserMsg.content,
-        buildPeerSystemPrompt(req.peers),
-        isFirstTurn ? promptConvention : undefined,
+        req.contextPrompt,
       )
       const promptPromise = client.session.prompt({
         sessionID,

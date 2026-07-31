@@ -35,11 +35,7 @@ import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { parseSseJsonBuffer } from '@codesurf/daemon/sse'
 import {
-  MAX_AGGREGATE_INSTRUCTION_BYTES,
-  MAX_PERSONA_PROMPT_BYTES,
-  MAX_SKILLS_PROMPT_BYTES,
   MAX_SKILLS_SUMMARY_BYTES,
-  boundContextWithReservedSuffix,
   previewContextToolInput,
   truncateUtf8,
 } from '../../../packages/codesurf-daemon/bin/context-budget.mjs'
@@ -99,7 +95,8 @@ import {
   type ChatStreamScope,
 } from '../chat/runtime'
 import { isValidAgentRoomId } from '../agent-room/validation.ts'
-import { appendUntrustedRoomContextToLatestUser } from '../chat/room-context-message.ts'
+import { appendComposedUserContextToLatestUser } from '../chat/room-context-message.ts'
+import { composeHostChatContext } from '../chat/request-context.ts'
 
 const BUILTIN_CHAT_PROVIDERS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'hermes', 'omnigent', 'csagent'])
 
@@ -185,7 +182,7 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
   const expandedMessages = cloneChatMessages(preparedMessages)
   expandedMessages[lastUserIndex] = {
     ...expandedMessages[lastUserIndex],
-    content: expansion.message,
+    content: expansion.bodyText,
   }
 
   // Pull out binary image attachments so we can send them to Claude as real
@@ -215,6 +212,7 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
     request: {
       ...req,
       expandedMessages,
+      fileReferencePrompt: expansion.contextText,
       ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
     },
     expansion,
@@ -521,20 +519,15 @@ function attachRoomContext(req: ChatRequest): ChatRequest {
     }
   }
   if (!systemExtra.trim()) {
-    return { ...req, roomAckSequence: roomAckSequence ?? undefined }
+    return {
+      ...req,
+      roomContext: undefined,
+      roomAckSequence: roomAckSequence ?? undefined,
+    }
   }
   return {
     ...req,
-    messages: appendUntrustedRoomContextToLatestUser(req.messages, systemExtra),
-    ...(req.expandedMessages
-      ? {
-          expandedMessages: appendUntrustedRoomContextToLatestUser(
-            req.expandedMessages,
-            systemExtra,
-          ),
-        }
-      : {}),
-    roomContext: undefined,
+    roomContext: systemExtra,
     roomAckSequence: roomAckSequence ?? undefined,
   }
 }
@@ -649,44 +642,27 @@ function boundOptionalRuntimeContext(value: unknown, maxBytes: number, reason: s
 }
 
 function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
-  const memory = boundContextWithReservedSuffix(
-    req.memoryPrompt,
-    req.roomContext,
-    MAX_AGGREGATE_INSTRUCTION_BYTES,
-    {
-      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
-      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
-    },
-  )
-  const skillsPrompt = boundOptionalRuntimeContext(
-    req.skillsPrompt,
-    MAX_SKILLS_PROMPT_BYTES,
-    `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
-  )
+  const composed = composeHostChatContext(req)
   const skillsSummary = boundOptionalRuntimeContext(
     req.skillsSummary,
     MAX_SKILLS_SUMMARY_BYTES,
     `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
   )
-  const personaPrompt = boundOptionalRuntimeContext(
-    req.agentMode?.systemPrompt,
-    MAX_PERSONA_PROMPT_BYTES,
-    `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
-  )
+  const messages = appendComposedUserContextToLatestUser(req.messages, composed.context.userSuffix)
+  const expandedMessages = req.expandedMessages
+    ? appendComposedUserContextToLatestUser(req.expandedMessages, composed.context.userSuffix)
+    : undefined
   return {
     ...req,
-    memoryPrompt: memory.text,
-    roomContext: memory.suffix,
-    skillsPrompt,
+    peers: composed.peers,
+    messages,
+    ...(expandedMessages ? { expandedMessages } : {}),
+    contextPrompt: composed.context.systemPrompt,
+    memoryPrompt: undefined,
+    roomContext: undefined,
+    fileReferencePrompt: undefined,
+    skillsPrompt: undefined,
     skillsSummary,
-    ...(req.agentMode
-      ? {
-        agentMode: {
-          ...req.agentMode,
-          systemPrompt: personaPrompt ?? '',
-        },
-      }
-      : {}),
   }
 }
 
@@ -1213,9 +1189,11 @@ export function registerChatIPC(): void {
     let requestWithFileReferences: ChatRequest = requestWithContext
     let fileReferenceExpansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null = null
     try {
-      const expanded = await expandLatestUserFileReferences(requestWithContext)
-      requestWithFileReferences = expanded.request
-      fileReferenceExpansion = expanded.expansion
+      if (!daemonHost) {
+        const expanded = await expandLatestUserFileReferences(requestWithContext)
+        requestWithFileReferences = expanded.request
+        fileReferenceExpansion = expanded.expansion
+      }
     } catch (error) {
       sendStream(scope, {
         type: 'error',

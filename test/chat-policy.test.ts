@@ -202,6 +202,10 @@ test('Electron request policy uses the trusted lookup and rejects unknown worksp
     contextBuckets: { version: 1, includedBuckets: [], buckets: [] },
     skillsPrompt: 'renderer skills injection',
     skillsSummary: 'renderer skills summary',
+    roomContext: 'renderer room injection',
+    roomAckSequence: 99,
+    contextPrompt: 'renderer composed injection',
+    fileReferencePrompt: 'renderer file injection',
   }
   const canonical = await canonicalizeElectronChatRequest(request, id => id === 'ws-1' ? root : null)
   assert.equal(canonical.workspaceDir, await realpath(root))
@@ -210,6 +214,10 @@ test('Electron request policy uses the trusted lookup and rejects unknown worksp
   assert.equal(canonical.contextBuckets, undefined)
   assert.equal(canonical.skillsPrompt, undefined)
   assert.equal(canonical.skillsSummary, undefined)
+  assert.equal(canonical.roomContext, undefined)
+  assert.equal(canonical.roomAckSequence, undefined)
+  assert.equal(canonical.contextPrompt, undefined)
+  assert.equal(canonical.fileReferencePrompt, undefined)
 
   await assert.rejects(
     canonicalizeElectronChatRequest({ ...request, workspaceId: 'missing' }, () => null),
