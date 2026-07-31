@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto'
-import { promises as fs, renameSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  promises as fs,
+  renameSync,
+  rmSync,
+} from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { RelayOperationContext } from './types'
 
@@ -14,6 +19,8 @@ export type RelayAtomicWriteDependencies = {
   writeTemporaryFile: (path: string, content: string) => Promise<void>
   commitTemporaryFile: (temporaryPath: string, path: string) => void
   removeTemporaryFile: (temporaryPath: string) => void
+  destinationExists?: (path: string) => boolean
+  moveDestinationFile?: (from: string, to: string) => void
 }
 
 const defaultDependencies: RelayAtomicWriteDependencies = {
@@ -29,6 +36,10 @@ const defaultDependencies: RelayAtomicWriteDependencies = {
   },
   removeTemporaryFile: temporaryPath => {
     rmSync(temporaryPath, { force: true })
+  },
+  destinationExists: path => existsSync(path),
+  moveDestinationFile: (from, to) => {
+    renameSync(from, to)
   },
 }
 
@@ -57,7 +68,17 @@ export async function writeFilesAtomically(
   dependencies: RelayAtomicWriteDependencies = defaultDependencies,
 ): Promise<void> {
   assertActive(context)
-  const staged: Array<{ path: string; temporaryPath: string }> = []
+  const staged: Array<{
+    path: string
+    temporaryPath: string
+    backupPath: string
+    backupCreated: boolean
+    committed: boolean
+  }> = []
+  const destinationExists = dependencies.destinationExists
+    ?? defaultDependencies.destinationExists!
+  const moveDestinationFile = dependencies.moveDestinationFile
+    ?? defaultDependencies.moveDestinationFile!
   try {
     for (const file of files) {
       await awaitActive(
@@ -70,25 +91,81 @@ export async function writeFilesAtomically(
       )
       // Register the path before writing so even a partial failed write is
       // removed by the common cleanup path.
-      staged.push({ path: file.path, temporaryPath })
+      staged.push({
+        path: file.path,
+        temporaryPath,
+        backupPath: join(
+          dirname(file.path),
+          `.${basename(file.path)}.${dependencies.createId()}.bak`,
+        ),
+        backupCreated: false,
+        committed: false,
+      })
       await awaitActive(
         () => dependencies.writeTemporaryFile(temporaryPath, file.content),
         context,
       )
     }
 
-    // Commit is deliberately synchronous after the final lifecycle check.
-    // Shutdown cannot interleave between that check and the atomic renames, so
-    // a cancelled generation can leave only unobservable temporary files.
+    // The commit and rollback phases are deliberately synchronous after the
+    // final lifecycle check. Shutdown cannot interleave with either sequence.
+    // Existing destinations move aside first so a later rename failure can
+    // restore the complete pre-commit state instead of leaving a partial
+    // mailbox/archive update visible.
     assertActive(context)
     for (const file of staged) {
+      if (!destinationExists(file.path)) continue
+      moveDestinationFile(file.path, file.backupPath)
+      file.backupCreated = true
+    }
+    for (const file of staged) {
       dependencies.commitTemporaryFile(file.temporaryPath, file.path)
+      file.committed = true
+    }
+    for (const file of staged) {
+      if (!file.backupCreated) continue
+      dependencies.removeTemporaryFile(file.backupPath)
+      file.backupCreated = false
     }
   } catch (error) {
+    const rollbackErrors: unknown[] = []
+    for (const file of [...staged].reverse()) {
+      if (file.committed) {
+        try {
+          dependencies.removeTemporaryFile(file.path)
+          file.committed = false
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError)
+        }
+      }
+      if (file.backupCreated) {
+        try {
+          moveDestinationFile(file.backupPath, file.path)
+          file.backupCreated = false
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError)
+        }
+      }
+    }
     for (const file of staged) {
       try {
         dependencies.removeTemporaryFile(file.temporaryPath)
-      } catch {}
+      } catch (cleanupError) {
+        rollbackErrors.push(cleanupError)
+      }
+      if (file.backupCreated) {
+        try {
+          dependencies.removeTemporaryFile(file.backupPath)
+        } catch (cleanupError) {
+          rollbackErrors.push(cleanupError)
+        }
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...rollbackErrors],
+        'Atomic relay write failed and rollback was incomplete',
+      )
     }
     throw error
   }
