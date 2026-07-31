@@ -178,6 +178,25 @@ describe('AgentRoomPersistenceQueue', () => {
     assert.deepEqual(JSON.parse(adapter.values.get(path)!), { revision: 'new' })
     assert.equal(queue.getStats().pendingPaths, 0)
   })
+
+  test('a failed explicit flush reports the error without disabling eventual retry', async () => {
+    const adapter = new MemoryAdapter()
+    const scheduler = new ManualRetryScheduler()
+    const queue = new AgentRoomPersistenceQueue(adapter, { retryScheduler: scheduler })
+    const path = '/virtual/flush-retry.json'
+    adapter.values.set(path, JSON.stringify({ revision: 'old' }))
+    adapter.failuresRemaining = 2
+
+    queue.writeJson(path, { revision: 'new' })
+    await adapter.failed.promise
+    await assert.rejects(queue.flush(), /injected write failure/)
+    assert.deepEqual(JSON.parse(adapter.values.get(path)!), { revision: 'old' })
+    assert.equal(scheduler.tasks.length, 1)
+
+    scheduler.runNext()
+    await queue.flush()
+    assert.deepEqual(JSON.parse(adapter.values.get(path)!), { revision: 'new' })
+  })
 })
 
 describe('NodeAgentRoomFileAdapter', () => {

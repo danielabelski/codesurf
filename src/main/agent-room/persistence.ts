@@ -385,7 +385,6 @@ export class AgentRoomPersistenceQueue {
           madeProgress ||= state.appliedRevision > priorApplied
           if (state.latest && state.appliedRevision < state.latest.revision && state.lastError) {
             errors.push(state.lastError)
-            this.cancelRetry(state)
           }
         }
         if (state.latest && state.appliedRevision >= state.latest.revision) {
