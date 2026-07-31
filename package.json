@@ -54,6 +54,7 @@
     "build:daemon": "npm --prefix packages/codesurf-daemon run build",
     "verify:daemon-dist": "npm --prefix packages/codesurf-daemon run verify:dist",
     "build:web": "npm run build:daemon && vite build --config vite.web.config.ts",
+    "verify:web-build": "node scripts/verify-web-build.mjs",
     "desktop:dev": "npm run build:daemon && node scripts/desktop-dev.mjs",
     "desktop:build": "node scripts/desktop-build.mjs",
     "desktop:dist": "node scripts/desktop-build.mjs",
