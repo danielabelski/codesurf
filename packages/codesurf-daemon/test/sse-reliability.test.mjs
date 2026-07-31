@@ -1495,3 +1495,111 @@ test('restart reconciliation resumes after a partial terminal append without dup
   assert.equal(terminal.status, 'failed')
   assert.equal(terminal.lastSequence, 3)
 })
+
+test('startup retention reconciles stale active artifacts without opening SSE and preserves live jobs', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-startup-retention-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(workspaceDir, { recursive: true })
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const old = new Date(0).toISOString()
+  for (let index = 0; index < 6; index += 1) {
+    const id = `stale-active-${index}`
+    await writeFile(join(jobsDir, `${id}.json`), JSON.stringify({
+      id,
+      status: index % 2 === 0 ? 'running' : 'queued',
+      lastSequence: 0,
+      requestedAt: old,
+      updatedAt: old,
+      completedAt: null,
+      error: null,
+    }), 'utf8')
+    await writeFile(join(timelinesDir, `${id}.jsonl`), '', 'utf8')
+  }
+
+  const releaseLive = deferred()
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    claudeQuery: () => (async function* () {
+      yield textDelta('still live')
+      await releaseLive.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  let liveJob = null
+  t.after(async () => {
+    releaseLive.resolve()
+    if (liveJob) await waitFor(() => !manager.listLiveJobIds().includes(liveJob.id))
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  liveJob = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'stay live' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(timelinesDir, `${liveJob.id}.jsonl`), 'utf8')
+  ).includes('still live'))
+
+  const result = await manager.sweepJobRetention({ maxAgeMs: 1, keepRecent: 0 })
+  assert.equal(result.pruned, 6)
+  for (let index = 0; index < 6; index += 1) {
+    const id = `stale-active-${index}`
+    await assert.rejects(readFile(join(jobsDir, `${id}.json`), 'utf8'), { code: 'ENOENT' })
+    await assert.rejects(readFile(join(timelinesDir, `${id}.jsonl`), 'utf8'), { code: 'ENOENT' })
+  }
+  assert.equal(manager.listLiveJobIds().includes(liveJob.id), true)
+  assert.equal((await manager.getJobState(liveJob.id))?.status, 'running')
+})
+
+test('startup retention does not scan healthy terminal timeline history', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-retention-no-terminal-scan-'))
+  const jobsDir = join(homeDir, 'jobs')
+  const timelinesDir = join(homeDir, 'timelines')
+  await mkdir(jobsDir, { recursive: true })
+  await mkdir(timelinesDir, { recursive: true })
+  const jobId = 'healthy-terminal'
+  const doneEvent = {
+    jobId,
+    sequence: 1,
+    timestamp: 1,
+    type: 'done',
+  }
+  await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+    id: jobId,
+    status: 'completed',
+    lastSequence: 1,
+    updatedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    error: null,
+  }), 'utf8')
+  await writeFile(join(timelinesDir, `${jobId}.jsonl`), `${JSON.stringify(doneEvent)}\n`, 'utf8')
+  let timelineScans = 0
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineReadStream() {
+      timelineScans += 1
+      throw new Error('healthy terminal timeline should not be scanned by retention')
+    },
+  })
+  t.after(async () => {
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const result = await manager.sweepJobRetention({
+    maxAgeMs: 24 * 60 * 60 * 1000,
+    keepRecent: 0,
+  })
+  assert.equal(result.pruned, 0)
+  assert.equal(timelineScans, 0)
+  assert.equal((await manager.getJobState(jobId))?.status, 'completed')
+})

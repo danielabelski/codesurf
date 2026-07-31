@@ -3673,10 +3673,15 @@ export function createChatJobManager({
       sessionId: typeof request.sessionId === 'string' ? request.sessionId : null,
       error: null,
     }
-    await writeJobMetadata(metadata)
-    await fs.writeFile(jobTimelinePath(id), '', 'utf8')
     const live = { id, metadata, cancel: null, proc: null, query: null }
     liveJobs.set(id, live)
+    try {
+      await writeJobMetadata(metadata)
+      await fs.writeFile(jobTimelinePath(id), '', 'utf8')
+    } catch (error) {
+      liveJobs.delete(id)
+      throw error
+    }
     jobQueue.push({ live, request, workspaceDir })
     pumpJobQueue()
     return metadata
@@ -4100,9 +4105,10 @@ export function createChatJobManager({
   // daemon-05 (core): prune terminal job metadata + timeline jsonl past a TTL
   // so ~/.codesurf/jobs and /timelines do not grow without bound. Keeps the
   // newest `keepRecent` terminal jobs regardless of age, then deletes terminal
-  // jobs older than `maxAgeMs`. Never touches live or active-status
-  // (running/queued) jobs. Checkpoint-record retention is deliberately out of
-  // scope here — it crosses into checkpoints.mjs + per-workspace dirs.
+  // jobs older than `maxAgeMs`. Never touches live jobs; stale active-status
+  // records from a prior process are reconciled first. Checkpoint-record
+  // retention is deliberately out of scope here — it crosses into
+  // checkpoints.mjs + per-workspace dirs.
   async function sweepJobRetention({ maxAgeMs = 30 * 24 * 60 * 60 * 1000, keepRecent = 200 } = {}) {
     let entries
     try {
@@ -4122,10 +4128,42 @@ export function createChatJobManager({
       } catch {
         continue
       }
-      // Only genuinely terminal jobs are prunable; running/queued (and any
-      // crashed-but-still-'running' record daemon-04 will reconcile) are left.
-      if (meta?.status !== 'completed' && meta?.status !== 'failed') continue
-      terminal.push({ id, completedAt: Date.parse(meta?.completedAt ?? '') || 0 })
+      const activeStatus = meta?.status === 'running' || meta?.status === 'queued'
+      const wasTerminalStatus = meta?.status === 'completed' || meta?.status === 'failed'
+      const metadataLastSequence = Number(meta?.lastSequence)
+      const metadataLooksInconsistent = wasTerminalStatus && (
+        !Number.isInteger(metadataLastSequence)
+        || metadataLastSequence <= 0
+      )
+      if (
+        activeStatus
+        || meta?.timelinePersistenceFailed === true
+        || metadataLooksInconsistent
+      ) {
+        try {
+          // The daemon invokes this sweep once on startup. Any active-status
+          // record without a matching live job belongs to the prior process and
+          // must be reconciled here, rather than remaining permanently exempt
+          // until somebody happens to reopen its SSE endpoint.
+          meta = await reconcileInterruptedJob(id) ?? meta
+        } catch {
+          // If storage remains unavailable, the record is still not truly live.
+          // Include old interrupted artifacts in retention using their last
+          // durable activity time so repeated finalization failures stay bounded.
+        }
+      }
+      const terminalStatus = meta?.status === 'completed' || meta?.status === 'failed'
+      const interruptedStatus = meta?.status === 'running' || meta?.status === 'queued'
+      if (!terminalStatus && !interruptedStatus && meta?.timelinePersistenceFailed !== true) continue
+      terminal.push({
+        id,
+        completedAt: Date.parse(
+          meta?.completedAt
+          ?? meta?.updatedAt
+          ?? meta?.requestedAt
+          ?? '',
+        ) || 0,
+      })
     }
     terminal.sort((a, b) => b.completedAt - a.completedAt)
     let pruned = 0
