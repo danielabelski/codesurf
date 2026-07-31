@@ -1,3 +1,5 @@
+import type { SensitiveMediaCapability } from '../../shared/extension-sensitive-media.ts'
+
 export type MediaAccessKind = 'microphone' | 'camera'
 export type RequestedMediaType = 'audio' | 'video'
 
@@ -56,6 +58,13 @@ export interface DisplayStreams<DisplaySource> {
   audio?: 'loopback'
 }
 
+export interface ExtensionPermissionDescriptor {
+  readonly id: string
+  readonly name: string
+  readonly enabled: boolean
+  readonly declaredMedia: readonly SensitiveMediaCapability[]
+}
+
 type PermissionCheckHandler = (
   webContents: WebContentsLike | null,
   permission: string,
@@ -91,11 +100,24 @@ export interface PermissionBoundaryRuntime<DisplaySource> {
   readonly platform: NodeJS.Platform
   getDefaultSession(): PermissionSession<DisplaySource> | undefined
   getDisplaySources(): Promise<DisplaySource[]>
+  getExtensionPermission(extensionId: string): ExtensionPermissionDescriptor | undefined
+  hasDirectChildFrame(
+    webContents: WebContentsLike,
+    url: string,
+    origin: string,
+  ): boolean
   getOwnerWindow(webContents: WebContentsLike): BrowserWindowLike | undefined
   getSession(webContents: WebContentsLike): PermissionSession<DisplaySource>
   getWebContentsForFrame(frame: FrameLike): WebContentsLike | undefined
+  hasExtensionConsent(extensionId: string, kind: SensitiveMediaCapability): boolean
   onSessionCreated(listener: (session: PermissionSession<DisplaySource>) => void): void
   onWebContentsCreated(listener: (webContents: WebContentsLike) => void): void
+  onWebContentsNavigation(webContents: WebContentsLike, listener: () => void): void
+  requestExtensionConsent(
+    extension: ExtensionPermissionDescriptor,
+    kind: SensitiveMediaCapability,
+    owner: BrowserWindowLike,
+  ): Promise<boolean>
   requestMediaAccess(kind: MediaAccessKind): Promise<boolean>
   selectDisplaySource(selection: DisplaySourceSelection<DisplaySource>): Promise<DisplaySource | undefined>
   warn(message: string, error?: unknown): void
@@ -109,6 +131,7 @@ export interface PermissionBoundaryOptions {
 
 export interface PermissionBoundary<DisplaySource> {
   readonly ready: Promise<void>
+  clearExtensionGrants(extensionId: string): void
   installSession(session: PermissionSession<DisplaySource>): void
   registerAppWindow(window: BrowserWindowLike): void
 }

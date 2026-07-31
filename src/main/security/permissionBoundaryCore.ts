@@ -1,6 +1,11 @@
+import { isValidExtensionId } from '../extensions/identity.ts'
+import type { SensitiveMediaCapability } from '../../shared/extension-sensitive-media.ts'
 import type {
   BrowserWindowLike,
+  DisplayMediaRequest,
+  ExtensionPermissionDescriptor,
   FrameLike,
+  MediaAccessKind,
   PermissionBoundary,
   PermissionBoundaryOptions,
   PermissionBoundaryRuntime,
@@ -16,6 +21,7 @@ export type {
   DisplayMediaRequest,
   DisplaySourceSelection,
   DisplayStreams,
+  ExtensionPermissionDescriptor,
   FrameLike,
   MediaAccessKind,
   PermissionBoundary,
@@ -34,26 +40,28 @@ type AllowedRenderer = {
   readonly url: URL
 }
 
+type Principal = {
+  readonly key: string
+  readonly kind: 'app' | 'extension'
+  readonly owner: BrowserWindowLike
+  readonly extension?: ExtensionPermissionDescriptor
+}
+
 const boundariesByRuntime = new WeakMap<object, PermissionBoundary<unknown>>()
 
 function getAllowedRenderer(options: PermissionBoundaryOptions): AllowedRenderer {
-  const rawUrl = options.developmentRendererUrl ?? options.productionRendererUrl
-  const url = new URL(rawUrl)
-  if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'file:') {
+  const url = new URL(options.developmentRendererUrl ?? options.productionRendererUrl)
+  if (!['http:', 'https:', 'file:'].includes(url.protocol)) {
     throw new Error(`Unsupported renderer URL protocol: ${url.protocol}`)
   }
-  return {
-    fileUrl: url.protocol === 'file:',
-    origin: url.origin,
-    url,
-  }
+  return { fileUrl: url.protocol === 'file:', origin: url.origin, url }
 }
 
 function sameFrame(left: FrameLike | null | undefined, right: FrameLike | null | undefined): boolean {
-  if (!left || !right) return false
-  return left.frameTreeNodeId === right.frameTreeNodeId
+  return Boolean(left && right
+    && left.frameTreeNodeId === right.frameTreeNodeId
     && left.processId === right.processId
-    && left.routingId === right.routingId
+    && left.routingId === right.routingId)
 }
 
 function once<T>(callback: (value: T) => void): (value: T) => void {
@@ -65,6 +73,39 @@ function once<T>(callback: (value: T) => void): (value: T) => void {
   }
 }
 
+function getExtensionLocation(rawUrl: string | undefined): {
+  readonly id: string
+  readonly frameOrigin: string
+  readonly securityOrigin: string
+} | undefined {
+  if (!rawUrl) return undefined
+  try {
+    const url = new URL(rawUrl)
+    const id = url.hostname
+    if (
+      url.protocol !== 'codesurf-ext:'
+      || !isValidExtensionId(id)
+      || url.host !== id
+      || url.username
+      || url.password
+      || url.port
+    ) {
+      return undefined
+    }
+    return {
+      id,
+      frameOrigin: `codesurf-ext://${id}`,
+      securityOrigin: `codesurf-ext://${id}/`,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function mediaKind(type: RequestedMediaType): MediaAccessKind {
+  return type === 'audio' ? 'microphone' : 'camera'
+}
+
 export function createPermissionBoundary<DisplaySource>(
   runtime: PermissionBoundaryRuntime<DisplaySource>,
   options: PermissionBoundaryOptions,
@@ -74,9 +115,9 @@ export function createPermissionBoundary<DisplaySource>(
 
   const allowedRenderer = getAllowedRenderer(options)
   const installedSessions = new WeakSet<object>()
-  const registeredContents = new WeakSet<object>()
+  const registeredContents = new Set<WebContentsLike>()
   const trustedOwners = new WeakMap<object, BrowserWindowLike>()
-  const mediaGrants = new WeakMap<object, Set<RequestedMediaType>>()
+  const grants = new WeakMap<object, Map<string, Set<SensitiveMediaCapability>>>()
 
   const isAllowedUrl = (rawUrl: string | undefined): boolean => {
     if (!rawUrl) return false
@@ -111,48 +152,181 @@ export function createPermissionBoundary<DisplaySource>(
     session: PermissionSession<DisplaySource>,
     webContents: WebContentsLike | null | undefined,
   ): BrowserWindowLike | undefined => {
-    if (!webContents || webContents.isDestroyed() || webContents.getType() !== 'window') return undefined
-    if (runtime.getSession(webContents) !== session) return undefined
+    if (!webContents || webContents.isDestroyed() || webContents.getType() !== 'window') return
+    if (runtime.getSession(webContents) !== session) return
     const owner = trustedOwners.get(webContents as object)
-    if (!owner || owner.isDestroyed() || owner.webContents !== webContents) return undefined
-    if (runtime.getOwnerWindow(webContents) !== owner) return undefined
+    if (
+      !owner
+      || owner.isDestroyed()
+      || owner.webContents !== webContents
+      || runtime.getOwnerWindow(webContents) !== owner
+    ) return
     const frame = webContents.mainFrame
     if (
       frame.isDestroyed()
       || frame.detached
       || frame.parent !== null
       || !sameFrame(frame, frame.top)
-    ) {
-      return undefined
-    }
-    if (
-      !isAllowedUrl(webContents.getURL())
+      || !isAllowedUrl(webContents.getURL())
       || !isAllowedUrl(frame.url)
       || !isAllowedOrigin(frame.origin)
-    ) {
-      return undefined
-    }
+    ) return
     return owner
   }
 
-  const getTrustedRequestOwner = (
+  const getPrincipal = (
     session: PermissionSession<DisplaySource>,
     webContents: WebContentsLike | null | undefined,
     details: PermissionCheckDetails | PermissionRequestDetails,
     requestingOrigin?: string,
-  ): BrowserWindowLike | undefined => {
-    if (details.isMainFrame !== true) return undefined
-    const hasAllowedRequestUrl = isAllowedUrl(details.requestingUrl)
-      || (!details.requestingUrl && isAllowedUrl(details.embeddingOrigin))
-    if (!hasAllowedRequestUrl) return undefined
-    if (requestingOrigin !== undefined) {
-      const allowedEmptyFileOrigin = allowedRenderer.fileUrl
+  ): Principal | undefined => {
+    const owner = getTrustedOwner(session, webContents)
+    if (!owner) return
+    if (details.isMainFrame === true) {
+      const allowedRequest = isAllowedUrl(details.requestingUrl)
+        || (!details.requestingUrl && isAllowedUrl(details.embeddingOrigin))
+      const emptyFileOrigin = allowedRenderer.fileUrl
         && requestingOrigin === ''
         && isAllowedUrl(details.embeddingOrigin)
-      if (!allowedEmptyFileOrigin && !isAllowedOrigin(requestingOrigin)) return undefined
+      if (
+        !allowedRequest
+        || (requestingOrigin !== undefined
+          && !emptyFileOrigin
+          && !isAllowedOrigin(requestingOrigin))
+        || (details.securityOrigin !== undefined
+          && !isAllowedOrigin(details.securityOrigin))
+      ) return
+      return { key: `app:${allowedRenderer.url.href}`, kind: 'app', owner }
     }
-    if (details.securityOrigin !== undefined && !isAllowedOrigin(details.securityOrigin)) return undefined
-    return getTrustedOwner(session, webContents)
+
+    const location = getExtensionLocation(details.requestingUrl)
+    if (
+      details.isMainFrame !== false
+      || !location
+      || (requestingOrigin === undefined
+        ? details.securityOrigin !== location.securityOrigin
+        : requestingOrigin !== location.securityOrigin
+          || (details.securityOrigin !== undefined
+            && details.securityOrigin !== location.securityOrigin))
+      || (details.embeddingOrigin !== undefined
+        && !isAllowedOrigin(details.embeddingOrigin)
+        && !isAllowedUrl(details.embeddingOrigin))
+      || !webContents
+      || !runtime.hasDirectChildFrame(
+        webContents,
+        details.requestingUrl ?? '',
+        location.frameOrigin,
+      )
+    ) return
+    const extension = runtime.getExtensionPermission(location.id)
+    if (!extension || extension.id !== location.id || !extension.enabled) return
+    return {
+      key: `extension:${extension.id}:${location.frameOrigin}`,
+      kind: 'extension',
+      owner,
+      extension,
+    }
+  }
+
+  const isAuthorized = (
+    principal: Principal,
+    kind: SensitiveMediaCapability,
+  ): boolean => {
+    if (principal.kind === 'app') return true
+    const id = principal.extension?.id
+    if (!id) return false
+    const current = runtime.getExtensionPermission(id)
+    return Boolean(
+      current
+      && current.id === id
+      && current.enabled
+      && current.declaredMedia.includes(kind)
+      && runtime.hasExtensionConsent(id, kind),
+    )
+  }
+
+  const hasGrant = (
+    webContents: WebContentsLike,
+    principal: Principal,
+    kind: SensitiveMediaCapability,
+  ): boolean => grants.get(webContents as object)?.get(principal.key)?.has(kind) === true
+
+  const addGrants = (
+    webContents: WebContentsLike,
+    principal: Principal,
+    kinds: readonly SensitiveMediaCapability[],
+  ): void => {
+    let byPrincipal = grants.get(webContents as object)
+    if (!byPrincipal) {
+      byPrincipal = new Map()
+      grants.set(webContents as object, byPrincipal)
+    }
+    let granted = byPrincipal.get(principal.key)
+    if (!granted) {
+      granted = new Set()
+      byPrincipal.set(principal.key, granted)
+    }
+    for (const kind of kinds) granted.add(kind)
+  }
+
+  const authorizeExtension = async (
+    principal: Principal,
+    kinds: readonly SensitiveMediaCapability[],
+  ): Promise<boolean> => {
+    if (principal.kind === 'app') return true
+    const extension = principal.extension
+    if (!extension || kinds.some(kind => !extension.declaredMedia.includes(kind))) return false
+    for (const kind of kinds) {
+      if (!runtime.hasExtensionConsent(extension.id, kind)) {
+        const allowed = await runtime.requestExtensionConsent(extension, kind, principal.owner)
+        if (!allowed) return false
+      }
+      if (!isAuthorized(principal, kind)) return false
+    }
+    return true
+  }
+
+  const getDisplayPrincipal = (
+    session: PermissionSession<DisplaySource>,
+    request: DisplayMediaRequest,
+  ): { principal: Principal; webContents: WebContentsLike } | undefined => {
+    const frame = request.frame
+    if (!frame || frame.isDestroyed() || frame.detached) return
+    const webContents = runtime.getWebContentsForFrame(frame)
+    const owner = getTrustedOwner(session, webContents)
+    if (!webContents || !owner) return
+    if (
+      sameFrame(frame, webContents.mainFrame)
+      && frame.parent === null
+      && sameFrame(frame, frame.top)
+      && isAllowedUrl(frame.url)
+      && isAllowedOrigin(frame.origin)
+      && isAllowedOrigin(request.securityOrigin)
+    ) {
+      return {
+        principal: { key: `app:${allowedRenderer.url.href}`, kind: 'app', owner },
+        webContents,
+      }
+    }
+    const location = getExtensionLocation(frame.url)
+    if (
+      !location
+      || frame.origin !== location.frameOrigin
+      || request.securityOrigin !== location.securityOrigin
+      || !sameFrame(frame.parent, webContents.mainFrame)
+      || !sameFrame(frame.top, webContents.mainFrame)
+    ) return
+    const extension = runtime.getExtensionPermission(location.id)
+    if (!extension || extension.id !== location.id || !extension.enabled) return
+    return {
+      principal: {
+        key: `extension:${extension.id}:${location.frameOrigin}`,
+        kind: 'extension',
+        owner,
+        extension,
+      },
+      webContents,
+    }
   }
 
   const installSession = (session: PermissionSession<DisplaySource>): void => {
@@ -160,68 +334,68 @@ export function createPermissionBoundary<DisplaySource>(
     installedSessions.add(session as object)
 
     session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
-      if (!getTrustedRequestOwner(session, webContents, details, requestingOrigin)) return false
-      if (permission === 'clipboard-sanitized-write') return true
+      const principal = getPrincipal(session, webContents, details, requestingOrigin)
+      if (!principal || !webContents) return false
+      if (permission === 'clipboard-sanitized-write') return principal.kind === 'app'
+      if (permission === 'display-capture') {
+        return isAuthorized(principal, 'display-capture')
+          && hasGrant(webContents, principal, 'display-capture')
+      }
       if (permission !== 'media') return false
-      if (details.mediaType !== 'audio' && details.mediaType !== 'video') return false
-      return mediaGrants.get(webContents as object)?.has(details.mediaType) === true
+      const kind = details.mediaType === 'audio'
+        ? 'microphone'
+        : details.mediaType === 'video'
+          ? 'camera'
+          : undefined
+      return Boolean(kind && isAuthorized(principal, kind) && hasGrant(webContents, principal, kind))
     })
 
     session.setPermissionRequestHandler((webContents, permission, callback, details) => {
       const finish = once(callback)
-      const owner = getTrustedRequestOwner(session, webContents, details)
-      if (!owner) {
-        finish(false)
-        return
-      }
+      const principal = getPrincipal(session, webContents, details)
+      if (!principal) return finish(false)
       if (permission === 'clipboard-sanitized-write') {
-        finish(true)
-        return
+        return finish(principal.kind === 'app')
       }
-      // Electron 41 gates getDisplayMedia behind a permission request before
-      // invoking setDisplayMediaRequestHandler. This boolean only advances to
-      // that handler; the trusted frame, gesture, and explicit source are still
-      // required there before any stream can be returned.
-      if (
-        permission === 'display-capture'
-        || (
-          permission === 'media'
+
+      const displayPreflight = permission === 'display-capture'
+        || (permission === 'media'
           && Array.isArray(details.mediaTypes)
-          && details.mediaTypes.length === 0
-          && isAllowedOrigin(details.securityOrigin)
-        )
-      ) {
-        finish(true)
+          && details.mediaTypes.length === 0)
+      if (displayPreflight) {
+        void authorizeExtension(principal, ['display-capture']).then(allowed => {
+          const current = getPrincipal(session, webContents, details)
+          const granted = allowed
+            && current?.key === principal.key
+            && isAuthorized(current, 'display-capture')
+          if (granted) addGrants(webContents, current, ['display-capture'])
+          finish(granted)
+        }).catch(error => {
+          runtime.warn('Display permission preflight failed', error)
+          finish(false)
+        })
         return
       }
-      if (permission !== 'media') {
-        finish(false)
-        return
-      }
-
-      const mediaTypes = [...new Set(details.mediaTypes ?? [])]
+      if (permission !== 'media') return finish(false)
+      const requestedTypes = [...new Set(details.mediaTypes ?? [])]
       if (
-        mediaTypes.length === 0
-        || mediaTypes.some(type => type !== 'audio' && type !== 'video')
-        || !isAllowedOrigin(details.securityOrigin)
-      ) {
-        finish(false)
-        return
-      }
+        requestedTypes.length === 0
+        || requestedTypes.some(type => type !== 'audio' && type !== 'video')
+      ) return finish(false)
+      const requestedKinds = requestedTypes.map(mediaKind)
 
-      void Promise.all(
-        mediaTypes.map(type => runtime.requestMediaAccess(type === 'audio' ? 'microphone' : 'camera')),
-      ).then(results => {
-        const stillTrusted = getTrustedRequestOwner(session, webContents, details)
-        const granted = Boolean(stillTrusted) && results.every(Boolean)
-        if (granted) {
-          let grants = mediaGrants.get(webContents as object)
-          if (!grants) {
-            grants = new Set()
-            mediaGrants.set(webContents as object, grants)
-          }
-          for (const mediaType of mediaTypes) grants.add(mediaType)
-        }
+      void authorizeExtension(principal, requestedKinds).then(async consented => {
+        if (!consented) return false
+        const osResults = await Promise.all(
+          requestedKinds.map(kind => runtime.requestMediaAccess(kind)),
+        )
+        return osResults.every(Boolean)
+      }).then(allowed => {
+        const current = getPrincipal(session, webContents, details)
+        const granted = allowed
+          && current?.key === principal.key
+          && requestedKinds.every(kind => isAuthorized(current, kind))
+        if (granted) addGrants(webContents, current, requestedKinds)
         finish(granted)
       }).catch(error => {
         runtime.warn('Media permission request failed', error)
@@ -231,45 +405,31 @@ export function createPermissionBoundary<DisplaySource>(
 
     session.setDisplayMediaRequestHandler((request, callback) => {
       const finish = once(callback)
-      const frame = request.frame
-      const webContents = frame ? runtime.getWebContentsForFrame(frame) : undefined
-      const owner = getTrustedOwner(session, webContents)
+      const initial = getDisplayPrincipal(session, request)
       if (
-        !frame
-        || !webContents
-        || !owner
-        || frame.isDestroyed()
-        || frame.detached
-        || frame.parent !== null
-        || !sameFrame(frame, frame.top)
-        || !sameFrame(frame, webContents.mainFrame)
-        || !isAllowedUrl(frame.url)
-        || !isAllowedOrigin(frame.origin)
-        || !isAllowedOrigin(request.securityOrigin)
+        !initial
         || request.userGesture !== true
         || request.videoRequested !== true
         || (request.audioRequested && runtime.platform !== 'win32')
-      ) {
-        finish({})
-        return
-      }
+        || !isAuthorized(initial.principal, 'display-capture')
+        || !hasGrant(initial.webContents, initial.principal, 'display-capture')
+      ) return finish({})
 
       void runtime.getDisplaySources().then(async sources => {
-        if (sources.length === 0) return undefined
-        const selected = await runtime.selectDisplaySource({ owner, sources })
+        if (sources.length === 0) return
+        const selected = await runtime.selectDisplaySource({
+          owner: initial.principal.owner,
+          sources,
+        })
         return selected && sources.includes(selected) ? selected : undefined
       }).then(selected => {
-        const currentContents = request.frame
-          ? runtime.getWebContentsForFrame(request.frame)
-          : undefined
-        const stillTrusted = request.frame
-          && currentContents === webContents
-          && sameFrame(request.frame, webContents.mainFrame)
-          && getTrustedOwner(session, webContents)
-        if (!selected || !stillTrusted) {
-          finish({})
-          return
-        }
+        const current = getDisplayPrincipal(session, request)
+        const stillAuthorized = current
+          && current.webContents === initial.webContents
+          && current.principal.key === initial.principal.key
+          && isAuthorized(current.principal, 'display-capture')
+          && hasGrant(current.webContents, current.principal, 'display-capture')
+        if (!selected || !stillAuthorized) return finish({})
         finish({
           video: selected,
           ...(request.audioRequested ? { audio: 'loopback' as const } : {}),
@@ -290,25 +450,34 @@ export function createPermissionBoundary<DisplaySource>(
       || webContents.isDestroyed()
       || webContents.getType() !== 'window'
       || runtime.getOwnerWindow(webContents) !== window
-    ) {
-      return
-    }
+    ) return
     installSession(runtime.getSession(webContents))
     trustedOwners.set(webContents as object, window)
-    if (!registeredContents.has(webContents as object)) {
-      registeredContents.add(webContents as object)
-      webContents.once('destroyed', () => {
-        trustedOwners.delete(webContents as object)
-        mediaGrants.delete(webContents as object)
-      })
+    if (registeredContents.has(webContents)) return
+    registeredContents.add(webContents)
+    runtime.onWebContentsNavigation(webContents, () => {
+      grants.delete(webContents as object)
+    })
+    webContents.once('destroyed', () => {
+      registeredContents.delete(webContents)
+      trustedOwners.delete(webContents as object)
+      grants.delete(webContents as object)
+    })
+  }
+
+  const clearExtensionGrants = (extensionId: string): void => {
+    const prefix = `extension:${extensionId}:`
+    for (const webContents of registeredContents) {
+      const byPrincipal = grants.get(webContents as object)
+      if (!byPrincipal) continue
+      for (const key of byPrincipal.keys()) {
+        if (key.startsWith(prefix)) byPrincipal.delete(key)
+      }
     }
   }
 
   runtime.onSessionCreated(installSession)
-  runtime.onWebContentsCreated(webContents => {
-    installSession(runtime.getSession(webContents))
-  })
-
+  runtime.onWebContentsCreated(webContents => installSession(runtime.getSession(webContents)))
   const ready = runtime.whenReady().then(() => {
     const defaultSession = runtime.getDefaultSession()
     if (defaultSession) installSession(defaultSession)
@@ -316,11 +485,11 @@ export function createPermissionBoundary<DisplaySource>(
     runtime.warn('Unable to install default-session permission handlers', error)
   })
   const boundary: PermissionBoundary<DisplaySource> = {
+    clearExtensionGrants,
     installSession,
     ready,
     registerAppWindow,
   }
-
   boundariesByRuntime.set(runtime as object, boundary as PermissionBoundary<unknown>)
   return boundary
 }
