@@ -24,12 +24,13 @@ import { tmpdir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { resolveElectronExecutable } from '../../e2e/helpers/electron-path.ts'
 import { stopTestChild, trackTestChild } from '../helpers/child-process-shutdown.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const projectRoot = resolve(dirname(__filename), '../..')
 const builtMain = resolve(projectRoot, 'dist-electron/main/index.js')
-const electronBin = resolve(projectRoot, 'node_modules/.bin/electron')
+const electronBin = resolveElectronExecutable(projectRoot)
 const fixtureBase = resolve(projectRoot, 'test/fixtures/broker')
 const lockHolderFixture = resolve(projectRoot, 'test/fixtures/codesurf-single-instance-lock-holder.cjs')
 

@@ -35,6 +35,7 @@ export interface LaunchedElectronApp {
   app: ElectronApplication
   page: Page
   homeDir: string
+  process: ReturnType<ElectronApplication['process']>
 }
 
 export type LaunchCodeSurfOptions = {
@@ -59,8 +60,9 @@ async function waitForProcessExit(
   })
 }
 
-async function terminateElectronProcess(app: ElectronApplication): Promise<void> {
-  const process = app.process()
+async function terminateElectronProcess(
+  process: ReturnType<ElectronApplication['process']>,
+): Promise<void> {
   if (process.exitCode !== null || process.signalCode !== null) return
   process.kill('SIGTERM')
   if (await waitForProcessExit(process, APP_PROCESS_EXIT_TIMEOUT_MS)) return
@@ -71,10 +73,11 @@ async function terminateElectronProcess(app: ElectronApplication): Promise<void>
 }
 
 async function closeElectronApplication(app: ElectronApplication): Promise<void> {
+  const process = app.process()
   try {
     await withCleanupTimeout(app.close(), APP_CLOSE_TIMEOUT_MS, 'Electron E2E app close')
   } catch (error) {
-    await terminateElectronProcess(app)
+    await terminateElectronProcess(process)
     throw error
   }
 }
@@ -92,12 +95,26 @@ async function stopIsolatedDaemon(homeDir: string): Promise<void> {
   }
 }
 
-async function cleanupLaunch(app: ElectronApplication | null, homeDir: string): Promise<void> {
+async function cleanupLaunch(
+  app: ElectronApplication | null,
+  process: ReturnType<ElectronApplication['process']> | null,
+  homeDir: string,
+): Promise<void> {
+  let processForCleanup = process
+  if (!processForCleanup && app) {
+    try {
+      processForCleanup = app.process()
+    } catch {
+      // Launch failed before Playwright exposed the process handle.
+    }
+  }
   await runIsolatedElectronCleanup({
     homeDir,
     // Routine cleanup is intentionally forceful. The dedicated quit helper
     // below is the one place that exercises graceful persistence shutdown.
-    closeApp: app ? () => terminateElectronProcess(app) : undefined,
+    closeApp: processForCleanup
+      ? () => terminateElectronProcess(processForCleanup)
+      : undefined,
     stopDaemon: () => stopIsolatedDaemon(homeDir),
     removeHome: () => rm(homeDir, { recursive: true, force: true }),
   })
@@ -106,6 +123,7 @@ async function cleanupLaunch(app: ElectronApplication | null, homeDir: string): 
 export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): Promise<LaunchedElectronApp> {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-e2e-home-'))
   let app: ElectronApplication | null = null
+  let appProcess: ReturnType<ElectronApplication['process']> | null = null
   try {
     const codesurfHome = join(homeDir, '.codesurf')
     const userDataDir = join(homeDir, 'electron-user-data')
@@ -130,15 +148,19 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
       }, null, 2),
     )
 
-    if (options?.seedSettings) {
-      await writeFile(
-        join(codesurfHome, 'settings.json'),
-        JSON.stringify({ version: 1, settings: options.seedSettings }, null, 2),
-      )
-    }
+    await writeFile(
+      join(codesurfHome, 'settings.json'),
+      JSON.stringify({
+        version: 1,
+        settings: {
+          onboardingComplete: true,
+          ...options?.seedSettings,
+        },
+      }, null, 2),
+    )
 
     app = await electron.launch({
-      executablePath: resolveElectronExecutable(),
+      executablePath: resolveElectronExecutable(REPO_ROOT),
       cwd: REPO_ROOT,
       args: [`--user-data-dir=${canonicalUserDataDir}`, MAIN_ENTRY],
       env: {
@@ -149,6 +171,7 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
       },
       timeout: 60_000,
     })
+    appProcess = app.process()
 
     const activeUserDataDir = await app.evaluate(({ app: electronApp }) => (
       electronApp.getPath('userData')
@@ -165,10 +188,10 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     const page = await app.firstWindow({ timeout: 45_000 })
     await page.waitForLoadState('domcontentloaded')
 
-    return { app, page, homeDir }
+    return { app, page, homeDir, process: appProcess }
   } catch (error) {
     try {
-      await cleanupLaunch(app, homeDir)
+      await cleanupLaunch(app, appProcess, homeDir)
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], 'Electron E2E launch and cleanup failed')
     }
@@ -177,7 +200,7 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
 }
 
 export async function closeCodeSurfElectron(launch: LaunchedElectronApp): Promise<void> {
-  await cleanupLaunch(launch.app, launch.homeDir)
+  await cleanupLaunch(launch.app, launch.process, launch.homeDir)
 }
 
 export async function quitCodeSurfElectron(launch: LaunchedElectronApp): Promise<void> {
