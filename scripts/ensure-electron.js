@@ -6,8 +6,6 @@
  * A trailing newline in path.txt also breaks electron-vite spawn (ENOENT).
  */
 
-const { downloadArtifact } = require('@electron/get')
-const extract = require('extract-zip')
 const childProcess = require('child_process')
 const fs = require('fs')
 const os = require('os')
@@ -51,6 +49,24 @@ function resolveArch(platform) {
   return arch
 }
 
+function isProductionOnlyInstall(env = process.env) {
+  const included = env.npm_config_include || env.NPM_CONFIG_INCLUDE || ''
+  if (included.split(/[,\s]+/).includes('dev')) return false
+
+  const omitted = env.npm_config_omit || env.NPM_CONFIG_OMIT || ''
+  if (omitted.split(/[,\s]+/).includes('dev')) return true
+
+  const only = String(env.npm_config_only || env.NPM_CONFIG_ONLY || '').toLowerCase()
+  if (only === 'prod' || only === 'production') return true
+
+  const production = String(
+    env.npm_config_production || env.NPM_CONFIG_PRODUCTION || '',
+  ).toLowerCase()
+  return env.NODE_ENV === 'production'
+    || production === 'true'
+    || production === '1'
+}
+
 function readPathTxt() {
   try {
     return fs.readFileSync(pathFile, 'utf8').trim()
@@ -82,11 +98,18 @@ function isInstalled(version, platformPath) {
 async function main() {
   if (process.env.ELECTRON_SKIP_BINARY_DOWNLOAD) return
 
+  if (isProductionOnlyInstall()) {
+    console.log('[ensure-electron] dev dependencies omitted; skipping Electron binary setup')
+    return
+  }
+
   if (!fs.existsSync(path.join(electronDir, 'package.json'))) {
     console.warn('[ensure-electron] electron package missing; skipping')
     return
   }
 
+  const { downloadArtifact } = require('@electron/get')
+  const extract = require('extract-zip')
   const { version } = require(path.join(electronDir, 'package.json'))
   const platform = process.env.npm_config_platform || process.platform
   const arch = resolveArch(platform)
@@ -146,10 +169,14 @@ async function main() {
 // transports can have no ref'ed handles while a cached/downloaded artifact is
 // being resolved, which previously let this process exit successfully before
 // extraction and path.txt creation completed.
-const keepAlive = setInterval(() => {}, 1_000)
-main()
-  .catch((error) => {
-    console.error('[ensure-electron]', error.stack || error)
-    process.exitCode = 1
-  })
-  .finally(() => clearInterval(keepAlive))
+module.exports = { isProductionOnlyInstall, main }
+
+if (require.main === module) {
+  const keepAlive = setInterval(() => {}, 1_000)
+  main()
+    .catch((error) => {
+      console.error('[ensure-electron]', error.stack || error)
+      process.exitCode = 1
+    })
+    .finally(() => clearInterval(keepAlive))
+}

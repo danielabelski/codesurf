@@ -77,16 +77,18 @@
   "keywords": [],
   "author": "Jason",
   "license": "AGPL-3.0-only",
+  "packageManager": "npm@10.9.0",
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^2.0.0",
     "@electron-toolkit/utils": "^4.0.0",
-    "@electron/rebuild": "^4.0.3",
+    "@electron/rebuild": "4.2.0",
     "@playwright/test": "^1.60.0",
     "@tailwindcss/postcss": "^4.2.1",
     "@tailwindcss/vite": "^4.0.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "^1.3.8",
     "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
@@ -94,11 +96,13 @@
     "@typescript/native-preview": "^7.0.0-dev.20260504.1",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.27",
+    "brace-expansion": "5.0.9",
     "cross-env": "^10.1.0",
+    "ejs": "5.0.2",
     "electron": "41.3.0",
-    "electron-builder": "^26.8.1",
+    "electron-builder": "26.15.3",
     "electron-vite": "^5.0.0",
-    "node-gyp": "^11.5.0",
+    "node-gyp": "12.4.0",
     "postcss": "^8.5.8",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -128,7 +132,6 @@
     "@streamdown/code": "^1.1.1",
     "@streamdown/math": "^1.0.2",
     "@streamdown/mermaid": "^1.0.2",
-    "@types/better-sqlite3": "^7.6.13",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-webgl": "^0.19.0",
@@ -158,7 +161,13 @@
     "use-stick-to-bottom": "^1.1.4",
     "web-worker": "^1.3.0"
   },
+  "optionalDependencies": {
+    "@emnapi/runtime": "1.11.1",
+    "@img/sharp-wasm32": "0.35.3"
+  },
   "overrides": {
+    "brace-expansion": "$brace-expansion",
+    "ejs": "$ejs",
     "monaco-editor": {
       "dompurify": "3.4.12"
     }
