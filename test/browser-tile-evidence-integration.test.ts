@@ -8,6 +8,7 @@ const BROWSER_TILE_SOURCE = [
   readFileSync(join(ROOT_DIR, 'src/renderer/src/components/BrowserTile.tsx'), 'utf8'),
   readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/BrowserEvidenceDrawer.tsx'), 'utf8'),
   readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/browserEvidenceViewModel.ts'), 'utf8'),
+  readFileSync(join(ROOT_DIR, 'src/renderer/src/components/browser/useBrowserWebviewLifecycle.ts'), 'utf8'),
 ].join('\n')
 
 describe('BrowserTile browser evidence integration', () => {

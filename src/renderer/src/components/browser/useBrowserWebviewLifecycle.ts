@@ -260,10 +260,12 @@ export function useBrowserWebviewLifecycle({
         line?: number
         column?: number
       }
-      const action = classifyBrowserConsoleMessage(consoleEvent.message, {
+      const message = consoleEvent.message
+      const action = classifyBrowserConsoleMessage(message, {
         tileId,
         bridgeToken: bridgeTokenRef.current,
-        bridgeAllowed: shouldInjectHostBridge(webview.getURL()),
+        bridgeAllowed: message.startsWith('{"__contex"')
+          && shouldInjectHostBridge(webview.getURL()),
       })
 
       if (action.kind === 'bridge') {
@@ -278,7 +280,7 @@ export function useBrowserWebviewLifecycle({
       if (action.kind === 'evidence') {
         eventsRef.current.recordEvidence({
           kind: 'console',
-          message: consoleEvent.message,
+          message,
           level: consoleEvent.level,
           source: consoleEvent.sourceId,
           line: consoleEvent.line,
@@ -297,7 +299,7 @@ export function useBrowserWebviewLifecycle({
         return
       }
       if (action.kind === 'cluso-error') {
-        console.error('[BrowserTile] Cluso error:', consoleEvent.message)
+        console.error('[BrowserTile] Cluso error:', message)
       }
     }
 
