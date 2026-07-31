@@ -603,6 +603,62 @@ export function createPermissionBoundary<DisplaySource>(
     }
   }
 
+  const terminateExtensionMediaFrames = async (extensionId: string): Promise<void> => {
+    if (!isValidExtensionId(extensionId)) return
+    const expectedOrigin = `codesurf-ext://${extensionId}`
+    const fallbackNavigations: Promise<unknown>[] = []
+    for (const webContents of registeredContents) {
+      const session = runtime.getSession(webContents)
+      if (!getTrustedOwner(session, webContents)) continue
+      let frames: readonly FrameLike[]
+      try {
+        frames = runtime.getDirectChildFrames(webContents)
+      } catch (error) {
+        runtime.warn(`Unable to enumerate media frames for extension ${extensionId}`, error)
+        continue
+      }
+      for (const frame of frames) {
+        const location = getExtensionLocation(frame.url)
+        if (
+          frame.isDestroyed()
+          || frame.detached
+          || !sameFrame(frame.parent, webContents.mainFrame)
+          || !sameFrame(frame.top, webContents.mainFrame)
+          || frame.origin !== expectedOrigin
+          || location?.id !== extensionId
+          || location.frameOrigin !== expectedOrigin
+        ) continue
+        const navigateAway = (): void => {
+          try {
+            fallbackNavigations.push(
+              frame.executeJavaScript('window.location.replace("about:blank")'),
+            )
+          } catch (error) {
+            runtime.warn(
+              `Unable to navigate active media frame for extension ${extensionId}`,
+              error,
+            )
+          }
+        }
+        try {
+          if (!frame.reload()) navigateAway()
+        } catch (error) {
+          runtime.warn(`Unable to reload active media frame for extension ${extensionId}`, error)
+          navigateAway()
+        }
+      }
+    }
+    const fallbackResults = await Promise.allSettled(fallbackNavigations)
+    for (const result of fallbackResults) {
+      if (result.status === 'rejected') {
+        runtime.warn(
+          `Unable to navigate active media frame for extension ${extensionId}`,
+          result.reason,
+        )
+      }
+    }
+  }
+
   runtime.onSessionCreated(installSession)
   runtime.onWebContentsCreated(webContents => installSession(runtime.getSession(webContents)))
   const ready = runtime.whenReady().then(() => {
@@ -616,6 +672,7 @@ export function createPermissionBoundary<DisplaySource>(
     installSession,
     ready,
     registerAppWindow,
+    terminateExtensionMediaFrames,
   }
   boundariesByRuntime.set(runtime as object, boundary as PermissionBoundary<unknown>)
   return boundary

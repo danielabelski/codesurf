@@ -18,6 +18,9 @@ export type DisplaySource = { id: string; name: string }
 
 export class FakeFrame implements FrameLike {
   detached = false
+  executedScripts: string[] = []
+  reloadCount = 0
+  reloadResult = true
   parent: FrameLike | null = null
   top: FrameLike = this
   url: string
@@ -42,6 +45,15 @@ export class FakeFrame implements FrameLike {
 
   isDestroyed(): boolean {
     return false
+  }
+
+  async executeJavaScript(code: string): Promise<unknown> {
+    this.executedScripts.push(code)
+  }
+
+  reload(): boolean {
+    this.reloadCount += 1
+    return this.reloadResult
   }
 }
 
@@ -178,6 +190,15 @@ export function createHarness(options?: {
     platform: options?.platform ?? 'darwin',
     whenReady: async () => undefined,
     getDefaultSession: () => defaultSession,
+    getDirectChildFrames: contents => {
+      return [...frameOwners].flatMap(([frame, owner]) => {
+        return owner === contents
+          && frame !== contents.mainFrame
+          && frame.parent === contents.mainFrame
+          ? [frame]
+          : []
+      })
+    },
     onSessionCreated: listener => sessionListeners.push(listener),
     onWebContentsCreated: listener => contentsListeners.push(listener),
     onWebContentsNavigation: (contents, listener) => {

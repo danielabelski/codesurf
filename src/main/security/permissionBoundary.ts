@@ -171,6 +171,11 @@ export function installElectronPermissionBoundary(
     platform: process.platform,
     whenReady: () => app.whenReady(),
     getDefaultSession: () => adaptSession(session.defaultSession),
+    getDirectChildFrames: contents => {
+      const electronContents = contents as unknown as WebContents
+      if (electronContents.isDestroyed()) return []
+      return electronContents.mainFrame.frames.map(asFrame)
+    },
     getDisplaySources: () => desktopCapturer.getSources({
       types: ['screen', 'window'],
       fetchWindowIcons: true,
@@ -330,7 +335,11 @@ export function installElectronPermissionBoundary(
     ready: Promise.all([boundary.ready, consentManager.ready]).then(() => undefined),
     revokeExtensionMedia: async extensionId => {
       boundary.clearExtensionGrants(extensionId)
-      await consentManager.revokeExtension(extensionId)
+      try {
+        await consentManager.revokeExtension(extensionId)
+      } finally {
+        await boundary.terminateExtensionMediaFrames(extensionId)
+      }
     },
     registerAppWindow: window => boundary.registerAppWindow(asBrowserWindow(window)),
     setExtensionAuthorizer: authorizer => {

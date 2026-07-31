@@ -192,6 +192,104 @@ describe('permission boundary display capture', () => {
     assert.deepEqual(await pending, {})
   })
 
+  test('terminates only exact direct extension media frames across trusted windows', async () => {
+    const harness = createHarness()
+    const first = harness.makeWindow()
+    const second = harness.makeWindow()
+    const unregistered = harness.makeWindow()
+    harness.boundary.registerAppWindow(first.window)
+    harness.boundary.registerAppWindow(second.window)
+    const extensionOrigin = 'codesurf-ext://sharing-extension'
+
+    const matching = new FakeFrame(
+      `${extensionOrigin}/one.html`,
+      extensionOrigin,
+      60,
+    )
+    matching.parent = first.contents.mainFrame
+    matching.top = first.contents.mainFrame
+    harness.attachFrame(first.contents, matching)
+
+    const fallback = new FakeFrame(
+      `${extensionOrigin}/two.html`,
+      extensionOrigin,
+      61,
+    )
+    fallback.parent = second.contents.mainFrame
+    fallback.top = second.contents.mainFrame
+    fallback.reloadResult = false
+    harness.attachFrame(second.contents, fallback)
+
+    const otherExtension = new FakeFrame(
+      'codesurf-ext://other-extension/index.html',
+      'codesurf-ext://other-extension',
+      62,
+    )
+    otherExtension.parent = first.contents.mainFrame
+    otherExtension.top = first.contents.mainFrame
+    harness.attachFrame(first.contents, otherExtension)
+
+    const spoofedOrigin = new FakeFrame(
+      `${extensionOrigin}/spoofed.html`,
+      'codesurf-ext://other-extension',
+      63,
+    )
+    spoofedOrigin.parent = first.contents.mainFrame
+    spoofedOrigin.top = first.contents.mainFrame
+    harness.attachFrame(first.contents, spoofedOrigin)
+
+    const spoofedUrl = new FakeFrame(
+      'codesurf-ext://other-extension/spoofed.html',
+      extensionOrigin,
+      64,
+    )
+    spoofedUrl.parent = first.contents.mainFrame
+    spoofedUrl.top = first.contents.mainFrame
+    harness.attachFrame(first.contents, spoofedUrl)
+
+    const nested = new FakeFrame(
+      `${extensionOrigin}/nested.html`,
+      extensionOrigin,
+      65,
+    )
+    nested.parent = matching
+    nested.top = first.contents.mainFrame
+    harness.attachFrame(first.contents, nested)
+
+    const outsideTrustedWindow = new FakeFrame(
+      `${extensionOrigin}/unregistered.html`,
+      extensionOrigin,
+      66,
+    )
+    outsideTrustedWindow.parent = unregistered.contents.mainFrame
+    outsideTrustedWindow.top = unregistered.contents.mainFrame
+    harness.attachFrame(unregistered.contents, outsideTrustedWindow)
+
+    await harness.boundary.terminateExtensionMediaFrames('sharing-extension')
+
+    assert.equal(matching.reloadCount, 1)
+    assert.equal(fallback.reloadCount, 1)
+    assert.deepEqual(
+      fallback.executedScripts,
+      ['window.location.replace("about:blank")'],
+    )
+    for (const unrelated of [
+      otherExtension,
+      spoofedOrigin,
+      spoofedUrl,
+      nested,
+      outsideTrustedWindow,
+      first.contents.mainFrame,
+      second.contents.mainFrame,
+    ]) {
+      assert.equal(unrelated.reloadCount, 0)
+      assert.deepEqual(unrelated.executedScripts, [])
+    }
+
+    await harness.boundary.terminateExtensionMediaFrames('../sharing-extension')
+    assert.equal(matching.reloadCount, 1, 'invalid extension ids must not match frames')
+  })
+
   test('denies invalid extension display identity and revokes grants on navigation or disable', async () => {
     const harness = createHarness()
     const trusted = harness.makeWindow()

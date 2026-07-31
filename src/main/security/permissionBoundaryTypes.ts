@@ -12,7 +12,9 @@ export interface FrameLike {
   readonly routingId: number
   readonly top: FrameLike | null
   readonly url: string
+  executeJavaScript(code: string): Promise<unknown>
   isDestroyed(): boolean
+  reload(): boolean
 }
 
 export interface FrameNavigationIdentity {
@@ -114,6 +116,7 @@ export interface DisplaySourceSelection<DisplaySource> {
 export interface PermissionBoundaryRuntime<DisplaySource> {
   readonly platform: NodeJS.Platform
   getDefaultSession(): PermissionSession<DisplaySource> | undefined
+  getDirectChildFrames(webContents: WebContentsLike): readonly FrameLike[]
   getDisplaySources(): Promise<DisplaySource[]>
   getExtensionPermission(extensionId: string): ExtensionPermissionDescriptor | undefined
   getDirectChildFrame(
@@ -156,4 +159,5 @@ export interface PermissionBoundary<DisplaySource> {
   clearExtensionGrants(extensionId: string): void
   installSession(session: PermissionSession<DisplaySource>): void
   registerAppWindow(window: BrowserWindowLike): void
+  terminateExtensionMediaFrames(extensionId: string): Promise<void>
 }
