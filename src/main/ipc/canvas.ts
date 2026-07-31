@@ -16,6 +16,7 @@ import {
   tileStatePath,
 } from '../storage/workspaceArtifacts'
 import { writeJsonArtifactAtomic } from '../storage/jsonArtifacts'
+import { WorkspaceSaveArbiter } from '../storage/workspaceSaveArbiter'
 import {
   appendQueuedMessageEvent,
   listActiveQueuedMessages,
@@ -52,6 +53,7 @@ import {
 } from './session-title-generation'
 
 const sessionsLog = log.scope('sessions')
+const canvasSaveArbiter = new WorkspaceSaveArbiter()
 
 interface TileSessionSummary {
   version: 1
@@ -757,31 +759,36 @@ export function registerCanvasIPC(): void {
   handleTyped('canvas:save', {
     args: [ipcSchemas.boundedString(), ipcSchemas.passthroughObject] as const,
     handler: async (_evt, workspaceId, state) => {
-    // Capture relay lifecycle ownership before the durable save starts.
+    // Capture relay lifecycle ownership before the save awaits its FIFO lane.
     // Shutdown/deactivation invalidates this token even if the disk write
     // completes later.
     const relayProjectionToken = captureCanvasRelayProjectionToken()
-    const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
-    const storageId = storageIds[0] ?? workspaceId
-    const path = canvasStatePath(storageId)
-    await fs.mkdir(dirname(path), { recursive: true })
-    await writeJsonArtifactAtomic(path, state)
+    // Reserve the per-workspace lane before any async migration or path
+    // resolution. Otherwise a later handler can resolve first and let an older
+    // request overwrite it.
+    await canvasSaveArbiter.run(workspaceId, async () => {
+      const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
+      const storageId = storageIds[0] ?? workspaceId
+      const path = canvasStatePath(storageId)
+      await fs.mkdir(dirname(path), { recursive: true })
+      await writeJsonArtifactAtomic(path, state)
 
-    // Queue the derived relay projection at the same point as its durable
-    // source state. The detached lane serializes by workspace and coalesces
-    // pending work, so an older slow sync cannot become the final projection.
-    if (
-      relayProjectionToken
-      && state
-      && typeof state === 'object'
-      && Array.isArray(state.tiles)
-    ) {
-      scheduleCanvasRelayProjection(
-        workspaceId,
-        relayProjectionToken,
-        state.tiles,
-      )
-    }
+      // Queue the derived relay projection at the same point as its durable
+      // source state. The detached lane serializes by workspace and coalesces
+      // pending work, so an older slow sync cannot become the final projection.
+      if (
+        relayProjectionToken
+        && state
+        && typeof state === 'object'
+        && Array.isArray(state.tiles)
+      ) {
+        scheduleCanvasRelayProjection(
+          workspaceId,
+          relayProjectionToken,
+          state.tiles,
+        )
+      }
+    })
     },
   })
 
