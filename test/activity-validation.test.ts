@@ -8,10 +8,12 @@ import {
   MAX_ACTIVITY_QUERY_LIMIT,
   MAX_ACTIVITY_TITLE_LENGTH,
   parseActivityDocument,
+  recoverActivityDocument,
   validateActivityQuery,
   validateActivityUpsertInput,
   validateActivityWorkspaceId,
 } from '../src/main/activity-validation.ts'
+import { MAX_ACTIVITY_RECORDS } from '../src/main/activity-cap.ts'
 
 function validRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -203,5 +205,34 @@ describe('activity document validation', () => {
       version: ACTIVITY_DOCUMENT_VERSION,
       records: [{ ...validRecord(), unknown: true }],
     }, 'workspace-1'), 'unknown_field')
+  })
+
+  test('caps valid oversized legacy arrays with bounded deterministic retention', () => {
+    const legacy = Array.from(
+      { length: MAX_ACTIVITY_RECORDS + 1 },
+      (_, index) => validRecord({ id: `legacy-${index}` }),
+    )
+    const parsed = parseActivityDocument(legacy, 'workspace-1')
+    assert.equal(parsed.records.length, MAX_ACTIVITY_RECORDS)
+    assert.equal(parsed.records[0].id, `legacy-${MAX_ACTIVITY_RECORDS}`)
+    assert.equal(parsed.records.some(record => record.id === 'legacy-0'), false)
+    assert.equal(parsed.needsRewrite, true)
+  })
+
+  test('recovery keeps independently valid rows and marks the source for quarantine', () => {
+    const recovered = recoverActivityDocument({
+      version: ACTIVITY_DOCUMENT_VERSION,
+      records: [
+        validRecord({ id: 'valid-1' }),
+        validRecord({ id: 42 }),
+        validRecord({ id: 'valid-2', tileId: 'tile-2' }),
+      ],
+    }, 'workspace-1')
+    assert.deepEqual(recovered.records.map(record => record.id).sort(), [
+      'valid-1',
+      'valid-2',
+    ])
+    assert.equal(recovered.requiresQuarantine, true)
+    assert.equal(recovered.needsRewrite, true)
   })
 })

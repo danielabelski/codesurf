@@ -16,11 +16,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ActivityRecord } from '../src/shared/activity-types.ts'
 import {
+  ACTIVITY_QUARANTINE_PREFIX,
   ActivityPersistenceError,
   activityStorePath,
   createFileActivityPersistence,
 } from '../src/main/activity-persistence.ts'
 import { ACTIVITY_DOCUMENT_VERSION } from '../src/main/activity-validation.ts'
+import { ActivityStore } from '../src/main/activity-store-core.ts'
+import { MAX_ACTIVITY_RECORDS } from '../src/main/activity-cap.ts'
 
 const NOW = Date.now()
 
@@ -114,9 +117,8 @@ describe('file activity persistence', () => {
     }
   })
 
-  test('preserves corrupt, future, and oversized files without rewriting them', async () => {
+  test('leaves future and oversized files untouched without quarantining or rewriting them', async () => {
     const cases: Array<{ name: string, raw: string, maxFileBytes?: number }> = [
-      { name: 'corrupt', raw: '{not json' },
       {
         name: 'future',
         raw: JSON.stringify({ version: ACTIVITY_DOCUMENT_VERSION + 1, records: [] }),
@@ -136,9 +138,108 @@ describe('file activity persistence', () => {
         })
         await assert.rejects(persistence.load(testCase.name), ActivityPersistenceError)
         assert.equal(await readFile(filePath, 'utf8'), testCase.raw)
+        assert.deepEqual(await readdir(dirname(filePath)), ['activity.json'])
       } finally {
         await cleanup()
       }
+    }
+  })
+
+  test('quarantines corrupt bytes exactly and starts a rewriteable empty store', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const raw = Buffer.from([0x7b, 0xff, 0x00, 0x7d])
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, raw)
+      const persistence = createFileActivityPersistence({ homeDir })
+
+      assert.deepEqual(await persistence.load('workspace-1'), {
+        records: [],
+        needsRewrite: true,
+      })
+      assert.deepEqual(await readFile(filePath), raw)
+      const quarantine = (await readdir(dirname(filePath)))
+        .find(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+      assert.ok(quarantine)
+      assert.deepEqual(await readFile(join(dirname(filePath), quarantine)), raw)
+      assert.equal((await stat(join(dirname(filePath), quarantine))).mode & 0o777, 0o600)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('caps oversized legacy arrays through bounded migration without quarantine', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const records = Array.from({ length: MAX_ACTIVITY_RECORDS + 25 }, (_, index) => record())
+        .map((item, index) => ({
+          ...item,
+          id: `legacy-${index}`,
+          createdAt: NOW - 20_000,
+          updatedAt: NOW - index,
+        }))
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, JSON.stringify(records))
+      const persistence = createFileActivityPersistence({ homeDir })
+
+      const loaded = await persistence.load('workspace-1')
+      assert.equal(loaded.records.length, MAX_ACTIVITY_RECORDS)
+      assert.equal(loaded.records[0].id, 'legacy-0')
+      assert.equal(loaded.records.some(item => item.id === `legacy-${MAX_ACTIVITY_RECORDS + 24}`), false)
+      assert.equal(loaded.needsRewrite, true)
+      assert.deepEqual(await readdir(dirname(filePath)), ['activity.json'])
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('quarantines mixed documents, salvages valid rows, then persists subsequent activity', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const mixed = Buffer.from(JSON.stringify({
+        version: ACTIVITY_DOCUMENT_VERSION,
+        records: [
+          record(),
+          { ...record(), id: 42 },
+          { ...record(), id: 'activity-2', tileId: 'tile-2' },
+        ],
+      }))
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, mixed)
+      const persistence = createFileActivityPersistence({ homeDir })
+      const store = new ActivityStore({ persistence, now: () => NOW + 1 })
+
+      assert.deepEqual(
+        (await store.query({ workspaceId: 'workspace-1' })).map(item => item.id).sort(),
+        ['activity-1', 'activity-2'],
+      )
+      await store.upsert('workspace-1', {
+        id: 'activity-3',
+        tileId: 'tile-3',
+        type: 'task',
+        title: 'Recovered work',
+      })
+      await store.flushAll()
+
+      const names = await readdir(dirname(filePath))
+      const quarantine = names.find(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+      assert.ok(quarantine)
+      assert.deepEqual(await readFile(join(dirname(filePath), quarantine)), mixed)
+      const current = JSON.parse(await readFile(filePath, 'utf8')) as {
+        version: number
+        records: ActivityRecord[]
+      }
+      assert.equal(current.version, ACTIVITY_DOCUMENT_VERSION)
+      assert.deepEqual(current.records.map(item => item.id).sort(), [
+        'activity-1',
+        'activity-2',
+        'activity-3',
+      ])
+    } finally {
+      await cleanup()
     }
   })
 

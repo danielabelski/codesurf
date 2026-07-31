@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { constants, promises as fs } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ActivityRecord } from '../shared/activity-types.ts'
 import { capActivityRecords } from './activity-cap.ts'
 import {
   ACTIVITY_DOCUMENT_VERSION,
+  ActivityValidationError,
   MAX_ACTIVITY_FILE_BYTES,
   parseActivityDocument,
+  recoverActivityDocument,
   validateActivityWorkspaceId,
 } from './activity-validation.ts'
 import { resolveInside } from './security/pathSegments.ts'
@@ -29,6 +31,8 @@ export interface FileActivityPersistenceOptions {
     afterOpen?: (filePath: string) => void | Promise<void>
   }
 }
+
+export const ACTIVITY_QUARANTINE_PREFIX = 'activity.quarantine-'
 
 export class ActivityPersistenceError extends Error {
   readonly code: string
@@ -216,7 +220,7 @@ async function syncDirectoryHandle(handle: ActivityWriteBoundary['directoryHandl
   }
 }
 
-async function durableAtomicWrite(filePath: string, content: string): Promise<void> {
+async function durableAtomicWrite(filePath: string, content: string | Uint8Array): Promise<void> {
   const boundary = await prepareWriteBoundary(filePath)
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
   let handle
@@ -240,7 +244,8 @@ async function durableAtomicWrite(filePath: string, content: string): Promise<vo
     if (temporaryPathInfo.isSymbolicLink() || !sameIdentity(openedTemporaryIdentity, temporaryPathInfo)) {
       throw persistenceError('path_changed', 'Activity temporary file changed during access', filePath)
     }
-    await handle.writeFile(content, 'utf8')
+    if (typeof content === 'string') await handle.writeFile(content, 'utf8')
+    else await handle.writeFile(content)
     await handle.sync()
     await handle.close()
     handle = undefined
@@ -282,6 +287,15 @@ async function durableAtomicWrite(filePath: string, content: string): Promise<vo
   } finally {
     await boundary.directoryHandle.close().catch(() => {})
   }
+}
+
+async function quarantineActivityBytes(filePath: string, bytes: Uint8Array): Promise<string> {
+  const quarantinePath = join(
+    dirname(filePath),
+    `${ACTIVITY_QUARANTINE_PREFIX}${Date.now()}-${randomUUID()}.json`,
+  )
+  await durableAtomicWrite(quarantinePath, bytes)
+  return quarantinePath
 }
 
 async function loadActivityFile(
@@ -354,18 +368,30 @@ async function loadActivityFile(
     let value: unknown
     try {
       value = JSON.parse(bytes.toString('utf8'))
-    } catch (error) {
-      throw persistenceError('corrupt_json', 'Activity store contains invalid JSON', filePath, error)
+    } catch {
+      await quarantineActivityBytes(filePath, bytes)
+      return { records: [], needsRewrite: true }
     }
 
     try {
-      const parsed = parseActivityDocument(value, workspaceId)
-      const capped = capActivityRecords(parsed.records)
+      const recovered = recoverActivityDocument(value, workspaceId)
+      if (recovered.requiresQuarantine) {
+        await quarantineActivityBytes(filePath, bytes)
+      }
+      const capped = capActivityRecords(recovered.records)
       return {
         records: capped,
-        needsRewrite: parsed.needsRewrite || capped !== parsed.records,
+        needsRewrite: recovered.needsRewrite || capped !== recovered.records,
       }
     } catch (error) {
+      if (error instanceof ActivityValidationError && error.code === 'future_document_version') {
+        throw persistenceError(
+          'future_document_version',
+          'Activity store was written by a newer CodeSurf version',
+          filePath,
+          error,
+        )
+      }
       throw persistenceError('invalid_document', 'Activity store schema is invalid or unsupported', filePath, error)
     }
   } finally {

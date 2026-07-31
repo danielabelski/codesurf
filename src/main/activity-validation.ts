@@ -33,6 +33,11 @@ export interface ParsedActivityDocument {
   needsRewrite: boolean
 }
 
+export interface RecoveredActivityDocument extends ParsedActivityDocument {
+  requiresQuarantine: boolean
+  issueCode?: string
+}
+
 export class ActivityValidationError extends Error {
   readonly code: string
 
@@ -295,41 +300,144 @@ export function validateActivityRecord(value: unknown, workspaceId: string): Act
   }
 }
 
-export function parseActivityDocument(value: unknown, workspaceIdValue: unknown): ParsedActivityDocument {
+function compactRecoveredRecords(
+  entries: Array<{ record: ActivityRecord, order: number }>,
+): {
+  entries: Array<{ record: ActivityRecord, order: number }>
+  hadDuplicates: boolean
+} {
+  entries.sort((left, right) => (
+    right.record.updatedAt - left.record.updatedAt
+    || right.order - left.order
+  ))
+  const identities = new Set<string>()
+  const compacted: typeof entries = []
+  let hadDuplicates = false
+  for (const entry of entries) {
+    const identity = `${entry.record.tileId}\0${entry.record.id}`
+    if (identities.has(identity)) {
+      hadDuplicates = true
+      continue
+    }
+    identities.add(identity)
+    compacted.push(entry)
+    if (compacted.length === MAX_ACTIVITY_RECORDS) break
+  }
+  return { entries: compacted, hadDuplicates }
+}
+
+/**
+ * Recover independently valid rows while retaining at most two cap-sized
+ * batches during validation. The source JSON is separately byte-bounded by
+ * persistence before this function is called.
+ */
+export function recoverActivityDocument(
+  value: unknown,
+  workspaceIdValue: unknown,
+): RecoveredActivityDocument {
   const workspaceId = validateActivityWorkspaceId(workspaceIdValue)
   let rawRecords: unknown[]
   let needsRewrite = false
+  let requiresQuarantine = false
+  let issueCode: string | undefined
 
   if (Array.isArray(value)) {
     rawRecords = value
     needsRewrite = true
   } else {
-    const document = assertObject(value, 'activity document')
-    assertKnownKeys(document, new Set(['version', 'records']), 'activity document')
+    if (!isPlainObject(value)) {
+      return {
+        records: [],
+        needsRewrite: true,
+        requiresQuarantine: true,
+        issueCode: 'invalid_object',
+      }
+    }
+    const document = value
     if (!Number.isSafeInteger(document.version)) {
-      fail('invalid_document_version', 'activity document version must be an integer')
+      return {
+        records: [],
+        needsRewrite: true,
+        requiresQuarantine: true,
+        issueCode: 'invalid_document_version',
+      }
     }
     if ((document.version as number) > ACTIVITY_DOCUMENT_VERSION) {
       fail('future_document_version', 'activity document was written by a newer CodeSurf version')
     }
     if (document.version !== ACTIVITY_DOCUMENT_VERSION) {
-      fail('invalid_document_version', 'activity document version is unsupported')
+      return {
+        records: [],
+        needsRewrite: true,
+        requiresQuarantine: true,
+        issueCode: 'invalid_document_version',
+      }
     }
-    if (!Array.isArray(document.records)) fail('invalid_records', 'activity document records must be an array')
+    for (const key of Object.keys(document)) {
+      if (key !== 'version' && key !== 'records') {
+        requiresQuarantine = true
+        needsRewrite = true
+        issueCode ??= 'unknown_field'
+      }
+    }
+    if (!Array.isArray(document.records)) {
+      return {
+        records: [],
+        needsRewrite: true,
+        requiresQuarantine: true,
+        issueCode: 'invalid_records',
+      }
+    }
     rawRecords = document.records
   }
 
-  if (rawRecords.length > MAX_ACTIVITY_RECORDS) {
-    fail('too_many_records', `activity document exceeds ${MAX_ACTIVITY_RECORDS} records`)
-  }
-  const records = rawRecords.map(record => validateActivityRecord(record, workspaceId))
-  const identities = new Set<string>()
-  for (const record of records) {
-    const identity = `${record.tileId}\0${record.id}`
-    if (identities.has(identity)) {
-      fail('duplicate_activity_identity', 'activity document contains a duplicate tile-scoped identity')
+  if (rawRecords.length > MAX_ACTIVITY_RECORDS) needsRewrite = true
+  let retained: Array<{ record: ActivityRecord, order: number }> = []
+  for (let order = 0; order < rawRecords.length; order += 1) {
+    try {
+      retained.push({
+        record: validateActivityRecord(rawRecords[order], workspaceId),
+        order,
+      })
+    } catch (error) {
+      requiresQuarantine = true
+      needsRewrite = true
+      issueCode ??= error instanceof ActivityValidationError ? error.code : 'invalid_record'
     }
-    identities.add(identity)
+    if (retained.length >= MAX_ACTIVITY_RECORDS * 2) {
+      const compacted = compactRecoveredRecords(retained)
+      retained = compacted.entries
+      if (compacted.hadDuplicates) {
+        requiresQuarantine = true
+        needsRewrite = true
+        issueCode ??= 'duplicate_activity_identity'
+      }
+    }
   }
-  return { records, needsRewrite }
+  const compacted = compactRecoveredRecords(retained)
+  if (compacted.hadDuplicates) {
+    requiresQuarantine = true
+    needsRewrite = true
+    issueCode ??= 'duplicate_activity_identity'
+  }
+  return {
+    records: compacted.entries.map(entry => entry.record),
+    needsRewrite,
+    requiresQuarantine,
+    ...(issueCode === undefined ? {} : { issueCode }),
+  }
+}
+
+export function parseActivityDocument(value: unknown, workspaceIdValue: unknown): ParsedActivityDocument {
+  const recovered = recoverActivityDocument(value, workspaceIdValue)
+  if (recovered.requiresQuarantine) {
+    fail(
+      recovered.issueCode ?? 'invalid_document',
+      'activity document contains invalid or conflicting data',
+    )
+  }
+  return {
+    records: recovered.records,
+    needsRewrite: recovered.needsRewrite,
+  }
 }
