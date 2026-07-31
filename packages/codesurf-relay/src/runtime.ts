@@ -63,6 +63,7 @@ interface RuntimeAgentState {
   epoch: number
   activeTurn: ActiveRuntimeTurn | null
   activeTick: ActiveRuntimeTick | null
+  providerTeardowns: Set<Promise<void>>
 }
 
 function extractJsonBlock(raw: string): string {
@@ -202,7 +203,9 @@ export class RelayRuntime {
       state.epoch += 1
       if (state.activeTurn) {
         state.activeTurn.controller.abort(error)
-        pending.add(state.activeTurn.providerTeardown)
+      }
+      for (const providerTeardown of state.providerTeardowns) {
+        pending.add(providerTeardown)
       }
       if (state.activeTick) {
         pending.add(state.activeTick.promise)
@@ -263,6 +266,7 @@ export class RelayRuntime {
       epoch: 1,
       activeTurn: null,
       activeTick: null,
+      providerTeardowns: new Set(),
     }
     this.agents.set(id, state)
     const epoch = state.epoch
@@ -646,10 +650,15 @@ export class RelayRuntime {
     } catch (error) {
       providerTurn = Promise.reject(error)
     }
-    activeTurn.providerTeardown = providerTurn.then(
+    const providerTeardown = providerTurn.then(
       () => undefined,
       () => undefined,
     )
+    activeTurn.providerTeardown = providerTeardown
+    state.providerTeardowns.add(providerTeardown)
+    void providerTeardown.then(() => {
+      state.providerTeardowns.delete(providerTeardown)
+    })
 
     return new Promise((resolve, reject) => {
       let settled = false
@@ -802,7 +811,9 @@ export class RelayRuntime {
 
   private async awaitAgentTeardown(state: RuntimeAgentState): Promise<void> {
     const pending = new Set<Promise<void>>()
-    if (state.activeTurn) pending.add(state.activeTurn.providerTeardown)
+    for (const providerTeardown of state.providerTeardowns) {
+      pending.add(providerTeardown)
+    }
     if (state.activeTick) pending.add(state.activeTick.promise)
     await Promise.allSettled([...pending])
   }

@@ -258,3 +258,59 @@ test('relay service invalidates suspended init and spawn work until a fresh gene
   assert.equal(activeSubscriptions, 0)
   assert.equal(liveRuntimes, 0)
 })
+
+test('relay service awaits every runtime teardown before reporting a failure', async () => {
+  const releaseSlowDestroy = deferred()
+  const firstFailure = new Error('first runtime destroy failed')
+  let runtimeCount = 0
+  let destroyCalls = 0
+  const service = new WorkspaceRelayService({
+    createRelay: () => ({
+      async init() {},
+      on() {
+        return () => {}
+      },
+    } as any),
+    createRuntime: () => {
+      runtimeCount += 1
+      const runtimeNumber = runtimeCount
+      return {
+        async spawn() {
+          throw new Error('not used')
+        },
+        async stop() {},
+        async destroy() {
+          destroyCalls += 1
+          if (runtimeNumber === 1) throw firstFailure
+          await releaseSlowDestroy.promise
+        },
+      }
+    },
+    createExecutor: () => ({
+      async runTurn() {
+        return '{}'
+      },
+    }),
+    readTileState: async () => null,
+    broadcast: () => {},
+  })
+
+  service.start()
+  await Promise.all([
+    service.getWorkspaceRelay('/workspace/first'),
+    service.getWorkspaceRelay('/workspace/second'),
+  ])
+
+  let stopSettled = false
+  const stopping = service.stopAll().finally(() => {
+    stopSettled = true
+  })
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(destroyCalls, 2)
+  assert.equal(stopSettled, false)
+
+  releaseSlowDestroy.resolve()
+  await assert.rejects(stopping, error => error === firstFailure)
+  assert.equal(stopSettled, true)
+})

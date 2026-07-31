@@ -390,7 +390,19 @@ export class WorkspaceRelayService {
     const instances = [...this.instances.values()]
     this.instances.clear()
     const disposals = instances.map(instance => this.disposeInstance(instance))
-    await Promise.all([...this.pendingDisposals, ...disposals])
+    const results = await Promise.allSettled(
+      new Set([...this.pendingDisposals, ...disposals]),
+    )
+    const errors = results.flatMap(result => (
+      result.status === 'rejected' ? [result.reason] : []
+    ))
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        'Multiple relay runtimes failed during shutdown',
+      )
+    }
   }
 
   private captureOperationGuard(

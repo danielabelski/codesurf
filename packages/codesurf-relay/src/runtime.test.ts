@@ -365,6 +365,54 @@ describe('runtime', () => {
       await runtime.destroy()
     })
 
+    it('destroy awaits provider teardown retained after a turn timeout', async () => {
+      let markTurnEntered!: () => void
+      const turnEntered = new Promise<void>(resolve => {
+        markTurnEntered = resolve
+      })
+      let releaseProvider!: () => void
+      const providerReleased = new Promise<void>(resolve => {
+        releaseProvider = resolve
+      })
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async () => {
+          markTurnEntered()
+          await providerReleased
+          return '{"ready":true,"status":"ready"}'
+        }),
+      }
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+        turnTimeoutMs: 10,
+      })
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-timeout',
+        name: 'Timed Out Agent',
+        kind: 'agent',
+        status: 'spawning',
+        channels: [],
+      })
+
+      const spawning = runtime.spawn({
+        id: 'agent-timeout',
+        name: 'Timed Out Agent',
+        task: 'Remain alive past the runtime timeout',
+      })
+      await turnEntered
+      await spawning
+
+      let destroySettled = false
+      const destroying = runtime.destroy().then(() => {
+        destroySettled = true
+      })
+      await Promise.resolve()
+      expect(destroySettled).toBe(false)
+
+      releaseProvider()
+      await destroying
+      expect(destroySettled).toBe(true)
+    })
+
     it('revalidates the participant epoch at every post-turn mutation boundary', async () => {
       const boundaries = [
         'work',
