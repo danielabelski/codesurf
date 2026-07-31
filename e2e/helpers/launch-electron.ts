@@ -1,4 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
@@ -105,6 +111,7 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     const userDataDir = join(homeDir, 'electron-user-data')
     await mkdir(codesurfHome, { recursive: true })
     await mkdir(userDataDir, { recursive: true })
+    const canonicalUserDataDir = await realpath(userDataDir)
     const now = new Date().toISOString()
     await writeFile(
       join(codesurfHome, 'agent-paths.json'),
@@ -133,7 +140,7 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     app = await electron.launch({
       executablePath: resolveElectronExecutable(),
       cwd: REPO_ROOT,
-      args: [`--user-data-dir=${userDataDir}`, MAIN_ENTRY],
+      args: [`--user-data-dir=${canonicalUserDataDir}`, MAIN_ENTRY],
       env: {
         ...process.env,
         HOME: homeDir,
@@ -146,7 +153,10 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     const activeUserDataDir = await app.evaluate(({ app: electronApp }) => (
       electronApp.getPath('userData')
     ))
-    if (resolve(activeUserDataDir) !== resolve(userDataDir)) {
+    if (
+      resolve(await realpath(activeUserDataDir))
+      !== resolve(canonicalUserDataDir)
+    ) {
       throw new Error(
         `Electron E2E userData escaped isolation: ${activeUserDataDir}`,
       )

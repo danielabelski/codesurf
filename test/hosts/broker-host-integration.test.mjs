@@ -12,7 +12,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve, dirname, join } from 'node:path'
@@ -164,17 +170,20 @@ function spawnBrokerTestHost({ userDataDir } = {}) {
   const profileHome = profileRoot ?? userDataDir
   const resolvedUserDataDir = userDataDir
     ?? join(profileRoot, 'electron-user-data')
+  mkdirSync(resolvedUserDataDir, { recursive: true })
+  const canonicalUserDataDir = realpathSync(resolvedUserDataDir)
+  const canonicalProfileHome = realpathSync(profileHome)
   const args = [
-    `--user-data-dir=${resolvedUserDataDir}`,
+    `--user-data-dir=${canonicalUserDataDir}`,
     projectRoot,
   ]
   const child = spawn(electronBin, args, {
     cwd: projectRoot,
     env: {
       ...process.env,
-      HOME: profileHome,
-      USERPROFILE: profileHome,
-      CODESURF_HOME: join(profileHome, '.codesurf'),
+      HOME: canonicalProfileHome,
+      USERPROFILE: canonicalProfileHome,
+      CODESURF_HOME: join(canonicalProfileHome, '.codesurf'),
       CODESURF_BROKER_TEST: '1',
       ELECTRON_DISABLE_SANDBOX: '1',
       ELECTRON_ENABLE_LOGGING: '1',
@@ -186,7 +195,7 @@ function spawnBrokerTestHost({ userDataDir } = {}) {
   return new StdioClient(child, {
     killProcessGroup,
     profileRoot,
-    userDataDir: resolvedUserDataDir,
+    userDataDir: canonicalUserDataDir,
   })
 }
 
