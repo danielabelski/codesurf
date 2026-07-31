@@ -4,6 +4,8 @@ import { CODESURF_HOME } from '../paths.ts'
 import { resolveExtensionEnabled } from './activation-policy.ts'
 import { isValidExtensionId } from './identity.ts'
 import type { ExtensionCapabilityRequest, ExtensionManifest } from '../../shared/types.ts'
+import { loadExtensionSecurityState } from './security-state.ts'
+import { isValidExtensionCapabilityRequests } from '../../shared/extension-types.ts'
 
 const EXTENSIONS_DIRNAME = 'extensions'
 
@@ -25,16 +27,6 @@ export type ExtensionListEntry = {
   dirPath: string | null
 }
 
-async function loadIdSet(path: string): Promise<Set<string>> {
-  try {
-    const raw = await readFile(path, 'utf8')
-    const arr = JSON.parse(raw)
-    return new Set(Array.isArray(arr) ? arr.filter((id): id is string => typeof id === 'string') : [])
-  } catch {
-    return new Set()
-  }
-}
-
 async function readManifestLight(
   extDir: string,
   disabledIds: Set<string>,
@@ -50,6 +42,11 @@ async function readManifestLight(
       || !manifest.name
       || typeof manifest.version !== 'string'
       || !manifest.version
+    ) return null
+    const capabilities = (manifest as { capabilities?: unknown }).capabilities
+    if (
+      capabilities !== undefined
+      && !isValidExtensionCapabilityRequests(capabilities)
     ) return null
     if (!manifest.tier) manifest.tier = 'safe'
     manifest._path = resolve(extDir)
@@ -107,8 +104,9 @@ export async function scanExtensionManifests(
   options?: { contexHome?: string },
 ): Promise<ExtensionManifest[]> {
   const contexHome = resolveContexHome(options?.contexHome)
-  const disabledIds = await loadIdSet(join(contexHome, 'disabled-extensions.json'))
-  const enabledCatalogIds = await loadIdSet(join(contexHome, 'enabled-catalog-extensions.json'))
+  const securityState = await loadExtensionSecurityState(contexHome)
+  const disabledIds = new Set(securityState.disabledExtensionIds)
+  const enabledCatalogIds = new Set(securityState.enabledCatalogExtensionIds)
   const manifests = new Map<string, ExtensionManifest>()
 
   await scanDirLight(join(contexHome, EXTENSIONS_DIRNAME), manifests, disabledIds, enabledCatalogIds)

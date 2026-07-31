@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { promises as fs } from 'node:fs'
+import { constants, promises as fs, writeFileSync } from 'node:fs'
 import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -13,10 +13,16 @@ import {
   resolveExtensionSettingsPath,
 } from '../src/main/extensions/identity.ts'
 import {
+  MAX_EXTENSION_TEXT_RESOURCE_BYTES,
+  canonicalResourceOpenFlags,
   openCanonicalResource,
   readOpenedCanonicalResourceText,
   streamOpenedCanonicalResource,
 } from '../src/main/extensions/resource-path.ts'
+import {
+  captureExtensionMediaRoot,
+  computeExtensionMediaAttestation,
+} from '../src/main/extensions/media-identity.ts'
 
 async function bundleMainModule(
   entryPoint: string,
@@ -508,6 +514,36 @@ describe('canonical extension resource boundary', () => {
     }
   })
 
+  test('rejects FIFOs without a blocking open', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-fifo-'))
+    const root = join(temp, 'extension')
+    const fifo = join(root, 'pipe')
+    await mkdir(root)
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const child = spawn('/usr/bin/mkfifo', [fifo], { stdio: 'ignore' })
+      child.on('error', rejectPromise)
+      child.on('close', code => {
+        if (code === 0) resolvePromise()
+        else rejectPromise(new Error(`mkfifo failed with code ${code}`))
+      })
+    })
+
+    const result = await Promise.race([
+      openCanonicalResource(root, fifo),
+      new Promise<never>((_, rejectPromise) => {
+        setTimeout(() => rejectPromise(new Error('FIFO open blocked')), 1_000)
+      }),
+    ])
+    assert.deepEqual(result, { ok: false, status: 404 })
+    assert.equal(canonicalResourceOpenFlags(null, null), constants.O_RDONLY)
+    assert.equal(
+      canonicalResourceOpenFlags(0x100, 0x200),
+      constants.O_RDONLY | 0x100 | 0x200,
+    )
+  })
+
   test('streams binary resources from the authenticated handle and caps buffered text', async () => {
     const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-stream-'))
     const root = join(temp, 'extension')
@@ -618,6 +654,8 @@ describe('canonical extension resource boundary', () => {
     })
     assert.equal(nestedResponse.status, 200)
     assert.equal(await nestedResponse.text(), '<html>inside</html>')
+    assert.equal(nestedResponse.headers.get('content-security-policy'), null)
+    assert.equal(nestedResponse.headers.get('x-content-type-options'), 'nosniff')
 
     const missingResponse = await handle({
       url: 'codesurf-ext://safe-extension/assets/missing.html',
@@ -630,26 +668,355 @@ describe('canonical extension resource boundary', () => {
     assert.equal(escapeResponse.status, 403)
     assert.doesNotMatch(await escapeResponse.text(), /outside/)
 
-    const resourcePath = nested
-      .split('/')
-      .filter(Boolean)
-      .map(segment => encodeURIComponent(segment))
-      .join('/')
-    const resourceResponse = await handle({
-      url: `codesurf-ext://__runext_resource__/safe-extension/${resourcePath}`,
+    const removedAbsoluteRoute = await handle({
+      url: 'codesurf-ext://__runext_resource__/safe-extension/absolute/path',
     })
-    assert.equal(resourceResponse.status, 200)
-    assert.equal(await resourceResponse.text(), '<html>inside</html>')
+    assert.equal(removedAbsoluteRoute.status, 400)
+  })
 
-    const escapePath = escape
-      .split('/')
-      .filter(Boolean)
-      .map(segment => encodeURIComponent(segment))
-      .join('/')
-    const escapedResourceResponse = await handle({
-      url: `codesurf-ext://__runext_resource__/safe-extension/${escapePath}`,
+  test('media protocol applies final-byte CSP and validates bridge ids', async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codesurf-media-html-policy-'))
+    const root = join(temp, 'media-extension')
+    await mkdir(root)
+    const manifest = {
+      id: 'media-html',
+      name: 'Media HTML',
+      version: '1.0.0',
+      tier: 'safe' as const,
+      capabilities: [{ name: 'microphone' }],
+      _path: root,
+      _enabled: true,
+    }
+    const html = [
+      '<!doctype html><html><head>',
+      '<base href="https://attacker.example/">',
+      '<script src="https://attacker.example/remote.js"></script>',
+      '<script>globalThis.localInline = true</script>',
+      '</head><body><object data="https://attacker.example/plugin"></object></body></html>',
+    ].join('')
+    await writeFile(join(root, 'extension.json'), JSON.stringify(manifest))
+    await writeFile(join(root, 'entry.html'), html)
+    await writeFile(join(root, 'entry.htm'), html)
+    await writeFile(join(root, 'unknown.payload'), '<script>globalThis.sniffed = true</script>')
+
+    const installRootBinding = await captureExtensionMediaRoot(root)
+    const mediaAttestation = await computeExtensionMediaAttestation(
+      root,
+      manifest,
+      installRootBinding,
+    )
+    const extension = {
+      manifest,
+      mediaIdentity: mediaAttestation.identity,
+      mediaAttestation,
+      installRootBinding,
+    }
+    const invalidations: string[] = []
+    const registry = {
+      get: (id: string) => id === manifest.id ? extension : undefined,
+      getCapabilityGate: () => ({ enforced: false, granted: [] }),
+      invalidateExtensionMediaAttestation: async (id: string) => {
+        invalidations.push(id)
+        return true
+      },
+      isExtensionMediaAttestationCurrent: (
+        id: string,
+        expected: typeof mediaAttestation,
+      ) => id === manifest.id && extension.mediaAttestation === expected,
+    }
+    const protocolState: { handler?: (request: { url: string }) => Promise<Response> } = {}
+    Object.assign(globalThis, { __codesurfMediaHtmlPolicyState: protocolState })
+    const { registerExtensionProtocol } = await bundleMainModule(
+      'src/main/extensions/protocol.ts',
+      `
+        const state = globalThis.__codesurfMediaHtmlPolicyState
+        export const protocol = {
+          registerSchemesAsPrivileged() {},
+          handle(_scheme, handler) { state.handler = handler },
+        }
+      `,
+    )
+    registerExtensionProtocol(registry)
+    const handle = protocolState.handler!
+
+    const response = await handle({
+      url: 'codesurf-ext://media-html/entry.html?tileId=tile-1',
     })
-    assert.equal(escapedResourceResponse.status, 403)
-    assert.doesNotMatch(await escapedResourceResponse.text(), /outside/)
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+    const csp = response.headers.get('content-security-policy') ?? ''
+    assert.match(csp, /script-src 'self' 'sha256-/)
+    assert.match(csp, /script-src-attr 'none'/)
+    assert.match(csp, /worker-src 'self'/)
+    assert.match(csp, /object-src 'none'/)
+    assert.match(csp, /base-uri 'none'/)
+    assert.doesNotMatch(csp.match(/script-src [^;]+/)?.[0] ?? '', /https?:|\*/)
+    const responseHtml = await response.text()
+    assert.match(responseHtml, /codesurf-bridge-ready/)
+    assert.match(responseHtml, /attacker\.example\/remote\.js/)
+
+    const htmResponse = await handle({
+      url: 'codesurf-ext://media-html/entry.htm',
+    })
+    assert.equal(htmResponse.headers.get('content-type'), 'text/html; charset=utf-8')
+    assert.match(htmResponse.headers.get('content-security-policy') ?? '', /object-src 'none'/)
+
+    const unknownResponse = await handle({
+      url: 'codesurf-ext://media-html/unknown.payload',
+    })
+    assert.equal(unknownResponse.headers.get('content-type'), 'application/octet-stream')
+    assert.equal(unknownResponse.headers.get('x-content-type-options'), 'nosniff')
+    assert.match(unknownResponse.headers.get('content-security-policy') ?? '', /script-src 'self'/)
+
+    const closingScriptId = encodeURIComponent(
+      'tile</script><script>globalThis.pwned=1</script>',
+    )
+    assert.equal((await handle({
+      url: `codesurf-ext://media-html/entry.html?tileId=${closingScriptId}`,
+    })).status, 400)
+    assert.equal((await handle({
+      url: `codesurf-ext://media-html/entry.html?tileId=${'a'.repeat(257)}`,
+    })).status, 414)
+    assert.equal((await handle({
+      url: 'codesurf-ext://media-html/entry.html?tileId=tile%0Aid',
+    })).status, 400)
+    assert.deepEqual(invalidations, [])
+  })
+
+  test('media protocol serves immutable attested bytes and revokes changed resources', { concurrency: false }, async () => {
+    const temp = await mkdtemp(join(tmpdir(), 'codesurf-media-protocol-'))
+    const root = join(temp, 'extension')
+    const originalRoot = join(temp, 'extension-original')
+    const entry = join(root, 'entry.txt')
+    const movedEntry = join(root, 'entry-original.txt')
+    const alias = join(root, 'alias.txt')
+    const componentAlias = join(root, 'linked-directory')
+    const newEntry = join(root, 'new.txt')
+    const largeHtml = join(root, 'large.html')
+    const externalDirectory = join(temp, 'external')
+    const externalEntry = join(externalDirectory, 'secret.txt')
+    await mkdir(root)
+    const manifest = {
+      id: 'media-extension',
+      name: 'Media Extension',
+      version: '1.0.0',
+      tier: 'safe' as const,
+      capabilities: [{ name: 'microphone' }],
+      _path: root,
+      _enabled: true,
+    }
+    await writeFile(join(root, 'extension.json'), JSON.stringify(manifest))
+    await writeFile(entry, 'trusted')
+    const canonicalEntry = await realpath(entry)
+
+    const extension = {
+      manifest,
+      mediaIdentity: null as string | null,
+      mediaAttestation: null as Awaited<
+        ReturnType<typeof computeExtensionMediaAttestation>
+      > | null,
+      installRootBinding: await captureExtensionMediaRoot(root),
+    }
+    const refresh = async (): Promise<void> => {
+      extension.installRootBinding = await captureExtensionMediaRoot(root)
+      extension.mediaAttestation = await computeExtensionMediaAttestation(
+        root,
+        manifest,
+        extension.installRootBinding,
+      )
+      extension.mediaIdentity = extension.mediaAttestation.identity
+    }
+    await refresh()
+
+    const invalidations: string[] = []
+    let mutateAfterVerification = false
+    const registry = {
+      get: (id: string) => id === manifest.id ? extension : undefined,
+      getCapabilityGate: () => ({ enforced: false, granted: [] }),
+      invalidateExtensionMediaAttestation: async (
+        id: string,
+        expected: typeof extension.mediaAttestation,
+      ) => {
+        if (id !== manifest.id || extension.mediaAttestation !== expected) return false
+        extension.mediaAttestation = null
+        extension.mediaIdentity = null
+        invalidations.push(id)
+        return true
+      },
+      isExtensionMediaAttestationCurrent: (
+        id: string,
+        expected: typeof extension.mediaAttestation,
+      ) => {
+        if (mutateAfterVerification) {
+          mutateAfterVerification = false
+          writeFileSync(entry, 'evil!!!')
+        }
+        return id === manifest.id
+          && extension.mediaAttestation === expected
+          && extension.mediaIdentity === expected?.identity
+      },
+    }
+
+    const protocolState: { handler?: (request: { url: string }) => Promise<Response> } = {}
+    Object.assign(globalThis, { __codesurfMediaProtocolState: protocolState })
+    const { registerExtensionProtocol } = await bundleMainModule(
+      'src/main/extensions/protocol.ts',
+      `
+        const state = globalThis.__codesurfMediaProtocolState
+        export const protocol = {
+          registerSchemesAsPrivileged() {},
+          handle(_scheme, handler) { state.handler = handler },
+        }
+      `,
+    )
+    registerExtensionProtocol(registry)
+    const handle = protocolState.handler!
+
+    const missing = await handle({
+      url: 'codesurf-ext://media-extension/missing.txt',
+    })
+    assert.equal(missing.status, 404)
+    assert.deepEqual(invalidations, [])
+
+    const originalOpen = fs.open
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const fileHandle = await originalOpen(...args)
+      if (String(args[0]) === canonicalEntry) {
+        const originalRead = fileHandle.read.bind(fileHandle)
+        let intercepted = false
+        fileHandle.read = (async (...readArgs: Parameters<typeof fileHandle.read>) => {
+          if (!intercepted) {
+            intercepted = true
+            const mutator = await originalOpen(entry, 'r+')
+            try {
+              await mutator.write(Buffer.from('changed'), 0, 7, 0)
+              await mutator.sync()
+            } finally {
+              await mutator.close()
+            }
+          }
+          return originalRead(...readArgs)
+        }) as typeof fileHandle.read
+      }
+      return fileHandle
+    }) as typeof fs.open
+    try {
+      const mutated = await handle({
+        url: 'codesurf-ext://media-extension/entry.txt',
+      })
+      assert.equal(mutated.status, 409)
+      assert.notEqual(await mutated.text(), 'changed')
+      assert.equal(extension.mediaAttestation, null)
+      assert.deepEqual(invalidations, ['media-extension'])
+    } finally {
+      fs.open = originalOpen
+    }
+
+    await writeFile(entry, 'trusted')
+    await refresh()
+    mutateAfterVerification = true
+    const immutable = await handle({
+      url: 'codesurf-ext://media-extension/entry.txt',
+    })
+    assert.equal(immutable.status, 200)
+    assert.equal(await immutable.text(), 'trusted')
+    const detectsPostValidationMutation = await handle({
+      url: 'codesurf-ext://media-extension/entry.txt',
+    })
+    assert.equal(detectsPostValidationMutation.status, 409)
+
+    await writeFile(entry, 'trusted')
+    await refresh()
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const fileHandle = await originalOpen(...args)
+      if (String(args[0]) === canonicalEntry) {
+        const originalRead = fileHandle.read.bind(fileHandle)
+        let intercepted = false
+        fileHandle.read = (async (...readArgs: Parameters<typeof fileHandle.read>) => {
+          if (!intercepted) {
+            intercepted = true
+            await fs.rename(entry, movedEntry)
+            await writeFile(entry, 'trusted')
+          }
+          return originalRead(...readArgs)
+        }) as typeof fileHandle.read
+      }
+      return fileHandle
+    }) as typeof fs.open
+    try {
+      const replaced = await handle({
+        url: 'codesurf-ext://media-extension/entry.txt',
+      })
+      assert.equal(replaced.status, 409)
+      assert.notEqual(await replaced.text(), 'trusted')
+    } finally {
+      fs.open = originalOpen
+    }
+
+    await fs.rm(entry, { force: true })
+    await fs.rm(movedEntry, { force: true })
+    await writeFile(entry, 'trusted')
+    await refresh()
+    await writeFile(entry, 'trusted')
+    await writeFile(
+      largeHtml,
+      Buffer.alloc(MAX_EXTENSION_TEXT_RESOURCE_BYTES + 1),
+    )
+    await refresh()
+    const invalidationsBeforeLargeHtml = invalidations.length
+    const oversizedHtml = await handle({
+      url: 'codesurf-ext://media-extension/large.html',
+    })
+    assert.equal(oversizedHtml.status, 413)
+    assert.equal(invalidations.length, invalidationsBeforeLargeHtml)
+    assert.ok(extension.mediaAttestation)
+
+    await fs.rm(largeHtml)
+    await refresh()
+    await writeFile(newEntry, 'new')
+    const newResource = await handle({
+      url: 'codesurf-ext://media-extension/new.txt',
+    })
+    assert.equal(newResource.status, 409)
+    assert.doesNotMatch(await newResource.text(), /new/)
+
+    await fs.rm(newEntry)
+    await refresh()
+    await symlink(entry, alias)
+    const aliasResponse = await handle({
+      url: 'codesurf-ext://media-extension/alias.txt',
+    })
+    assert.equal(aliasResponse.status, 409)
+    assert.doesNotMatch(await aliasResponse.text(), /trusted/)
+
+    await fs.rm(alias)
+    await refresh()
+    await mkdir(externalDirectory)
+    await writeFile(externalEntry, 'external-secret')
+    await symlink(externalEntry, alias)
+    const externalAliasResponse = await handle({
+      url: 'codesurf-ext://media-extension/alias.txt',
+    })
+    assert.equal(externalAliasResponse.status, 409)
+    assert.doesNotMatch(await externalAliasResponse.text(), /external-secret/)
+
+    await fs.rm(alias)
+    await refresh()
+    await symlink(externalDirectory, componentAlias)
+    const componentAliasResponse = await handle({
+      url: 'codesurf-ext://media-extension/linked-directory/secret.txt',
+    })
+    assert.equal(componentAliasResponse.status, 409)
+    assert.doesNotMatch(await componentAliasResponse.text(), /external-secret/)
+
+    await fs.rm(componentAlias)
+    await refresh()
+    await fs.rename(root, originalRoot)
+    await mkdir(root)
+    const missingAfterRootReplacement = await handle({
+      url: 'codesurf-ext://media-extension/still-missing.txt',
+    })
+    assert.equal(missingAfterRootReplacement.status, 409)
+    assert.equal(extension.mediaAttestation, null)
   })
 })

@@ -24,6 +24,7 @@ export type PluginExecutionMode = 'iframe' | 'node' | 'worker'
 export type PluginRenderMode = 'iframe' | 'component' | 'mcp-ui'
 export type PluginCapabilityName =
   | 'fs' | 'network' | 'shell' | 'chat' | 'daemon' | 'chrome' | 'secrets' | 'relay' | 'canvas'
+  | 'microphone' | 'camera' | 'display-capture'
 
 // ─── Contribution shapes ──────────────────────────────────────────────────────
 export interface PluginCapabilityRequest { name: PluginCapabilityName | string; reason?: string; scope?: string[] }

@@ -210,7 +210,6 @@ export function ChatTileWebview(props: Props): React.ReactNode {
         // round-trips. forms/popups left off until needed. The chat-app
         // is OUR code, so origin trust is delegated to network/load source.
         sandbox="allow-scripts allow-same-origin allow-forms"
-        allow="microphone"
         style={{
           width: '100%',
           height: '100%',

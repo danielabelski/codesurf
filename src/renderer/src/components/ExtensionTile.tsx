@@ -11,6 +11,11 @@ import { useTheme } from '../ThemeContext'
 import { useFontTokens, useAppFonts } from '../FontContext'
 import { CODESURF_OPEN_CHAT_SURFACE_EVENT } from '../utils/appLaunchRequests'
 import { PluginSurface } from './PluginSurface'
+import {
+  getExtensionIframeAllow,
+  isSensitiveMediaCapability,
+  type SensitiveMediaCapability,
+} from '../../../shared/extension-sensitive-media'
 
 const el = (window as any).electron
 
@@ -63,6 +68,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [extId, setExtId] = useState<string | null>(null)
+  const [sensitiveMedia, setSensitiveMedia] = useState<SensitiveMediaCapability[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
   const [renderedSize, setRenderedSize] = useState({ w: width, h: Math.max(0, height - 36) })
   const themeCssVarsRef = useRef<Record<string, string>>({})
@@ -544,6 +550,11 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
         setExtId(match.extId)
         setRenderMode(match.render ?? 'iframe')
+        setSensitiveMedia(
+          Array.isArray(match.sensitiveMedia)
+            ? match.sensitiveMedia.filter(isSensitiveMediaCapability)
+            : [],
+        )
 
         // render:'mcp-ui' tiles paint via PluginSurface (AppRenderer) instead of a
         // raw iframe — fetch the guest HTML and skip the codesurf-ext:// url path.
@@ -793,6 +804,8 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         overflow: 'hidden',
         background: extensionSurfaceBackground,
       }}>
+        {/* MCP-UI proxy frames deliberately receive no sensitive media policy:
+            their internal __runext_* principal is not an extension principal. */}
         <PluginSurface extId={extId ?? extType} render="mcp-ui" html={mcpHtml ?? ''} surfaceId={extType} />
       </div>
     )
@@ -811,7 +824,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         ref={iframeRef}
         src={entryUrl}
         sandbox="allow-scripts allow-same-origin allow-modals"
-        allow="camera; microphone; display-capture; autoplay"
+        allow={getExtensionIframeAllow(sensitiveMedia)}
         style={{
           position: 'absolute',
           top: 0,

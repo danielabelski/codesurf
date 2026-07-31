@@ -17,6 +17,7 @@ import { ExtensionBrokerHost } from './host'
 import { JsonRpcPeer, type JsonValue, type JsonObject } from './json-rpc'
 import { bus } from '../../event-bus'
 import type { ExtensionManifest } from '../../../shared/types'
+import { isValidExtensionCapabilityRequests } from '../../../shared/extension-types'
 
 // Fake registry — only provides getCapabilityGate and registerMCPTool
 class TestRegistry {
@@ -74,7 +75,15 @@ async function handleHarnessCall(method: string, params: JsonObject): Promise<Js
       }
 
     case 'activateFixture': {
-      const { extDir, capabilities } = params as { extDir: string; capabilities?: Array<{ name: string }> }
+      const { extDir } = params as { extDir: string }
+      const rawCapabilities = params.capabilities
+      if (
+        rawCapabilities !== undefined
+        && !isValidExtensionCapabilityRequests(rawCapabilities)
+      ) {
+        throw new Error('Invalid fixture capabilities')
+      }
+      const capabilities = rawCapabilities
 
       // Build a minimal manifest
       const manifest: ExtensionManifest = {
