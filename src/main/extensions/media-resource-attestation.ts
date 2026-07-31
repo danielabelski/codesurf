@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { CanonicalResourceOpen } from './resource-path.ts'
 import {
+  MAX_EXTENSION_IDENTITY_DEPTH,
   MAX_EXTENSION_IDENTITY_FILE_BYTES,
   captureExtensionMediaRoot,
   type ExtensionMediaResourceAttestation,
@@ -59,6 +60,36 @@ export function extensionMediaResourceKey(
     || isAbsolute(rel)
   ) return undefined
   return rel.split(sep).join('/')
+}
+
+/**
+ * Distinguishes a genuinely missing typo from a newly-created unattested path
+ * without following child symlinks. Work is capped to the identity depth
+ * budget, and traversal stops at the first missing or non-directory component.
+ */
+export async function extensionMediaResourcePathExists(
+  root: ExtensionMediaRootBinding,
+  candidatePath: string,
+): Promise<boolean> {
+  const key = extensionMediaResourceKey(root, candidatePath)
+  if (!key) return false
+  const segments = key.split('/').filter(Boolean)
+  let current = root.lexicalRoot
+  for (
+    let index = 0;
+    index < segments.length && index <= MAX_EXTENSION_IDENTITY_DEPTH;
+    index += 1
+  ) {
+    current = join(current, segments[index])
+    const info = await fs.lstat(current).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw error
+    })
+    if (!info) return false
+    if (info.isSymbolicLink()) return true
+    if (index < segments.length - 1 && !info.isDirectory()) return true
+  }
+  return true
 }
 
 /**

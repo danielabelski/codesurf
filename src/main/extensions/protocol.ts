@@ -13,6 +13,7 @@ import {
 } from './resource-path'
 import {
   extensionMediaResourceKey,
+  extensionMediaResourcePathExists,
   readAttestedExtensionResource,
 } from './media-resource-attestation.ts'
 import { getDeclaredSensitiveMediaCapabilities } from '../../shared/extension-sensitive-media.ts'
@@ -101,7 +102,14 @@ async function openProtocolExtensionResource(
     candidatePath,
   )
   if (!opened.ok) {
-    if (attestation && expected) {
+    const unattestedPathExists = attestation
+      && !expected
+      && resourceKey
+      && await extensionMediaResourcePathExists(
+        extension.installRootBinding,
+        candidatePath,
+      ).catch(() => true)
+    if (attestation && (expected || unattestedPathExists)) {
       await registry.invalidateExtensionMediaAttestation(extensionId, attestation)
       return { ok: false, status: 409 }
     }

@@ -37,6 +37,7 @@ import {
 } from './media-identity.ts'
 import {
   extensionMediaResourceKey,
+  extensionMediaResourcePathExists,
   readAttestedExtensionResource,
 } from './media-resource-attestation.ts'
 
@@ -1093,7 +1094,14 @@ export class ExtensionRegistry {
       : undefined
     const resolvedResource = await openCanonicalResource(root, abs)
     if (!resolvedResource.ok) {
-      if (mediaAttestation && expectedResource) {
+      const unattestedPathExists = mediaAttestation
+        && !expectedResource
+        && mediaResourceKey
+        && await extensionMediaResourcePathExists(
+          ext.installRootBinding,
+          abs,
+        ).catch(() => true)
+      if (mediaAttestation && (expectedResource || unattestedPathExists)) {
         await this.invalidateExtensionMediaAttestation(extId, mediaAttestation)
       }
       return null
