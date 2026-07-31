@@ -56,6 +56,13 @@ export interface ActivityStoreStats {
   dirtyWorkspaceIds: string[]
 }
 
+export class ActivityStoreClosedError extends Error {
+  constructor() {
+    super('Activity store is closing')
+    this.name = 'ActivityStoreClosedError'
+  }
+}
+
 const defaultScheduler: ActivityScheduler = {
   set(callback, delayMs) {
     const handle = setTimeout(callback, delayMs)
@@ -111,6 +118,9 @@ export class ActivityStore {
   private readonly pendingAcquires = new Map<string, number>()
   private accessSequence = 0
   private evictionTail: Promise<void> = Promise.resolve()
+  private closing = false
+  private activeOperations = 0
+  private readonly operationWaiters: Array<() => void> = []
 
   constructor(options: ActivityStoreOptions) {
     this.persistence = options.persistence
@@ -252,12 +262,24 @@ export class ActivityStore {
     workspaceId: unknown,
     operation: (state: StoreState) => T | Promise<T>,
   ): Promise<T> {
-    const state = await this.acquire(workspaceId)
+    if (this.closing) throw new ActivityStoreClosedError()
+    this.activeOperations += 1
+    let state: StoreState | null = null
     try {
+      state = await this.acquire(workspaceId)
       return await operation(state)
     } finally {
-      this.release(state)
+      if (state) this.release(state)
+      this.activeOperations -= 1
+      if (this.activeOperations === 0) {
+        for (const resolve of this.operationWaiters.splice(0)) resolve()
+      }
     }
+  }
+
+  private waitForActiveOperations(): Promise<void> {
+    if (this.activeOperations === 0) return Promise.resolve()
+    return new Promise(resolve => this.operationWaiters.push(resolve))
   }
 
   private queueEviction(): void {
@@ -315,6 +337,31 @@ export class ActivityStore {
     return result
   }
 
+  private groupResults(records: ActivityRecord[]): Record<string, ActivityRecord[]> {
+    const groups = new Map<string, ActivityRecord[]>()
+    let bytes = 2
+    let count = 0
+    for (const record of records) {
+      if (count >= MAX_ACTIVITY_QUERY_LIMIT) break
+      const clone = cloneRecord(record)
+      const key = clone.agent ?? `tile:${clone.tileId}`
+      const group = groups.get(key)
+      const recordBytes = Buffer.byteLength(JSON.stringify(clone), 'utf8')
+      const addedBytes = group
+        ? 1 + recordBytes
+        : (groups.size === 0 ? 0 : 1)
+          + Buffer.byteLength(JSON.stringify(key), 'utf8')
+          + 3
+          + recordBytes
+      if (bytes + addedBytes > this.maxQueryResponseBytes) break
+      if (group) group.push(clone)
+      else groups.set(key, [clone])
+      bytes += addedBytes
+      count += 1
+    }
+    return Object.fromEntries(groups)
+  }
+
   async upsert(workspaceIdValue: unknown, inputValue: unknown): Promise<ActivityRecord> {
     const workspaceId = validateActivityWorkspaceId(workspaceIdValue)
     const data = validateActivityUpsertInput(inputValue)
@@ -355,7 +402,10 @@ export class ActivityStore {
         candidate.push(record)
       }
 
-      const capped = capActivityRecords(candidate, now)
+      let capped = capActivityRecords(candidate, now)
+      if (!capped.includes(record)) {
+        capped = [...capped.slice(0, -1), record]
+      }
       this.assertCandidateFits(workspaceId, capped)
       state.records = capped
       this.markDirty(state)
@@ -414,19 +464,14 @@ export class ActivityStore {
     const workspaceId = validateActivityWorkspaceId(workspaceIdValue)
     return this.withStore(workspaceId, state => {
       const sorted = [...state.records].sort((left, right) => right.updatedAt - left.updatedAt)
-      const bounded = this.boundResults(sorted, MAX_ACTIVITY_QUERY_LIMIT)
-      const groups = new Map<string, ActivityRecord[]>()
-      for (const record of bounded) {
-        const key = record.agent ?? `tile:${record.tileId}`
-        const group = groups.get(key)
-        if (group) group.push(record)
-        else groups.set(key, [record])
-      }
-      return Object.fromEntries(groups)
+      return this.groupResults(sorted)
     })
   }
 
   async flushAll(): Promise<void> {
+    this.closing = true
+    await this.waitForActiveOperations()
+    await Promise.allSettled([...this.loads.values()])
     const results = await Promise.allSettled(
       [...this.stores.values()].map(state => this.flushState(state)),
     )
