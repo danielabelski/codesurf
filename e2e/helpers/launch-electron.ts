@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { _electron as electron, type ElectronApplication, type Page } from '@playwright/test'
 import { createDaemonManager } from '../../packages/codesurf-daemon/src/manager.ts'
 import { runIsolatedElectronCleanup, withCleanupTimeout } from './cleanup-steps'
@@ -12,6 +12,18 @@ const DAEMON_ENTRY = join(REPO_ROOT, 'bin/codesurfd.mjs')
 const APP_CLOSE_TIMEOUT_MS = 15_000
 const APP_PROCESS_EXIT_TIMEOUT_MS = 5_000
 const DAEMON_STOP_TIMEOUT_MS = 10_000
+const E2E_AGENT_IDS = [
+  'claude',
+  'codex',
+  'opencode',
+  'openclaw',
+  'hermes',
+  'cursor-agent',
+  'gemini',
+  'cline',
+  'amp',
+  'kilo',
+] as const
 
 export interface LaunchedElectronApp {
   app: ElectronApplication
@@ -77,7 +89,9 @@ async function stopIsolatedDaemon(homeDir: string): Promise<void> {
 async function cleanupLaunch(app: ElectronApplication | null, homeDir: string): Promise<void> {
   await runIsolatedElectronCleanup({
     homeDir,
-    closeApp: app ? () => closeElectronApplication(app) : undefined,
+    // Routine cleanup is intentionally forceful. The dedicated quit helper
+    // below is the one place that exercises graceful persistence shutdown.
+    closeApp: app ? () => terminateElectronProcess(app) : undefined,
     stopDaemon: () => stopIsolatedDaemon(homeDir),
     removeHome: () => rm(homeDir, { recursive: true, force: true }),
   })
@@ -87,11 +101,31 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-e2e-home-'))
   let app: ElectronApplication | null = null
   try {
+    const codesurfHome = join(homeDir, '.codesurf')
+    const userDataDir = join(homeDir, 'electron-user-data')
+    await mkdir(codesurfHome, { recursive: true })
+    await mkdir(userDataDir, { recursive: true })
+    const now = new Date().toISOString()
+    await writeFile(
+      join(codesurfHome, 'agent-paths.json'),
+      JSON.stringify({
+        shellPath: process.env.PATH ?? null,
+        updatedAt: now,
+        ...Object.fromEntries(E2E_AGENT_IDS.map(id => [
+          id,
+          {
+            path: null,
+            version: null,
+            detectedAt: now,
+            confirmed: true,
+          },
+        ])),
+      }, null, 2),
+    )
+
     if (options?.seedSettings) {
-      const contexHome = join(homeDir, '.codesurf')
-      await mkdir(contexHome, { recursive: true })
       await writeFile(
-        join(contexHome, 'settings.json'),
+        join(codesurfHome, 'settings.json'),
         JSON.stringify({ version: 1, settings: options.seedSettings }, null, 2),
       )
     }
@@ -99,7 +133,7 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     app = await electron.launch({
       executablePath: resolveElectronExecutable(),
       cwd: REPO_ROOT,
-      args: [MAIN_ENTRY],
+      args: [`--user-data-dir=${userDataDir}`, MAIN_ENTRY],
       env: {
         ...process.env,
         HOME: homeDir,
@@ -108,6 +142,15 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
       },
       timeout: 60_000,
     })
+
+    const activeUserDataDir = await app.evaluate(({ app: electronApp }) => (
+      electronApp.getPath('userData')
+    ))
+    if (resolve(activeUserDataDir) !== resolve(userDataDir)) {
+      throw new Error(
+        `Electron E2E userData escaped isolation: ${activeUserDataDir}`,
+      )
+    }
 
     const page = await app.firstWindow({ timeout: 45_000 })
     await page.waitForLoadState('domcontentloaded')
