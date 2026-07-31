@@ -37,6 +37,14 @@ jobs:
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
 
+      - name: Audit dependency trees
+        run: |
+          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --audit-level=low
+          npm --prefix packages/codesurf-relay audit --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -46,5 +54,13 @@ jobs:
       - name: Build Electron app for E2E
         run: npm run build
 
+      - name: Build, install, and smoke npm package
+        run: npm run test:npm-package
+
       - name: Run Playwright E2E suite
         run: npm run test:e2e
+
+      - name: Verify production-only install
+        run: |
+          npm ci --omit=dev
+          npm audit --omit=dev --audit-level=low

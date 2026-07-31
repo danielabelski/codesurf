@@ -74,6 +74,14 @@ jobs:
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
 
+      - name: Audit dependency trees
+        run: |
+          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --audit-level=low
+          npm --prefix packages/codesurf-relay audit --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+
       - name: Run release gate tests
         run: npm test
 
