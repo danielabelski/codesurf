@@ -661,6 +661,7 @@ describe('canonical extension resource boundary', () => {
   test('media protocol serves immutable attested bytes and revokes changed resources', { concurrency: false }, async () => {
     const temp = await mkdtemp(join(tmpdir(), 'codesurf-media-protocol-'))
     const root = join(temp, 'extension')
+    const originalRoot = join(temp, 'extension-original')
     const entry = join(root, 'entry.txt')
     const movedEntry = join(root, 'entry-original.txt')
     const alias = join(root, 'alias.txt')
@@ -899,5 +900,15 @@ describe('canonical extension resource boundary', () => {
     })
     assert.equal(componentAliasResponse.status, 409)
     assert.doesNotMatch(await componentAliasResponse.text(), /external-secret/)
+
+    await fs.rm(componentAlias)
+    await refresh()
+    await fs.rename(root, originalRoot)
+    await mkdir(root)
+    const missingAfterRootReplacement = await handle({
+      url: 'codesurf-ext://media-extension/still-missing.txt',
+    })
+    assert.equal(missingAfterRootReplacement.status, 409)
+    assert.equal(extension.mediaAttestation, null)
   })
 })
