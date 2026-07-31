@@ -52,10 +52,6 @@ export function BrowserEvidenceDrawer({
   const fonts = useAppFonts()
   const events = filterBrowserEvidence(state.events, state.filter)
   const actionStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
     border: `1px solid ${theme.border.default}`,
     borderRadius: 8,
     background: theme.surface.input,
@@ -63,6 +59,13 @@ export function BrowserEvidenceDrawer({
     cursor: 'pointer',
     padding: '6px 7px',
     fontSize: fonts.secondarySize - 1,
+  }
+  const iconActionStyle: React.CSSProperties = {
+    ...actionStyle,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
   }
 
   return (
@@ -149,22 +152,22 @@ export function BrowserEvidenceDrawer({
       </div>
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button type="button" title="Capture snapshot" onClick={actions.captureSnapshot} style={actionStyle}>
+        <button type="button" title="Capture snapshot" onClick={actions.captureSnapshot} style={iconActionStyle}>
           <ClipboardList size={12} />
           Capture snapshot
         </button>
         <button type="button" title="Copy report" onClick={actions.copyReport} style={actionStyle}>
           Copy report
         </button>
-        <button type="button" title="Open QA Workbench" onClick={actions.openQaWorkbench} style={actionStyle}>
+        <button type="button" title="Open QA Workbench" onClick={actions.openQaWorkbench} style={iconActionStyle}>
           <Bug size={12} />
           Workbench
         </button>
-        <button type="button" title="Attach QA report to chat" onClick={actions.attachQaReportToChat} style={actionStyle}>
+        <button type="button" title="Attach QA report to chat" onClick={actions.attachQaReportToChat} style={iconActionStyle}>
           <ClipboardCheck size={12} />
           Attach to chat
         </button>
-        <button type="button" title="Clear evidence" onClick={actions.clearEvidence} style={actionStyle}>
+        <button type="button" title="Clear evidence" onClick={actions.clearEvidence} style={iconActionStyle}>
           <Trash2 size={12} />
           Clear evidence
         </button>

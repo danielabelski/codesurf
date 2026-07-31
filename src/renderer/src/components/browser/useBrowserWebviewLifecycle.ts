@@ -62,6 +62,7 @@ export interface BrowserWebviewLifecycle {
   isClusoReady: boolean
   isClusoActive: boolean
   loadUrl: (url: string) => void
+  restoreUrl: (url: string) => void
   goBack: () => void
   goForward: () => void
   reload: () => boolean
@@ -421,6 +422,15 @@ export function useBrowserWebviewLifecycle({
   const loadUrl = useCallback((url: string) => {
     if (readyRef.current && webviewRef.current) safeLoadURL(webviewRef.current, url)
   }, [])
+  const restoreUrl = useCallback((url: string) => {
+    const webview = webviewRef.current
+    if (!webview) return
+    if (readyRef.current) {
+      safeLoadURL(webview, url)
+    } else {
+      webview.src = url
+    }
+  }, [])
   const goBack = useCallback(() => {
     if (readyRef.current && webviewRef.current) webviewRef.current.goBack()
   }, [])
@@ -450,6 +460,7 @@ export function useBrowserWebviewLifecycle({
     isClusoReady: cluso.isReady,
     isClusoActive: cluso.isActive,
     loadUrl,
+    restoreUrl,
     goBack,
     goForward,
     reload,

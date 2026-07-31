@@ -190,6 +190,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     isClusoReady,
     isClusoActive,
     loadUrl,
+    restoreUrl,
     goBack,
     goForward,
     reload: reloadWebview,
@@ -235,6 +236,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
         setCurrentUrl(saved.currentUrl)
         initialSrc.current = saved.currentUrl
         prevInitialUrl.current = saved.currentUrl
+        restoreUrl(saved.currentUrl)
       }
       if (typeof saved.canGoBack === 'boolean') setCanGoBack(saved.canGoBack)
       if (typeof saved.canGoForward === 'boolean') setCanGoForward(saved.canGoForward)
@@ -243,7 +245,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     }).catch(() => {}).finally(() => {
       setStateLoaded(true)
     })
-  }, [workspaceId, tileId])
+  }, [workspaceId, tileId, restoreUrl])
 
   useEffect(() => {
     if (!workspaceId || !stateLoaded) return
