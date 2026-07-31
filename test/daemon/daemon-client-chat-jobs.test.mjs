@@ -168,6 +168,153 @@ test('streamJobEvents reconnects active EOF from the last delivered sequence and
   assert.equal(calls.filter(call => call.path === '/chat/job/state').length, 1)
 })
 
+test('streamJobEvents recovers a transient sequence gap from the last contiguous event', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  let streamAttempt = 0
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since') })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'running', lastSequence: 3 })
+    }
+    streamAttempt += 1
+    const chunks = streamAttempt === 1
+      ? [
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+      : [
+          'data: {"jobId":"job-1","sequence":2,"timestamp":2,"type":"text","text":"two"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await client.streamJobEvents({
+    jobId: 'job-1',
+    reconnectDelayMs: 0,
+    onEvent(event) {
+      events.push(event)
+    },
+  })
+
+  assert.deepEqual(events.map(event => event.sequence), [1, 2, 3])
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['0', '1'],
+  )
+})
+
+test('streamJobEvents never acknowledges or delivers done across a persistent sequence gap', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since') })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 3 })
+    }
+    const since = Number(parsed.searchParams.get('since') ?? 0)
+    const chunks = since === 0
+      ? [
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+      : ['data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n']
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      maxReconnectAttempts: 3,
+      reconnectDelayMs: 0,
+      onEvent(event) {
+        events.push(event)
+      },
+    }),
+    /sequence gap|terminal replay/i,
+  )
+
+  assert.deepEqual(events.map(event => event.sequence), [1])
+  assert.equal(events.some(event => event.type === 'done'), false)
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['0', '1'],
+  )
+})
+
+test('streamJobEvents rejects a recorded gap when terminal metadata is stale', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push(parsed.pathname)
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 1 })
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+        ))
+        controller.enqueue(encoder.encode(
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      reconnectDelayMs: 0,
+      onEvent(event) {
+        events.push(event)
+      },
+    }),
+    /sequence gap/i,
+  )
+
+  assert.deepEqual(events.map(event => event.sequence), [1])
+  assert.equal(events.some(event => event.type === 'done'), false)
+  assert.equal(calls.filter(path => path === '/chat/job/events').length, 1)
+  assert.equal(calls.filter(path => path === '/chat/job/state').length, 1)
+})
+
 test('streamJobEvents performs one terminal catch-up replay and delivers failed error plus done', async t => {
   const originalFetch = globalThis.fetch
   const calls = []

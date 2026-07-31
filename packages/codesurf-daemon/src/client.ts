@@ -105,6 +105,15 @@ class DaemonStreamConsumerError extends Error {
   }
 }
 
+class DaemonStreamSequenceGapError extends Error {
+  constructor(jobId: string, expected: number, received: number) {
+    super(
+      `Daemon event stream sequence gap for job ${jobId}: expected ${expected}, received ${received}`,
+    )
+    this.name = 'DaemonStreamSequenceGapError'
+  }
+}
+
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
 }
@@ -277,6 +286,10 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
           continue
         }
         if (sequence <= lastDeliveredSequence) continue
+        const expectedSequence = lastDeliveredSequence + 1
+        if (sequence !== expectedSequence) {
+          throw new DaemonStreamSequenceGapError(jobId, expectedSequence, sequence)
+        }
         try {
           await options.onEvent(event)
         } catch (consumerError) {
@@ -393,6 +406,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
           terminalCatchupAttempted = true
           await waitForReconnect(reconnectDelayMs, options.signal)
           continue
+        }
+        if (disconnectError instanceof DaemonStreamSequenceGapError) {
+          throw disconnectError
         }
         return
       }
