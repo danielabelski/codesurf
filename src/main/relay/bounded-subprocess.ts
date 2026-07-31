@@ -71,6 +71,53 @@ type CloseResult = {
   signal: NodeJS.Signals | null
 }
 
+export type WindowsTaskkillOutcome =
+  | 'success'
+  | 'verified'
+  | 'spawn-error'
+  | 'nonzero-exit'
+  | 'timeout'
+
+export type WindowsTaskkillResult = {
+  confirmed: boolean
+  outcome: WindowsTaskkillOutcome
+  detail: string
+}
+
+export type WindowsTaskkillProcess = {
+  onError(listener: (error: Error) => void): void
+  onClose(listener: (
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ) => void): void
+  kill(): void
+}
+
+export type WindowsTaskkillDependencies = {
+  spawnTaskkill(pid: number): WindowsTaskkillProcess
+  verifyProcessTreeExited?: (pid: number) => Promise<boolean>
+}
+
+const defaultWindowsTaskkillDependencies: WindowsTaskkillDependencies = {
+  spawnTaskkill: pid => {
+    const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    return {
+      onError(listener) {
+        child.once('error', listener)
+      },
+      onClose(listener) {
+        child.once('close', listener)
+      },
+      kill() {
+        try { child.kill('SIGKILL') } catch {}
+      },
+    }
+  },
+}
+
 function wait(delayMs: number): Promise<void> {
   return new Promise(resolve => {
     setTimeout(resolve, delayMs)
@@ -127,34 +174,69 @@ function signalPosixProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): vo
   }
 }
 
-async function forceKillWindowsProcessTree(proc: ChildProcess, waitMs: number): Promise<void> {
-  const pid = proc.pid
-  if (!pid) {
-    try { proc.kill('SIGKILL') } catch {}
-    return
-  }
-
-  await new Promise<void>((resolve) => {
+export async function runWindowsTaskkill(
+  pid: number,
+  waitMs: number,
+  dependencies: WindowsTaskkillDependencies = defaultWindowsTaskkillDependencies,
+): Promise<WindowsTaskkillResult> {
+  return await new Promise<WindowsTaskkillResult>(resolve => {
     let settled = false
-    const finish = (): void => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = async (
+      outcome: Exclude<WindowsTaskkillOutcome, 'verified'>,
+      detail: string,
+      taskkillSucceeded = false,
+    ): Promise<void> => {
       if (settled) return
       settled = true
-      clearTimeout(timer)
-      resolve()
+      if (timer) clearTimeout(timer)
+      if (taskkillSucceeded) {
+        resolve({ confirmed: true, outcome, detail })
+        return
+      }
+      const verified = await dependencies.verifyProcessTreeExited?.(pid)
+        .catch(() => false)
+      resolve(verified
+        ? {
+            confirmed: true,
+            outcome: 'verified',
+            detail: `${detail}; descendants independently verified dead`,
+          }
+        : { confirmed: false, outcome, detail })
     }
-    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true,
-    })
-    const timer = setTimeout(() => {
-      try { killer.kill('SIGKILL') } catch {}
-      finish()
+    let killer: WindowsTaskkillProcess
+    try {
+      killer = dependencies.spawnTaskkill(pid)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      void finish('spawn-error', `taskkill /T failed to start: ${message}`)
+      return
+    }
+    timer = setTimeout(() => {
+      killer.kill()
+      void finish(
+        'timeout',
+        `taskkill /T did not exit within ${waitMs}ms`,
+      )
     }, waitMs)
-    killer.once('error', finish)
-    killer.once('close', finish)
+    killer.onError(error => {
+      void finish(
+        'spawn-error',
+        `taskkill /T failed to start: ${error.message}`,
+      )
+    })
+    killer.onClose((code, signal) => {
+      if (code === 0) {
+        void finish('success', 'taskkill /T exited successfully', true)
+        return
+      }
+      void finish(
+        'nonzero-exit',
+        `taskkill /T exited with code ${code ?? 'null'}`
+          + (signal ? ` and signal ${signal}` : ''),
+      )
+    })
   })
-
-  try { proc.kill('SIGKILL') } catch {}
 }
 
 async function terminateProcessTree(options: {
@@ -162,17 +244,26 @@ async function terminateProcessTree(options: {
   closePromise: Promise<CloseResult>
   termGraceMs: number
   killWaitMs: number
-}): Promise<boolean> {
+}): Promise<{ confirmed: boolean; detail?: string }> {
   const { proc, closePromise, termGraceMs, killWaitMs } = options
   const pid = proc.pid
 
   if (!pid) {
-    return await waitForClose(closePromise, killWaitMs)
+    return { confirmed: await waitForClose(closePromise, killWaitMs) }
   }
 
   if (process.platform === 'win32') {
-    await forceKillWindowsProcessTree(proc, killWaitMs)
-    return await waitForClose(closePromise, killWaitMs)
+    const taskkill = await runWindowsTaskkill(pid, killWaitMs)
+    if (!taskkill.confirmed) {
+      // Best-effort direct-child fallback reduces leakage, but it does not
+      // prove descendants exited and therefore cannot make shutdown succeed.
+      try { proc.kill('SIGKILL') } catch {}
+    }
+    const childClosed = await waitForClose(closePromise, killWaitMs)
+    return {
+      confirmed: taskkill.confirmed && childClosed,
+      detail: taskkill.detail,
+    }
   }
 
   signalPosixProcessGroup(proc, 'SIGTERM')
@@ -186,7 +277,7 @@ async function terminateProcessTree(options: {
     waitForClose(closePromise, killWaitMs),
     waitForPosixProcessGroupExit(pid, killWaitMs),
   ])
-  return childClosed && groupExited
+  return { confirmed: childClosed && groupExited }
 }
 
 function positiveLimit(value: number | undefined, fallback: number, name: string): number {
@@ -355,16 +446,17 @@ export async function runBoundedSubprocess(
     clearTimeout(timeoutHandle)
     stopCollecting()
     void (async () => {
-      const confirmedClosed = await terminateProcessTree({
+      const termination = await terminateProcessTree({
         proc,
         closePromise,
         termGraceMs,
         killWaitMs,
       })
-      const finalReason = confirmedClosed ? reason : 'termination'
-      const finalMessage = confirmedClosed
+      const finalReason = termination.confirmed ? reason : 'termination'
+      const finalMessage = termination.confirmed
         ? message
         : `${message}; process exit could not be confirmed after forced termination`
+          + (termination.detail ? ` (${termination.detail})` : '')
       rejectFailure(finalReason, finalMessage, cause)
     })()
   }

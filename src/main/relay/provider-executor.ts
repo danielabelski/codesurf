@@ -1,4 +1,3 @@
-import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 import { sep, resolve as resolvePath } from 'path'
 import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
@@ -67,10 +66,12 @@ async function runRelayProviderCli(options: {
   env: NodeJS.ProcessEnv
   timeoutMs: number
   signal?: AbortSignal
+  stdoutMaxBytes?: number
 }): Promise<BoundedSubprocessResult> {
   return await runBoundedSubprocess({
     ...options,
-    stdoutMaxBytes: RELAY_SUBPROCESS_STDOUT_MAX_BYTES,
+    stdoutMaxBytes: options.stdoutMaxBytes
+      ?? RELAY_SUBPROCESS_STDOUT_MAX_BYTES,
     stderrMaxBytes: RELAY_SUBPROCESS_STDERR_MAX_BYTES,
   })
 }
@@ -314,24 +315,58 @@ function normalizeOpenClawModelRef(model?: string | null): string {
   return (model ?? '').trim().toLowerCase()
 }
 
-function parseOpenClawAgents(openclawBin: string, shellPath?: string | null): Array<{ id: string; name?: string; model?: string; isDefault?: boolean }> {
+type OpenClawAgentSummary = {
+  id: string
+  name?: string
+  model?: string
+  isDefault?: boolean
+}
+
+async function discoverOpenClawAgents(
+  openclawBin: string,
+  shellPath?: string | null,
+  signal?: AbortSignal,
+): Promise<OpenClawAgentSummary[]> {
+  const result = await runRelayProviderCli({
+    label: 'OpenClaw agent discovery',
+    command: openclawBin,
+    args: ['agents', 'list', '--json'],
+    env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
+    timeoutMs: OPENCLAW_AGENT_LIST_TIMEOUT_MS,
+    signal,
+    stdoutMaxBytes: OPENCLAW_AGENT_LIST_MAX_BUFFER_BYTES,
+  })
+  if (result.code !== 0) return []
   try {
-    const raw = execFileSync(openclawBin, ['agents', 'list', '--json'], {
-      encoding: 'utf-8',
-      env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
-      timeout: OPENCLAW_AGENT_LIST_TIMEOUT_MS,
-      maxBuffer: OPENCLAW_AGENT_LIST_MAX_BUFFER_BYTES,
-      windowsHide: true,
-    }).trim()
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    const parsed: unknown = JSON.parse(result.stdout.trim())
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((value): OpenClawAgentSummary[] => {
+      if (
+        value === null
+        || typeof value !== 'object'
+        || typeof (value as { id?: unknown }).id !== 'string'
+      ) {
+        return []
+      }
+      const candidate = value as Record<string, unknown>
+      return [{
+        id: candidate.id as string,
+        ...(typeof candidate.name === 'string' ? { name: candidate.name } : {}),
+        ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
+        ...(typeof candidate.isDefault === 'boolean'
+          ? { isDefault: candidate.isDefault }
+          : {}),
+      }]
+    })
   } catch {
     return []
   }
 }
 
-function selectOpenClawAgentId(openclawBin: string, shellPath?: string | null, preferredModel?: string | null): string | null {
-  const agents = parseOpenClawAgents(openclawBin, shellPath)
+function selectOpenClawAgentId(
+  agents: OpenClawAgentSummary[],
+  preferredModel?: string | null,
+): string | null {
   if (agents.length === 0) return 'main'
 
   const requested = normalizeOpenClawModelRef(preferredModel)
@@ -366,9 +401,13 @@ async function runOpenClawTurn(
   const openclawBin = getAgentPath('openclaw') || 'openclaw'
   const shellPath = getShellEnvPath()
   const existingSessionId = openClawSessions.get(participantId) ?? null
-  const agentId = existingSessionId ? null : selectOpenClawAgentId(openclawBin, shellPath, spawnRequest.model)
+  const agents = existingSessionId
+    ? []
+    : await discoverOpenClawAgents(openclawBin, shellPath, signal)
+  const agentId = existingSessionId
+    ? null
+    : selectOpenClawAgentId(agents, spawnRequest.model)
   if (!existingSessionId && !agentId) {
-    const agents = parseOpenClawAgents(openclawBin, shellPath)
     const available = agents
       .map(agent => agent.model || agent.id)
       .filter((value, index, all): value is string => typeof value === 'string' && value.trim().length > 0 && all.indexOf(value) === index)
