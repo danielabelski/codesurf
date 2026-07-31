@@ -338,6 +338,14 @@ export function createHarness(options?: {
         ?? `sha256:${createHash('sha256').update(id).digest('hex')}`
       extensionConsents.set(`${id}:${identity}`, new Set(kinds))
     },
+    setDisplaySources: (nextSources: readonly DisplaySource[]) => {
+      sources.splice(0, sources.length, ...nextSources)
+    },
+    setDisplaySelectionIndex: (index: number | undefined) => {
+      displaySelector = async selection => {
+        return index === undefined ? undefined : selection.sources[index]
+      }
+    },
     setSelectedSource: (source: DisplaySource | undefined) => { selectedSource = source },
     setDisplaySelector: (
       selector: typeof displaySelector,

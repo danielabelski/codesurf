@@ -2,6 +2,10 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import type { DisplayMediaRequest } from '../src/main/security/permissionBoundaryCore.ts'
 import {
+  EXTENSION_MEDIA_DIALOG_TEXT_BYTES,
+  getSafeDisplaySourceDialogChoices,
+} from '../src/shared/extension-sensitive-media.ts'
+import {
   createHarness,
   FakeFrame,
   mainFrameDetails,
@@ -135,6 +139,65 @@ describe('permission boundary display capture', () => {
       assert.equal(
         extensionRequester.extension.declaredMediaReasons['display-capture'],
         'Present a selected project window',
+      )
+    }
+  })
+
+  test('makes hostile duplicate source labels unique while preserving selection indexes', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    const hostileNames = [
+      'Cancel',
+      'Cancel',
+      '',
+      '\u0000\u0007\t',
+      '\u202eCancel\u2066',
+      'Duplicate',
+      'Duplicate',
+      `Very long ${'雪'.repeat(200)}`,
+    ]
+    const hostileSources = Array.from({ length: 24 }, (_, index) => ({
+      id: `${index % 2 === 0 ? 'screen' : 'window'}:${index}:0`,
+      name: hostileNames[index % hostileNames.length] ?? '',
+    }))
+    harness.setDisplaySources(hostileSources)
+    harness.setDisplaySelectionIndex(17)
+
+    assert.equal(
+      await requestPermission(trusted.session, trusted.contents, 'display-capture', {
+        ...mainFrameDetails(harness.appUrl),
+      }),
+      true,
+    )
+    assert.deepEqual(
+      await requestDisplay(trusted.session, {
+        frame: trusted.contents.mainFrame,
+        securityOrigin: new URL(harness.appUrl).origin,
+        videoRequested: true,
+        audioRequested: false,
+        userGesture: true,
+      }),
+      { video: hostileSources[17] },
+    )
+
+    const selection = harness.displaySelections.at(-1)
+    assert.deepEqual(selection?.requester, { kind: 'host' })
+    assert.equal(selection?.sources.length, hostileSources.length)
+    const choices = getSafeDisplaySourceDialogChoices(selection?.sources ?? [], 20)
+    const buttons = [...choices.map(choice => choice.label), 'Cancel']
+
+    assert.equal(choices.length, 20)
+    assert.equal(new Set(buttons).size, buttons.length)
+    assert.equal(buttons.filter(button => button === 'Cancel').length, 1)
+    assert.strictEqual(choices[17]?.source, hostileSources[17])
+    for (const [index, choice] of choices.entries()) {
+      const type = index % 2 === 0 ? 'Screen' : 'Window'
+      assert.match(choice.label, new RegExp(`^\\[${type} ${index + 1}\\] `, 'u'))
+      assert.equal(/[\p{Cc}\p{Bidi_Control}]/u.test(choice.label), false)
+      assert.ok(
+        Buffer.byteLength(choice.label, 'utf8')
+          <= EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
       )
     }
   })

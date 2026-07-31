@@ -28,6 +28,7 @@ import {
 } from './extensionMediaConsent'
 import {
   EXTENSION_MEDIA_DIALOG_TEXT_BYTES,
+  getSafeDisplaySourceDialogChoices,
   getSafeExtensionMediaAttribution,
   sanitizeExtensionMediaDialogText,
   type SensitiveMediaCapability,
@@ -260,7 +261,10 @@ export function installElectronPermissionBoundary(
       }
     },
     selectDisplaySource: async ({ owner, requester, sources }) => {
-      const choices = sources.slice(0, MAX_DISPLAY_SOURCE_CHOICES)
+      const choices = getSafeDisplaySourceDialogChoices(
+        sources,
+        MAX_DISPLAY_SOURCE_CHOICES,
+      )
       if (choices.length === 0) return undefined
       const attribution = requester.kind === 'extension'
         ? getSafeExtensionMediaAttribution(
@@ -300,13 +304,7 @@ export function installElectronPermissionBoundary(
           message,
           detail,
           buttons: [
-            ...choices.map((source, index) => {
-              return sanitizeExtensionMediaDialogText(
-                source.name,
-                `Source ${index + 1}`,
-                EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
-              )
-            }),
+            ...choices.map(choice => choice.label),
             'Cancel',
           ],
           defaultId: cancelId,
@@ -315,7 +313,7 @@ export function installElectronPermissionBoundary(
         },
       )
       return result.response >= 0 && result.response < choices.length
-        ? choices[result.response]
+        ? choices[result.response]?.source
         : undefined
     },
     warn: (message, error) => {

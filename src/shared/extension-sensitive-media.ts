@@ -28,6 +28,16 @@ export interface SafeExtensionMediaAttribution {
   readonly reason?: string
 }
 
+export interface DisplaySourceDialogInput {
+  readonly id?: unknown
+  readonly name?: unknown
+}
+
+export interface SafeDisplaySourceDialogChoice<TSource extends DisplaySourceDialogInput> {
+  readonly label: string
+  readonly source: TSource
+}
+
 const textEncoder = new TextEncoder()
 const UNSAFE_CONTROL = /\p{Cc}/gu
 const UNSAFE_BIDI_FORMATTING = /\p{Bidi_Control}/gu
@@ -64,6 +74,41 @@ export function sanitizeExtensionMediaDialogText(
   }
   const normalized = normalize(value) || normalize(fallback)
   return truncateUtf8(normalized, maxBytes)
+}
+
+export function getSafeDisplaySourceDialogChoices<
+  TSource extends DisplaySourceDialogInput,
+>(
+  sources: readonly TSource[],
+  maxChoices: number,
+): SafeDisplaySourceDialogChoice<TSource>[] {
+  const choiceLimit = Number.isSafeInteger(maxChoices) && maxChoices > 0
+    ? maxChoices
+    : 0
+  return sources.slice(0, choiceLimit).map((source, index) => {
+    const sourceKind = typeof source.id === 'string'
+      ? source.id.split(':', 1)[0]?.toLowerCase()
+      : undefined
+    const type = sourceKind === 'screen'
+      ? 'Screen'
+      : sourceKind === 'window'
+        ? 'Window'
+        : 'Source'
+    const prefix = `[${type} ${index + 1}]`
+    const name = sanitizeExtensionMediaDialogText(
+      source.name,
+      'Unnamed source',
+      EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
+    )
+    return {
+      label: sanitizeExtensionMediaDialogText(
+        `${prefix} ${name}`,
+        `${prefix} Unnamed source`,
+        EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
+      ),
+      source,
+    }
+  })
 }
 
 export function getSafeExtensionMediaAttribution(
