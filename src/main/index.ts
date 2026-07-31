@@ -24,6 +24,7 @@ import { registerJobsIPC } from './ipc/jobs'
 import { registerSkillsIPC, queuePendingSkillFile } from './ipc/skills'
 import { registerFileProtocol } from './file-protocol'
 import { flushAll as flushActivityStore } from './activity-store'
+import { createQuitDrainCoordinator } from './quit-drain.ts'
 import { initializeAgentPathsCache, registerAgentPathsIPC } from './agent-paths'
 import { ExtensionRegistry } from './extensions/registry'
 import { registerExtensionProtocol } from './extensions/protocol'
@@ -54,6 +55,14 @@ import { normalizeSafeExternalUrl } from './utils/externalUrl'
 import { log } from './utils/logger.ts'
 
 const indexLog = log.scope('boot')
+const quitDrainCoordinator = createQuitDrainCoordinator({
+  // Canvas persistence can join this structural barrier as a second named
+  // drain without nesting or competing before-quit handlers.
+  drains: [{ name: 'activity', run: flushActivityStore }],
+  timeoutMs: 5_000,
+  requestQuit: () => app.quit(),
+  onFailure: failure => indexLog.warn('quit drain continued after bounded failure', failure),
+})
 import {
   attachGuestWebviewSecurityHandlers,
   createMainWindowWebPreferences,
@@ -922,8 +931,8 @@ app.whenReady().then(async () => {
 })
 }
 
-app.on('before-quit', () => {
-  flushActivityStore()
+app.on('before-quit', (event) => {
+  if (quitDrainCoordinator.beforeQuit(event) === 'intercepted') return
   stopAllCollabWatchers()
   extensionRegistry?.deactivateAll()
   stopAllRelayServices()
