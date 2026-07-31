@@ -115,7 +115,7 @@ test('relay service invalidates suspended init and spawn work until a fresh gene
 
   const suspendedInit = service.getWorkspaceRelay('/workspace/relay-race')
   await initEntered.promise
-  service.stopAll()
+  await service.stopAll()
 
   await assert.rejects(
     suspendedInit,
@@ -184,7 +184,7 @@ test('relay service invalidates suspended init and spawn work until a fresh gene
     },
   )
   await spawnEntered.promise
-  service.stopAll()
+  await service.stopAll()
 
   await assert.rejects(
     suspendedSpawn,
@@ -234,7 +234,7 @@ test('relay service invalidates suspended init and spawn work until a fresh gene
     ['fresh-agent'],
   )
   await waitEntered.promise
-  service.stopAll()
+  await service.stopAll()
   await assert.rejects(
     suspendedWait,
     error => error instanceof RelayOperationCancelledError,
@@ -249,7 +249,7 @@ test('relay service invalidates suspended init and spawn work until a fresh gene
   const staleExistingLookup = service.getWorkspaceRelay(
     '/workspace/relay-race',
   )
-  service.stopAll()
+  await service.stopAll()
   await assert.rejects(
     staleExistingLookup,
     error => error instanceof RelayOperationCancelledError,

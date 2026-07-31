@@ -26,7 +26,6 @@ import { validateCapabilityCall } from './policy'
 import { JsonRpcPeer, type JsonValue, type JsonObject } from './json-rpc'
 import { BROKER_ERROR_CODES } from './protocol'
 import { registerRelayIPC, unregisterRelayIPC } from '../../ipc/relay'
-import { stopAllRelayServices } from '../../relay/service'
 import { log } from '../../utils/logger.ts'
 
 export class ExtensionBrokerHost {
@@ -406,8 +405,9 @@ export class ExtensionBrokerHost {
         // Register a cleanup so deactivate() stops the relay services.
         const origDispose = this.ctx!.dispose.bind(this.ctx)
         this.ctx!.dispose = () => {
-          unregisterRelayIPC()
-          stopAllRelayServices()
+          void unregisterRelayIPC().catch(error => {
+            console.warn('[Relay] Failed to stop brokered relay host:', error)
+          })
           origDispose()
         }
         return { ok: true }

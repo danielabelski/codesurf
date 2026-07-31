@@ -54,7 +54,7 @@ const RELAY_CHANNELS = [
 ] as const
 
 export function registerRelayIPC(): void {
-  unregisterRelayIPC()
+  removeRelayIPCHandlers()
   startRelayServices()
   setRelayHostActive(true)
   activateCanvasRelayProjectionSync()
@@ -155,7 +155,7 @@ export function registerRelayIPC(): void {
   })
 }
 
-export function unregisterRelayIPC(): void {
+function removeRelayIPCHandlers(): void {
   deactivateCanvasRelayProjectionSync()
   setRelayHostActive(false)
   for (const ch of RELAY_CHANNELS) {
@@ -165,8 +165,12 @@ export function unregisterRelayIPC(): void {
       /* ignore */
     }
   }
+}
+
+export async function unregisterRelayIPC(): Promise<void> {
+  removeRelayIPCHandlers()
   // Removing the ordinary entry points and invalidating the service generation
   // are one lifecycle operation. Any handler already suspended in init/spawn
   // observes the inactive generation before it can publish fresh resources.
-  stopAllRelayServices()
+  await stopAllRelayServices()
 }

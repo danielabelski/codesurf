@@ -451,4 +451,28 @@ describe('window persistence barrier', () => {
     disposeQuitBarrier()
     registry.dispose()
   })
+
+  test('does not resume app quit until asynchronous cleanup settles', async () => {
+    const app = new FakeApp()
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>(resolve => {
+      releaseCleanup = resolve
+    })
+    const disposeQuitBarrier = installAppQuitBarrier(
+      app,
+      () => null,
+      () => cleanup,
+    )
+
+    app.quit()
+    await settle()
+    assert.equal(app.acceptedQuitCount, 0)
+    assert.equal(app.quitCalls, 1)
+
+    releaseCleanup()
+    await settle()
+    assert.equal(app.quitCalls, 2)
+    assert.equal(app.acceptedQuitCount, 1)
+    disposeQuitBarrier()
+  })
 })

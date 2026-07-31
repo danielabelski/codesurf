@@ -49,7 +49,6 @@ import { APP_ID, APP_NAME } from './paths'
 import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
-import { stopAllRelayServices } from './relay/service'
 import { unregisterRelayIPC } from './ipc/relay'
 import { normalizeSafeExternalUrl } from './utils/externalUrl'
 import { log } from './utils/logger.ts'
@@ -964,18 +963,31 @@ app.whenReady().then(async () => {
 })
 }
 
-function runAppShutdownCleanup(): void {
+async function runAppShutdownCleanup(): Promise<void> {
   flushActivityStore()
-  void stopMCPServer().catch(error => {
-    console.warn('[MCP] Failed to stop local server during shutdown:', error)
-  })
+  const mcpShutdown = stopMCPServer()
+  const relayShutdown = unregisterRelayIPC()
   stopAllCollabWatchers()
-  unregisterRelayIPC()
   extensionRegistry?.deactivateAll()
-  stopAllRelayServices()
   killAllChatProcesses()
   stopOwlSupervisor()
   closeDb()
+  const [mcpResult, relayResult] = await Promise.allSettled([
+    mcpShutdown,
+    relayShutdown,
+  ])
+  if (mcpResult.status === 'rejected') {
+    console.warn(
+      '[MCP] Failed to stop local server during shutdown:',
+      mcpResult.reason,
+    )
+  }
+  if (relayResult.status === 'rejected') {
+    console.warn(
+      '[Relay] Failed to stop relay providers during shutdown:',
+      relayResult.reason,
+    )
+  }
 }
 
 disposeAppQuitBarrier = installAppQuitBarrier(

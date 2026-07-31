@@ -244,6 +244,6 @@ export function waitForWorkspaceRelayAny(
   )
 }
 
-export function stopAllRelayServices(): void {
-  relayService.stopAll()
+export function stopAllRelayServices(): Promise<void> {
+  return relayService.stopAll()
 }

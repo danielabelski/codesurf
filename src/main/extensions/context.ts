@@ -18,7 +18,6 @@ import type { EventBus } from '../event-bus'
 import type { ExtensionManifest, ExtensionMCPToolContrib } from '../../shared/types'
 import type { ExtensionRegistry } from './registry'
 import { registerRelayIPC, unregisterRelayIPC } from '../ipc/relay'
-import { stopAllRelayServices } from '../relay/service'
 import { CODESURF_HOME } from '../paths'
 import { getPluginState, setPluginState, replacePluginState, stateChannel } from './plugin-store'
 import { log } from '../utils/logger.ts'
@@ -151,8 +150,9 @@ export class ExtensionContext {
         install: () => {
           registerRelayIPC()
           return () => {
-            unregisterRelayIPC()
-            stopAllRelayServices()
+            void unregisterRelayIPC().catch(error => {
+              console.warn('[Relay] Failed to stop relay host:', error)
+            })
           }
         },
       }

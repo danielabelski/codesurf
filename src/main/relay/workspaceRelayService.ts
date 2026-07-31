@@ -20,7 +20,7 @@ export type RelayOperationGuard = {
 type RelayRuntimeLike = {
   spawn(request: RelaySpawnRequest): Promise<RelayParticipant>
   stop(participantId: string): Promise<void>
-  destroy(): void
+  destroy(): void | Promise<void>
 }
 
 export type WorkspaceRelayInstance = {
@@ -29,6 +29,7 @@ export type WorkspaceRelayInstance = {
   unsubscribe: () => void
   generation: number
   disposed: boolean
+  disposePromise: Promise<void> | null
 }
 
 export type WorkspaceRelayServiceDependencies = {
@@ -63,6 +64,7 @@ export class WorkspaceRelayService {
   private generation = 0
   private active = false
   private abortController: AbortController | null = null
+  private readonly pendingDisposals = new Set<Promise<void>>()
 
   constructor(dependencies: WorkspaceRelayServiceDependencies) {
     this.dependencies = dependencies
@@ -381,14 +383,14 @@ export class WorkspaceRelayService {
     )
   }
 
-  stopAll(): void {
+  async stopAll(): Promise<void> {
     this.active = false
     this.abortController?.abort()
     this.abortController = null
-    for (const instance of this.instances.values()) {
-      this.disposeInstance(instance)
-    }
+    const instances = [...this.instances.values()]
     this.instances.clear()
+    const disposals = instances.map(instance => this.disposeInstance(instance))
+    await Promise.all([...this.pendingDisposals, ...disposals])
   }
 
   private captureOperationGuard(
@@ -459,10 +461,42 @@ export class WorkspaceRelayService {
         input: RelayTurnInput,
         signal?: AbortSignal,
       ): Promise<string> => {
-        return this.awaitGuarded(
-          () => executor.runTurn(input, signal),
-          guard,
-        )
+        this.assertActive(guard)
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new RelayOperationCancelledError()
+        }
+        const linkedController = new AbortController()
+        const abortFromRuntime = (): void => {
+          linkedController.abort(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new RelayOperationCancelledError(),
+          )
+        }
+        const abortFromService = (): void => {
+          linkedController.abort(new RelayOperationCancelledError())
+        }
+        signal?.addEventListener('abort', abortFromRuntime, { once: true })
+        guard.signal.addEventListener('abort', abortFromService, { once: true })
+        if (signal?.aborted) abortFromRuntime()
+        if (guard.signal.aborted) abortFromService()
+        try {
+          const result = await executor.runTurn(
+            input,
+            linkedController.signal,
+          )
+          this.assertActive(guard)
+          if (signal?.aborted) abortFromRuntime()
+          if (linkedController.signal.aborted) {
+            throw linkedController.signal.reason
+          }
+          return result
+        } finally {
+          signal?.removeEventListener('abort', abortFromRuntime)
+          guard.signal.removeEventListener('abort', abortFromService)
+        }
       },
     }
   }
@@ -479,7 +513,7 @@ export class WorkspaceRelayService {
     }
     if (existing) {
       this.instances.delete(workspacePath)
-      this.disposeInstance(existing)
+      await this.disposeInstance(existing)
     }
 
     const relay = this.dependencies.createRelay(workspacePath)
@@ -496,7 +530,7 @@ export class WorkspaceRelayService {
     }
     if (raced) {
       this.instances.delete(workspacePath)
-      this.disposeInstance(raced)
+      await this.disposeInstance(raced)
     }
 
     let runtime: RelayRuntimeLike | null = null
@@ -522,6 +556,7 @@ export class WorkspaceRelayService {
         unsubscribe,
         generation: guard.generation,
         disposed: false,
+        disposePromise: null,
       }
       this.assertActive(guard)
       this.instances.set(workspacePath, published)
@@ -532,13 +567,13 @@ export class WorkspaceRelayService {
         this.instances.delete(workspacePath)
       }
       if (published) {
-        this.disposeInstance(published)
+        await this.disposeInstance(published)
       } else {
         try {
           unsubscribe?.()
         } catch {}
         try {
-          runtime?.destroy()
+          await runtime?.destroy()
         } catch {}
       }
       throw error
@@ -558,14 +593,20 @@ export class WorkspaceRelayService {
     return this.awaitGuarded(() => operation(instance, guard), guard)
   }
 
-  private disposeInstance(instance: WorkspaceRelayInstance): void {
-    if (instance.disposed) return
+  private disposeInstance(instance: WorkspaceRelayInstance): Promise<void> {
+    if (instance.disposePromise) return instance.disposePromise
     instance.disposed = true
     try {
       instance.unsubscribe()
     } catch {}
-    try {
-      instance.runtime.destroy()
-    } catch {}
+    const disposePromise = Promise.resolve()
+      .then(() => instance.runtime.destroy())
+      .then(() => undefined)
+    instance.disposePromise = disposePromise
+    this.pendingDisposals.add(disposePromise)
+    void disposePromise.finally(() => {
+      this.pendingDisposals.delete(disposePromise)
+    }).catch(() => {})
+    return disposePromise
   }
 }

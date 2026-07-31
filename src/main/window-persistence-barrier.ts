@@ -310,36 +310,32 @@ export function installAppQuitBarrier(
     ReturnType<typeof createWindowPersistenceBarrierRegistry>,
     'closeAll'
   > | null,
-  cleanup: () => void,
+  cleanup: () => void | Promise<void>,
   onError: (error: unknown) => void = error => {
     console.error('[window] persistence barrier failed:', error)
   },
 ): () => void {
   let resumeQuit = false
   let resumeScheduled = false
-  let cleanupComplete = false
+  let cleanupPromise: Promise<void> | null = null
 
-  const runCleanup = (): void => {
-    if (cleanupComplete) return
-    cleanupComplete = true
-    cleanup()
+  const runCleanup = (): Promise<void> => {
+    if (!cleanupPromise) {
+      cleanupPromise = Promise.resolve().then(cleanup)
+    }
+    return cleanupPromise
   }
 
   const onBeforeQuit = (event: { preventDefault(): void }): void => {
-    const registry = getRegistry()
-    if (!registry) {
-      runCleanup()
-      return
-    }
-    if (resumeQuit) {
-      runCleanup()
-      return
-    }
+    if (resumeQuit) return
 
     event.preventDefault()
     if (resumeScheduled) return
     resumeScheduled = true
-    void registry.closeAll()
+    const registry = getRegistry()
+    void (registry?.closeAll() ?? Promise.resolve())
+      .catch(onError)
+      .then(runCleanup)
       .catch(onError)
       .then(() => {
         if (resumeQuit) return
