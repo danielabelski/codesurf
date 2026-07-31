@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { CanvasGroupFrames } from './components/canvas/CanvasGroupFrames'
 import type { AggregatedSessionEntry } from '../../shared/session-types'
-import type { TileState, GroupState, CanvasState, Workspace, AppSettings, TileType } from '../../shared/types'
+import type { TileState, GroupState, Workspace, AppSettings, TileType } from '../../shared/types'
 
 import { withDefaultSettings } from '../../shared/types'
 import type { MenuItem } from './components/ContextMenu'
@@ -52,6 +52,12 @@ import {
   SETTINGS_CACHE_KEY,
 } from './lib/appShellPersistence'
 import { hrefToLocalPath, snapToCanvasGrid } from './lib/canvasStateHelpers'
+import {
+  registerWindowPersistenceTask,
+  resolveCanvasPersistenceMode,
+  startWindowPersistenceBarrier,
+  supportsWindowPersistenceBarrier,
+} from './lib/windowPersistenceBarrier'
 
 import {
   extensionActionRegistry,
@@ -174,7 +180,6 @@ function App(): JSX.Element {
   useEffect(() => { expandedTileIdRef.current = expandedTileId }, [expandedTileId])
   useEffect(() => { expandedCanvasGroupIdRef.current = expandedCanvasGroupId }, [expandedCanvasGroupId])
   const currentWorkspaceIdRef = useRef<string | null>(workspace?.id ?? null)
-  useEffect(() => { currentWorkspaceIdRef.current = workspace?.id ?? null }, [workspace?.id])
   const workspaceTabsHydratedRef = useRef(false)
 
   const selectedWorkspaceFilePath = useMemo(() => {
@@ -282,6 +287,10 @@ function App(): JSX.Element {
 
   const canvasRef = useRef<HTMLDivElement>(null)
   const canvasPersistSuspendedRef = useRef(false)
+  const canvasPersistenceMode = resolveCanvasPersistenceMode(
+    window.electron?.window,
+    Boolean(miniChatOptions),
+  )
 
   const canvasEngine = useCanvasEngine({
     workspace,
@@ -304,6 +313,7 @@ function App(): JSX.Element {
     },
     setTiles,
     setGroups,
+    persistenceMode: canvasPersistenceMode,
   })
 
   const {
@@ -336,6 +346,8 @@ function App(): JSX.Element {
     clearHistory,
     flushPendingSave,
     markCanvasLoaded,
+    transferCanvasWorkspaceOwnership,
+    releaseWorkspacePersistence,
   } = canvasEngine
 
   const panelTileIdsRef = useRef<Set<string>>(new Set())
@@ -381,7 +393,6 @@ function App(): JSX.Element {
     handleNewWorkspace,
     handleOpenFolder,
     handleLaunchTemplate,
-    applySavedCanvasState: applyLoadedCanvasState,
   } = useAppWorkspaceOrchestration({
     workspace,
     workspaces,
@@ -397,6 +408,7 @@ function App(): JSX.Element {
     expandedCanvasGroupIdRef,
     expandedCanvasPriorViewportRef,
     currentWorkspaceIdRef,
+    expandedTileIdRef,
     setWorkspace,
     setWorkspaces,
     setOpenWorkspaceIds,
@@ -416,7 +428,32 @@ function App(): JSX.Element {
     clearHistory,
     flushPendingSave,
     markCanvasLoaded,
+    transferCanvasWorkspaceOwnership,
+    releaseWorkspacePersistence,
   })
+  const handleSwitchWorkspaceRef = useRef(handleSwitchWorkspace)
+  handleSwitchWorkspaceRef.current = handleSwitchWorkspace
+
+  useEffect(() => {
+    const persistenceApi = window.electron?.window
+    if (!supportsWindowPersistenceBarrier(persistenceApi)) return
+    const unregisterCanvas = registerWindowPersistenceTask('canvas', async request => {
+      if (miniChatOptions || !request.canvasOwner) return
+      const workspaceId = currentWorkspaceIdRef.current
+      if (workspaceId) {
+        await flushPendingSave(workspaceId, {
+          // Every quitting window writes in the deterministic main-process
+          // ownership order, even if its local debounce queue is already clean.
+          force: request.reason === 'quit',
+        })
+      }
+    })
+    const stopBarrier = startWindowPersistenceBarrier(persistenceApi)
+    return () => {
+      unregisterCanvas()
+      stopBarrier()
+    }
+  }, [currentWorkspaceIdRef, flushPendingSave, miniChatOptions])
 
   // ─── Load workspace + canvas state on mount ───────────────────────────────
   useEffect(() => {
@@ -562,27 +599,16 @@ function App(): JSX.Element {
       }
 
       setOpenWorkspaceIds(Array.from(new Set(restoredOpenWorkspaceIds)))
-      setWorkspace(targetWorkspace)
       workspaceTabsHydratedRef.current = true
 
-      if (targetWorkspace && !miniChatOptions && active?.id !== targetWorkspace.id) {
-        await window.electron.workspace.setActive(targetWorkspace.id).catch(() => {})
-      }
-
       if (!targetWorkspace) {
-        showEmptyLayoutPage()
+        await showEmptyLayoutPage()
         return
       }
-      if (targetWorkspace) {
-        const saved: CanvasState | null = await window.electron.canvas.load(targetWorkspace.id)
-        const savedTiles = saved?.tiles ?? []
-        void window.electron?.collab?.pruneOrphanedTileDirs?.(targetWorkspace.path, savedTiles.map(tile => tile.id))
-        if (saved) {
-          applyLoadedCanvasState(saved)
-        } else {
-          showEmptyLayoutPage({ preserveOpenTabs: true })
-        }
-      }
+      // Initial hydration and interactive navigation share one generation
+      // coordinator. A slow initial A load therefore cannot overwrite a newer
+      // user-requested switch to B.
+      await handleSwitchWorkspaceRef.current(targetWorkspace.id)
     }
     init()
 
@@ -598,7 +624,7 @@ function App(): JSX.Element {
         }).catch(() => {})
       }
     }
-  }, [showEmptyLayoutPage, applyLoadedCanvasState, miniChatOptions?.workspaceId])
+  }, [showEmptyLayoutPage, miniChatOptions?.workspaceId])
 
   // ─── Subscribe to custom theme registrations from extensions ─────────────
   useEffect(() => {
@@ -1586,7 +1612,9 @@ function App(): JSX.Element {
           selectedTabDropShadow={selectedTabDropShadow}
           onSwitchWorkspace={handleSwitchWorkspace}
           onCloseWorkspaceTab={handleCloseWorkspaceTab}
-          onNewWorkspaceTab={showEmptyLayoutPage}
+          onNewWorkspaceTab={() => {
+            void showEmptyLayoutPage({ preserveOpenTabs: true })
+          }}
           onCloseWorkspacePickerTab={(fallbackWorkspaceId) => {
             setShowWorkspacePickerTab(false)
             if (fallbackWorkspaceId) void handleSwitchWorkspace(fallbackWorkspaceId)
