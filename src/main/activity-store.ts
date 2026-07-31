@@ -1,5 +1,6 @@
 import type {
   ActivityQuery,
+  ActivityHealthSnapshot,
   ActivityRecord,
   ActivityUpsertInput,
 } from '../shared/activity-types.ts'
@@ -51,6 +52,10 @@ export function getActivityByAgent(
   workspaceId: string,
 ): Promise<Record<string, ActivityRecord[]>> {
   return activityStore.byAgent(workspaceId)
+}
+
+export function getActivityHealth(workspaceId: string): Promise<ActivityHealthSnapshot> {
+  return Promise.resolve(activityStore.getHealth(workspaceId))
 }
 
 /** Enter the shutdown barrier and durably drain every accepted mutation. */

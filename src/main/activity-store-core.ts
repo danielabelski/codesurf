@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type {
+  ActivityHealthEvent,
+  ActivityHealthOperation,
+  ActivityHealthSnapshot,
   ActivityQuery,
   ActivityRecord,
 } from '../shared/activity-types.ts'
@@ -8,7 +11,10 @@ import {
   activityDocumentByteLengthFromRecordBytes,
   activityRecordByteLength,
 } from './activity-document-format.ts'
-import type { ActivityPersistence } from './activity-persistence.ts'
+import {
+  ActivityPersistenceError,
+  type ActivityPersistence,
+} from './activity-persistence.ts'
 import {
   MAX_ACTIVITY_FILE_BYTES,
   MAX_ACTIVITY_QUERY_LIMIT,
@@ -22,7 +28,9 @@ import {
 
 export const DEFAULT_ACTIVITY_SAVE_DEBOUNCE_MS = 1000
 export const DEFAULT_ACTIVITY_SAVE_RETRY_MS = 1000
+export const DEFAULT_ACTIVITY_MAX_SAVE_RETRY_MS = 60_000
 export const DEFAULT_MAX_LOADED_ACTIVITY_WORKSPACES = 32
+export const DEFAULT_ACTIVITY_HEALTH_EVENT_INTERVAL_MS = 30_000
 
 export interface ActivityScheduler {
   set(callback: () => void, delayMs: number): unknown
@@ -36,10 +44,13 @@ export interface ActivityStoreOptions {
   scheduler?: ActivityScheduler
   saveDebounceMs?: number
   saveRetryMs?: number
+  maxSaveRetryMs?: number
   maxLoadedWorkspaces?: number
   maxFileBytes?: number
   maxQueryResponseBytes?: number
   measureRecordBytes?: (record: ActivityRecord) => number
+  healthEventIntervalMs?: number
+  onHealthEvent?: (event: ActivityHealthEvent) => void
 }
 
 interface StoreState {
@@ -52,6 +63,7 @@ interface StoreState {
   saveTimer: unknown | null
   persistPromise: Promise<void> | null
   lastSaveError: unknown
+  saveFailureCount: number
   lastAccess: number
   activeUsers: number
 }
@@ -66,6 +78,15 @@ export class ActivityStoreClosedError extends Error {
   constructor() {
     super('Activity store is closing')
     this.name = 'ActivityStoreClosedError'
+  }
+}
+
+export class ActivityStoreCapacityError extends Error {
+  readonly code = 'capacity_exhausted'
+
+  constructor() {
+    super('Activity workspace capacity is exhausted')
+    this.name = 'ActivityStoreCapacityError'
   }
 }
 
@@ -116,13 +137,20 @@ export class ActivityStore {
   private readonly scheduler: ActivityScheduler
   private readonly saveDebounceMs: number
   private readonly saveRetryMs: number
+  private readonly maxSaveRetryMs: number
   private readonly maxLoadedWorkspaces: number
   private readonly maxFileBytes: number
   private readonly maxQueryResponseBytes: number
   private readonly measureRecordBytes: (record: ActivityRecord) => number
+  private readonly healthEventIntervalMs: number
+  private readonly onHealthEvent: ((event: ActivityHealthEvent) => void) | undefined
   private readonly stores = new Map<string, StoreState>()
   private readonly loads = new Map<string, Promise<StoreState>>()
   private readonly pendingAcquires = new Map<string, number>()
+  private readonly admittedLoads = new Set<string>()
+  private pendingAdmissionWorkspace: string | null = null
+  private readonly health = new Map<string, ActivityHealthSnapshot>()
+  private readonly healthEventTimes = new Map<string, number>()
   private accessSequence = 0
   private evictionTail: Promise<void> = Promise.resolve()
   private closing = false
@@ -142,6 +170,13 @@ export class ActivityStore {
       options.saveRetryMs ?? DEFAULT_ACTIVITY_SAVE_RETRY_MS,
       'saveRetryMs',
     )
+    this.maxSaveRetryMs = assertPositiveInteger(
+      options.maxSaveRetryMs ?? DEFAULT_ACTIVITY_MAX_SAVE_RETRY_MS,
+      'maxSaveRetryMs',
+    )
+    if (this.maxSaveRetryMs < this.saveRetryMs) {
+      throw new TypeError('maxSaveRetryMs cannot be less than saveRetryMs')
+    }
     this.maxLoadedWorkspaces = assertPositiveInteger(
       options.maxLoadedWorkspaces ?? DEFAULT_MAX_LOADED_ACTIVITY_WORKSPACES,
       'maxLoadedWorkspaces',
@@ -155,6 +190,50 @@ export class ActivityStore {
       'maxQueryResponseBytes',
     )
     this.measureRecordBytes = options.measureRecordBytes ?? activityRecordByteLength
+    this.healthEventIntervalMs = assertPositiveInteger(
+      options.healthEventIntervalMs ?? DEFAULT_ACTIVITY_HEALTH_EVENT_INTERVAL_MS,
+      'healthEventIntervalMs',
+    )
+    this.onHealthEvent = options.onHealthEvent
+  }
+
+  private healthErrorCode(error: unknown): string {
+    if (error instanceof ActivityPersistenceError) return error.code
+    if (error instanceof ActivityStoreCapacityError) return error.code
+    return 'operation_failed'
+  }
+
+  private recordHealthFailure(
+    workspaceId: string,
+    operation: ActivityHealthOperation,
+    error: unknown,
+  ): void {
+    const occurredAt = this.now()
+    const code = this.healthErrorCode(error)
+    const lastIssue = { operation, code, occurredAt }
+    this.health.set(workspaceId, {
+      available: true,
+      status: 'degraded',
+      lastIssue,
+    })
+    const eventKey = `${workspaceId}\0${operation}\0${code}`
+    const lastEmittedAt = this.healthEventTimes.get(eventKey)
+    if (
+      lastEmittedAt !== undefined
+      && occurredAt - lastEmittedAt < this.healthEventIntervalMs
+    ) return
+    this.healthEventTimes.set(eventKey, occurredAt)
+    try {
+      this.onHealthEvent?.({ workspaceId, ...lastIssue })
+    } catch {
+      // Health observers must never disrupt persistence.
+    }
+  }
+
+  private recordHealthSuccess(workspaceId: string, operation: ActivityHealthOperation): void {
+    const current = this.health.get(workspaceId)
+    if (current?.lastIssue?.operation !== operation) return
+    this.health.set(workspaceId, { available: true, status: 'healthy' })
   }
 
   private touch(state: StoreState): void {
@@ -182,6 +261,8 @@ export class ActivityStore {
         const snapshot = cloneRecords(state.records)
         await this.persistence.save(state.workspaceId, snapshot)
         state.persistedGeneration = Math.max(state.persistedGeneration, generation)
+        state.saveFailureCount = 0
+        this.recordHealthSuccess(state.workspaceId, 'save')
       }
     })()
     state.persistPromise = task
@@ -195,8 +276,14 @@ export class ActivityStore {
       error => {
         if (state.persistPromise === task) state.persistPromise = null
         state.lastSaveError = error
+        state.saveFailureCount += 1
+        this.recordHealthFailure(state.workspaceId, 'save', error)
         if (this.stores.get(state.workspaceId) === state) {
-          this.scheduleSave(state, this.saveRetryMs)
+          const retryMs = Math.min(
+            this.maxSaveRetryMs,
+            this.saveRetryMs * (2 ** Math.min(state.saveFailureCount - 1, 20)),
+          )
+          this.scheduleSave(state, retryMs)
         }
       },
     )
@@ -220,33 +307,65 @@ export class ActivityStore {
     const activeLoad = this.loads.get(workspaceId)
     if (activeLoad) return activeLoad
 
-    const load = this.persistence.load(workspaceId).then(result => {
-      const raced = this.stores.get(workspaceId)
-      if (raced) return raced
-      const needsRewrite = result.needsRewrite
-      const recordBytes = result.records.map(this.measureRecordBytes)
-      const state: StoreState = {
-        workspaceId,
-        records: cloneRecords(result.records),
-        recordBytes,
-        documentBytes: activityDocumentByteLengthFromRecordBytes(recordBytes),
-        generation: needsRewrite ? 1 : 0,
-        persistedGeneration: 0,
-        saveTimer: null,
-        persistPromise: null,
-        lastSaveError: null,
-        lastAccess: 0,
-        activeUsers: 0,
+    const load = (async () => {
+      await this.reserveLoad(workspaceId)
+      try {
+        const result = await this.persistence.load(workspaceId)
+        this.recordHealthSuccess(workspaceId, 'load')
+        const raced = this.stores.get(workspaceId)
+        if (raced) return raced
+        const needsRewrite = result.needsRewrite
+        const recordBytes = result.records.map(this.measureRecordBytes)
+        const state: StoreState = {
+          workspaceId,
+          records: cloneRecords(result.records),
+          recordBytes,
+          documentBytes: activityDocumentByteLengthFromRecordBytes(recordBytes),
+          generation: needsRewrite ? 1 : 0,
+          persistedGeneration: 0,
+          saveTimer: null,
+          persistPromise: null,
+          lastSaveError: null,
+          saveFailureCount: 0,
+          lastAccess: 0,
+          activeUsers: 0,
+        }
+        this.stores.set(workspaceId, state)
+        if (needsRewrite) this.scheduleSave(state)
+        return state
+      } catch (error) {
+        this.recordHealthFailure(workspaceId, 'load', error)
+        throw error
+      } finally {
+        this.admittedLoads.delete(workspaceId)
       }
-      this.stores.set(workspaceId, state)
-      if (needsRewrite) this.scheduleSave(state)
-      return state
-    })
+    })()
     this.loads.set(workspaceId, load)
     void load.finally(() => {
       if (this.loads.get(workspaceId) === load) this.loads.delete(workspaceId)
     }).catch(() => {})
     return load
+  }
+
+  private reserveLoad(workspaceId: string): Promise<void> {
+    if (this.stores.size + this.admittedLoads.size < this.maxLoadedWorkspaces) {
+      this.admittedLoads.add(workspaceId)
+      return Promise.resolve()
+    }
+    if (this.pendingAdmissionWorkspace !== null) {
+      return Promise.reject(new ActivityStoreCapacityError())
+    }
+    this.pendingAdmissionWorkspace = workspaceId
+    return this.evictOne().then(evicted => {
+      if (!evicted && this.stores.size + this.admittedLoads.size >= this.maxLoadedWorkspaces) {
+        throw new ActivityStoreCapacityError()
+      }
+      this.admittedLoads.add(workspaceId)
+    }).finally(() => {
+      if (this.pendingAdmissionWorkspace === workspaceId) {
+        this.pendingAdmissionWorkspace = null
+      }
+    })
   }
 
   private async acquire(workspaceIdValue: unknown): Promise<StoreState> {
@@ -300,18 +419,22 @@ export class ActivityStore {
 
   private async evictToLimit(): Promise<void> {
     while (this.stores.size > this.maxLoadedWorkspaces) {
-      const candidate = [...this.stores.values()]
+      if (!(await this.evictOne())) return
+    }
+  }
+
+  private async evictOne(): Promise<boolean> {
+    const candidates = [...this.stores.values()]
         .filter(state => (
           state.activeUsers === 0
           && (this.pendingAcquires.get(state.workspaceId) ?? 0) === 0
         ))
-        .sort((left, right) => left.lastAccess - right.lastAccess)[0]
-      if (!candidate) return
-
+        .sort((left, right) => left.lastAccess - right.lastAccess)
+    for (const candidate of candidates) {
       try {
         await this.flushState(candidate)
       } catch {
-        return
+        continue
       }
       if (
         candidate.activeUsers !== 0
@@ -323,7 +446,9 @@ export class ActivityStore {
         continue
       }
       this.stores.delete(candidate.workspaceId)
+      return true
     }
+    return false
   }
 
   private assertCandidateFits(bytes: number): void {
@@ -561,5 +686,16 @@ export class ActivityStore {
         .filter(state => state.persistedGeneration < state.generation)
         .map(state => state.workspaceId),
     }
+  }
+
+  getHealth(workspaceIdValue: unknown): ActivityHealthSnapshot {
+    const workspaceId = validateActivityWorkspaceId(workspaceIdValue)
+    const current = this.health.get(workspaceId)
+    return current
+      ? {
+          ...current,
+          ...(current.lastIssue ? { lastIssue: { ...current.lastIssue } } : {}),
+        }
+      : { available: true, status: 'healthy' }
   }
 }

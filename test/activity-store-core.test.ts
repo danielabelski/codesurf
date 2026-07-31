@@ -7,6 +7,7 @@ import type {
 } from '../src/main/activity-persistence.ts'
 import {
   ActivityStore,
+  ActivityStoreCapacityError,
   ActivityStoreClosedError,
   type ActivityScheduler,
 } from '../src/main/activity-store-core.ts'
@@ -265,7 +266,7 @@ describe('ActivityStore concurrency and lifecycle', () => {
     const persistence = new MemoryPersistence()
     const loadGate = deferred<LoadedActivityRecords>()
     persistence.loadOverride = async () => loadGate.promise
-    const store = new ActivityStore({ persistence })
+    const store = new ActivityStore({ persistence, now: () => 100 })
 
     const first = store.upsert('workspace-1', upsertInput('tile-a', 'a'))
     const second = store.upsert('workspace-1', upsertInput('tile-b', 'b'))
@@ -341,6 +342,74 @@ describe('ActivityStore concurrency and lifecycle', () => {
     await store.flushAll()
   })
 
+  test('backs repeated save failures off exponentially, caps delay, and reports sanitized health', async () => {
+    const persistence = new MemoryPersistence()
+    const scheduler = new ManualScheduler()
+    const events: unknown[] = []
+    let attempts = 0
+    let now = 1_000
+    persistence.saveOverride = async (workspaceId, records) => {
+      attempts += 1
+      if (attempts <= 3) throw new Error(`/private/secret failure ${attempts}`)
+      persistence.data.set(workspaceId, cloneRecords(records))
+    }
+    const store = new ActivityStore({
+      persistence,
+      scheduler,
+      now: () => now,
+      saveDebounceMs: 10,
+      saveRetryMs: 25,
+      maxSaveRetryMs: 60,
+      healthEventIntervalMs: 100,
+      onHealthEvent: event => events.push(event),
+    })
+
+    await store.upsert('workspace-1', upsertInput('tile-a', 'a'))
+    assert.equal(scheduler.runNext().delayMs, 10)
+    await nextTurn()
+    assert.equal(scheduler.pending()[0]?.delayMs, 25)
+    now += 50
+    scheduler.runNext()
+    await nextTurn()
+    assert.equal(scheduler.pending()[0]?.delayMs, 50)
+    now += 100
+    scheduler.runNext()
+    await nextTurn()
+    assert.equal(scheduler.pending()[0]?.delayMs, 60)
+    assert.deepEqual(events, [
+      {
+        workspaceId: 'workspace-1',
+        operation: 'save',
+        code: 'operation_failed',
+        occurredAt: 1_000,
+      },
+      {
+        workspaceId: 'workspace-1',
+        operation: 'save',
+        code: 'operation_failed',
+        occurredAt: 1_150,
+      },
+    ])
+    assert.deepEqual(store.getHealth('workspace-1'), {
+      available: true,
+      status: 'degraded',
+      lastIssue: {
+        operation: 'save',
+        code: 'operation_failed',
+        occurredAt: 1_150,
+      },
+    })
+
+    scheduler.runNext()
+    await nextTurn()
+    assert.equal(attempts, 4)
+    assert.deepEqual(store.getHealth('workspace-1'), {
+      available: true,
+      status: 'healthy',
+    })
+    await store.flushAll()
+  })
+
   test('rewrites migrated data even when no mutation follows the load', async () => {
     const persistence = new MemoryPersistence()
     persistence.loadOverride = async () => ({
@@ -374,6 +443,82 @@ describe('ActivityStore concurrency and lifecycle', () => {
     await store.flushAll()
   })
 
+  test('bounds concurrent first loads without calling persistence beyond capacity', async () => {
+    const persistence = new MemoryPersistence()
+    const gates = new Map<string, Deferred<LoadedActivityRecords>>()
+    persistence.loadOverride = async workspaceId => {
+      const gate = deferred<LoadedActivityRecords>()
+      gates.set(workspaceId, gate)
+      return gate.promise
+    }
+    const store = new ActivityStore({ persistence, maxLoadedWorkspaces: 2 })
+
+    const first = store.query({ workspaceId: 'workspace-1' })
+    const second = store.query({ workspaceId: 'workspace-2' })
+    const rejected = store.query({ workspaceId: 'workspace-3' })
+    await assert.rejects(rejected, ActivityStoreCapacityError)
+    assert.equal(persistence.loadCount, 2)
+    gates.get('workspace-1')!.resolve({ records: [], needsRewrite: false })
+    gates.get('workspace-2')!.resolve({ records: [], needsRewrite: false })
+    await Promise.all([first, second])
+    assert.equal(store.getStats().loadedWorkspaceIds.length, 2)
+    await store.flushAll()
+  })
+
+  test('sweeps past a failing dirty victim and admits after another safe eviction', async () => {
+    const persistence = new MemoryPersistence()
+    const scheduler = new ManualScheduler()
+    persistence.saveOverride = async workspaceId => {
+      if (workspaceId === 'workspace-1') throw new Error('disk unavailable')
+    }
+    const store = new ActivityStore({
+      persistence,
+      scheduler,
+      maxLoadedWorkspaces: 2,
+    })
+
+    await store.upsert('workspace-1', upsertInput('tile-a', 'a'))
+    await store.query({ workspaceId: 'workspace-2' })
+    await store.query({ workspaceId: 'workspace-3' })
+    assert.deepEqual(store.getStats().loadedWorkspaceIds.sort(), [
+      'workspace-1',
+      'workspace-3',
+    ])
+    assert.equal(scheduler.pending().length, 1)
+    persistence.saveOverride = null
+    scheduler.runNext()
+    await nextTurn()
+    await store.flushAll()
+  })
+
+  test('rejects admission when every victim is pinned, then recovers after retry succeeds', async () => {
+    const persistence = new MemoryPersistence()
+    const scheduler = new ManualScheduler()
+    let saveFails = true
+    persistence.saveOverride = async (workspaceId, records) => {
+      if (saveFails) throw new Error('disk unavailable')
+      persistence.data.set(workspaceId, cloneRecords(records))
+    }
+    const store = new ActivityStore({
+      persistence,
+      scheduler,
+      maxLoadedWorkspaces: 1,
+    })
+
+    await store.upsert('workspace-1', upsertInput('tile-a', 'a'))
+    await assert.rejects(
+      store.query({ workspaceId: 'workspace-2' }),
+      ActivityStoreCapacityError,
+    )
+    assert.equal(persistence.loadCount, 1)
+    saveFails = false
+    scheduler.runNext()
+    await nextTurn()
+    await store.query({ workspaceId: 'workspace-2' })
+    assert.deepEqual(store.getStats().loadedWorkspaceIds, ['workspace-2'])
+    await store.flushAll()
+  })
+
   test('does not cache failed loads, allowing a corrected artifact to load later', async () => {
     const persistence = new MemoryPersistence()
     let fail = true
@@ -381,9 +526,18 @@ describe('ActivityStore concurrency and lifecycle', () => {
       if (fail) throw new Error('corrupt document')
       return { records: [activity('repaired')], needsRewrite: false }
     }
-    const store = new ActivityStore({ persistence })
+    const store = new ActivityStore({ persistence, now: () => 100 })
 
     await assert.rejects(store.query({ workspaceId: 'workspace-1' }), /corrupt document/)
+    assert.deepEqual(store.getHealth('workspace-1'), {
+      available: true,
+      status: 'degraded',
+      lastIssue: {
+        operation: 'load',
+        code: 'operation_failed',
+        occurredAt: 100,
+      },
+    })
     fail = false
     assert.equal((await store.query({ workspaceId: 'workspace-1' }))[0].id, 'repaired')
     assert.equal(persistence.loadCount, 2)
