@@ -21,7 +21,7 @@
     "test": "npm run test:unit && npm run test:packages",
     "pretest:unit": "npm run build:main",
     "test:unit": "npm run test:unit:core && npm run test:unit:electron-hosts",
-    "test:unit:core": "node --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs",
+    "test:unit:core": "node --experimental-strip-types --test test/*.test.ts test/*.test.mjs test/main/*.test.mjs test/sidebar/*.test.mjs test/daemon/*.test.mjs test/platform/*.test.mjs",
     "test:unit:electron-hosts": "node --test --test-concurrency=1 test/hosts/*.test.mjs",
     "test:daemon-package": "npm --prefix packages/codesurf-daemon test",
     "test:relay": "npm --prefix packages/codesurf-relay test",
