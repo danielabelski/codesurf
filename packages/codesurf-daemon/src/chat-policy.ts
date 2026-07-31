@@ -1,5 +1,6 @@
-import { open } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { constants } from 'node:fs'
+import { lstat, open, realpath } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 
 export const MAX_PERSONA_DOCUMENT_BYTES = 256 * 1024
 export const MAX_PERSONA_COUNT = 128
@@ -62,6 +63,22 @@ export const DEFAULT_PERSONAS: PolicyPersona[] = [
 
 const PERSONA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const TOOL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/ -]*$/
+const PERSONA_OVERLAY_FIELDS = new Set([
+  'id',
+  'name',
+  'description',
+  'systemPrompt',
+  'tools',
+  'icon',
+  'color',
+  'isBuiltin',
+  'defaultNextMode',
+  'defaultBinding',
+  'extends',
+  'skills',
+  'source',
+])
+const PERSONA_BINDING_FIELDS = new Set(['provider', 'model'])
 const WRITE_CAPABLE_TOOLS = new Set(
   ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'apply_patch'].map(normalizeToolName),
 )
@@ -109,6 +126,9 @@ function parseOverlay(value: unknown, index: number): PersonaOverlay | null {
     invalid(`personas[${index}] must be an object`)
   }
   const input = value as Record<string, unknown>
+  for (const field of Object.keys(input)) {
+    if (!PERSONA_OVERLAY_FIELDS.has(field)) invalid(`personas[${index}] contains unknown field ${field}`)
+  }
   const id = validId(input.id, `personas[${index}].id`)
   if (id.startsWith('discovered-')) return null
   const output: PersonaOverlay = { id }
@@ -123,7 +143,11 @@ function parseOverlay(value: unknown, index: number): PersonaOverlay | null {
   }
   for (const [field, maxBytes] of Object.entries(textLimits)) {
     if (Object.hasOwn(input, field)) {
-      ;(output as Record<string, unknown>)[field] = boundedString(input[field], `personas[${index}].${field}`, maxBytes)
+      const text = boundedString(input[field], `personas[${index}].${field}`, maxBytes)
+      if ((field === 'name' || field === 'icon' || field === 'color') && !text.trim()) {
+        invalid(`personas[${index}].${field} must not be empty`)
+      }
+      ;(output as Record<string, unknown>)[field] = text
     }
   }
   if (Object.hasOwn(input, 'tools')) output.tools = parseTools(input.tools, `personas[${index}].tools`)
@@ -134,15 +158,24 @@ function parseOverlay(value: unknown, index: number): PersonaOverlay | null {
   }
   if (Object.hasOwn(input, 'skills')) {
     if (!Array.isArray(input.skills) || input.skills.length > 32) invalid(`personas[${index}].skills is invalid`)
-    output.skills = input.skills.map((skill, skillIndex) =>
-      boundedString(skill, `personas[${index}].skills[${skillIndex}]`, 128).trim(),
-    )
+    const seenSkills = new Set<string>()
+    output.skills = input.skills.map((skill, skillIndex) => {
+      const normalized = boundedString(skill, `personas[${index}].skills[${skillIndex}]`, 128).trim()
+      if (!normalized || seenSkills.has(normalized)) invalid(`personas[${index}].skills contains an empty or duplicate entry`)
+      seenSkills.add(normalized)
+      return normalized
+    })
   }
   if (Object.hasOwn(input, 'defaultBinding')) {
     if (!input.defaultBinding || typeof input.defaultBinding !== 'object' || Array.isArray(input.defaultBinding)) {
       invalid(`personas[${index}].defaultBinding must be an object`)
     }
     const binding = input.defaultBinding as Record<string, unknown>
+    for (const field of Object.keys(binding)) {
+      if (!PERSONA_BINDING_FIELDS.has(field)) {
+        invalid(`personas[${index}].defaultBinding contains unknown field ${field}`)
+      }
+    }
     output.defaultBinding = {
       ...(Object.hasOwn(binding, 'provider')
         ? { provider: boundedString(binding.provider, `personas[${index}].defaultBinding.provider`, 128).trim() }
@@ -206,6 +239,9 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
     const explicitBaseExists = explicitBaseId
       ? overlays.has(explicitBaseId) || builtins.has(explicitBaseId)
       : false
+    if (explicitBaseId && !explicitBaseExists) {
+      invalid(`persona ${id} extends missing persona ${explicitBaseId}`)
+    }
     const base = explicitBaseExists
       ? resolvePersona(explicitBaseId!, [...stack, id])
       : builtin
@@ -216,9 +252,6 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
         ? base.tools
         : []
 
-    if (explicitBaseId && !explicitBaseExists && tools === null) {
-      invalid(`persona ${id} cannot inherit unrestricted tools from a missing base`)
-    }
     if (base) assertNoToolWidening(base.tools, tools, `persona ${id}`)
     if (builtin) assertNoToolWidening(builtin.tools, tools, `built-in persona ${id}`)
 
@@ -253,11 +286,34 @@ export function overlayAuthoritativePersonas(document: unknown): PolicyPersona[]
   ]
 }
 
-async function readBoundedFile(path: string): Promise<string> {
-  const handle = await open(path, 'r')
+function pathIsWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || (!rel.startsWith('..') && !rel.includes(`..${process.platform === 'win32' ? '\\' : '/'}`))
+}
+
+function stableFileTuple(left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>['stat']>>, right: typeof left): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+}
+
+async function readBoundedPersonaFile(workspaceRoot: string): Promise<string> {
+  const canonicalRoot = await realpath(workspaceRoot)
+  const parentPath = join(canonicalRoot, '.codesurf', 'customisation')
+  const canonicalParent = await realpath(parentPath)
+  if (canonicalParent !== parentPath || !pathIsWithin(canonicalRoot, canonicalParent)) {
+    invalid('agents.json parent must be a canonical directory inside the registered workspace')
+  }
+  const path = join(canonicalParent, 'agents.json')
+  const pathInfo = await lstat(path)
+  if (pathInfo.isSymbolicLink() || !pathInfo.isFile()) invalid('agents.json must be a regular non-symlink file')
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
-    const stat = await handle.stat()
-    if (!stat.isFile() || stat.size > MAX_PERSONA_DOCUMENT_BYTES) {
+    const before = await handle.stat()
+    if (!before.isFile() || before.size > MAX_PERSONA_DOCUMENT_BYTES) {
       invalid(`agents.json exceeds ${MAX_PERSONA_DOCUMENT_BYTES} bytes or is not a file`)
     }
     const buffer = Buffer.alloc(MAX_PERSONA_DOCUMENT_BYTES + 1)
@@ -268,6 +324,18 @@ async function readBoundedFile(path: string): Promise<string> {
       offset += bytesRead
     }
     if (offset > MAX_PERSONA_DOCUMENT_BYTES) invalid(`agents.json exceeds ${MAX_PERSONA_DOCUMENT_BYTES} bytes`)
+    const after = await handle.stat()
+    const currentPath = await realpath(path)
+    const currentInfo = await lstat(path)
+    if (
+      currentPath !== path
+      || currentInfo.isSymbolicLink()
+      || currentInfo.dev !== after.dev
+      || currentInfo.ino !== after.ino
+      || !stableFileTuple(before, after)
+    ) {
+      invalid('agents.json changed while it was being verified')
+    }
     return buffer.subarray(0, offset).toString('utf8')
   } finally {
     await handle.close()
@@ -288,7 +356,7 @@ export async function resolveAuthoritativePersona(options: {
 
   let personas: PolicyPersona[]
   try {
-    const raw = await readBoundedFile(join(workspaceRoot, '.codesurf', 'customisation', 'agents.json'))
+    const raw = await readBoundedPersonaFile(workspaceRoot)
     personas = overlayAuthoritativePersonas(JSON.parse(raw))
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -308,29 +376,36 @@ export async function listAuthoritativePersonas(workspaceRoot: unknown): Promise
   if (!root) return DEFAULT_PERSONAS.map(persona => ({ ...persona }))
   try {
     return overlayAuthoritativePersonas(
-      JSON.parse(await readBoundedFile(join(root, '.codesurf', 'customisation', 'agents.json'))),
+      JSON.parse(await readBoundedPersonaFile(root)),
     )
   } catch {
     return DEFAULT_PERSONAS.map(persona => ({ ...persona }))
   }
 }
 
-export function bindChatRequestToWorkspace<T extends Record<string, unknown>>(
+export async function bindChatRequestToWorkspace<T extends Record<string, unknown>>(
   request: T,
   workspace: { id: string, path: string },
-): T & { workspaceId: string, workspaceDir: string } {
+): Promise<T & { workspaceId: string, workspaceDir: string }> {
   const requestedId = typeof request.workspaceId === 'string' ? request.workspaceId.trim() : ''
   if (!requestedId) throw new ChatPolicyError('CHAT_WORKSPACE_REQUIRED', 'workspaceId is required')
   if (requestedId !== workspace.id) {
     throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${requestedId}`)
   }
-  const canonicalRoot = resolve(String(workspace.path ?? '').trim())
-  if (!workspace.path || !canonicalRoot) {
+  let canonicalRoot: string
+  try {
+    canonicalRoot = await realpath(resolve(String(workspace.path ?? '').trim()))
+  } catch {
     throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace ${requestedId} has no registered root`)
   }
-  const suppliedRoot = typeof request.workspaceDir === 'string' && request.workspaceDir.trim()
-    ? resolve(request.workspaceDir.trim())
-    : null
+  let suppliedRoot: string | null = null
+  if (typeof request.workspaceDir === 'string' && request.workspaceDir.trim()) {
+    try {
+      suppliedRoot = await realpath(resolve(request.workspaceDir.trim()))
+    } catch {
+      throw new ChatPolicyError('CHAT_WORKSPACE_MISMATCH', 'workspaceDir does not match the registered workspace root')
+    }
+  }
   if (suppliedRoot && suppliedRoot !== canonicalRoot) {
     throw new ChatPolicyError('CHAT_WORKSPACE_MISMATCH', 'workspaceDir does not match the registered workspace root')
   }

@@ -45,9 +45,9 @@ export declare function listAuthoritativePersonas(workspaceRoot: unknown): Promi
 export declare function bindChatRequestToWorkspace<T extends Record<string, unknown>>(request: T, workspace: {
     id: string;
     path: string;
-}): T & {
+}): Promise<T & {
     workspaceId: string;
     workspaceDir: string;
-};
+}>;
 export declare function assertProviderPersonaEnforceable(providerValue: unknown, persona: PolicyPersona | null): void;
 export declare function codexExecPermissionArgs(modeValue: unknown): string[];
