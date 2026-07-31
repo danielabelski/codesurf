@@ -5,6 +5,8 @@ import { join } from 'path'
 import { CODESURF_HOME } from '../../paths'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
 import { assertTileScope } from '../auth'
+import { assertSafePathSegment } from '../../security/pathSegments'
+import { resolvePeerWorkspaceScope } from '../peer-scope.ts'
 
 export interface MCPKanbanColumn {
   id: string
@@ -55,32 +57,65 @@ async function listWorkspaceIds(): Promise<string[]> {
   try {
     const raw = await fs.readFile(join(CODESURF_HOME, 'config.json'), 'utf8')
     const cfg = JSON.parse(raw) as { workspaces?: Array<{ id: string }> }
-    const ids = (cfg.workspaces ?? []).map(ws => ws.id).filter(Boolean)
+    const ids = (cfg.workspaces ?? [])
+      .map(ws => ws.id)
+      .filter((id): id is string => {
+        try {
+          assertSafePathSegment(id, 'workspace_id')
+          return true
+        } catch {
+          return false
+        }
+      })
     if (ids.length > 0) return ids
   } catch { /**/ }
 
   try {
     const entries = await fs.readdir(join(CODESURF_HOME, 'workspaces'), { withFileTypes: true })
-    return entries.filter(entry => entry.isDirectory()).map(entry => entry.name)
+    return entries
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .filter((id) => {
+        try {
+          assertSafePathSegment(id, 'workspace_id')
+          return true
+        } catch {
+          return false
+        }
+      })
   } catch {
     return []
   }
 }
 
 export function kanbanStateFile(workspaceId: string, boardTileId: string): string {
-  return join(CODESURF_HOME, 'workspaces', workspaceId, '.codesurf', `kanban-${boardTileId}.json`)
+  const safeWorkspaceId = assertSafePathSegment(workspaceId, 'workspace_id')
+  const safeBoardTileId = assertSafePathSegment(boardTileId, 'board_tile_id')
+  return join(
+    CODESURF_HOME,
+    'workspaces',
+    safeWorkspaceId,
+    '.codesurf',
+    `kanban-${safeBoardTileId}.json`,
+  )
 }
 
 export async function resolveKanbanTarget(boardTileId?: string, workspaceId?: string): Promise<ResolvedKanbanTarget> {
-  const workspaceIds = workspaceId ? [workspaceId] : await listWorkspaceIds()
+  const safeBoardTileId = boardTileId
+    ? assertSafePathSegment(boardTileId, 'board_tile_id')
+    : undefined
+  const safeWorkspaceId = workspaceId
+    ? assertSafePathSegment(workspaceId, 'workspace_id')
+    : undefined
+  const workspaceIds = safeWorkspaceId ? [safeWorkspaceId] : await listWorkspaceIds()
   const candidates: Array<{ workspaceId: string; boardTileId: string; path: string }> = []
 
   for (const wsId of workspaceIds) {
-    if (boardTileId) {
-      const path = kanbanStateFile(wsId, boardTileId)
+    if (safeBoardTileId) {
+      const path = kanbanStateFile(wsId, safeBoardTileId)
       try {
         await fs.access(path)
-        candidates.push({ workspaceId: wsId, boardTileId, path })
+        candidates.push({ workspaceId: wsId, boardTileId: safeBoardTileId, path })
       } catch { /**/ }
       continue
     }
@@ -91,13 +126,23 @@ export async function resolveKanbanTarget(boardTileId?: string, workspaceId?: st
       for (const name of entries) {
         const match = /^kanban-(.+)\.json$/.exec(name)
         if (!match) continue
-        candidates.push({ workspaceId: wsId, boardTileId: match[1], path: join(dir, name) })
+        let discoveredBoardTileId: string
+        try {
+          discoveredBoardTileId = assertSafePathSegment(match[1], 'board_tile_id')
+        } catch {
+          continue
+        }
+        candidates.push({
+          workspaceId: wsId,
+          boardTileId: discoveredBoardTileId,
+          path: kanbanStateFile(wsId, discoveredBoardTileId),
+        })
       }
     } catch { /**/ }
   }
 
   if (candidates.length === 0) {
-    throw new Error(boardTileId ? `Kanban board '${boardTileId}' not found` : 'No kanban boards found')
+    throw new Error(safeBoardTileId ? `Kanban board '${safeBoardTileId}' not found` : 'No kanban boards found')
   }
   if (candidates.length > 1) {
     throw new Error(`Multiple kanban boards found; specify board_tile_id (${candidates.map(c => c.boardTileId).join(', ')})`)
@@ -146,6 +191,7 @@ export const KANBAN_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         card_id:  { type: 'string', description: 'Your card ID — available as $CARD_ID' },
         summary:  { type: 'string', description: 'What was done' },
         next_col: { type: 'string', description: 'Override target column id (optional)' }
@@ -159,6 +205,7 @@ export const KANBAN_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         card_id: { type: 'string' },
         note:    { type: 'string', description: 'Progress update visible on the canvas' },
         status:  { type: 'string', enum: ['working', 'blocked', 'waiting'], description: 'Optional status' }
@@ -172,6 +219,7 @@ export const KANBAN_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         card_id: { type: 'string' },
         reason:  { type: 'string' }
       },
@@ -184,6 +232,7 @@ export const KANBAN_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         card_id: { type: 'string' },
         event:   { type: 'string' },
         payload: { type: 'object' }
@@ -197,6 +246,7 @@ export const KANBAN_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         card_id:  { type: 'string' },
         question: { type: 'string', description: 'What do you need from the human?' },
         options:  { type: 'array', items: { type: 'string' }, description: 'Optional choices to present' }
@@ -355,8 +405,9 @@ export async function handleKanbanTool(
     return null
   }
 
-  const cardId = args.card_id as string
+  const cardId = asString(args.card_id) ?? ''
   const { pushSSE, sendToRenderer } = ctx
+  let cardWorkspaceId = ''
 
   // card_complete/card_update/card_error/canvas_event/request_input all take
   // card_id == $CARD_ID, i.e. the caller's own tile. A tile-scoped token must
@@ -365,16 +416,42 @@ export async function handleKanbanTool(
     name === 'card_complete' || name === 'card_update' || name === 'card_error' ||
     name === 'canvas_event' || name === 'request_input'
   ) {
-    const scopeError = assertTileScope(ctx.principal, cardId)
+    if (!cardId) return 'Missing card_id'
+    try {
+      assertSafePathSegment(cardId, 'card_id')
+    } catch {
+      return 'Invalid card_id'
+    }
+    const requestedWorkspaceId = asString(args.workspace_id)
+    const workspaceId = ctx.principal.kind === 'tile'
+      ? ctx.principal.workspaceId
+      : requestedWorkspaceId
+    if (!workspaceId) return 'Missing workspace_id'
+    try {
+      assertSafePathSegment(workspaceId, 'workspace_id')
+    } catch {
+      return 'Invalid workspace_id'
+    }
+    const scopeError = assertTileScope(
+      ctx.principal,
+      requestedWorkspaceId ?? workspaceId,
+      cardId,
+    )
     if (scopeError) return scopeError
+    cardWorkspaceId = workspaceId
   }
 
   if (name === 'card_complete') {
-    const payload = { cardId, summary: args.summary, nextCol: args.next_col }
-    pushSSE(cardId, 'card_complete', payload)
+    const payload = {
+      workspaceId: cardWorkspaceId,
+      cardId,
+      summary: args.summary,
+      nextCol: args.next_col,
+    }
+    pushSSE(cardWorkspaceId, cardId, 'card_complete', payload)
     sendToRenderer('card_complete', payload)
     bus.publish({
-      channel: `card:${cardId}`,
+      channel: `card:${cardWorkspaceId}:${cardId}`,
       type: 'task',
       source: 'mcp',
       payload: { cardId, summary: args.summary, nextCol: args.next_col, action: 'complete' }
@@ -383,11 +460,16 @@ export async function handleKanbanTool(
   }
 
   if (name === 'card_update') {
-    const payload = { cardId, note: args.note, status: args.status }
-    pushSSE(cardId, 'card_update', payload)
+    const payload = {
+      workspaceId: cardWorkspaceId,
+      cardId,
+      note: args.note,
+      status: args.status,
+    }
+    pushSSE(cardWorkspaceId, cardId, 'card_update', payload)
     sendToRenderer('card_update', payload)
     bus.publish({
-      channel: `card:${cardId}`,
+      channel: `card:${cardWorkspaceId}:${cardId}`,
       type: 'progress',
       source: 'mcp',
       payload: { cardId, note: args.note, status: args.status }
@@ -396,11 +478,11 @@ export async function handleKanbanTool(
   }
 
   if (name === 'card_error') {
-    const payload = { cardId, reason: args.reason }
-    pushSSE(cardId, 'card_error', payload)
+    const payload = { workspaceId: cardWorkspaceId, cardId, reason: args.reason }
+    pushSSE(cardWorkspaceId, cardId, 'card_error', payload)
     sendToRenderer('card_error', payload)
     bus.publish({
-      channel: `card:${cardId}`,
+      channel: `card:${cardWorkspaceId}:${cardId}`,
       type: 'notification',
       source: 'mcp',
       payload: { cardId, reason: args.reason, level: 'error' }
@@ -409,11 +491,20 @@ export async function handleKanbanTool(
   }
 
   if (name === 'canvas_event') {
-    const payload = { cardId, event: args.event, data: args.payload ?? {} }
-    pushSSE(cardId, args.event as string, payload)
+    if (
+      typeof args.event !== 'string'
+      || !/^[A-Za-z0-9_.:-]{1,64}$/.test(args.event)
+    ) return 'Invalid event name'
+    const payload = {
+      workspaceId: cardWorkspaceId,
+      cardId,
+      event: args.event,
+      data: args.payload ?? {},
+    }
+    pushSSE(cardWorkspaceId, cardId, args.event as string, payload)
     sendToRenderer('canvas_event', payload)
     bus.publish({
-      channel: `card:${cardId}`,
+      channel: `card:${cardWorkspaceId}:${cardId}`,
       type: 'data',
       source: 'mcp',
       payload: { cardId, event: args.event, data: args.payload ?? {} }
@@ -422,11 +513,16 @@ export async function handleKanbanTool(
   }
 
   if (name === 'request_input') {
-    const payload = { cardId, question: args.question, options: args.options ?? [] }
-    pushSSE(cardId, 'input_requested', payload)
+    const payload = {
+      workspaceId: cardWorkspaceId,
+      cardId,
+      question: args.question,
+      options: args.options ?? [],
+    }
+    pushSSE(cardWorkspaceId, cardId, 'input_requested', payload)
     sendToRenderer('input_requested', payload)
     bus.publish({
-      channel: `card:${cardId}`,
+      channel: `card:${cardWorkspaceId}:${cardId}`,
       type: 'ask',
       source: 'mcp',
       payload: { cardId, question: args.question, options: args.options ?? [] }
@@ -436,9 +532,10 @@ export async function handleKanbanTool(
 
   if (name.startsWith('kanban_')) {
     const boardTileId = asString(args.board_tile_id)
-    const workspaceId = asString(args.workspace_id)
+    const workspaceScope = resolvePeerWorkspaceScope(ctx.principal, args.workspace_id)
+    if (!workspaceScope.ok) return workspaceScope.error
     try {
-      const target = await resolveKanbanTarget(boardTileId, workspaceId)
+      const target = await resolveKanbanTarget(boardTileId, workspaceScope.workspaceId)
       const state: MCPKanbanState = {
         columns: [...target.state.columns],
         cards: [...target.state.cards],
