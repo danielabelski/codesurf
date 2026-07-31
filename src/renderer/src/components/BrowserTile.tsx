@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, ArrowLeft, ArrowRight, Crosshair, Globe, Home, Monitor, RotateCcw, RotateCw, Smartphone } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
-import { dispatchOpenLink } from '../utils/links'
 import { dispatchCreateTile, dispatchOpenChatSurface } from '../utils/appLaunchRequests'
 import {
   appendBrowserEvidence,
@@ -15,27 +14,19 @@ import {
   type BrowserEvidenceInput,
   type BrowserEvidenceViewport,
 } from '../../../shared/browserEvidence'
-import { coerceBusEventType } from '../../../shared/busEventTypes'
 import {
   HOMEPAGE,
-  DESKTOP_UA,
-  MOBILE_UA,
-  getWebviewParkingRoot,
-  getOrCreateManagedWebview,
-  scheduleManagedWebviewDisposal,
-  safeLoadURL,
-  createBusBridgeScript,
   createClusoInjectScript,
-  createClusoSetActiveScript,
-  isEmbeddedPreviewWebview,
-  isAllowedBrowserUrl,
-  shouldInjectHostBridge,
   normalizeUrl,
+  safeLoadURL,
 } from './browser/webviewManager'
 import { ToolbarButton } from './browser/ToolbarButton'
 import { BrowserEvidenceDrawer } from './browser/BrowserEvidenceDrawer'
 import type { BrowserEvidenceFilter } from './browser/browserEvidenceViewModel'
-import { isElectronHost } from '../platform'
+import {
+  useBrowserWebviewLifecycle,
+  type BrowserNavigationState,
+} from './browser/useBrowserWebviewLifecycle'
 import clusoEmbedJs from '../assets/cluso/cluso-embed.js?raw'
 import clusoEmbedCss from '../assets/cluso/cluso-embed.css?raw'
 
@@ -74,14 +65,11 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const browserBackground = theme.surface.panel
   const browserToolbarBackground = theme.surface.titlebar
   const browserBorder = theme.border.default
-  const browserBackgroundRef = useRef(browserBackground)
-  browserBackgroundRef.current = browserBackground
   const wvContainerRef = useRef<HTMLDivElement>(null)
   const wvRef = useRef<Electron.WebviewTag | null>(null)
   const wvReadyRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
   const mountedRef = useRef(true)
-  const bridgeTokenRef = useRef(crypto.randomUUID())
   const clusoToggleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const peerRelayUnsubscribeRef = useRef<(() => void) | null>(null)
   const mcpCommandUnsubscribeRef = useRef<(() => void) | null>(null)
@@ -108,9 +96,8 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [mode, setMode] = useState<BrowserMode>('desktop')
-  const [isClusoReady, setIsClusoReady] = useState(false)
-  const [isClusoActive, setIsClusoActive] = useState(false)
-  const [isEmbeddedPreview, setIsEmbeddedPreview] = useState(() => !isElectronHost())
+  const [, setIsClusoReady] = useState(false)
+  const [, setIsClusoActive] = useState(false)
   const [isToolbarHovered, setIsToolbarHovered] = useState(false)
   const [isAddressFocused, setIsAddressFocused] = useState(false)
   const [stateLoaded, setStateLoaded] = useState(!workspaceId)
@@ -129,7 +116,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   sizeRef.current = { width, height }
 
   const getCurrentViewport = useCallback((): BrowserEvidenceViewport | undefined => {
-    const rect = wvContainerRef.current?.getBoundingClientRect()
+    const rect = managedContainerRef.current?.getBoundingClientRect()
     const viewportWidth = rect && rect.width > 0 ? rect.width : sizeRef.current.width
     const viewportHeight = rect && rect.height > 0 ? rect.height : sizeRef.current.height
     const roundedWidth = Math.max(1, Math.round(viewportWidth))
@@ -210,6 +197,49 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       },
     )
   }, [createCurrentEvidenceSnapshot, tileId])
+
+  const handleWebviewNavigation = useCallback((navigation: BrowserNavigationState) => {
+    if (navigation.url) {
+      setCurrentUrl(navigation.url)
+      if (document.activeElement !== inputRef.current) {
+        setAddressBar(navigation.url)
+      }
+    }
+    setPageTitle(navigation.title)
+    setCanGoBack(navigation.canGoBack)
+    setCanGoForward(navigation.canGoForward)
+    setIsLoading(navigation.isLoading)
+  }, [])
+
+  const {
+    containerRef: managedContainerRef,
+    isEmbeddedPreview,
+    isClusoReady: managedClusoReady,
+    isClusoActive: managedClusoActive,
+    loadUrl: loadManagedUrl,
+    goBack: goBackManaged,
+    goForward: goForwardManaged,
+    reload: reloadManaged,
+    stop: stopManaged,
+    setMode: setManagedMode,
+    toggleCluso,
+  } = useBrowserWebviewLifecycle({
+    tileId,
+    initialUrl: initialSrc.current,
+    stateLoaded,
+    background: browserBackground,
+    surface: {
+      isVisible,
+      isToolbarHovered,
+      isAddressFocused,
+      isInteracting: Boolean(isInteracting),
+    },
+    events: {
+      onNavigation: handleWebviewNavigation,
+      onLoadingChange: setIsLoading,
+      recordEvidence: recordBrowserEvidence,
+    },
+  })
 
   const browserEvidenceSummary = summarizeBrowserEvidence(browserEvidence)
   const browserPageHealth = createBrowserPageHealth(browserEvidenceSummary, isLoading)
@@ -424,331 +454,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     if (mountedRef.current && wvReadyRef.current) injectCluso()
   }, [injectCluso])
 
-  // Create or reattach the webview imperatively so page state survives view switches
-  useEffect(() => {
-    // Wait for persisted tile state before creating a fresh webview, otherwise
-    // remounts can briefly boot to HOMEPAGE and then navigate back.
-    if (!stateLoaded) return
-
-    const container = wvContainerRef.current
-    if (!container) return
-
-    const { webview, reused } = getOrCreateManagedWebview(tileId, initialSrc.current, browserBackground)
-    const embeddedPreview = isEmbeddedPreviewWebview(webview)
-
-    wvRef.current = webview
-    wvReadyRef.current = false
-    setIsEmbeddedPreview(embeddedPreview)
-
-    // Sync webview background with current theme so it doesn't flash white
-    webview.style.background = browserBackground
-
-    // ---- helpers --------------------------------------------------------
-    const updateNav = () => {
-      if (!wvRef.current || !wvReadyRef.current) return
-      try {
-        const url = wvRef.current.getURL()
-        if (url) {
-          setCurrentUrlRef.current(url)
-          if (document.activeElement !== inputRef.current) {
-            setAddressBarRef.current(url)
-          }
-          window.electron?.bus?.publish(
-            `tile:${tileId}`,
-            'activity',
-            `browser:${tileId}`,
-            { kind: 'navigation', event: 'navigated', url }
-          )
-        }
-        const title = wvRef.current.getTitle?.() || ''
-        setPageTitleRef.current(title)
-        setCanGoBackRef.current(wvRef.current.canGoBack())
-        setCanGoForwardRef.current(wvRef.current.canGoForward())
-        setIsLoadingRef.current(wvRef.current.isLoading())
-      } catch {
-        wvReadyRef.current = false
-      }
-    }
-
-    // ---- dark mode background injection -----------------------------------
-    // Inject a low-specificity dark background into the webview content so
-    // pages that don't set their own background (about:blank, loading states)
-    // don't flash white.  Real pages override this with their own styles.
-    const injectDarkBackground = () => {
-      if (!webview || !wvReadyRef.current) return
-      const bg = browserBackgroundRef.current
-      webview.insertCSS(
-        `html:not([style*="background"]):not([class]) { background-color: ${bg} !important; }` +
-        `body:not([style*="background"]):not([class]) { background-color: ${bg} !important; }`
-      ).catch(() => { /* webview may not be ready yet */ })
-    }
-
-    // ---- event handlers -------------------------------------------------
-    const onDomReady = () => {
-      wvReadyRef.current = true
-      if (!embeddedPreview) injectDarkBackground()
-      updateNav()
-    }
-
-    const onStartLoad = () => setIsLoadingRef.current(true)
-
-    const onStopLoad = () => {
-      setIsLoadingRef.current(false)
-      updateNav()
-      // Reset cluso state and re-inject after each page load
-      setIsClusoReadyRef.current(false)
-      setIsClusoActiveRef.current(false)
-      if (embeddedPreview) return
-      injectCluso()
-      // Inject bus bridge so webview content can publish to the EventBus
-      if (shouldInjectHostBridge(webview.getURL())) {
-        executeInWebview(createBusBridgeScript(tileId, bridgeTokenRef.current))
-          .catch(err => console.warn('[BrowserTile] Bus bridge injection failed:', err))
-      }
-    }
-
-    const onFrameFinishLoad = (e: Event) => {
-      const ev = e as Event & { isMainFrame?: boolean }
-      if (ev.isMainFrame === false) return
-      updateNav()
-      recordBrowserEvidence({
-        kind: 'lifecycle',
-        message: 'Frame finished loading',
-        url: webview.getURL(),
-        details: {
-          title: webview.getTitle?.() || '',
-          isLoading: webview.isLoading(),
-        },
-      })
-    }
-
-    const onFailLoad = (e: Event) => {
-      setIsLoadingRef.current(false)
-      setIsClusoReadyRef.current(false)
-      setIsClusoActiveRef.current(false)
-
-      const ev = e as Event & {
-        errorCode?: number
-        errorDescription?: string
-        validatedURL?: string
-        url?: string
-        isMainFrame?: boolean
-      }
-      recordBrowserEvidence({
-        kind: 'load-failure',
-        message: ev.errorDescription || `Load failed${typeof ev.errorCode === 'number' ? ` (${ev.errorCode})` : ''}`,
-        url: ev.validatedURL || ev.url || webview.getURL(),
-        errorCode: ev.errorCode,
-        details: typeof ev.isMainFrame === 'boolean' ? { isMainFrame: ev.isMainFrame } : undefined,
-      })
-    }
-
-    const onNavigate = () => updateNav()
-    const onNavigateInPage = () => updateNav()
-    const onWillNavigate = (e: Event) => {
-      const ev = e as Event & { url?: string }
-      if (!ev.url || isAllowedBrowserUrl(ev.url)) return
-      e.preventDefault()
-      void webview.loadURL(HOMEPAGE)
-    }
-
-    // The `new-window` DOM webview event was removed in Electron 22.
-    // window.open / target=_blank is now intercepted in the main process via
-    // setWindowOpenHandler and forwarded here as an IPC event (webview:new-window).
-    // The subscription is set up outside this effect (see onNewWindowCleanup below).
-
-    // ---- console message handler (bus bridge + cluso) -------------------
-    const onConsoleMessage = (e: Electron.ConsoleMessageEvent) => {
-      const consoleEvent = e as Electron.ConsoleMessageEvent & {
-        level?: string | number
-        sourceId?: string
-        line?: number
-        column?: number
-      }
-      const { message } = consoleEvent
-
-      if (message.startsWith('{"__contex"')) {
-        if (!shouldInjectHostBridge(webview.getURL())) return
-        try {
-          const data = JSON.parse(message) as {
-            __contex?: boolean
-            token?: string
-            type?: string
-            channel?: string
-            payload?: Record<string, unknown>
-          }
-          if (
-            data.__contex
-            && data.token === bridgeTokenRef.current
-            && (data.channel === `browser:${tileId}` || data.channel === `tile:${tileId}`)
-          ) {
-            const eventType = coerceBusEventType(data.type)
-            const payload = data.payload && typeof data.payload === 'object' ? data.payload : {}
-            window.electron?.bus?.publish(
-              `browser:${tileId}`,
-              eventType,
-              `browser:${tileId}`,
-              eventType === 'data' && data.type && data.type !== 'data'
-                ? { ...payload, eventType: data.type }
-                : payload,
-            )
-          }
-        } catch { /* not valid JSON — ignore */ }
-        return
-      }
-
-      if (!message.startsWith('__CLUSO_')) {
-        recordBrowserEvidence({
-          kind: 'console',
-          message,
-          level: consoleEvent.level,
-          source: consoleEvent.sourceId,
-          line: consoleEvent.line,
-          column: consoleEvent.column,
-          url: webview.getURL(),
-        })
-        return
-      }
-
-      if (message.startsWith('__CLUSO_READY__')) {
-        setIsClusoReadyRef.current(true)
-        const payloadText = message.startsWith('__CLUSO_READY__:')
-          ? message.slice('__CLUSO_READY__:'.length)
-          : null
-        if (payloadText) {
-          try {
-            const payload = JSON.parse(payloadText) as { active?: boolean }
-            if (typeof payload.active === 'boolean') {
-              setIsClusoActiveRef.current(payload.active)
-            }
-          } catch { /* ignore malformed */ }
-        }
-        console.log('[BrowserTile] Cluso ready')
-        return
-      }
-
-      if (message.startsWith('__CLUSO_ACTIVE__:')) {
-        try {
-          const payload = JSON.parse(message.slice('__CLUSO_ACTIVE__:'.length)) as { active?: boolean }
-          setIsClusoActiveRef.current(Boolean(payload.active))
-        } catch { /* ignore */ }
-        return
-      }
-
-      if (message.startsWith('__CLUSO_ERROR__')) {
-        console.error('[BrowserTile] Cluso error:', message)
-        return
-      }
-    }
-
-    // ---- register -------------------------------------------------------
-    webview.addEventListener('dom-ready', onDomReady)
-    webview.addEventListener('did-start-loading', onStartLoad)
-    webview.addEventListener('did-stop-loading', onStopLoad)
-    webview.addEventListener('did-frame-finish-load', onFrameFinishLoad)
-    webview.addEventListener('did-fail-load', onFailLoad)
-    webview.addEventListener('will-navigate', onWillNavigate)
-    webview.addEventListener('did-navigate', onNavigate)
-    webview.addEventListener('did-navigate-in-page', onNavigateInPage)
-    // NOTE: 'new-window' DOM event is removed in Electron 22+; handled via IPC below.
-    webview.addEventListener('console-message', onConsoleMessage)
-
-    // Sync Chrome cookies into this tile's session before the webview starts loading.
-    // Only for fresh webviews — reused ones already have cookies from their previous session.
-    const attachWebview = () => {
-      if (!mountedRef.current || wvRef.current !== webview) return
-      if (!container.contains(webview)) container.appendChild(webview)
-    }
-
-    if (!reused && !container.contains(webview)) {
-      // Attempt Chrome cookie sync (async, best-effort)
-      window.electron?.settings?.get().then((settings: any) => {
-        if (!settings?.chromeSyncEnabled || !settings?.chromeSyncProfileDir) {
-          attachWebview()
-          return
-        }
-        const partition = `persist:browser-tile-${tileId}`
-        window.electron?.chromeSync?.syncCookies(settings.chromeSyncProfileDir, partition)
-          .then(() => attachWebview())
-          .catch(() => attachWebview())
-      }).catch(() => attachWebview())
-    } else if (!container.contains(webview)) {
-      container.appendChild(webview)
-    }
-
-    if (reused && !embeddedPreview) {
-      requestAnimationFrame(() => {
-        if (!mountedRef.current || wvRef.current !== webview) return
-        wvReadyRef.current = true
-        updateNav()
-        // Replayed webviews do not emit a fresh page-load cycle, so restore the
-        // host-side bridge state explicitly on reattach.
-        // Ensure assets are available before injecting — they load async from disk
-        const tryInject = (attempt: number) => {
-          const { js, css } = clusoAssetsRef.current
-          if (js && css) {
-            injectCluso()
-          } else if (attempt < 20 && mountedRef.current) {
-            setTimeout(() => tryInject(attempt + 1), 100)
-          }
-        }
-        tryInject(0)
-        // Reused webviews may not be re-attached to the DOM on this rAF tick yet,
-        // so getURL() (→ getWebContentsId) can throw. Mirror updateNav()'s guard:
-        // skip silently — the bus bridge reinjects on the next dom-ready/navigate.
-        let reattachUrl: string | null = null
-        try {
-          reattachUrl = webview.getURL()
-        } catch {
-          reattachUrl = null
-        }
-        if (reattachUrl && shouldInjectHostBridge(reattachUrl)) {
-          executeInWebview(createBusBridgeScript(tileId, bridgeTokenRef.current))
-            .catch(err => console.warn('[BrowserTile] Bus bridge reinjection failed:', err))
-        }
-      })
-    }
-
-    return () => {
-      webview.removeEventListener('dom-ready', onDomReady)
-      webview.removeEventListener('did-start-loading', onStartLoad)
-      webview.removeEventListener('did-stop-loading', onStopLoad)
-      webview.removeEventListener('did-frame-finish-load', onFrameFinishLoad)
-      webview.removeEventListener('did-fail-load', onFailLoad)
-      webview.removeEventListener('will-navigate', onWillNavigate)
-      webview.removeEventListener('did-navigate', onNavigate)
-      webview.removeEventListener('did-navigate-in-page', onNavigateInPage)
-      // 'new-window' DOM listener was removed — cleanup handled by onNewWindowCleanup effect
-      webview.removeEventListener('console-message', onConsoleMessage)
-      // Park the live webview offscreen instead of detaching it outright.
-      // Reusing a parked guest preserves page/session state across view switches.
-      const parkingRoot = getWebviewParkingRoot()
-      if (container.contains(webview) || webview.parentElement !== parkingRoot) {
-        parkingRoot.appendChild(webview)
-      }
-      wvRef.current = null
-      wvReadyRef.current = false
-      scheduleManagedWebviewDisposal(tileId, webview)
-    }
-  }, [tileId, injectCluso, recordBrowserEvidence, stateLoaded])
-
-  // Handle window.open / target=_blank from the guest webview.
-  // The `new-window` DOM event was removed in Electron 22; the main process now
-  // intercepts via setWindowOpenHandler and forwards via 'webview:new-window' IPC.
-  // This effect is stable (no resize deps) so it never triggers a webview remount.
-  useEffect(() => {
-    const unsubscribe = window.electron?.browserTile?.onNewWindow?.((evt: { url: string }) => {
-      if (evt.url) void dispatchOpenLink(evt.url)
-    })
-    return () => { unsubscribe?.() }
-  }, [])
-
-  // Keep webview background in sync with theme (avoids white flash on theme change)
-  useEffect(() => {
-    const webview = wvRef.current
-    if (webview) webview.style.background = browserBackground
-  }, [browserBackground])
-
   // Navigate when initialUrl prop changes (e.g. opened from sidebar)
   const prevInitialUrl = useRef(startUrl)
   useEffect(() => {
@@ -757,11 +462,9 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       prevInitialUrl.current = next
       setAddressBar(next)
       setCurrentUrl(next)
-      if (wvReadyRef.current && wvRef.current) {
-        safeLoadURL(wvRef.current, next)
-      }
+      loadManagedUrl(next)
     }
-  }, [initialUrl])
+  }, [initialUrl, loadManagedUrl])
 
   // Electron webviews are their own compositor surface. During drag/resize
   // interactions, hiding the surface is more reliable than pointer-events:none
@@ -789,27 +492,17 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     setAddressBar(next)
     setCurrentUrl(next)
     setIsLoading(true)
-    if (wvReadyRef.current && wvRef.current) safeLoadURL(wvRef.current, next)
-  }, [])
+    loadManagedUrl(next)
+  }, [loadManagedUrl])
 
-  const goBack = useCallback(() => {
-    if (wvReadyRef.current && wvRef.current) wvRef.current.goBack()
-  }, [])
-
-  const goForward = useCallback(() => {
-    if (wvReadyRef.current && wvRef.current) wvRef.current.goForward()
-  }, [])
+  const goBack = goBackManaged
+  const goForward = goForwardManaged
 
   const reload = useCallback(() => {
-    if (wvReadyRef.current && wvRef.current) {
-      setIsLoading(true)
-      wvRef.current.reload()
-    }
-  }, [])
+    if (reloadManaged()) setIsLoading(true)
+  }, [reloadManaged])
 
-  const stop = useCallback(() => {
-    if (wvReadyRef.current && wvRef.current) wvRef.current.stop()
-  }, [])
+  const stop = stopManaged
 
   const goHome = useCallback(() => navigate(HOMEPAGE), [navigate])
 
@@ -817,11 +510,8 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const switchMode = useCallback((next: BrowserMode) => {
     if (isEmbeddedPreview) return
     setMode(next)
-    if (wvReadyRef.current && wvRef.current) {
-      wvRef.current.setUserAgent(next === 'mobile' ? MOBILE_UA : DESKTOP_UA)
-      wvRef.current.reload()
-    }
-  }, [isEmbeddedPreview])
+    setManagedMode(next)
+  }, [isEmbeddedPreview, setManagedMode])
 
   const captureEvidenceSnapshot = useCallback(() => {
     publishEvidenceSnapshot('user-capture')
@@ -906,47 +596,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       }
     }
   }, [tileId, navigate, reload, goBack, goForward, switchMode, publishEvidenceSnapshot])
-
-  // Toggle cluso element selector.
-  // Uses a retry loop outside the webview (via setTimeout) so that:
-  //  - the attempts counter always increments
-  //  - the timer is cleaned up if the component unmounts mid-polling
-  const handleToggleCluso = useCallback(() => {
-    if (isEmbeddedPreview) return
-    const MAX_ATTEMPTS = 30
-    const RETRY_DELAY_MS = 100
-    const nextActive = !isClusoActive
-    const toggleScript = createClusoSetActiveScript(nextActive)
-
-    const tryToggle = (attempt: number) => {
-      const webview = wvRef.current
-      if (!webview || !wvReadyRef.current || !mountedRef.current) return
-
-      executeInWebview(toggleScript).then((result: unknown) => {
-        const status = typeof result === 'string' ? result : String(result ?? '')
-        if ((status === '__CLUSO_NOT_READY__' || status === '__CLUSO_PENDING__') && attempt < MAX_ATTEMPTS && mountedRef.current) {
-          clusoToggleTimerRef.current = setTimeout(() => tryToggle(attempt + 1), RETRY_DELAY_MS)
-          return
-        }
-
-        if (status === '__CLUSO_TOGGLED__') {
-          setIsClusoActiveRef.current(nextActive)
-          return
-        }
-
-        if (status.startsWith('__CLUSO_TOGGLE_ERROR__')) {
-          console.error('[BrowserTile] Failed to toggle Cluso:', status)
-        }
-      }).catch((err: unknown) => {
-        console.error('[BrowserTile] Failed to toggle Cluso:', err)
-      })
-    }
-
-    // If the page loaded before the embed assets were ready, injection may not
-    // have happened yet. Retry it here before polling for the host bridge.
-    if (!isClusoReady) injectCluso()
-    tryToggle(0)
-  }, [injectCluso, executeInWebview, isClusoReady, isClusoActive, isEmbeddedPreview])
 
   const focusAddressInput = useCallback(() => {
     requestAnimationFrame(() => {
@@ -1091,10 +740,10 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
             </ToolbarButton>
             <ToolbarButton
               label="Cluso"
-              title={isClusoActive ? 'Finish selection' : isClusoReady ? 'Select elements for chat context' : 'Load selector'}
-              active={isClusoActive}
-              disabled={!isClusoReady && !currentUrl}
-              onClick={handleToggleCluso}
+              title={managedClusoActive ? 'Finish selection' : managedClusoReady ? 'Select elements for chat context' : 'Load selector'}
+              active={managedClusoActive}
+              disabled={!managedClusoReady && !currentUrl}
+              onClick={toggleCluso}
             >
               <Crosshair size={12} />
             </ToolbarButton>
@@ -1203,7 +852,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
       {/* Webview container — starts below toolbar (or fills entire tile when navbar hidden) */}
       <div
-        ref={wvContainerRef}
+        ref={managedContainerRef}
         style={{ position: 'absolute', top: hideNavbar ? 0 : 34, left: 0, right: 0, bottom: 0, zIndex: 1, background: browserBackground }}
       />
 
