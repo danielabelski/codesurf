@@ -1,5 +1,13 @@
 import { bus } from '../../event-bus'
 import type { McpToolContext, McpToolSchema } from '../types'
+import { resolvePeerWorkspaceScope } from '../peer-scope.ts'
+
+const workspaceProperty = {
+  workspace_id: {
+    type: 'string',
+    description: 'Workspace ID (required for global-token callers)',
+  },
+}
 
 export const BUS_TOOLS: McpToolSchema[] = [
   {
@@ -8,6 +16,7 @@ export const BUS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         channel: { type: 'string', description: 'Channel to publish to (e.g. tile:abc123, task:xyz)' },
         status: { type: 'string', description: 'Current status text' },
         percent: { type: 'number', description: 'Progress 0-100 (optional)' },
@@ -22,6 +31,7 @@ export const BUS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         channel: { type: 'string', description: 'Channel to publish to' },
         message: { type: 'string', description: 'Activity message' },
         level: { type: 'string', enum: ['info', 'warn', 'error', 'success'], description: 'Severity level' }
@@ -35,6 +45,7 @@ export const BUS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         channel: { type: 'string', description: 'Channel to publish to' },
         title: { type: 'string' },
         description: { type: 'string' },
@@ -49,6 +60,7 @@ export const BUS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         channel: { type: 'string' },
         task_id: { type: 'string' },
         status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'failed'] },
@@ -64,6 +76,7 @@ export const BUS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         channel: { type: 'string' },
         title: { type: 'string' },
         message: { type: 'string' },
@@ -76,9 +89,22 @@ export const BUS_TOOLS: McpToolSchema[] = [
 
 const BUS_TOOL_NAMES = new Set(BUS_TOOLS.map(tool => tool.name))
 
-// Tools here address a pub/sub `channel` string, not a tile_id/card_id — the
-// event bus is a universal cross-tile broadcast mechanism by design (see
-// CLAUDE.md), so there is no tile identity to scope against.
+export function scopeBusChannel(workspaceId: string, requested: unknown): string | null {
+  if (typeof requested !== 'string' || !requested.trim()) return null
+  const channel = requested.trim()
+  const tileMatch = /^tile:([^:]+)(?::(.+))?$/.exec(channel)
+  if (tileMatch) {
+    if (tileMatch[2]) {
+      return tileMatch[1] === workspaceId ? channel : null
+    }
+    return `tile:${workspaceId}:${tileMatch[1]}`
+  }
+  if (channel.startsWith('workspace:')) {
+    return channel.startsWith(`workspace:${workspaceId}:`) ? channel : null
+  }
+  return `workspace:${workspaceId}:${channel}`
+}
+
 export async function handleBusTool(
   name: string,
   args: Record<string, unknown>,
@@ -87,60 +113,47 @@ export async function handleBusTool(
   if (!BUS_TOOL_NAMES.has(name)) return null
 
   const { sendToRenderer } = ctx
-
-  if (name === 'update_progress') {
+  const scope = resolvePeerWorkspaceScope(ctx.principal, args.workspace_id)
+  if (!scope.ok) return scope.error
+  const channel = scopeBusChannel(scope.workspaceId, args.channel)
+  if (!channel) return 'Forbidden: invalid or cross-workspace channel'
+  const publish = (
+    type: 'progress' | 'activity' | 'task' | 'notification',
+    payload: Record<string, unknown>,
+  ) => {
     const evt = bus.publish({
-      channel: args.channel as string,
-      type: 'progress',
+      channel,
+      type,
       source: 'mcp',
-      payload: { status: args.status, percent: args.percent, detail: args.detail }
+      payload: { ...payload, workspaceId: scope.workspaceId },
     })
     sendToRenderer('bus:event', evt)
-    return `Progress updated on ${args.channel}: ${args.status}`
+    return evt
+  }
+
+  if (name === 'update_progress') {
+    publish('progress', { status: args.status, percent: args.percent, detail: args.detail })
+    return `Progress updated on ${channel}: ${args.status}`
   }
 
   if (name === 'log_activity') {
-    const evt = bus.publish({
-      channel: args.channel as string,
-      type: 'activity',
-      source: 'mcp',
-      payload: { message: args.message, level: args.level ?? 'info' }
-    })
-    sendToRenderer('bus:event', evt)
-    return `Activity logged on ${args.channel}: ${args.message}`
+    publish('activity', { message: args.message, level: args.level ?? 'info' })
+    return `Activity logged on ${channel}: ${args.message}`
   }
 
   if (name === 'create_task') {
-    const evt = bus.publish({
-      channel: args.channel as string,
-      type: 'task',
-      source: 'mcp',
-      payload: { title: args.title, description: args.description, status: args.status ?? 'pending', action: 'create' }
-    })
-    sendToRenderer('bus:event', evt)
-    return `Task created on ${args.channel}: ${args.title}`
+    publish('task', { title: args.title, description: args.description, status: args.status ?? 'pending', action: 'create' })
+    return `Task created on ${channel}: ${args.title}`
   }
 
   if (name === 'update_task') {
-    const evt = bus.publish({
-      channel: args.channel as string,
-      type: 'task',
-      source: 'mcp',
-      payload: { task_id: args.task_id, status: args.status, title: args.title, detail: args.detail, action: 'update' }
-    })
-    sendToRenderer('bus:event', evt)
-    return `Task ${args.task_id} updated on ${args.channel}: ${args.status}`
+    publish('task', { task_id: args.task_id, status: args.status, title: args.title, detail: args.detail, action: 'update' })
+    return `Task ${args.task_id} updated on ${channel}: ${args.status}`
   }
 
   if (name === 'notify') {
-    const evt = bus.publish({
-      channel: args.channel as string,
-      type: 'notification',
-      source: 'mcp',
-      payload: { title: args.title, message: args.message, level: args.level ?? 'info' }
-    })
-    sendToRenderer('bus:event', evt)
-    return `Notification sent on ${args.channel}: ${args.message}`
+    publish('notification', { title: args.title, message: args.message, level: args.level ?? 'info' })
+    return `Notification sent on ${channel}: ${args.message}`
   }
 
   return null

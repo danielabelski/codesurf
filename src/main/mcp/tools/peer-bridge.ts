@@ -7,6 +7,8 @@ import type { TileState } from '../../../shared/types'
 import { asString, type McpToolContext } from '../types'
 import { requestToolPermission } from '../../permissions'
 import { assertSafePathSegment } from '../../security/pathSegments'
+import { isValidAgentRoomId } from '../../agent-room/validation'
+import { resolvePeerWorkspaceScope } from '../peer-scope'
 
 // SECURITY: terminal_send_input writes arbitrary text (+ Enter) directly into
 // a terminal tile, giving any MCP caller that holds the bearer token from
@@ -94,12 +96,16 @@ async function readCanvasStateTiles(workspaceId: string): Promise<TileState[]> {
   return []
 }
 
-async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
+async function findNoteTileBackingFile(
+  workspaceId: string,
+  tileId: string,
+): Promise<string | null> {
   // Validate before using tileId as a path segment: prevents traversal via
   // MCP-supplied tile_id values like '../../../etc/passwd'.
   assertSafePathSegment(tileId, 'tile_id')
   const workspaces = await readWorkspaceRefsFromUserConfig()
   for (const ws of workspaces) {
+    if (ws.id !== workspaceId) continue
     try {
       const notePath = join(ws.path, '.codesurf', tileId, 'context', 'note.txt')
       const stat = await fs.stat(notePath).catch(() => null)
@@ -126,11 +132,15 @@ async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
  * on the null (global) workspace and one "Always" click silently authorizes
  * the tool against every workspace's tiles forever.
  */
-export async function resolveTileWorkspaceDir(tileId: string): Promise<string | null> {
+export async function resolveTileWorkspaceDir(
+  tileId: string,
+  workspaceId?: string,
+): Promise<string | null> {
   try {
     assertSafePathSegment(tileId, 'tile_id')
     const workspaces = await readWorkspaceRefsFromUserConfig()
     for (const ws of workspaces) {
+      if (workspaceId && ws.id !== workspaceId) continue
       const protocolDir = await fs.stat(join(ws.path, '.codesurf', tileId)).catch(() => null)
       if (protocolDir?.isDirectory()) return ws.path
       const tiles = await readCanvasStateTiles(ws.id)
@@ -143,10 +153,9 @@ export async function resolveTileWorkspaceDir(tileId: string): Promise<string | 
 }
 
 // Every tool here takes tile_id as a TARGET peer block, not the caller's own
-// block — cross-tile by design (this is the peer bridge: terminal_send_input,
-// chat_send_message, browser_navigate, kanban_*, image_*, note_* etc. all
-// act on a connected peer). No assertTileScope guard applies. None of these
-// tools carries a separate sender-identity field to stamp.
+// block. Cross-tile dispatch is intentional, but it remains workspace-bound:
+// a tile token can reach peers only in its authenticated workspace, while a
+// global caller must provide workspace_id.
 export async function handlePeerBridgeTool(
   name: string,
   args: Record<string, unknown>,
@@ -158,13 +167,17 @@ export async function handlePeerBridgeTool(
 
   const tileId = asString(args.tile_id)
   if (!tileId) return 'Missing tile_id'
+  if (!isValidAgentRoomId(tileId)) return 'Invalid tile_id'
+  const workspaceScope = resolvePeerWorkspaceScope(ctx.principal, args.workspace_id)
+  if (!workspaceScope.ok) return workspaceScope.error
+  const workspaceId = workspaceScope.workspaceId
 
   if (name.startsWith('browser_') || name === 'browser_set_mode') {
     const mode = asString(args.mode)
     const url = asString(args.url)
     if (name === 'browser_navigate' && !url) return 'Missing url'
     if (name === 'browser_set_mode' && (mode !== 'desktop' && mode !== 'mobile')) return 'Invalid mode'
-    return publishPeerCommand(tileId, name, { url: url ?? '', mode: mode }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { url: url ?? '', mode: mode }, ctx)
   }
 
   if (name === 'terminal_send_input') {
@@ -181,7 +194,7 @@ export async function handlePeerBridgeTool(
       )
     }
 
-    const workspaceDir = await resolveTileWorkspaceDir(tileId)
+    const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
     const permissionRequest = {
       provider: 'mcp',
       toolName: 'terminal_send_input',
@@ -192,24 +205,27 @@ export async function handlePeerBridgeTool(
     const allowed = await requestToolPermission(permissionRequest, /* interactive */ true)
     if (!allowed) return 'Permission denied: terminal_send_input was not approved'
 
-    return publishPeerCommand(tileId, name, { input, enter: asBoolean(args.enter) }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, {
+      input,
+      enter: args.enter === undefined ? true : asBoolean(args.enter),
+    }, ctx)
   }
 
   if (name === 'chat_send_message' || name === 'chat_acknowledge') {
     const message = asString(args.message) ?? asString(args.note)
     if (!message) return 'Missing message'
-    return publishPeerCommand(tileId, name, { message }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { message }, ctx)
   }
 
   if (name === 'code_open_file') {
     const filePath = asString(args.file_path)
     if (!filePath) return 'Missing file_path'
-    return publishPeerCommand(tileId, name, { filePath }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { filePath }, ctx)
   }
 
   if (name === 'note_read_content') {
     try {
-      const notePath = await findNoteTileBackingFile(tileId)
+      const notePath = await findNoteTileBackingFile(workspaceId, tileId)
       if (notePath) return await fs.readFile(notePath, 'utf8')
     } catch (err) {
       console.warn(`[peer-bridge] note_read_content failed for ${tileId}:`, err)
@@ -223,8 +239,8 @@ export async function handlePeerBridgeTool(
     // Gated like terminal_send_input: the backing file may be any path the
     // canvas state references, so an ungated write is an arbitrary-file
     // overwrite primitive for any token holder.
-    const notePath = await findNoteTileBackingFile(tileId)
-    const workspaceDir = await resolveTileWorkspaceDir(tileId)
+    const notePath = await findNoteTileBackingFile(workspaceId, tileId)
+    const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
     const allowed = await requestToolPermission({
       provider: 'mcp',
       toolName: 'note_write_content',
@@ -239,7 +255,7 @@ export async function handlePeerBridgeTool(
       console.warn(`[peer-bridge] note_write_content failed for ${tileId}:`, err)
       return `Failed to write note: ${(err as Error).message}`
     }
-    return publishPeerCommand(tileId, name, { content }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { content }, ctx)
   }
 
   if (name === 'note_append_context' || name === 'file_open_context' || name === 'image_annotate' || name === 'kanban_set_status') {
@@ -247,8 +263,8 @@ export async function handlePeerBridgeTool(
     if (!content) return 'Missing message'
     if (name === 'note_append_context') {
       // Same write primitive as note_write_content — gate it the same way.
-      const notePath = await findNoteTileBackingFile(tileId)
-      const workspaceDir = await resolveTileWorkspaceDir(tileId)
+      const notePath = await findNoteTileBackingFile(workspaceId, tileId)
+      const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
       const allowed = await requestToolPermission({
         provider: 'mcp',
         toolName: 'note_append_context',
@@ -267,25 +283,25 @@ export async function handlePeerBridgeTool(
         console.warn(`[peer-bridge] note_append_context failed for ${tileId}:`, err)
       }
     }
-    return publishPeerCommand(tileId, name, { content }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { content }, ctx)
   }
 
   if (name === 'image_edit_request' || name === 'image_generate_variation') {
-    return executeImageEditTool(tileId, name, args, ctx)
+    return executeImageEditTool(workspaceId, tileId, name, args, ctx)
   }
 
   if (name === 'image_replace_source') {
     const filePath = asString(args.file_path)
     if (!filePath) return 'Missing file_path'
-    return publishPeerCommand(tileId, name, {
+    return publishPeerCommand(workspaceId, tileId, name, {
       filePath,
       note: asString(args.note) ?? '',
     }, ctx)
   }
 
   if (name === 'kanban_create_card' || name === 'kanban_update_card' || name === 'kanban_move_card' || name === 'kanban_pause_card' || name === 'kanban_delete_card' || name === 'kanban_create_column' || name === 'kanban_rename_column' || name === 'kanban_delete_column') {
-    return publishPeerCommand(tileId, name, { ...args }, ctx)
+    return publishPeerCommand(workspaceId, tileId, name, { ...args }, ctx)
   }
 
-  return publishPeerCommand(tileId, name, {}, ctx)
+  return publishPeerCommand(workspaceId, tileId, name, {}, ctx)
 }

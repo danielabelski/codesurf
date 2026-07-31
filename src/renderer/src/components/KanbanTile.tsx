@@ -467,6 +467,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
   logActivityRef.current = logActivity
 
   const handleKanbanEvent = useCallback((event: string, data: any) => {
+    if (data?.workspaceId && data.workspaceId !== workspaceId) return
     if (data?.boardTileId && data.boardTileId !== tileIdRef.current) return
 
     const columns = columnsRef.current
@@ -582,7 +583,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       const port = await window.electron?.mcp?.getPort?.()
       if (!port) return
       const { openMcpEventSource } = await import('../utils/mcpHttp')
-      es = await openMcpEventSource(port, 'global')
+      es = await openMcpEventSource(port, 'global', workspaceId)
       if (!es) return
       const handle = (e: MessageEvent) => {
         try {
@@ -595,7 +596,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       })
     })()
     return () => es?.close()
-  }, [dispatchKanbanEvent])
+  }, [dispatchKanbanEvent, workspaceId])
 
   // Also listen via IPC (fallback for same-process events)
   useEffect(() => {
@@ -607,9 +608,9 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
 
   // Listen for peer MCP commands from connected chat/tiles
   useEffect(() => {
-    if (!tileId || !window.electron?.bus) return
-    const channel = `tile:${tileId}`
-    const subscriberId = `kanban:${tileId}:mcp`
+    if (!workspaceId || !tileId || !window.electron?.bus) return
+    const channel = `tile:${workspaceId}:${tileId}`
+    const subscriberId = `kanban:${workspaceId}:${tileId}:mcp`
     const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (evt) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
@@ -697,7 +698,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       }
     })
     return () => unsubscribe?.()
-  }, [tileId])
+  }, [workspaceId, tileId])
 
   // Streaming handled by pty/xterm — no separate stream listener needed
 
@@ -765,9 +766,11 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
 
   const removeCard = useCallback((id: string) => {
     const card = cards.find(c => c.id === id)
-    if (card?.linkedTileId) window.electron?.terminal?.destroy?.(card.linkedTileId)
+    if (card?.linkedTileId) {
+      window.electron?.terminal?.destroy?.(card.linkedTileId, workspaceId)
+    }
     setCards(prev => prev.filter(c => c.id !== id))
-  }, [cards])
+  }, [cards, workspaceId])
 
   const dropOnCol = useCallback((colId: string, e: React.DragEvent) => {
     e.preventDefault()
@@ -944,7 +947,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
                 >+
                 </button>
                 <span style={{ fontSize: fonts.size, color: theme.text.primary, background: theme.surface.panelElevated, borderRadius: 10, minWidth: 24, height: 24, padding: '0 8px', border: `1px solid ${theme.border.default}`, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{colCards.length}</span>
-                <button onClick={() => { cards.filter(c => c.columnId === col.id).forEach(c => c.linkedTileId && window.electron?.terminal?.destroy?.(c.linkedTileId)); setCards(p => p.filter(c => c.columnId !== col.id)); setColumns(p => p.filter(c => c.id !== col.id)) }}
+                <button onClick={() => { cards.filter(c => c.columnId === col.id).forEach(c => c.linkedTileId && window.electron?.terminal?.destroy?.(c.linkedTileId, workspaceId)); setCards(p => p.filter(c => c.columnId !== col.id)); setColumns(p => p.filter(c => c.id !== col.id)) }}
                   style={{ fontSize: fonts.size, lineHeight: 1, color: theme.text.primary, background: 'none', border: 'none', cursor: 'pointer', padding: '0 3px', fontWeight: 800, fontFamily: 'inherit' }}
                   onMouseEnter={e => (e.currentTarget.style.opacity = '0.72')}
                   onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
@@ -957,6 +960,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
                   <div key={card.id} data-card-id={card.id}>
                     <KanbanCard
                       card={card}
+                      workspaceId={workspaceId}
                       workspaceDir={workspaceDir}
                       active={isActive(card.linkedTileId)}
                       dragging={dragging === card.id}

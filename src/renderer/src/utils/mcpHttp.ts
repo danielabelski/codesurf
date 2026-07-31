@@ -23,9 +23,11 @@ export async function postMcpEndpoint(
 export async function openMcpEventSource(
   port: number,
   cardId: string,
+  workspaceId?: string,
 ): Promise<EventSource | null> {
   const token = await window.electron?.mcp?.getToken?.()
   if (!token) return null
   const params = new URLSearchParams({ card_id: cardId, token })
+  if (workspaceId) params.set('workspace_id', workspaceId)
   return new EventSource(`http://127.0.0.1:${port}/events?${params.toString()}`)
 }

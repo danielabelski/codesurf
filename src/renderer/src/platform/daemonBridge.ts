@@ -122,8 +122,15 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
   const busListeners = new Map<string, Set<(event: { channel: string; payload: unknown }) => void>>()
   const terminalTransport = createTerminalTransport()
   const streamListeners = new Set<(event: Record<string, unknown>) => void>()
-  const activeJobStreams = new Map<string, { jobId: string, controller: AbortController }>()
+  const activeJobStreams = new Map<string, {
+    workspaceId: string
+    cardId: string
+    jobId: string
+    controller: AbortController
+  }>()
   const maxSseBufferBytes = 1024 * 1024
+  const jobStreamKey = (workspaceId: string, cardId: string) =>
+    JSON.stringify([workspaceId, cardId])
 
   const emitStreamEvent = (event: Record<string, unknown>) => {
     for (const listener of streamListeners) {
@@ -135,10 +142,11 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     }
   }
 
-  const stopJobStream = (cardId: string) => {
-    const active = activeJobStreams.get(cardId)
+  const stopJobStream = (workspaceId: string, cardId: string) => {
+    const key = jobStreamKey(workspaceId, cardId)
+    const active = activeJobStreams.get(key)
     if (!active) return
-    activeJobStreams.delete(cardId)
+    activeJobStreams.delete(key)
     active.controller.abort()
   }
 
@@ -171,10 +179,16 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     return { events, remaining }
   }
 
-  const subscribeToJobEvents = async (cardId: string, jobId: string, since = 0): Promise<void> => {
-    stopJobStream(cardId)
+  const subscribeToJobEvents = async (
+    workspaceId: string,
+    cardId: string,
+    jobId: string,
+    since = 0,
+  ): Promise<void> => {
+    const key = jobStreamKey(workspaceId, cardId)
+    stopJobStream(workspaceId, cardId)
     const controller = new AbortController()
-    activeJobStreams.set(cardId, { jobId, controller })
+    activeJobStreams.set(key, { workspaceId, cardId, jobId, controller })
     const query = new URLSearchParams({ jobId, since: String(Math.max(0, Math.floor(since))) })
 
     try {
@@ -206,6 +220,7 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         for (const event of parsed.events) {
           emitStreamEvent({
             ...event,
+            workspaceId,
             cardId,
             jobId: typeof event.jobId === 'string' ? event.jobId : jobId,
           })
@@ -214,6 +229,7 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     } catch (error) {
       if (!controller.signal.aborted) {
         emitStreamEvent({
+          workspaceId,
           cardId,
           jobId,
           type: 'error',
@@ -221,8 +237,8 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         })
       }
     } finally {
-      const active = activeJobStreams.get(cardId)
-      if (active?.controller === controller) activeJobStreams.delete(cardId)
+      const active = activeJobStreams.get(key)
+      if (active?.controller === controller) activeJobStreams.delete(key)
     }
   }
 
@@ -457,46 +473,77 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         })
         const jobId = state.jobId || state.id
         const request = req && typeof req === 'object' ? req as Record<string, unknown> : {}
+        const workspaceId = typeof request.workspaceId === 'string' ? request.workspaceId : ''
         const cardId = typeof request.cardId === 'string' ? request.cardId : ''
         const detached = request.runMode === 'background'
-        if (jobId && cardId && !detached) {
-          void subscribeToJobEvents(cardId, jobId)
+        if (jobId && workspaceId && cardId && !detached) {
+          void subscribeToJobEvents(workspaceId, cardId, jobId)
         }
         return { ok: true, jobId, detached }
       },
       resumeJob: async (req: unknown) => {
         const request = req && typeof req === 'object' ? req as Record<string, unknown> : {}
+        const workspaceId = typeof request.workspaceId === 'string' ? request.workspaceId : ''
         const cardId = typeof request.cardId === 'string' ? request.cardId : ''
         const jobId = typeof request.jobId === 'string' ? request.jobId : ''
-        if (!cardId || !jobId) return { ok: false, resumed: false, jobId: jobId || null }
+        if (!workspaceId || !cardId || !jobId) {
+          return { ok: false, resumed: false, jobId: jobId || null }
+        }
 
         const state = await daemonFetch<{
+          id?: string
           status?: string
           lastSequence?: number
           error?: string | null
           sessionId?: string | null
+          workspaceId?: string | null
+          cardId?: string | null
         }>(`/chat/job/state?jobId=${encodeURIComponent(jobId)}`)
+        if (
+          state.id !== jobId
+          || state.workspaceId !== workspaceId
+          || state.cardId !== cardId
+        ) {
+          return { ok: false, resumed: false, jobId }
+        }
         const since = typeof request.jobSequence === 'number' && Number.isFinite(request.jobSequence)
           ? Math.max(0, Math.floor(request.jobSequence))
           : 0
         const lastSequence = Number(state.lastSequence ?? 0)
         const active = state.status === 'queued' || state.status === 'running'
         if (!active && since >= lastSequence) {
-          if (state.error) emitStreamEvent({ cardId, jobId, sequence: lastSequence, type: 'error', error: state.error })
-          emitStreamEvent({ cardId, jobId, sequence: lastSequence, type: 'done', sessionId: state.sessionId ?? undefined })
+          if (state.error) {
+            emitStreamEvent({
+              workspaceId,
+              cardId,
+              jobId,
+              sequence: lastSequence,
+              type: 'error',
+              error: state.error,
+            })
+          }
+          emitStreamEvent({
+            workspaceId,
+            cardId,
+            jobId,
+            sequence: lastSequence,
+            type: 'done',
+            sessionId: state.sessionId ?? undefined,
+          })
           return { ok: true, resumed: false, jobId }
         }
-        void subscribeToJobEvents(cardId, jobId, since)
+        void subscribeToJobEvents(workspaceId, cardId, jobId, since)
         return { ok: true, resumed: true, jobId }
       },
-      stop: async (cardId: string) => {
-        const active = activeJobStreams.get(cardId)
-        stopJobStream(cardId)
-        if (!active) return
+      stop: async (workspaceId: string, cardId: string) => {
+        const active = activeJobStreams.get(jobStreamKey(workspaceId, cardId))
+        stopJobStream(workspaceId, cardId)
+        if (!active) return { ok: true }
         await daemonFetch('/chat/job/cancel', {
           method: 'POST',
           body: JSON.stringify({ jobId: active.jobId }),
         }).catch(() => {})
+        return { ok: true }
       },
       answerToolPermission: async (args: unknown) =>
         daemonFetch('/chat/job/permission/answer', { method: 'POST', body: JSON.stringify(args) }),
@@ -509,7 +556,14 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         throw new Error('stream.start is unavailable outside Electron; chat jobs subscribe automatically')
       },
       stop: async (cardId: string) => {
-        stopJobStream(cardId)
+        const matches = [...activeJobStreams.values()]
+          .filter(active => active.cardId === cardId)
+        // The legacy stream API has no workspace argument. Preserve its
+        // single-match behavior without letting an ambiguous card ID stop
+        // streams in multiple workspaces.
+        if (matches.length === 1) {
+          stopJobStream(matches[0]!.workspaceId, cardId)
+        }
       },
       onChunk: (callback: (event: Record<string, unknown>) => void) => {
         streamListeners.add(callback)
@@ -655,10 +709,11 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
     terminal: {
       create: async (
         tileId: string,
+        workspaceId: string,
         workspaceDir: string,
         launchBin?: string,
         launchArgs?: string[],
-        options?: { workspaceId?: string, cols?: number, rows?: number },
+        options?: { cols?: number, rows?: number },
       ) => {
         // The public gateway protocol deliberately does not accept an arbitrary
         // executable. Sandboxes select an allowlisted shell/server-side image.
@@ -667,7 +722,7 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         }
         const session = await terminalTransport.create(tileId, {
           cwd: workspaceDir,
-          workspaceId: options?.workspaceId,
+          workspaceId,
           cols: options?.cols,
           rows: options?.rows,
         })
@@ -681,13 +736,14 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         return terminalTransport.write(tileId, `\x15cd '${escaped}'\r`)
       },
       resize: (tileId: string, cols: number, rows: number) => terminalTransport.resize(tileId, cols, rows),
-      destroy: (tileId: string) => terminalTransport.close(tileId),
+      destroy: (tileId: string, _workspaceId: string) => terminalTransport.close(tileId),
       dispose: (tileId: string) => terminalTransport.close(tileId),
       detach: (tileId: string) => terminalTransport.close(tileId),
       // Agent-room metadata is an Electron/tmux concern. It never grants a
       // remote terminal new capabilities, so retain the harmless renderer hook.
       updatePeers: async (
         _tileId: string,
+        _workspaceId: string,
         _workspaceDir: string,
         _peers: Array<{ peerId: string; peerType: string; tools: string[] }>,
       ) => undefined,

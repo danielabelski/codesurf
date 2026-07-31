@@ -88,11 +88,33 @@ import {
   activeQueries,
   activeProcesses,
   activeHttpRequests,
+  chatRequestScope,
+  chatStreamScopeKey,
+  createChatStreamScope,
   persistSessionIds,
   deleteCardSessionIds,
+  registerRoomContextAcknowledgement,
+  acknowledgeRoomContext,
+  discardRoomContextAcknowledgement,
+  type ChatStreamScope,
 } from '../chat/runtime'
+import { isValidAgentRoomId } from '../agent-room/validation.ts'
+import { appendUntrustedRoomContextToLatestUser } from '../chat/room-context-message.ts'
 
 const BUILTIN_CHAT_PROVIDERS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'hermes', 'omnigent', 'csagent'])
+
+function validatedChatScope(
+  workspaceId: unknown,
+  cardId: unknown,
+): ChatStreamScope | null {
+  const normalizedWorkspaceId = String(workspaceId ?? '').trim()
+  const normalizedCardId = String(cardId ?? '').trim()
+  if (
+    !isValidAgentRoomId(normalizedWorkspaceId)
+    || !isValidAgentRoomId(normalizedCardId)
+  ) return null
+  return createChatStreamScope(normalizedWorkspaceId, normalizedCardId)
+}
 
 export { warmOpenCodeModelsOnStartup } from '../chat/providers/opencode'
 
@@ -291,19 +313,19 @@ interface PendingToolPermission {
   reject: (err: Error) => void
 }
 
-// Keyed by `${cardId}::${toolUseID}` so we can address the exact tool_use.
+// Keyed by workspace/card identity plus toolUseID.
 const pendingToolPermissions = new Map<string, PendingToolPermission>()
 
-function toolPermissionKey(cardId: string, toolUseID: string | null | undefined): string {
-  return `${cardId}::${toolUseID ?? ''}`
+function toolPermissionKey(scope: ChatStreamScope, toolUseID: string | null | undefined): string {
+  return JSON.stringify([chatStreamScopeKey(scope), toolUseID ?? ''])
 }
 
 export function awaitToolPermissionAnswer(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null,
   request: ToolPermissionRequest,
 ): Promise<ToolPermissionDecision> {
-  const key = toolPermissionKey(cardId, toolUseID)
+  const key = toolPermissionKey(scope, toolUseID)
   const prior = pendingToolPermissions.get(key)
   if (prior) {
     try { prior.reject(new Error('Tool permission superseded')) } catch { /* noop */ }
@@ -311,7 +333,7 @@ export function awaitToolPermissionAnswer(
   }
   return new Promise<ToolPermissionDecision>((resolve, reject) => {
     pendingToolPermissions.set(key, { resolve, reject })
-    sendStream(cardId, {
+    sendStream(scope, {
       type: 'tool_permission_request',
       toolId: toolUseID,
       provider: request.provider,
@@ -325,11 +347,11 @@ export function awaitToolPermissionAnswer(
 }
 
 function resolvePendingToolPermission(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null | undefined,
   decision: ToolPermissionDecision,
 ): boolean {
-  const key = toolPermissionKey(cardId, toolUseID)
+  const key = toolPermissionKey(scope, toolUseID)
   const pending = pendingToolPermissions.get(key)
   if (!pending) return false
   pendingToolPermissions.delete(key)
@@ -337,21 +359,27 @@ function resolvePendingToolPermission(
   return true
 }
 
-function cancelPendingToolPermissionsForCard(cardId: string, reason: string = 'Cancelled'): void {
-  const prefix = `${cardId}::`
+function cancelPendingToolPermissionsForCard(
+  scope: ChatStreamScope,
+  reason: string = 'Cancelled',
+): void {
+  const scopeKey = chatStreamScopeKey(scope)
   for (const [key, pending] of pendingToolPermissions.entries()) {
-    if (key.startsWith(prefix)) {
+    try {
+      const parsed = JSON.parse(key)
+      if (!Array.isArray(parsed) || parsed[0] !== scopeKey) continue
       pendingToolPermissions.delete(key)
       try { pending.reject(new Error(reason)) } catch { /* noop */ }
-    }
+    } catch { /* ignore malformed internal keys */ }
   }
 }
 
-function stopDaemonStream(cardId: string): void {
-  const active = activeDaemonStreams.get(cardId)
+function stopDaemonStream(scope: ChatStreamScope): void {
+  const scopeKey = chatStreamScopeKey(scope)
+  const active = activeDaemonStreams.get(scopeKey)
   if (!active) return
   active.abortController.abort()
-  activeDaemonStreams.delete(cardId)
+  activeDaemonStreams.delete(scopeKey)
 }
 
 async function resolveHostEndpoint(host: ExecutionHostRecord): Promise<{ baseUrl: string; token: string | null }> {
@@ -456,11 +484,13 @@ function buildAsyncExecutionContext(params: {
 // are imported at the top of this file.
 
 function syncPeerLinks(req: ChatRequest): void {
+  if (!req.workspaceId) return
   const tileTypes: Record<string, string> = { [req.cardId]: 'chat' }
   for (const peer of req.peers ?? []) {
     tileTypes[peer.peerId] = peer.peerType || 'unknown'
   }
   updateLinks(
+    req.workspaceId,
     req.cardId,
     (req.peers ?? []).map(peer => peer.peerId),
     tileTypes,
@@ -469,14 +499,19 @@ function syncPeerLinks(req: ChatRequest): void {
 
 /** Join room from canvas wires, inject pending room traffic, announce identity. */
 function attachRoomContext(req: ChatRequest): ChatRequest {
+  if (!req.workspaceId) return { ...req, roomAckSequence: undefined }
   syncPeerLinks(req)
-  const { roomId, systemExtra } = prepareTurnContext(req.cardId, 'chat')
+  const {
+    roomId,
+    systemExtra,
+    acknowledgeThrough: roomAckSequence,
+  } = prepareTurnContext(req.workspaceId, req.cardId, 'chat')
   if (roomId) {
     // Share the latest user message into the room so peers get it on their next turn
     const lastUser = [...(req.messages ?? [])].reverse().find(m => m.role === 'user')
     const userText = String(lastUser?.content ?? '').trim()
     if (userText) {
-      roomPost({
+      roomPost(req.workspaceId, {
         fromTileId: req.cardId,
         fromTileType: 'chat',
         kind: 'message',
@@ -485,12 +520,22 @@ function attachRoomContext(req: ChatRequest): ChatRequest {
       })
     }
   }
-  if (!systemExtra.trim()) return req
+  if (!systemExtra.trim()) {
+    return { ...req, roomAckSequence: roomAckSequence ?? undefined }
+  }
   return {
     ...req,
-    roomContext: systemExtra,
-    // Also fold into memoryPrompt so providers that only use memory still see it
-    memoryPrompt: [req.memoryPrompt, systemExtra].filter(Boolean).join('\n\n') || undefined,
+    messages: appendUntrustedRoomContextToLatestUser(req.messages, systemExtra),
+    ...(req.expandedMessages
+      ? {
+          expandedMessages: appendUntrustedRoomContextToLatestUser(
+            req.expandedMessages,
+            systemExtra,
+          ),
+        }
+      : {}),
+    roomContext: undefined,
+    roomAckSequence: roomAckSequence ?? undefined,
   }
 }
 
@@ -645,16 +690,16 @@ function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
   }
 }
 
-function emitMemoryContextLoaded(cardId: string, context: LoadedMemoryContext | null | undefined): void {
+function emitMemoryContextLoaded(scope: ChatStreamScope, context: LoadedMemoryContext | null | undefined): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
   const toolId = `codesurf-memory-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
   const input = buildMemoryContextInput(context)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
+    sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
 }
 
 function summarizeSelectedSkills(index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): string | undefined {
@@ -669,44 +714,44 @@ function buildSelectedSkillsPrompt(index: Awaited<ReturnType<typeof daemonClient
   return String(index?.selection?.prompt ?? '').trim() || undefined
 }
 
-function emitSelectedSkillsLoaded(cardId: string, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSelectedSkillsLoaded(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
   const summary = summarizeSelectedSkills(index)
   if (!summary) return
   const toolId = `codesurf-skills-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Included Skills' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Included Skills' })
   const input = buildSelectedSkillsPrompt(index)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
+    sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
 }
 
-function emitSkippedSkillLocations(cardId: string, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSkippedSkillLocations(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
   const skipped = index?.skippedLocations ?? []
   if (skipped.length === 0) return
   const toolId = `codesurf-skills-skipped-${Date.now()}`
   const lines = skipped.map(entry => `${entry.path} (${entry.code})`).join('\n')
   const summary = `${skipped.length} skill location${skipped.length === 1 ? '' : 's'} could not be read. Skills from those paths were skipped.`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Skill Scan Warning' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Skill Scan Warning' })
   if (lines) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: lines })
+    sendStream(scope, { type: 'tool_input', toolId, text: lines })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Skill Scan Warning', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Skill Scan Warning', text: summary })
 }
 
 function emitFileReferenceExpansion(
-  cardId: string,
+  scope: ChatStreamScope,
   expansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null | undefined,
 ): void {
   const summary = String(expansion?.summaryText ?? '').trim()
   if (!summary) return
   const toolId = `codesurf-file-refs-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace File References' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Workspace File References' })
   const input = String(expansion?.inputText ?? '').trim()
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(scope, { type: 'tool_input', toolId, text: input })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace File References', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Workspace File References', text: summary })
 }
 
 async function loadRuntimeMemoryContext(req: ChatRequest): Promise<LoadedMemoryContext | null> {
@@ -830,12 +875,18 @@ async function buildProjectContext(workspaceDir: string | undefined): Promise<Pr
   return value
 }
 
-async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, jobId: string, sinceSequence = 0): Promise<void> {
-  stopDaemonStream(cardId)
+async function attachDaemonJobStream(
+  scope: ChatStreamScope,
+  host: ExecutionHostRecord,
+  jobId: string,
+  sinceSequence = 0,
+): Promise<void> {
+  const scopeKey = chatStreamScopeKey(scope)
+  stopDaemonStream(scope)
 
   const endpoint = await resolveHostEndpoint(host)
   const abortController = new AbortController()
-  activeDaemonStreams.set(cardId, { abortController, host, jobId })
+  activeDaemonStreams.set(scopeKey, { abortController, host, jobId })
 
   try {
     const response = await fetch(`${endpoint.baseUrl}/chat/job/events?jobId=${encodeURIComponent(jobId)}&since=${encodeURIComponent(String(sinceSequence))}`, {
@@ -865,7 +916,7 @@ async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, 
         log('daemon stream parse error', error)
       }
       for (const payload of parsed.events) {
-        sendStream(cardId, payload)
+        sendStream(scope, payload)
       }
     }
   } catch (error) {
@@ -873,14 +924,15 @@ async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, 
     if (error instanceof Error && error.name === 'AbortError') return
     throw error
   } finally {
-    const active = activeDaemonStreams.get(cardId)
+    const active = activeDaemonStreams.get(scopeKey)
     if (active?.jobId === jobId) {
-      activeDaemonStreams.delete(cardId)
+      activeDaemonStreams.delete(scopeKey)
     }
   }
 }
 
 async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Promise<{ ok: boolean; jobId: string; detached?: boolean }> {
+  const scope = chatRequestScope(req)
   const rawProjectContext = await buildProjectContext(req.workspaceDir)
   const contextPolicy = buildProviderContextPolicy({
     executionTarget: req.executionTarget,
@@ -917,32 +969,35 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
         },
       },
     })
+    registerRoomContextAcknowledgement(req)
+    acknowledgeRoomContext(req)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    sendStream(req.cardId, { type: 'error', error: message })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: message })
+    sendStream(scope, { type: 'done' })
     return { ok: false, jobId: '' }
   }
 
   if (req.runMode !== 'background') {
-    void attachDaemonJobStream(req.cardId, host, job.id, 0).catch((error: Error) => {
-      sendStream(req.cardId, { type: 'error', error: error.message, jobId: job.id })
-      sendStream(req.cardId, { type: 'done', jobId: job.id })
+    void attachDaemonJobStream(scope, host, job.id, 0).catch((error: Error) => {
+      sendStream(scope, { type: 'error', error: error.message, jobId: job.id })
+      sendStream(scope, { type: 'done', jobId: job.id })
     })
   } else {
-    sendStream(req.cardId, {
+    sendStream(scope, {
       type: 'tool_summary',
       toolName: 'Background job',
       text: `Started detached ${requestWithProviderSettings.provider} job ${job.id}.`,
       jobId: job.id,
     })
-    sendStream(req.cardId, { type: 'done', jobId: job.id })
+    sendStream(scope, { type: 'done', jobId: job.id })
   }
 
   return { ok: true, jobId: job.id, detached: req.runMode === 'background' }
 }
 
 async function resumeChatDaemonJob(req: ChatRequest): Promise<{ ok: boolean; resumed: boolean; jobId: string | null }> {
+  const scope = chatRequestScope(req)
   if (!req.jobId) return { ok: false, resumed: false, jobId: null }
   const host = await selectChatExecutionHost(req)
   if (!host) return { ok: false, resumed: false, jobId: req.jobId }
@@ -958,22 +1013,22 @@ async function resumeChatDaemonJob(req: ChatRequest): Promise<{ ok: boolean; res
   const sinceSequence = Number(req.jobSequence ?? 0)
   if (state.status !== 'running' && sinceSequence >= Number(state.lastSequence ?? 0)) {
     if (state.error) {
-      sendStream(req.cardId, { type: 'error', error: state.error, jobId: req.jobId, sequence: state.lastSequence })
+      sendStream(scope, { type: 'error', error: state.error, jobId: req.jobId, sequence: state.lastSequence })
     }
-    sendStream(req.cardId, { type: 'done', jobId: req.jobId, sequence: state.lastSequence, sessionId: state.sessionId ?? undefined })
+    sendStream(scope, { type: 'done', jobId: req.jobId, sequence: state.lastSequence, sessionId: state.sessionId ?? undefined })
     return { ok: true, resumed: false, jobId: req.jobId }
   }
 
-  void attachDaemonJobStream(req.cardId, host, req.jobId, sinceSequence).catch((error: Error) => {
-    sendStream(req.cardId, { type: 'error', error: error.message, jobId: req.jobId })
-    sendStream(req.cardId, { type: 'done', jobId: req.jobId })
+  void attachDaemonJobStream(scope, host, req.jobId, sinceSequence).catch((error: Error) => {
+    sendStream(scope, { type: 'error', error: error.message, jobId: req.jobId })
+    sendStream(scope, { type: 'done', jobId: req.jobId })
   })
 
   return { ok: true, resumed: true, jobId: req.jobId }
 }
 
-async function cancelChatDaemonJob(cardId: string): Promise<void> {
-  const active = activeDaemonStreams.get(cardId)
+async function cancelChatDaemonJob(scope: ChatStreamScope): Promise<void> {
+  const active = activeDaemonStreams.get(chatStreamScopeKey(scope))
   if (!active) return
 
   try {
@@ -983,7 +1038,7 @@ async function cancelChatDaemonJob(cardId: string): Promise<void> {
   } catch (error) {
     log('daemon cancel error', error)
   } finally {
-    stopDaemonStream(cardId)
+    stopDaemonStream(scope)
   }
 }
 
@@ -994,46 +1049,59 @@ async function cancelChatDaemonJob(cardId: string): Promise<void> {
  * orphaned work streaming into a dead cardId.
  */
 async function stopCardExecution(
-  cardId: string,
+  scope: ChatStreamScope,
   options?: { emitDone?: boolean, reason?: string },
 ): Promise<void> {
   const reason = options?.reason ?? 'Chat stopped'
-  const ac = cardAbortControllers.get(cardId)
+  const scopeKey = chatStreamScopeKey(scope)
+  // Lifecycle completion generated by an explicit stop is not evidence that
+  // the provider accepted this turn. Preserve unread peer context for retry.
+  discardRoomContextAcknowledgement(scope)
+  const ac = cardAbortControllers.get(scopeKey)
   if (ac) {
     ac.abort()
-    cardAbortControllers.delete(cardId)
+    cardAbortControllers.delete(scopeKey)
   }
-  const q = activeQueries.get(cardId)
+  const q = activeQueries.get(scopeKey)
   if (q) {
     markClaudeQueryIntentionallyClosed(q)
     q.close()
-    activeQueries.delete(cardId)
+    activeQueries.delete(scopeKey)
   }
-  const proc = activeProcesses.get(cardId)
+  const proc = activeProcesses.get(scopeKey)
   if (proc) {
     proc.kill('SIGTERM')
-    activeProcesses.delete(cardId)
+    activeProcesses.delete(scopeKey)
   }
-  const httpRequest = activeHttpRequests.get(cardId)
+  const httpRequest = activeHttpRequests.get(scopeKey)
   if (httpRequest) {
     httpRequest.destroy()
-    activeHttpRequests.delete(cardId)
+    activeHttpRequests.delete(scopeKey)
   }
-  await cancelChatDaemonJob(cardId)
-  cancelPendingAskUserQuestionsForCard(cardId, reason)
-  cancelPendingToolPermissionsForCard(cardId, reason)
-  cardPermissionModes.delete(cardId)
-  await abortOpenCodeSession(cardId)
-  try { await stopCsagent(cardId) } catch { /* best-effort */ }
-  disposeCsagent(cardId)
+  await cancelChatDaemonJob(scope)
+  cancelPendingAskUserQuestionsForCard(scope, reason)
+  cancelPendingToolPermissionsForCard(scope, reason)
+  cardPermissionModes.delete(scopeKey)
+  await abortOpenCodeSession(scope)
+  try { await stopCsagent(scope) } catch { /* best-effort */ }
+  disposeCsagent(scope)
   if (options?.emitDone !== false) {
-    sendStream(cardId, { type: 'done' })
+    sendStream(scope, { type: 'done' })
   }
 }
 
 export function registerChatIPC(): void {
   log('registerChatIPC: handlers registered')
-  ipcMain.handle('chat:send', async (_, req: ChatRequest) => {
+  ipcMain.handle('chat:send', async (_, incomingReq: ChatRequest) => {
+    const scope = validatedChatScope(incomingReq?.workspaceId, incomingReq?.cardId)
+    if (!scope) {
+      return { ok: false, error: 'Invalid or missing workspace/card identity' }
+    }
+    const req: ChatRequest = {
+      ...incomingReq,
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+    }
     log('chat:send received', { provider: req.provider, model: req.model, msgCount: req.messages.length })
     const requestedRunMode = req.runMode === 'background' ? 'background' : 'foreground'
     if (requestedRunMode === 'foreground') {
@@ -1041,18 +1109,18 @@ export function registerChatIPC(): void {
       // Full stop (incl. csagent) so the previous turn cannot interleave events.
       // emitDone:false — the new turn owns the stream; a premature done would
       // flip the UI to idle before the replacement send starts.
-      await stopCardExecution(req.cardId, { emitDone: false, reason: 'Replaced by new turn' })
+      await stopCardExecution(scope, { emitDone: false, reason: 'Replaced by new turn' })
     }
 
     let canonicalRequest: ChatRequest
     try {
       canonicalRequest = await canonicalizeElectronChatRequest(req, getWorkspacePathById)
     } catch (error) {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1061,8 +1129,8 @@ export function registerChatIPC(): void {
       resolveWorkspaceRoot: () => canonicalRequest.workspaceDir ?? null,
     })
     if (!authoritativeResolution.ok) {
-      sendStream(req.cardId, { type: 'error', error: authoritativeResolution.error })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'error', error: authoritativeResolution.error })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
     const authoritativeAgentMode = authoritativeResolution.agentMode
@@ -1074,11 +1142,11 @@ export function registerChatIPC(): void {
         authoritativeAgentMode,
       )
     } catch (error) {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1088,11 +1156,11 @@ export function registerChatIPC(): void {
       localDaemonAvailable = (await getExecutionRoutingState()).localDaemonAvailable
       daemonHost = await selectChatExecutionHost(policyRequest)
     } catch (error) {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1113,11 +1181,11 @@ export function registerChatIPC(): void {
       memoryContext = await loadRuntimeMemoryContext(effectiveRequest)
       memoryPrompt = String(memoryContext?.prompt ?? '').trim() || undefined
     } catch (error) {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1149,15 +1217,15 @@ export function registerChatIPC(): void {
       requestWithFileReferences = expanded.request
       fileReferenceExpansion = expanded.expansion
     } catch (error) {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
-    emitFileReferenceExpansion(req.cardId, fileReferenceExpansion)
+    emitFileReferenceExpansion(scope, fileReferenceExpansion)
 
     // Room membership + consume pending traffic (all execution backends)
     requestWithFileReferences = revalidateRuntimeContextRequest(
@@ -1179,16 +1247,16 @@ export function registerChatIPC(): void {
       return await sendChatToDaemon(requestWithFileReferences, daemonHost)
     }
 
-    emitMemoryContextLoaded(req.cardId, memoryContext)
-    emitSelectedSkillsLoaded(req.cardId, skillsContext)
-    emitSkippedSkillLocations(req.cardId, skillsContext)
+    emitMemoryContextLoaded(scope, memoryContext)
+    emitSelectedSkillsLoaded(scope, skillsContext)
+    emitSkippedSkillLocations(scope, skillsContext)
 
     if (requestedRunMode === 'background') {
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: 'Detached background chat execution currently requires a daemon-backed Claude or Codex host.',
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1209,8 +1277,8 @@ export function registerChatIPC(): void {
     // agentMode entirely — so this switch-level guard is the non-bypassable net
     // that covers every provider in one place.
     if (agentModeUnresolved(requestWithFileReferences)) {
-      sendStream(requestWithFileReferences.cardId, { type: 'error', error: AGENT_MODE_UNRESOLVED_ERROR })
-      sendStream(requestWithFileReferences.cardId, { type: 'done' })
+      sendStream(scope, { type: 'error', error: AGENT_MODE_UNRESOLVED_ERROR })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1218,54 +1286,85 @@ export function registerChatIPC(): void {
       requestWithFileReferences.providerTransport?.type === 'local-proxy'
       && BUILTIN_CHAT_PROVIDERS.has(requestWithFileReferences.provider)
     ) {
-      sendStream(requestWithFileReferences.cardId, {
+      sendStream(scope, {
         type: 'error',
         error: `Extension provider id cannot use reserved built-in provider: ${requestWithFileReferences.provider}`,
       })
-      sendStream(requestWithFileReferences.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
-    switch (requestWithFileReferences.provider) {
-      case 'claude': chatClaude(requestWithFileReferences); break
-      case 'codex': chatCodex(requestWithFileReferences); break
-      case 'opencode': chatOpencode(requestWithFileReferences); break
-      case 'openclaw': chatOpenclaw(requestWithFileReferences); break
-      case 'hermes': chatHermes(requestWithFileReferences); break
-      case 'csagent': chatCsagent(requestWithFileReferences); break
-      default:
-        if (requestWithFileReferences.providerTransport?.type === 'local-proxy') {
-          chatLocalProxy(requestWithFileReferences)
-        } else {
-          sendStream(requestWithFileReferences.cardId, { type: 'error', error: `Unsupported provider: ${requestWithFileReferences.provider}` })
-          sendStream(requestWithFileReferences.cardId, { type: 'done' })
-        }
+    registerRoomContextAcknowledgement(requestWithFileReferences)
+    const reportProviderRejection = (error: unknown): void => {
+      sendStream(scope, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(scope, { type: 'done' })
+    }
+    try {
+      switch (requestWithFileReferences.provider) {
+        case 'claude': chatClaude(requestWithFileReferences); break
+        case 'codex':
+          void chatCodex(requestWithFileReferences).catch(reportProviderRejection)
+          break
+        case 'opencode': chatOpencode(requestWithFileReferences); break
+        case 'openclaw': chatOpenclaw(requestWithFileReferences); break
+        case 'hermes': chatHermes(requestWithFileReferences); break
+        case 'csagent':
+          void chatCsagent(requestWithFileReferences).catch(reportProviderRejection)
+          break
+        default:
+          if (requestWithFileReferences.providerTransport?.type === 'local-proxy') {
+            chatLocalProxy(requestWithFileReferences)
+          } else {
+            sendStream(scope, { type: 'error', error: `Unsupported provider: ${requestWithFileReferences.provider}` })
+            sendStream(scope, { type: 'done' })
+          }
+      }
+    } catch (error) {
+      reportProviderRejection(error)
+      return { ok: false }
     }
 
     return { ok: true }
   })
 
-  ipcMain.handle('chat:resumeJob', async (_, req: ChatRequest) => {
-    return await resumeChatDaemonJob(req)
+  ipcMain.handle('chat:resumeJob', (_, req: ChatRequest) => {
+    const scope = validatedChatScope(req?.workspaceId, req?.cardId)
+    if (!scope) {
+      return { ok: false, resumed: false, jobId: req?.jobId ?? null }
+    }
+    return resumeChatDaemonJob({
+      ...req,
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+    })
   })
 
-  ipcMain.handle('chat:steer', async (_, payload: { cardId?: string; message?: string }) => {
-    const cardId = String(payload?.cardId ?? '').trim()
+  ipcMain.handle('chat:steer', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+    message?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
     const message = String(payload?.message ?? '').trim()
-    if (!cardId || !message) return { ok: false, error: 'missing cardId or message' }
+    if (!scope || !message) {
+      return { ok: false, error: 'invalid workspace/card identity or message' }
+    }
     try {
-      if (await steerCsagent(cardId, message)) {
-        sendStream(cardId, { type: 'steer_sent', text: message })
+      if (await steerCsagent(scope, message)) {
+        sendStream(scope, { type: 'steer_sent', text: message })
         return { ok: true }
       }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-    const q = activeQueries.get(cardId)
+    const q = activeQueries.get(chatStreamScopeKey(scope))
     if (!q) return { ok: false, error: 'no active steerable Claude stream' }
     try {
       await q.streamInput(buildClaudeTextInput(message, 'now'))
-      sendStream(cardId, { type: 'steer_sent', text: message })
+      sendStream(scope, { type: 'steer_sent', text: message })
       return { ok: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
@@ -1274,44 +1373,59 @@ export function registerChatIPC(): void {
     }
   })
 
-  ipcMain.handle('chat:stop', async (_, cardId: string) => {
-    await stopCardExecution(cardId, { emitDone: true, reason: 'Chat stopped' })
+  ipcMain.handle('chat:stop', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
+    await stopCardExecution(scope, { emitDone: true, reason: 'Chat stopped' })
+    return { ok: true }
   })
 
   // Permanently dispose a card's chat state when its tile is deleted. Unlike
   // clearSession (same tile, fresh conversation) this also stops live work and
   // prunes the persisted session-ids.json so neither the in-memory maps nor the
   // on-disk file grow unbounded across the install lifetime.
-  ipcMain.handle('chat:disposeCard', async (_, cardId: string) => {
-    if (!cardId || typeof cardId !== 'string') return { ok: false }
+  ipcMain.handle('chat:disposeCard', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
     // Stop every provider first — tile delete used to only clear session maps,
     // leaving Codex/Claude/daemon/csagent running against a dead cardId.
-    await stopCardExecution(cardId, { emitDone: true, reason: 'Card disposed' })
-    deleteCardSessionIds(cardId)
-    clearOpenCodeSession(cardId)
-    clearOpenclawSession(cardId)
-    clearHermesSession(cardId)
-    clearCsagentSession(cardId)
+    await stopCardExecution(scope, { emitDone: true, reason: 'Card disposed' })
+    deleteCardSessionIds(scope)
+    clearOpenCodeSession(scope)
+    clearOpenclawSession(scope)
+    clearHermesSession(scope)
+    clearCsagentSession(scope)
     // Drop the tile-scoped MCP token so a deleted tile's agent can no longer auth.
-    revokeTileToken(cardId)
+    revokeTileToken(scope.workspaceId, scope.cardId)
     // Schedule a rewrite of session-ids.json from the (now-pruned) map.
     persistSessionIds()
     return { ok: true }
   })
 
   // Clear session for a card (start fresh conversation)
-  ipcMain.handle('chat:clearSession', async (_, cardId: string) => {
-    deleteCardSessionIds(cardId)
-    clearOpenCodeSession(cardId)
-    clearOpenclawSession(cardId)
-    clearHermesSession(cardId)
-    clearCsagentSession(cardId)
-    cancelPendingAskUserQuestionsForCard(cardId, 'Session cleared')
-    cancelPendingToolPermissionsForCard(cardId, 'Session cleared')
-    cardPermissionModes.delete(cardId)
+  ipcMain.handle('chat:clearSession', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
+    deleteCardSessionIds(scope)
+    clearOpenCodeSession(scope)
+    clearOpenclawSession(scope)
+    clearHermesSession(scope)
+    clearCsagentSession(scope)
+    cancelPendingAskUserQuestionsForCard(scope, 'Session cleared')
+    cancelPendingToolPermissionsForCard(scope, 'Session cleared')
+    cardPermissionModes.delete(chatStreamScopeKey(scope))
     // Persist the eviction so the cleared session does not reappear on restart.
     persistSessionIds()
-    log('session cleared for card', cardId)
+    log('session cleared for card', scope.workspaceId, scope.cardId)
     return { ok: true }
   })
 
@@ -1320,10 +1434,12 @@ export function registerChatIPC(): void {
   // If switching TO bypass, any pending permission prompts auto-resolve as
   // "once" (allow) so the agent stops waiting on the UI.
   ipcMain.handle('chat:setPermissionMode', async (_, payload: {
+    workspaceId: string
     cardId: string
     mode: string
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const sdkModeMap: Record<string, string> = {
@@ -1337,12 +1453,13 @@ export function registerChatIPC(): void {
       return { ok: false, error: `unknown mode: ${payload.mode}` }
     }
 
-    const previous = cardPermissionModes.get(payload.cardId) ?? 'default'
-    cardPermissionModes.set(payload.cardId, sdkMode)
+    const scopeKey = chatStreamScopeKey(scope)
+    const previous = cardPermissionModes.get(scopeKey) ?? 'default'
+    cardPermissionModes.set(scopeKey, sdkMode)
 
     // Tell the SDK too, so any internal gating (hooks, agents) uses the new
     // mode. Swallow errors — the query may have already closed.
-    const activeQuery = activeQueries.get(payload.cardId)
+    const activeQuery = activeQueries.get(scopeKey)
     if (activeQuery) {
       try {
         await activeQuery.setPermissionMode(sdkMode as any)
@@ -1354,24 +1471,24 @@ export function registerChatIPC(): void {
     // Auto-resolve pending prompts when flipping to bypass so the agent
     // unblocks immediately.
     if (sdkMode === 'bypassPermissions') {
-      const prefix = `${payload.cardId}::`
       for (const [key, pending] of pendingToolPermissions.entries()) {
-        if (key.startsWith(prefix)) {
-          pendingToolPermissions.delete(key)
-          try { pending.resolve('once') } catch { /* noop */ }
-          // Tell the UI the pending chip is gone.
-          const toolUseID = key.slice(prefix.length) || null
-          sendStream(payload.cardId, {
-            type: 'tool_permission_resolved',
-            toolId: toolUseID,
-            decision: 'once',
-            reason: 'mode_change',
-          })
-        }
+        let parsed: unknown
+        try { parsed = JSON.parse(key) } catch { continue }
+        if (!Array.isArray(parsed) || parsed[0] !== scopeKey) continue
+        pendingToolPermissions.delete(key)
+        try { pending.resolve('once') } catch { /* noop */ }
+        // Tell the UI the pending chip is gone.
+        const toolUseID = typeof parsed[1] === 'string' && parsed[1] ? parsed[1] : null
+        sendStream(scope, {
+          type: 'tool_permission_resolved',
+          toolId: toolUseID,
+          decision: 'once',
+          reason: 'mode_change',
+        })
       }
     }
 
-    sendStream(payload.cardId, {
+    sendStream(scope, {
       type: 'permission_mode_changed',
       mode: sdkMode,
       previous,
@@ -1383,20 +1500,22 @@ export function registerChatIPC(): void {
   // Tool permission — receive the user's decision from the renderer and resolve
   // the pending canUseTool promise so the agent can continue (or halt).
   ipcMain.handle('chat:answerToolPermission', async (_, payload: {
+    workspaceId: string
     cardId: string
     toolId: string | null
     decision: ToolPermissionDecision
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const validDecisions: ToolPermissionDecision[] = ['deny', 'never', 'once', 'session', 'today', 'forever']
     if (!validDecisions.includes(payload.decision)) {
       return { ok: false, error: 'invalid decision' }
     }
-    const delivered = resolvePendingToolPermission(payload.cardId, payload.toolId ?? null, payload.decision)
+    const delivered = resolvePendingToolPermission(scope, payload.toolId ?? null, payload.decision)
     if (!delivered) {
-      const activeDaemon = activeDaemonStreams.get(payload.cardId)
+      const activeDaemon = activeDaemonStreams.get(chatStreamScopeKey(scope))
       if (activeDaemon) {
         try {
           return await hostRequest(activeDaemon.host, '/chat/job/permission/answer', {
@@ -1411,7 +1530,7 @@ export function registerChatIPC(): void {
           return { ok: false, error: error instanceof Error ? error.message : String(error) }
         }
       }
-      log('chat:answerToolPermission: no pending request for', payload.cardId, payload.toolId)
+      log('chat:answerToolPermission: no pending request for', scope.workspaceId, scope.cardId, payload.toolId)
       return { ok: false, error: 'no pending request' }
     }
     return { ok: true }
@@ -1420,26 +1539,28 @@ export function registerChatIPC(): void {
   // AskUserQuestion — receive the user's form submission from the renderer and
   // resolve the pending canUseTool promise so the agent can continue.
   ipcMain.handle('chat:answerUserQuestion', async (_, payload: {
+    workspaceId: string
     cardId: string
     toolId: string | null
     answers: Record<string, string>
     annotations?: Record<string, { notes?: string; preview?: string }>
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const answers = (payload.answers && typeof payload.answers === 'object') ? payload.answers : {}
     const annotations = (payload.annotations && typeof payload.annotations === 'object') ? payload.annotations : undefined
-    const delivered = resolvePendingAskUserQuestion(payload.cardId, payload.toolId ?? null, { answers, annotations })
+    const delivered = resolvePendingAskUserQuestion(scope, payload.toolId ?? null, { answers, annotations })
     if (!delivered) {
-      log('chat:answerUserQuestion: no pending question for', payload.cardId, payload.toolId)
+      log('chat:answerUserQuestion: no pending question for', scope.workspaceId, scope.cardId, payload.toolId)
       return { ok: false, error: 'no pending question' }
     }
     // Emit a tool_summary so the form is replaced by a permanent summary of the
     // user's selections (persists across re-renders and session rehydration).
     const summaryLines = Object.entries(answers).map(([q, a]) => `• ${q} — ${a}`)
     if (summaryLines.length > 0) {
-      sendStream(payload.cardId, {
+      sendStream(scope, {
         type: 'tool_summary',
         toolId: payload.toolId,
         toolName: 'AskUserQuestion',

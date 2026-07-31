@@ -757,16 +757,19 @@ function App(): JSX.Element {
     })
   }, [])
   const activeChatSessionMatch = useMemo(() => {
-    if (!activeChatTileId) return { entryId: null, sessionId: null }
+    if (!activeChatTileId || !workspace?.id) return { entryId: null, sessionId: null }
     const remembered = chatTileSessionMatches[activeChatTileId] ?? { entryId: null, sessionId: null }
-    const runtimeState = getChatTileRuntimeState<{ sessionId?: string | null; linkedSessionEntryId?: string | null }>(activeChatTileId)
+    const runtimeState = getChatTileRuntimeState<{
+      sessionId?: string | null
+      linkedSessionEntryId?: string | null
+    }>(workspace.id, activeChatTileId)
     const runtimeEntryId = typeof runtimeState?.linkedSessionEntryId === 'string' ? runtimeState.linkedSessionEntryId : null
     const runtimeSessionId = typeof runtimeState?.sessionId === 'string' ? runtimeState.sessionId : null
     return {
       entryId: runtimeEntryId ?? remembered.entryId,
       sessionId: runtimeSessionId ?? remembered.sessionId,
     }
-  }, [activeChatTileId, chatTileSessionMatches])
+  }, [activeChatTileId, chatTileSessionMatches, workspace?.id])
   const preferredBrowserOpenTargetRef = useRef<string | null>(null)
 
   const {
@@ -816,11 +819,13 @@ function App(): JSX.Element {
     if (!tile) return false
     if (tile.type === 'terminal') return false
     if (tile.type === 'chat') {
-      const runtimeState = getChatTileRuntimeState<{ isStreaming?: boolean }>(tileId)
+      const runtimeState = workspace?.id
+        ? getChatTileRuntimeState<{ isStreaming?: boolean }>(workspace.id, tileId)
+        : null
       return runtimeState?.isStreaming !== true
     }
     return true
-  }, [])
+  }, [workspace?.id])
 
   const findPanelFileOpenLeaf = useCallback((sourceTileId: string | undefined, fileType: TileState['type']): PanelLeaf | null => {
     const layout = panelLayoutRef.current
@@ -897,6 +902,7 @@ function App(): JSX.Element {
     const el = (window as any).electron?.mcp
     if (!el?.onKanban) return
     const cleanup = el.onKanban((event: string, data: any) => {
+      if (data?.workspaceId && data.workspaceId !== workspace?.id) return
       if (event === 'canvas_create_tile') {
         addTile((data.type ?? 'note') as TileState['type'], data.filePath, data.x !== undefined ? { x: data.x, y: data.y } : undefined)
       }
@@ -922,6 +928,7 @@ function App(): JSX.Element {
           if (!port) return
           const { postMcpEndpoint } = await import('./utils/mcpHttp')
           await postMcpEndpoint(port, '/push', {
+            workspace_id: workspace?.id,
             card_id: 'global',
             event: 'canvas_tiles_response',
             data: { tiles: tileList },
@@ -930,7 +937,7 @@ function App(): JSX.Element {
       }
     })
     return cleanup
-  }, [tiles, addTile])
+  }, [tiles, addTile, workspace?.id])
 
   const {
     clipboardRef,
@@ -1357,6 +1364,7 @@ function App(): JSX.Element {
     dragState,
     selectedTileId,
     viewportZoom: viewport.zoom,
+    workspaceId: workspace?.id,
     workspacePath: workspace?.path,
     activeChatTileId,
     tileByIdMap,

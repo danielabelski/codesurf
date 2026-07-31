@@ -1,4 +1,12 @@
 import type { McpToolContext, McpToolSchema } from '../types'
+import { resolvePeerWorkspaceScope } from '../peer-scope.ts'
+
+const workspaceProperty = {
+  workspace_id: {
+    type: 'string',
+    description: 'Workspace ID (required for global-token callers)',
+  },
+}
 
 export const CANVAS_TOOLS: McpToolSchema[] = [
   {
@@ -7,6 +15,7 @@ export const CANVAS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         type:      { type: 'string', description: 'Block type. Core: terminal|code|note|image|kanban|browser. Extensions: ext:<block-type> (use list_extensions to discover).' },
         title:     { type: 'string' },
         file_path: { type: 'string', description: 'Absolute path to open in the block (for code/note/image) or URL for browser' },
@@ -22,6 +31,7 @@ export const CANVAS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         path: { type: 'string', description: 'Workspace-relative or absolute path' }
       },
       required: ['path']
@@ -33,6 +43,7 @@ export const CANVAS_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        ...workspaceProperty,
         x: { type: 'number' },
         y: { type: 'number' }
       },
@@ -42,7 +53,7 @@ export const CANVAS_TOOLS: McpToolSchema[] = [
   {
     name: 'canvas_list_tiles',
     description: 'List all blocks currently on the canvas.',
-    inputSchema: { type: 'object', properties: {} }
+    inputSchema: { type: 'object', properties: { ...workspaceProperty } }
   },
   {
     name: 'list_extensions',
@@ -62,32 +73,6 @@ export async function handleCanvasTool(
   ctx: McpToolContext,
 ): Promise<string | null> {
   if (!CANVAS_TOOL_NAMES.has(name)) return null
-
-  if (name === 'canvas_create_tile') {
-    ctx.sendToRenderer('canvas_create_tile', {
-      type:     args.type,
-      title:    args.title,
-      filePath: args.file_path,
-      x:        args.x,
-      y:        args.y
-    })
-    return `Block created: ${args.type}${args.title ? ` "${args.title}"` : ''}`
-  }
-
-  if (name === 'canvas_open_file') {
-    ctx.sendToRenderer('canvas_open_file', { path: args.path })
-    return `Opening file: ${args.path}`
-  }
-
-  if (name === 'canvas_pan_to') {
-    ctx.sendToRenderer('canvas_pan_to', { x: args.x, y: args.y })
-    return `Canvas panned to (${args.x}, ${args.y})`
-  }
-
-  if (name === 'canvas_list_tiles') {
-    ctx.sendToRenderer('canvas_list_tiles', {})
-    return 'Block list requested — canvas will emit canvas_tiles_response event'
-  }
 
   if (name === 'list_extensions') {
     const registry = ctx.getExtensionRegistry()
@@ -109,6 +94,39 @@ export async function handleCanvasTool(
       contextConsumes: m.contributes?.context?.consumes ?? [],
     }))
     return JSON.stringify(exts, null, 2)
+  }
+
+  const scope = resolvePeerWorkspaceScope(ctx.principal, args.workspace_id)
+  if (!scope.ok) return scope.error
+  const scopedData = (data: Record<string, unknown>): Record<string, unknown> => ({
+    ...data,
+    workspaceId: scope.workspaceId,
+  })
+
+  if (name === 'canvas_create_tile') {
+    ctx.sendToRenderer('canvas_create_tile', scopedData({
+      type:     args.type,
+      title:    args.title,
+      filePath: args.file_path,
+      x:        args.x,
+      y:        args.y
+    }))
+    return `Block created: ${args.type}${args.title ? ` "${args.title}"` : ''}`
+  }
+
+  if (name === 'canvas_open_file') {
+    ctx.sendToRenderer('canvas_open_file', scopedData({ path: args.path }))
+    return `Opening file: ${args.path}`
+  }
+
+  if (name === 'canvas_pan_to') {
+    ctx.sendToRenderer('canvas_pan_to', scopedData({ x: args.x, y: args.y }))
+    return `Canvas panned to (${args.x}, ${args.y})`
+  }
+
+  if (name === 'canvas_list_tiles') {
+    ctx.sendToRenderer('canvas_list_tiles', scopedData({}))
+    return 'Block list requested — canvas will emit canvas_tiles_response event'
   }
 
   return null

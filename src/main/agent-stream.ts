@@ -6,6 +6,7 @@
 
 import { IncomingMessage } from 'http'
 import { broadcastToRenderer } from './utils/broadcast'
+import { BoundedLineDecoder } from './chat/bounded-output.ts'
 
 export interface StreamEvent {
   cardId: string
@@ -16,27 +17,29 @@ export interface StreamEvent {
   error?: string
 }
 
+export type StreamEventEmitter = (event: StreamEvent) => void
+
 function sendStream(_cardId: string, event: StreamEvent): void {
   broadcastToRenderer('agent:stream', event)
 }
 
 // ─── Claude streaming (SSE, Anthropic format) ────────────────────────────────
 
-export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
-  let buffer = ''
+export function parseClaudeStream(
+  cardId: string,
+  res: IncomingMessage,
+  emit: StreamEventEmitter = event => sendStream(cardId, event),
+): void {
+  const decoder = new BoundedLineDecoder()
   let doneSent = false
   const sendDone = (): void => {
     if (doneSent) return
     doneSent = true
-    sendStream(cardId, { cardId, type: 'done' })
+    emit({ cardId, type: 'done' })
   }
 
   res.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString()
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
+    for (const line of decoder.push(chunk.toString())) {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
       if (data === '[DONE]') {
@@ -48,31 +51,31 @@ export function parseClaudeStream(cardId: string, res: IncomingMessage): void {
         if (evt.type === 'content_block_delta') {
           const delta = evt.delta
           if (delta?.type === 'text_delta') {
-            sendStream(cardId, { cardId, type: 'text', text: delta.text })
+            emit({ cardId, type: 'text', text: delta.text })
           } else if (delta?.type === 'thinking_delta') {
-            sendStream(cardId, { cardId, type: 'thinking', text: delta.thinking })
+            emit({ cardId, type: 'thinking', text: delta.thinking })
           }
         } else if (evt.type === 'content_block_start') {
           if (evt.content_block?.type === 'tool_use') {
-            sendStream(cardId, { cardId, type: 'tool_use', toolName: evt.content_block.name })
+            emit({ cardId, type: 'tool_use', toolName: evt.content_block.name })
           }
         } else if (evt.type === 'message_stop') {
           sendDone()
         } else if (evt.type === 'error') {
-          sendStream(cardId, { cardId, type: 'error', error: evt.error?.message ?? 'Unknown error' })
+          emit({ cardId, type: 'error', error: evt.error?.message ?? 'Unknown error' })
         }
       } catch { /* non-JSON line */ }
     }
   })
 
-  res.on('error', err => sendStream(cardId, { cardId, type: 'error', error: err.message }))
+  res.on('error', err => emit({ cardId, type: 'error', error: err.message }))
   res.on('end', () => sendDone())
 }
 
 // ─── Codex streaming (SSE, OpenAI format) ────────────────────────────────────
 
 export function parseCodexStream(cardId: string, res: IncomingMessage): void {
-  let buffer = ''
+  const decoder = new BoundedLineDecoder()
   let doneSent = false
   const sendDone = (): void => {
     if (doneSent) return
@@ -81,11 +84,7 @@ export function parseCodexStream(cardId: string, res: IncomingMessage): void {
   }
 
   res.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString()
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
+    for (const line of decoder.push(chunk.toString())) {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
       if (data === '[DONE]') {
@@ -117,7 +116,7 @@ export function parseCodexStream(cardId: string, res: IncomingMessage): void {
 // ─── Pi streaming (newline-delimited JSON) ───────────────────────────────────
 
 export function parsePiStream(cardId: string, res: IncomingMessage): void {
-  let buffer = ''
+  const decoder = new BoundedLineDecoder()
   let doneSent = false
   const sendDone = (): void => {
     if (doneSent) return
@@ -126,11 +125,7 @@ export function parsePiStream(cardId: string, res: IncomingMessage): void {
   }
 
   res.on('data', (chunk: Buffer) => {
-    buffer += chunk.toString()
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
+    for (const line of decoder.push(chunk.toString())) {
       if (!line.trim()) continue
       try {
         const evt = JSON.parse(line)

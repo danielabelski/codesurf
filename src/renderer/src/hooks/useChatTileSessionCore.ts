@@ -23,7 +23,7 @@ export interface UseChatTileSessionCoreOptions {
 export function useChatTileSessionCore(options: UseChatTileSessionCoreOptions) {
   const { tileId, workspaceId, settings } = options
 
-  const core = useChatTileCoreState({ tileId, settings })
+  const core = useChatTileCoreState({ tileId, workspaceId, settings })
   const {
     initialJobSequence,
     messages,
@@ -71,6 +71,7 @@ export function useChatTileSessionCore(options: UseChatTileSessionCoreOptions) {
     queueStreamText,
     flushPendingStreamText,
   } = useChatTileStreamBuffer({
+    workspaceId,
     tileId,
     setMessages,
     pagedLinkedHistoryEnabled,
@@ -91,6 +92,7 @@ export function useChatTileSessionCore(options: UseChatTileSessionCoreOptions) {
   }, [jobId])
 
   useChatStreamHandler({
+    workspaceId,
     tileId,
     setMessagesSafe,
     // Prefer commitSessionId so provider session maps stay in sync (same as ChatTile).

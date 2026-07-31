@@ -1,37 +1,60 @@
 import { clearTileMessages } from './chat/chatMessagesStore.ts'
 
 const chatTileRuntimeState = new Map<string, unknown>()
-const disposedChatTileIds = new Set<string>()
+const disposedChatTiles = new Set<string>()
 // The tombstone set only needs to reject late async writes that race a recent
 // disposal, so bound it — without a cap it grows by one UUID per chat tile ever
 // deleted for the whole renderer session.
 const DISPOSED_TOMBSTONE_CAP = 256
 
-export function getChatTileRuntimeState<T>(tileId: string): T | null {
-  if (disposedChatTileIds.has(tileId)) return null
-  return (chatTileRuntimeState.get(tileId) as T | undefined) ?? null
+function getWorkspaceTileKey(workspaceId: string, tileId: string): string {
+  return JSON.stringify([workspaceId, tileId])
 }
 
-export function setChatTileRuntimeState<T>(tileId: string, state: T): void {
-  if (disposedChatTileIds.has(tileId)) return
-  chatTileRuntimeState.set(tileId, state)
+export function getChatTileRuntimeState<T>(
+  workspaceId: string,
+  tileId: string,
+): T | null {
+  const key = getWorkspaceTileKey(workspaceId, tileId)
+  if (disposedChatTiles.has(key)) return null
+  return (chatTileRuntimeState.get(key) as T | undefined) ?? null
 }
 
-export function disposeChatTileRuntimeState(tileId: string): void {
-  disposedChatTileIds.add(tileId)
-  chatTileRuntimeState.delete(tileId)
-  clearTileMessages(tileId)
-  if (disposedChatTileIds.size > DISPOSED_TOMBSTONE_CAP) {
+export function setChatTileRuntimeState<T>(
+  workspaceId: string,
+  tileId: string,
+  state: T,
+): void {
+  const key = getWorkspaceTileKey(workspaceId, tileId)
+  if (disposedChatTiles.has(key)) return
+  chatTileRuntimeState.set(key, state)
+}
+
+export function disposeChatTileRuntimeState(
+  workspaceId: string,
+  tileId: string,
+): void {
+  const key = getWorkspaceTileKey(workspaceId, tileId)
+  disposedChatTiles.add(key)
+  chatTileRuntimeState.delete(key)
+  clearTileMessages(workspaceId, tileId)
+  if (disposedChatTiles.size > DISPOSED_TOMBSTONE_CAP) {
     // Sets preserve insertion order; evict the oldest tombstone.
-    const oldest = disposedChatTileIds.values().next().value
-    if (oldest !== undefined) disposedChatTileIds.delete(oldest)
+    const oldest = disposedChatTiles.values().next().value
+    if (oldest !== undefined) disposedChatTiles.delete(oldest)
   }
 }
 
-export function reviveChatTileRuntimeState(tileId: string): void {
-  disposedChatTileIds.delete(tileId)
+export function reviveChatTileRuntimeState(
+  workspaceId: string,
+  tileId: string,
+): void {
+  disposedChatTiles.delete(getWorkspaceTileKey(workspaceId, tileId))
 }
 
-export function isChatTileRuntimeStateDisposed(tileId: string): boolean {
-  return disposedChatTileIds.has(tileId)
+export function isChatTileRuntimeStateDisposed(
+  workspaceId: string,
+  tileId: string,
+): boolean {
+  return disposedChatTiles.has(getWorkspaceTileKey(workspaceId, tileId))
 }

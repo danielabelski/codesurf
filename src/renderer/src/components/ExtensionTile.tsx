@@ -369,11 +369,12 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         const request = params?.request ?? params
         const cardId = String(request?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.add(cardId)
         const peers = await buildChatPeers()
         return el.chat?.send?.({
           ...request,
-          workspaceId: request?.workspaceId ?? workspaceId,
+          workspaceId,
           workspaceDir: request?.workspaceDir ?? workspacePath,
           peers: peers.length > 0 ? peers : undefined,
         })
@@ -382,8 +383,9 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       case 'chat.stop': {
         const cardId = String(params?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.delete(cardId)
-        return el.chat?.stop?.(cardId)
+        return el.chat?.stop?.(workspaceId, cardId)
       }
 
       case 'chat.openSurface': {
@@ -410,8 +412,9 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       case 'chat.clearSession': {
         const cardId = String(params?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.delete(cardId)
-        return el.chat?.clearSession?.(cardId)
+        return el.chat?.clearSession?.(workspaceId, cardId)
       }
 
       case 'relay.init':
@@ -685,6 +688,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   useEffect(() => {
     const unsubscribe = el.stream?.onChunk?.((event: any) => {
+      if (event?.workspaceId !== workspaceId) return
       const cardId = typeof event?.cardId === 'string' ? event.cardId : ''
       if (!cardId || !extensionChatCardsRef.current.has(cardId)) return
 
@@ -703,7 +707,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       if (typeof unsubscribe === 'function') unsubscribe()
       extensionChatCardsRef.current.clear()
     }
-  }, [postToIframe])
+  }, [postToIframe, workspaceId])
 
   useEffect(() => {
     if (!bridgeReadyRef.current) return

@@ -10,12 +10,14 @@ ensureMonacoConfigured()
 
 type FileNoteTileProps = {
   tileId?: string
+  workspaceId?: string
   filePath?: string
   initialContent: string
 }
 
 export function FileNoteTile({
   tileId,
+  workspaceId,
   filePath,
   initialContent,
 }: FileNoteTileProps): JSX.Element {
@@ -35,22 +37,22 @@ export function FileNoteTile({
       loaded.current = true
       return
     }
-    window.electron.fs.readFile(filePath).then(text => {
+    window.electron.fs.readFile(filePath, workspaceId).then(text => {
       setContent(text)
       loaded.current = true
     }).catch(() => {
       setContent('')
       loaded.current = true
     })
-  }, [filePath, initialContent])
+  }, [filePath, initialContent, workspaceId])
 
   const persistContent = useCallback((value: string) => {
     if (!filePath) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
-      window.electron.fs.writeFile(filePath, value)
+      window.electron.fs.writeFile(filePath, value, workspaceId)
     }, 500)
-  }, [filePath])
+  }, [filePath, workspaceId])
 
   const handleChange = useCallback((value: string | undefined) => {
     if (!loaded.current || value === undefined) return
@@ -63,9 +65,9 @@ export function FileNoteTile({
   }, [])
 
   useEffect(() => {
-    if (!tileId) return
-    const channel = `tile:${tileId}`
-    const subscriberId = `note-${tileId}`
+    if (!workspaceId || !tileId) return
+    const channel = `tile:${workspaceId}:${tileId}`
+    const subscriberId = `note-${workspaceId}-${tileId}`
     const unsub = window.electron?.bus?.subscribe(channel, subscriberId, (event: { payload?: { command?: string; content?: string } }) => {
       if (event.payload?.command === 'note_append_context' && event.payload.content) {
         setContent(previous => {
@@ -80,7 +82,7 @@ export function FileNoteTile({
       }
     })
     return () => unsub?.()
-  }, [persistContent, tileId])
+  }, [persistContent, workspaceId, tileId])
 
   // Safe preview: render user-authored markdown (HTML-escaped first in
   // renderMarkdown).

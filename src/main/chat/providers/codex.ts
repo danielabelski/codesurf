@@ -9,8 +9,15 @@ import { dirname, join, relative, resolve, sep } from 'path'
 import { promisify } from 'util'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
-import { writeMCPConfigToWorkspace, writeTileMcpConfig, tileMcpConfigPath, getTileToken } from '../../mcp-server'
-import { CODESURF_HOME } from '../../paths'
+import { writeMCPConfigToWorkspace, writeTileMcpConfig, getTileToken } from '../../mcp-server'
+import {
+  BoundedLineDecoder,
+  BoundedTextAccumulator,
+  MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES,
+  MAX_PROVIDER_DIAGNOSTIC_BYTES,
+  boundProviderHistoryText,
+  boundRecentText,
+} from '../bounded-output'
 import { buildPeerSystemPrompt } from '../prompt-builders'
 import { sanitizeToolOutputText } from '../output-sanitizers'
 import { createRuntimeCheckpoint } from '../runtime-checkpoints'
@@ -22,6 +29,8 @@ import {
   getPreparedMessages,
   upsertRuntimeSessionState,
   activeProcesses,
+  chatRequestScope,
+  chatStreamScopeKey,
   getCardSessionId,
   setCardSessionId,
 } from '../runtime'
@@ -246,10 +255,12 @@ async function summarizeCodexFileChanges(
 
 // createRuntimeCheckpoint is shared (../runtime-checkpoints). getDisplayPath stays for Codex diffs.
 
-export function chatCodex(req: ChatRequest): void {
+export async function chatCodex(req: ChatRequest): Promise<void> {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
@@ -257,7 +268,7 @@ export function chatCodex(req: ChatRequest): void {
   const shellPath = getShellEnvPath()
   const peerPrompt = buildPeerSystemPrompt(req.peers)
   const runtimeMessages = cloneChatMessages(req.messages)
-  const resumeThreadId = req.sessionId ?? getCardSessionId(req.cardId, req.provider) ?? null
+  const resumeThreadId = req.sessionId ?? getCardSessionId(scope, req.provider) ?? null
   const runtimeSession: RuntimeChatSessionState = {
     provider: req.provider,
     model: req.model,
@@ -298,43 +309,46 @@ export function chatCodex(req: ChatRequest): void {
     // Leaving it stuck true makes resume/job UI treat the turn as live forever.
     runtimeSession.isStreaming = false
     void upsertRuntimeSessionState(req, runtimeSession)
-    sendStream(req.cardId, { type: 'error', error: err instanceof Error ? err.message : String(err) })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
+    sendStream(scope, { type: 'done' })
     return
   }
 
   if (req.workspaceDir) {
-    void writeMCPConfigToWorkspace(req.workspaceDir).catch(() => {})
+    await writeMCPConfigToWorkspace(req.workspaceDir).catch(() => {})
   }
 
   const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) })
-  // Prefer tile-scoped MCP config so Codex presents the tile bearer token
-  // (SEC-05). Fire-and-forget the write; point CODESURF_MCP_CONFIG at the
-  // deterministic path so a prior run (or a racing write) still finds it.
-  let mcpConfigPath = join(CODESURF_HOME, 'mcp-server.json')
-  try {
-    mcpConfigPath = tileMcpConfigPath(req.cardId)
-    void writeTileMcpConfig(req.cardId).catch(() => {})
-  } catch {
-    // invalid cardId / path — keep global fallback
+  // Supply only a tile-scoped MCP config. Failure leaves MCP unavailable
+  // instead of falling back to the global bearer.
+  let mcpConfigPath: string | null = null
+  if (req.workspaceId) {
+    try {
+      // Do not launch Codex until the scoped config is atomically in place:
+      // the CLI reads CODESURF_MCP_CONFIG during startup.
+      mcpConfigPath = await writeTileMcpConfig(req.workspaceId, req.cardId)
+      spawnEnv.CODESURF_MCP_TILE_TOKEN = getTileToken(req.workspaceId, req.cardId)
+      spawnEnv.CODESURF_WORKSPACE_ID = req.workspaceId
+    } catch {
+      // invalid workspace/card path — fail closed without MCP
+    }
   }
-  spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
-  spawnEnv.CODESURF_MCP_TILE_TOKEN = getTileToken(req.cardId)
+  if (mcpConfigPath) spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
 
   const proc = spawn(codexBin, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: spawnEnv,
   })
 
-  activeProcesses.set(req.cardId, proc)
+  activeProcesses.set(scopeKey, proc)
   const pendingSnapshots = new Map<string, CodexFileSnapshot>()
   const aggregatedFileChanges = new Map<string, StreamToolFileChange>()
   const exploreEntries: StreamToolCommandEntry[] = []
-  let assistantText = ''
+  const assistantText = new BoundedTextAccumulator(MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES)
   let editsStarted = false
   let exploreStarted = false
   let commandSeq = 0
-  let pendingStdout = ''
+  const stdoutDecoder = new BoundedLineDecoder()
   let stdoutChain = Promise.resolve()
   // Set to true after a fatal event (checkpoint failure, turn.failed, error)
   // so buffered stdout chunks are not streamed after the error chip.
@@ -348,15 +362,15 @@ export function chatCodex(req: ChatRequest): void {
     if (evt.type === 'turn.failed' || evt.type === 'error') {
       const msg = evt.error?.message ?? evt.message ?? `Codex event: ${evt.type}`
       aborted = true
-      sendStream(req.cardId, { type: 'error', error: String(msg) })
+      sendStream(scope, { type: 'error', error: String(msg) })
       return
     }
 
     if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
-      setCardSessionId(req.cardId, req.provider, evt.thread_id)
+      setCardSessionId(scope, req.provider, evt.thread_id)
       runtimeSession.sessionId = evt.thread_id
       void upsertRuntimeSessionState(req, runtimeSession)
-      sendStream(req.cardId, { type: 'session', sessionId: evt.thread_id })
+      sendStream(scope, { type: 'session', sessionId: evt.thread_id })
       return
     }
 
@@ -387,7 +401,7 @@ export function chatCodex(req: ChatRequest): void {
         if (!checkpoint.ok) {
           aborted = true
           proc.kill('SIGTERM')
-          sendStream(req.cardId, { type: 'error', error: `Checkpoint creation failed before Codex file changes: ${checkpoint.error ?? 'unknown error'}` })
+          sendStream(scope, { type: 'error', error: `Checkpoint creation failed before Codex file changes: ${checkpoint.error ?? 'unknown error'}` })
           return
         }
       }
@@ -399,22 +413,27 @@ export function chatCodex(req: ChatRequest): void {
     if (!item || typeof item !== 'object') return
 
     if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) {
-      assistantText += item.text
-      sendStream(req.cardId, { type: 'text', text: item.text })
+      assistantText.append(item.text)
+      sendStream(scope, { type: 'text', text: item.text })
       return
     }
 
     if (item.type === 'command_execution' && typeof item.command === 'string') {
       const command = normalizeCodexShellCommand(item.command)
       const kind = classifyCodexCommand(command)
-      const output = sanitizeToolOutputText(typeof item.aggregated_output === 'string' ? item.aggregated_output : '')
+      const output = boundRecentText(
+        sanitizeToolOutputText(typeof item.aggregated_output === 'string' ? item.aggregated_output : ''),
+        MAX_PROVIDER_DIAGNOSTIC_BYTES,
+        MAX_PROVIDER_DIAGNOSTIC_BYTES / 4,
+      )
       if (kind === 'search' || kind === 'read') {
         if (!exploreStarted) {
-          sendStream(req.cardId, { type: 'tool_start', toolId: 'codex-explore', toolName: 'Exploring workspace' })
+          sendStream(scope, { type: 'tool_start', toolId: 'codex-explore', toolName: 'Exploring workspace' })
           exploreStarted = true
         }
+        if (exploreEntries.length >= 64) exploreEntries.shift()
         exploreEntries.push({ label: command, command, output, kind })
-        sendStream(req.cardId, {
+        sendStream(scope, {
           type: 'tool_summary',
           toolId: 'codex-explore',
           toolName: buildExploreToolName(exploreEntries),
@@ -427,8 +446,8 @@ export function chatCodex(req: ChatRequest): void {
         // Each command gets a unique toolId so blocks interleave with text
         // rather than collapsing into a single aggregate chip.
         const toolId = `codex-cmd-${commandSeq++}`
-        sendStream(req.cardId, { type: 'tool_start', toolId, toolName: 'exec_command' })
-        sendStream(req.cardId, {
+        sendStream(scope, { type: 'tool_start', toolId, toolName: 'exec_command' })
+        sendStream(scope, {
           type: 'tool_summary',
           toolId,
           toolName: 'exec_command',
@@ -447,10 +466,10 @@ export function chatCodex(req: ChatRequest): void {
       }
       const mergedFileChanges = Array.from(aggregatedFileChanges.values())
       if (!editsStarted) {
-        sendStream(req.cardId, { type: 'tool_start', toolId: 'codex-file-changes', toolName: buildEditedToolName(mergedFileChanges) })
+        sendStream(scope, { type: 'tool_start', toolId: 'codex-file-changes', toolName: buildEditedToolName(mergedFileChanges) })
         editsStarted = true
       }
-      sendStream(req.cardId, {
+      sendStream(scope, {
         type: 'tool_summary',
         toolId: 'codex-file-changes',
         toolName: buildEditedToolName(mergedFileChanges),
@@ -462,12 +481,10 @@ export function chatCodex(req: ChatRequest): void {
   const BACKPRESSURE_THRESHOLD = 1024 * 1024 // 1 MB of buffered unprocessed stdout
   let queuedBytes = 0
   proc.stdout?.on('data', (chunk: Buffer) => {
-    pendingStdout += chunk.toString()
-    const lines = pendingStdout.split(/\r?\n/)
-    pendingStdout = lines.pop() ?? ''
+    const lines = stdoutDecoder.push(chunk.toString())
 
     // Backpressure: pause stdout when the async processing chain falls behind.
-    const batchBytes = lines.reduce((sum, line) => sum + line.length + 1, 0)
+    const batchBytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line, 'utf8') + 1, 0)
     queuedBytes += batchBytes
     if (queuedBytes > BACKPRESSURE_THRESHOLD) {
       proc.stdout?.pause()
@@ -482,7 +499,7 @@ export function chatCodex(req: ChatRequest): void {
           const evt = JSON.parse(trimmed)
           await handleCodexJsonEvent(evt)
         } catch {
-          if (!aborted) sendStream(req.cardId, { type: 'text', text: `${line}\n` })
+          if (!aborted) sendStream(scope, { type: 'text', text: `${line}\n` })
         }
       }
     }).catch(() => {}).finally(() => {
@@ -494,11 +511,9 @@ export function chatCodex(req: ChatRequest): void {
     })
   })
 
-  const MAX_STDERR = 64 * 1024 // 64 KB cap
-  let stderrBuf = ''
+  const stderrBuf = new BoundedTextAccumulator(MAX_PROVIDER_DIAGNOSTIC_BYTES)
   proc.stderr?.on('data', (chunk: Buffer) => {
-    stderrBuf += chunk.toString()
-    if (stderrBuf.length > MAX_STDERR) stderrBuf = stderrBuf.slice(-MAX_STDERR)
+    stderrBuf.append(chunk.toString())
   })
 
   // H-9: identity-guard — only clean up and emit done/error if this proc is
@@ -506,67 +521,68 @@ export function chatCodex(req: ChatRequest): void {
   // before the old proc's close handler fires; without this guard the old
   // handler would delete the new proc's entry and inject stale done/error
   // events into the new turn.
-  const isCurrent = (): boolean => activeProcesses.get(req.cardId) === proc
+  const isCurrent = (): boolean => activeProcesses.get(scopeKey) === proc
 
   proc.on('close', (code) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
     if (aborted) {
-      activeProcesses.delete(req.cardId)
+      activeProcesses.delete(scopeKey)
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
       // Always emit done on abort so tool blocks leave `running` (reducer
       // finalizes tools only on `done`, not on `error` alone).
-      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
       return
     }
-    activeProcesses.delete(req.cardId)
+    activeProcesses.delete(scopeKey)
     stdoutChain = stdoutChain.then(async () => {
-      if (pendingStdout.trim()) {
+      const pendingStdout = stdoutDecoder.flush()
+      if (pendingStdout?.trim()) {
         try {
           await handleCodexJsonEvent(JSON.parse(pendingStdout.trim()))
         } catch {
-          assistantText += pendingStdout
-          sendStream(req.cardId, { type: 'text', text: pendingStdout })
+          assistantText.append(pendingStdout)
+          sendStream(scope, { type: 'text', text: pendingStdout })
         }
       }
-      if (assistantText.trim()) {
+      if (assistantText.value.trim()) {
         runtimeSession.messages = [
           ...runtimeMessages,
-          { role: 'assistant', content: assistantText },
+          { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
         ]
       }
-      runtimeSession.sessionId = getCardSessionId(req.cardId, req.provider) ?? runtimeSession.sessionId
+      runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
-      if (code !== 0 && stderrBuf.trim()) {
-        sendStream(req.cardId, { type: 'error', error: stderrBuf.trim() })
+      if (code !== 0 && stderrBuf.value.trim()) {
+        sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
       }
-      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
     }).catch(() => {
-      if (assistantText.trim()) {
+      if (assistantText.value.trim()) {
         runtimeSession.messages = [
           ...runtimeMessages,
-          { role: 'assistant', content: assistantText },
+          { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
         ]
       }
-      runtimeSession.sessionId = getCardSessionId(req.cardId, req.provider) ?? runtimeSession.sessionId
+      runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
-      if (code !== 0 && stderrBuf.trim()) {
-        sendStream(req.cardId, { type: 'error', error: stderrBuf.trim() })
+      if (code !== 0 && stderrBuf.value.trim()) {
+        sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
       }
-      sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
     })
   })
 
   proc.on('error', (err) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
-    activeProcesses.delete(req.cardId)
+    activeProcesses.delete(scopeKey)
     runtimeSession.isStreaming = false
     void upsertRuntimeSessionState(req, runtimeSession)
-    sendStream(req.cardId, { type: 'error', error: err.message.includes('ENOENT')
+    sendStream(scope, { type: 'error', error: err.message.includes('ENOENT')
       ? 'Codex CLI not found. Install: npm install -g @openai/codex'
       : err.message })
-    sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+    sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
   })
 }

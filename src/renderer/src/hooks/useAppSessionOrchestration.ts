@@ -216,7 +216,12 @@ export function useAppSessionOrchestration(params: UseAppSessionOrchestrationPar
     const persist = options?.persist === true
     const sessionHint = buildSessionEntryHint(session)
     const usePagedLinkedHistory = shouldUsePagedLinkedHistory(session)
-    const existingTileId = findMatchingChatTileIdForSession(tilesRef.current, session, chatTileSessionMatches)
+    const existingTileId = findMatchingChatTileIdForSession(
+      workspaceId,
+      tilesRef.current,
+      session,
+      chatTileSessionMatches,
+    )
 
     if (existingTileId) {
       rememberChatTileSessionMatch(existingTileId, session)
@@ -235,12 +240,17 @@ export function useAppSessionOrchestration(params: UseAppSessionOrchestrationPar
     }
 
     const nextChatState = buildNextChatTileRuntimeState(session, state, settings)
-    const matchingChatTileId = existingTileId ?? findMatchingChatTileIdForSession(tilesRef.current, session, chatTileSessionMatches)
+    const matchingChatTileId = existingTileId ?? findMatchingChatTileIdForSession(
+      workspaceId,
+      tilesRef.current,
+      session,
+      chatTileSessionMatches,
+    )
     const shouldOpenPermanent = persist || nextChatState.isStreaming === true
 
     if (matchingChatTileId) {
       rememberChatTileSessionMatch(matchingChatTileId, session, nextChatState.sessionId ?? null)
-      setChatTileRuntimeState(matchingChatTileId, nextChatState)
+      setChatTileRuntimeState(workspaceId, matchingChatTileId, nextChatState)
       await window.electron.canvas.saveTileState(workspaceId, matchingChatTileId, nextChatState).catch(() => {})
       if (shouldOpenPermanent) pinPreviewTab(matchingChatTileId)
       setChatReloadTokens(prev => ({ ...prev, [matchingChatTileId]: (prev[matchingChatTileId] ?? 0) + 1 }))
@@ -265,7 +275,7 @@ export function useAppSessionOrchestration(params: UseAppSessionOrchestrationPar
       : addTile('chat')
 
     rememberChatTileSessionMatch(chatTileId, session, nextChatState.sessionId ?? null)
-    setChatTileRuntimeState(chatTileId, nextChatState)
+    setChatTileRuntimeState(workspaceId, chatTileId, nextChatState)
     await window.electron.canvas.saveTileState(workspaceId, chatTileId, nextChatState).catch(() => {})
     if (targetLeaf) {
       if (shouldOpenPermanent) pinPreviewTab(chatTileId)

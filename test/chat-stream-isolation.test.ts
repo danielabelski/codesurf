@@ -15,6 +15,7 @@ import {
 } from '../src/renderer/src/components/chat/chatMessagesStore.ts'
 
 const TILE = 'chat-isolation-tile'
+const WORKSPACE = 'chat-isolation-workspace'
 
 function streamingAssistant(content = ''): ChatMessage {
   return {
@@ -56,23 +57,23 @@ describe('isPureTextStreamUpdate', () => {
 
 describe('chat messages store isolation', () => {
   test('pure text flushes update transcript content while chrome snapshot stays stable', () => {
-    replaceTileMessages(TILE, [
+    replaceTileMessages(WORKSPACE, TILE, [
       { id: 'u1', role: 'user', content: 'go', timestamp: 0 },
       streamingAssistant(''),
     ])
 
-    const chromeBefore = getTileChromeSnapshot(TILE)
-    const messagesBefore = getTileMessagesSnapshot(TILE)
+    const chromeBefore = getTileChromeSnapshot(WORKSPACE, TILE)
+    const messagesBefore = getTileMessagesSnapshot(WORKSPACE, TILE)
 
-    appendStreamingAssistantText(TILE, 'Hel')
-    appendStreamingAssistantText(TILE, 'lo')
-    appendStreamingAssistantText(TILE, '!')
+    appendStreamingAssistantText(WORKSPACE, TILE, 'Hel')
+    appendStreamingAssistantText(WORKSPACE, TILE, 'lo')
+    appendStreamingAssistantText(WORKSPACE, TILE, '!')
 
-    const chromeAfter = getTileChromeSnapshot(TILE)
-    const messagesAfter = getTileMessagesSnapshot(TILE)
+    const chromeAfter = getTileChromeSnapshot(WORKSPACE, TILE)
+    const messagesAfter = getTileMessagesSnapshot(WORKSPACE, TILE)
 
     // (a) transcript sees concatenated assistant text
-    const last = getTileMessages(TILE).at(-1)
+    const last = getTileMessages(WORKSPACE, TILE).at(-1)
     assert.equal(last?.role, 'assistant')
     assert.equal(last?.content, 'Hello!')
     assert.ok(messagesAfter.revision > messagesBefore.revision)
@@ -84,10 +85,10 @@ describe('chat messages store isolation', () => {
   })
 
   test('tool stream events bump chrome revision (non-transcript isolation ends)', () => {
-    replaceTileMessages(TILE, [streamingAssistant('working')])
-    const chromeBefore = getTileChromeSnapshot(TILE)
+    replaceTileMessages(WORKSPACE, TILE, [streamingAssistant('working')])
+    const chromeBefore = getTileChromeSnapshot(WORKSPACE, TILE)
 
-    updateTileMessages(TILE, prev => {
+    updateTileMessages(WORKSPACE, TILE, prev => {
       const last = prev[prev.length - 1]
       if (!last) return prev
       const withTool = applyChatStreamEvent(last, {
@@ -98,20 +99,20 @@ describe('chat messages store isolation', () => {
       return [...prev.slice(0, -1), withTool]
     })
 
-    const chromeAfter = getTileChromeSnapshot(TILE)
+    const chromeAfter = getTileChromeSnapshot(WORKSPACE, TILE)
     assert.ok(chromeAfter.revision > chromeBefore.revision)
     assert.notEqual(chromeAfter, chromeBefore)
-    assert.ok((getTileMessages(TILE).at(-1)?.toolBlocks?.length ?? 0) >= 1)
+    assert.ok((getTileMessages(WORKSPACE, TILE).at(-1)?.toolBlocks?.length ?? 0) >= 1)
   })
 
   test('shipped stream-apply path: text via append + reducer tools stay consistent', () => {
-    replaceTileMessages(TILE, [streamingAssistant('')])
+    replaceTileMessages(WORKSPACE, TILE, [streamingAssistant('')])
 
-    const chrome0 = getTileChromeSnapshot(TILE)
-    appendStreamingAssistantText(TILE, 'Checking…')
-    assert.equal(getTileChromeSnapshot(TILE), chrome0)
+    const chrome0 = getTileChromeSnapshot(WORKSPACE, TILE)
+    appendStreamingAssistantText(WORKSPACE, TILE, 'Checking…')
+    assert.equal(getTileChromeSnapshot(WORKSPACE, TILE), chrome0)
 
-    updateTileMessages(TILE, prev => {
+    updateTileMessages(WORKSPACE, TILE, prev => {
       let m = prev[prev.length - 1]!
       m = applyChatStreamEvent(m, { type: 'thinking_start', thinkingId: 'th1' })
       m = applyChatStreamEvent(m, { type: 'thinking', thinkingId: 'th1', text: 'plan' })
@@ -119,11 +120,11 @@ describe('chat messages store isolation', () => {
       return [...prev.slice(0, -1), m]
     })
 
-    const msgs = getTileMessages(TILE)
+    const msgs = getTileMessages(WORKSPACE, TILE)
     assert.equal(msgs.at(-1)?.content, 'Checking…')
     assert.ok((msgs.at(-1)?.thinkingBlocks?.length ?? 0) >= 1)
     assert.ok((msgs.at(-1)?.toolBlocks?.length ?? 0) >= 1)
-    assert.ok(getTileChromeSnapshot(TILE).revision > chrome0.revision)
+    assert.ok(getTileChromeSnapshot(WORKSPACE, TILE).revision > chrome0.revision)
   })
 
   test('transcript projection refreshes live text without changing the structural window', () => {

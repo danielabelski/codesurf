@@ -5,11 +5,13 @@
  * every tile filters every event by cardId. With N chat tiles that is N IPC
  * handlers firing per chunk.
  *
- * The hub attaches at most one transport subscription and fans out by cardId.
+ * The hub attaches at most one transport subscription and fans out by the
+ * immutable workspace/card identity.
  * Pure / testable: inject `attachTransport` instead of `window.electron`.
  */
 
 export type ChatStreamChunk = {
+  workspaceId: string
   cardId: string
   type: string
   text?: string
@@ -25,7 +27,7 @@ export type ChatStreamTransportAttach = (
   onChunk: (event: ChatStreamChunk) => void,
 ) => () => void
 
-const listenersByTile = new Map<string, Set<ChatStreamListener>>()
+const listenersByScope = new Map<string, Set<ChatStreamListener>>()
 let transportUnsub: (() => void) | null = null
 let transportAttach: ChatStreamTransportAttach | null = null
 /** Test override — when set, used instead of window.electron.stream.onChunk. */
@@ -42,9 +44,10 @@ function defaultTransportAttach(onChunk: (event: ChatStreamChunk) => void): () =
 }
 
 function dispatch(event: ChatStreamChunk): void {
+  const workspaceId = typeof event?.workspaceId === 'string' ? event.workspaceId : ''
   const cardId = typeof event?.cardId === 'string' ? event.cardId : ''
-  if (!cardId) return
-  const set = listenersByTile.get(cardId)
+  if (!workspaceId || !cardId) return
+  const set = listenersByScope.get(streamScopeKey(workspaceId, cardId))
   if (!set || set.size === 0) return
   for (const listener of set) {
     try {
@@ -62,7 +65,7 @@ function ensureTransport(): void {
 }
 
 function maybeTeardownTransport(): void {
-  if (listenersByTile.size > 0) return
+  if (listenersByScope.size > 0) return
   if (transportUnsub) {
     try { transportUnsub() } catch { /* ignore */ }
     transportUnsub = null
@@ -70,40 +73,42 @@ function maybeTeardownTransport(): void {
 }
 
 /**
- * Subscribe to stream chunks for one tile/card id.
+ * Subscribe to stream chunks for one workspace/tile identity.
  * Returns unsubscribe. Global transport tears down when the last tile leaves.
  */
 export function subscribeChatStream(
+  workspaceId: string,
   tileId: string,
   listener: ChatStreamListener,
 ): () => void {
-  if (!tileId) return () => {}
-  let set = listenersByTile.get(tileId)
+  if (!workspaceId || !tileId) return () => {}
+  const key = streamScopeKey(workspaceId, tileId)
+  let set = listenersByScope.get(key)
   if (!set) {
     set = new Set()
-    listenersByTile.set(tileId, set)
+    listenersByScope.set(key, set)
   }
   set.add(listener)
   ensureTransport()
 
   return () => {
-    const current = listenersByTile.get(tileId)
+    const current = listenersByScope.get(key)
     if (!current) return
     current.delete(listener)
-    if (current.size === 0) listenersByTile.delete(tileId)
+    if (current.size === 0) listenersByScope.delete(key)
     maybeTeardownTransport()
   }
 }
 
 /** How many tiles currently have at least one stream listener. */
 export function getChatStreamHubTileCount(): number {
-  return listenersByTile.size
+  return listenersByScope.size
 }
 
 /** Total listener callbacks registered (may be > tile count). */
 export function getChatStreamHubListenerCount(): number {
   let n = 0
-  for (const set of listenersByTile.values()) n += set.size
+  for (const set of listenersByScope.values()) n += set.size
   return n
 }
 
@@ -124,16 +129,20 @@ export function setChatStreamHubTransportForTests(
     transportUnsub = null
   }
   transportOverride = attach
-  if (listenersByTile.size > 0) ensureTransport()
+  if (listenersByScope.size > 0) ensureTransport()
 }
 
 /** Test-only: drop all listeners and transport. */
 export function resetChatStreamHubForTests(): void {
-  listenersByTile.clear()
+  listenersByScope.clear()
   if (transportUnsub) {
     try { transportUnsub() } catch { /* ignore */ }
     transportUnsub = null
   }
   transportOverride = null
   transportAttach = null
+}
+
+function streamScopeKey(workspaceId: string, cardId: string): string {
+  return JSON.stringify([workspaceId, cardId])
 }

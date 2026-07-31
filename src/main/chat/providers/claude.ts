@@ -8,7 +8,15 @@ import { existsSync } from 'fs'
 import { promises as fs } from 'fs'
 import { resolve } from 'path'
 import { getAgentPath } from '../../agent-paths'
-import { getMCPPort, getMCPToken, getContexMcpToolNames } from '../../mcp-server'
+import { getMCPPort, getTileToken, getContexMcpToolNames } from '../../mcp-server'
+import {
+  BoundedTextAccumulator,
+  MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES,
+  MAX_PROVIDER_DEDUP_TAIL_BYTES,
+  MAX_PROVIDER_DIAGNOSTIC_BYTES,
+  appendBoundedSuffix,
+  boundProviderHistoryText,
+} from '../bounded-output'
 import { formatClaudeSdkError } from '../output-sanitizers'
 import { buildAsyncExecutionPrompt, buildPeerSystemPrompt } from '../prompt-builders'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
@@ -24,6 +32,8 @@ import type {
 } from '../types'
 import {
   activeQueries,
+  chatRequestScope,
+  chatStreamScopeKey,
   clearActiveQuery,
   cloneChatMessages,
   getPreparedMessages,
@@ -33,18 +43,19 @@ import {
   sendStream,
   setCardSessionId,
   upsertRuntimeSessionState,
+  type ChatStreamScope,
 } from '../runtime'
 
-// Live permission mode per card, so mid-thread mode switches (e.g. Default -> Bypass)
-// propagate into the running canUseTool closure. Keyed by cardId.
+// Live permission mode per workspace/card, so mid-thread mode switches
+// propagate into the running canUseTool closure.
 export const cardPermissionModes = new Map<string, string>()
 
-// Per-card AbortController so chat:stop can cancel the SDK request alongside q.close()
+// Per-workspace/card AbortController so chat:stop can cancel the SDK request.
 export const cardAbortControllers = new Map<string, AbortController>()
 
-function clearActiveClaudeQuery(cardId: string, q: Query): void {
-  clearActiveQuery(cardId, q)
-  cardAbortControllers.delete(cardId)
+function clearActiveClaudeQuery(scope: ChatStreamScope, q: Query): void {
+  clearActiveQuery(scope, q)
+  cardAbortControllers.delete(chatStreamScopeKey(scope))
 }
 
 const intentionallyClosedQueries = new WeakSet<Query>()
@@ -77,19 +88,19 @@ interface PendingAskUserQuestion {
   resolve: (value: AskUserQuestionAnswer) => void
   reject: (err: Error) => void
 }
-// Keyed by `${cardId}::${toolUseID}` so we can address the exact tool_use.
+// Keyed by workspace/card identity plus toolUseID.
 const pendingAskUserQuestions = new Map<string, PendingAskUserQuestion>()
 
-function askUserQuestionKey(cardId: string, toolUseID: string | null | undefined): string {
-  return `${cardId}::${toolUseID ?? ''}`
+function askUserQuestionKey(scope: ChatStreamScope, toolUseID: string | null | undefined): string {
+  return JSON.stringify([chatStreamScopeKey(scope), toolUseID ?? ''])
 }
 
 function awaitAskUserQuestionAnswer(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null,
   questions: AskUserQuestionItem[],
 ): Promise<AskUserQuestionAnswer> {
-  const key = askUserQuestionKey(cardId, toolUseID)
+  const key = askUserQuestionKey(scope, toolUseID)
   // Reject any prior pending prompt at the same key (shouldn't happen, but be safe).
   const prior = pendingAskUserQuestions.get(key)
   if (prior) {
@@ -99,7 +110,7 @@ function awaitAskUserQuestionAnswer(
   return new Promise<AskUserQuestionAnswer>((resolve, reject) => {
     pendingAskUserQuestions.set(key, { resolve, reject })
     // Notify the renderer that a form is awaiting user input.
-    sendStream(cardId, {
+    sendStream(scope, {
       type: 'ask_user_question',
       toolId: toolUseID,
       questions,
@@ -108,11 +119,11 @@ function awaitAskUserQuestionAnswer(
 }
 
 export function resolvePendingAskUserQuestion(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null | undefined,
   payload: AskUserQuestionAnswer,
 ): boolean {
-  const key = askUserQuestionKey(cardId, toolUseID)
+  const key = askUserQuestionKey(scope, toolUseID)
   const pending = pendingAskUserQuestions.get(key)
   if (!pending) return false
   pendingAskUserQuestions.delete(key)
@@ -120,13 +131,18 @@ export function resolvePendingAskUserQuestion(
   return true
 }
 
-export function cancelPendingAskUserQuestionsForCard(cardId: string, reason: string = 'Cancelled'): void {
-  const prefix = `${cardId}::`
+export function cancelPendingAskUserQuestionsForCard(
+  scope: ChatStreamScope,
+  reason: string = 'Cancelled',
+): void {
+  const scopeKey = chatStreamScopeKey(scope)
   for (const [key, pending] of pendingAskUserQuestions.entries()) {
-    if (key.startsWith(prefix)) {
+    try {
+      const parsed = JSON.parse(key)
+      if (!Array.isArray(parsed) || parsed[0] !== scopeKey) continue
       pendingAskUserQuestions.delete(key)
       try { pending.reject(new Error(reason)) } catch { /* noop */ }
-    }
+    } catch { /* ignore malformed internal keys */ }
   }
 }
 
@@ -414,18 +430,20 @@ function buildAnthropicFileChanges(
 // --- Claude via Agent SDK ----------------------------------------------------
 
 export function chatClaude(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
   // Restore sessionId from frontend (survives app restart via tile state)
-  if (req.sessionId && !getCardSessionId(req.cardId, req.provider)) {
-    setCardSessionId(req.cardId, req.provider, req.sessionId)
+  if (req.sessionId && !getCardSessionId(scope, req.provider)) {
+    setCardSessionId(scope, req.provider, req.sessionId)
   }
 
-  const existingSessionId = getCardSessionId(req.cardId, req.provider) ?? req.sessionId ?? null
+  const existingSessionId = getCardSessionId(scope, req.provider) ?? req.sessionId ?? null
   const runtimeMessages = cloneChatMessages(req.messages)
   const runtimeSession: RuntimeChatSessionState = {
     provider: req.provider,
@@ -447,8 +465,8 @@ export function chatClaude(req: ChatRequest): void {
   })
 
   const abortController = new AbortController()
-  cardAbortControllers.set(req.cardId, abortController)
-  let claudeStderr = ''
+  cardAbortControllers.set(scopeKey, abortController)
+  const claudeStderr = new BoundedTextAccumulator(MAX_PROVIDER_DIAGNOSTIC_BYTES)
 
   // Map mode from UI to SDK permission mode
   const modeMap: Record<string, string> = {
@@ -460,7 +478,7 @@ export function chatClaude(req: ChatRequest): void {
   const permMode = modeMap[req.mode ?? ''] ?? 'default'
   // Seed live mode map so mid-thread switches can override it without waiting
   // for the next turn.
-  cardPermissionModes.set(req.cardId, permMode)
+  cardPermissionModes.set(scopeKey, permMode)
 
   // Map thinking option from UI to SDK thinking config
   const thinkingMap: Record<string, { type: string; budget_tokens?: number }> = {
@@ -476,11 +494,13 @@ export function chatClaude(req: ChatRequest): void {
   // Wire up the codesurf MCP server (Bearer auth matches mcp-server HTTP checks)
   const mcpPort = getMCPPort()
   const mcpServers: Record<string, { type: 'http'; url: string; headers?: Record<string, string> }> = {}
-  if (req.mcpEnabled !== false && mcpPort) {
+  if (req.mcpEnabled !== false && mcpPort && req.workspaceId) {
     mcpServers.codesurf = {
       type: 'http',
       url: `http://127.0.0.1:${mcpPort}/mcp`,
-      headers: { Authorization: `Bearer ${getMCPToken()}` },
+      headers: {
+        Authorization: `Bearer ${getTileToken(req.workspaceId, req.cardId)}`,
+      },
     }
     log('MCP server attached at port', mcpPort)
   }
@@ -513,9 +533,9 @@ export function chatClaude(req: ChatRequest): void {
   try {
     ({ tools: agentTools, persona: agentPersona } = buildClaudeAgentModeOptions(req))
   } catch (err) {
-    sendStream(req.cardId, { type: 'error', error: err instanceof Error ? err.message : String(err) })
-    sendStream(req.cardId, { type: 'done' })
-    cardAbortControllers.delete(req.cardId)
+    sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
+    sendStream(scope, { type: 'done' })
+    cardAbortControllers.delete(scopeKey)
     return
   }
   systemPrompt = buildClaudeAgentPrompt(systemPrompt, req.memoryPrompt, req.skillsPrompt, req.asyncExecution, agentPersona)
@@ -542,7 +562,7 @@ export function chatClaude(req: ChatRequest): void {
             : []
           if (questions.length > 0) {
             const toolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
-            const { answers, annotations } = await awaitAskUserQuestionAnswer(req.cardId, toolUseID, questions)
+            const { answers, annotations } = await awaitAskUserQuestionAnswer(scope, toolUseID, questions)
             return {
               behavior: 'allow',
               updatedInput: {
@@ -561,7 +581,7 @@ export function chatClaude(req: ChatRequest): void {
       }
 
       // Read the live mode so mid-thread switches take effect immediately.
-      const currentMode = cardPermissionModes.get(req.cardId) ?? permMode
+      const currentMode = cardPermissionModes.get(scopeKey) ?? permMode
       if (currentMode === 'bypassPermissions') {
         return await allowToolWithCheckpoint(req, toolName, input, toolOptions)
       }
@@ -576,7 +596,7 @@ export function chatClaude(req: ChatRequest): void {
       }
 
       const sdkToolUseID = typeof toolOptions?.toolUseID === 'string' ? toolOptions.toolUseID : null
-      const result = await resolveInlineToolPermission(req.cardId, permissionRequest, sdkToolUseID)
+      const result = await resolveInlineToolPermission(scope, permissionRequest, sdkToolUseID)
 
       if ('error' in result) {
         return {
@@ -604,8 +624,7 @@ export function chatClaude(req: ChatRequest): void {
     // Use detected system binary, not the SDK's bundled cli.js
     ...(claudePath && { pathToClaudeCodeExecutable: claudePath }),
     stderr: (data: string) => {
-      claudeStderr += data
-      if (claudeStderr.length > 64 * 1024) claudeStderr = claudeStderr.slice(-64 * 1024)
+      claudeStderr.append(data)
     },
   }
 
@@ -641,22 +660,22 @@ export function chatClaude(req: ChatRequest): void {
     log('query() returned, consuming generator...', req.imageAttachments?.length
       ? `(with ${req.imageAttachments.length} image attachment${req.imageAttachments.length === 1 ? '' : 's'})`
       : '')
-    activeQueries.set(req.cardId, q)
+    activeQueries.set(scopeKey, q)
 
     // Consume the async generator in the background
     ;(async () => {
       let capturedSessionId = false
-      let assistantText = ''
+      const assistantText = new BoundedTextAccumulator(MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES)
       let sawAssistantOutput = false
       // Track streamed text per content_block index so we can fall back to the
       // assembled `assistant` message for any text the partial stream missed.
       // Key format: `${turn}:${index}` — we bump `turn` on each assistant message.
-      const streamedTextByIndex = new Map<string, string>()
+      const streamedTextByIndex = new Map<string, { length: number, tail: string }>()
       let streamTurn = 0
       let currentThinkingId: string | null = null
       try {
         for await (const msg of q) {
-          if (!isActiveQuery(req.cardId, q)) {
+          if (!isActiveQuery(scope, q)) {
             return
           }
 
@@ -665,10 +684,10 @@ export function chatClaude(req: ChatRequest): void {
             const sid = (msg as any).session_id
             if (sid) {
               log('captured session_id:', sid.slice(0, 8))
-              setCardSessionId(req.cardId, req.provider, sid)
+              setCardSessionId(scope, req.provider, sid)
               runtimeSession.sessionId = sid
               void upsertRuntimeSessionState(req, runtimeSession)
-              sendStream(req.cardId, { type: 'session', sessionId: sid })
+              sendStream(scope, { type: 'session', sessionId: sid })
               capturedSessionId = true
             }
           }
@@ -679,20 +698,28 @@ export function chatClaude(req: ChatRequest): void {
             if (evt.type === 'content_block_delta') {
               if (evt.delta?.type === 'text_delta' && evt.delta.text) {
                 const key = `${streamTurn}:${evt.index ?? 0}`
-                streamedTextByIndex.set(key, (streamedTextByIndex.get(key) ?? '') + evt.delta.text)
-                assistantText += evt.delta.text
+                const prior = streamedTextByIndex.get(key) ?? { length: 0, tail: '' }
+                if (!streamedTextByIndex.has(key) && streamedTextByIndex.size >= 256) {
+                  const oldestKey = streamedTextByIndex.keys().next().value
+                  if (oldestKey) streamedTextByIndex.delete(oldestKey)
+                }
+                streamedTextByIndex.set(key, {
+                  length: prior.length + evt.delta.text.length,
+                  tail: appendBoundedSuffix(prior.tail, evt.delta.text, MAX_PROVIDER_DEDUP_TAIL_BYTES),
+                })
+                assistantText.append(evt.delta.text)
                 sawAssistantOutput = true
-                sendStream(req.cardId, { type: 'text', text: evt.delta.text })
+                sendStream(scope, { type: 'text', text: evt.delta.text })
               } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
                 sawAssistantOutput = true
-                sendStream(req.cardId, { type: 'thinking', text: evt.delta.thinking, thinkingId: currentThinkingId })
+                sendStream(scope, { type: 'thinking', text: evt.delta.thinking, thinkingId: currentThinkingId })
               } else if (evt.delta?.type === 'input_json_delta' && evt.delta.partial_json) {
-                sendStream(req.cardId, { type: 'tool_input', text: evt.delta.partial_json })
+                sendStream(scope, { type: 'tool_input', text: evt.delta.partial_json })
               }
             } else if (evt.type === 'content_block_start') {
               if (evt.content_block?.type === 'tool_use') {
                 sawAssistantOutput = true
-                sendStream(req.cardId, {
+                sendStream(scope, {
                   type: 'tool_start',
                   toolName: evt.content_block.name,
                   toolId: evt.content_block.id,
@@ -700,10 +727,10 @@ export function chatClaude(req: ChatRequest): void {
               } else if (evt.content_block?.type === 'thinking') {
                 const thinkingId = `think-${streamTurn}-${evt.index ?? 0}`
                 currentThinkingId = thinkingId
-                sendStream(req.cardId, { type: 'thinking_start', thinkingId })
+                sendStream(scope, { type: 'thinking_start', thinkingId })
               }
             } else if (evt.type === 'content_block_stop') {
-              sendStream(req.cardId, { type: 'block_stop', index: evt.index, thinkingId: currentThinkingId })
+              sendStream(scope, { type: 'block_stop', index: evt.index, thinkingId: currentThinkingId })
               currentThinkingId = null
             }
           } else if (msg.type === 'assistant') {
@@ -717,7 +744,7 @@ export function chatClaude(req: ChatRequest): void {
                 if (block.type === 'tool_use') {
                   sawAssistantOutput = true
                   const toolInputStr = JSON.stringify(block.input, null, 2)
-                  sendStream(req.cardId, {
+                  sendStream(scope, {
                     type: 'tool_use',
                     toolName: block.name,
                     toolId: block.id,
@@ -729,7 +756,7 @@ export function chatClaude(req: ChatRequest): void {
                     req.workspaceDir,
                   )
                   if (fileChanges.length > 0) {
-                    sendStream(req.cardId, {
+                    sendStream(scope, {
                       type: 'tool_summary',
                       toolId: block.id,
                       toolName: block.name,
@@ -738,127 +765,144 @@ export function chatClaude(req: ChatRequest): void {
                   }
                 } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
                   const key = `${streamTurn}:${idx}`
-                  const alreadyStreamed = streamedTextByIndex.get(key) ?? ''
-                  if (block.text === alreadyStreamed) continue
-                  const tail = block.text.startsWith(alreadyStreamed)
+                  const alreadyStreamed = streamedTextByIndex.get(key)
+                  const matchesStreamedPrefix = Boolean(
+                    alreadyStreamed
+                    && block.text.length >= alreadyStreamed.length
+                    && block.text.slice(
+                      Math.max(0, alreadyStreamed.length - alreadyStreamed.tail.length),
+                      alreadyStreamed.length,
+                    ) === alreadyStreamed.tail,
+                  )
+                  if (matchesStreamedPrefix && block.text.length === alreadyStreamed?.length) continue
+                  const tail = matchesStreamedPrefix && alreadyStreamed
                     ? block.text.slice(alreadyStreamed.length)
                     : block.text
                   if (tail.length > 0) {
-                    assistantText += tail
+                    assistantText.append(tail)
                     sawAssistantOutput = true
-                    sendStream(req.cardId, { type: 'text', text: tail })
-                    streamedTextByIndex.set(key, block.text)
+                    sendStream(scope, { type: 'text', text: tail })
+                    streamedTextByIndex.set(key, {
+                      length: block.text.length,
+                      tail: appendBoundedSuffix('', block.text, MAX_PROVIDER_DEDUP_TAIL_BYTES),
+                    })
                   }
                 }
               }
             }
             // Advance turn so the next assistant message gets fresh indices.
+            const finishedTurnPrefix = `${streamTurn}:`
+            for (const key of streamedTextByIndex.keys()) {
+              if (key.startsWith(finishedTurnPrefix)) streamedTextByIndex.delete(key)
+            }
             streamTurn += 1
           } else if (msg.type === 'tool_use_summary') {
-            sendStream(req.cardId, {
+            sendStream(scope, {
               type: 'tool_summary',
               text: (msg as any).summary,
             })
             if (typeof (msg as any).summary === 'string' && (msg as any).summary.trim()) sawAssistantOutput = true
           } else if (msg.type === 'tool_progress') {
             sawAssistantOutput = true
-            sendStream(req.cardId, {
+            sendStream(scope, {
               type: 'tool_progress',
               toolName: (msg as any).tool_name,
               elapsed: (msg as any).elapsed_time_seconds,
             })
           } else if (msg.type === 'result') {
-            if (!isActiveQuery(req.cardId, q)) {
+            if (!isActiveQuery(scope, q)) {
               return
             }
             const result = msg as any
             const resultText = typeof result.result === 'string' ? result.result.trim() : ''
-            if (!assistantText.trim() && resultText) {
-              assistantText = resultText
+            if (!assistantText.value.trim() && resultText) {
+              assistantText.append(resultText)
               sawAssistantOutput = true
-              sendStream(req.cardId, { type: 'text', text: resultText })
+              sendStream(scope, { type: 'text', text: resultText })
             }
             if (!sawAssistantOutput && !resultText) {
               runtimeSession.sessionId = result.session_id ?? runtimeSession.sessionId
               runtimeSession.isStreaming = false
               void upsertRuntimeSessionState(req, runtimeSession)
-              sendStream(req.cardId, {
+              sendStream(scope, {
                 type: 'error',
                 error: 'Claude finished without assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
               })
-              clearActiveClaudeQuery(req.cardId, q)
+              clearActiveClaudeQuery(scope, q)
               return
             }
-            if (assistantText.trim()) {
+            if (assistantText.value.trim()) {
               runtimeSession.messages = [
                 ...runtimeMessages,
-                { role: 'assistant', content: assistantText },
+                { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
               ]
             }
             runtimeSession.sessionId = result.session_id ?? runtimeSession.sessionId
             runtimeSession.isStreaming = false
             void upsertRuntimeSessionState(req, runtimeSession)
-            sendStream(req.cardId, {
+            sendStream(scope, {
               type: 'done',
               cost: result.total_cost_usd,
               turns: result.num_turns,
-              resultText: result.result,
+              resultText: typeof result.result === 'string'
+                ? boundProviderHistoryText(result.result)
+                : result.result,
               sessionId: result.session_id,
             })
-            clearActiveClaudeQuery(req.cardId, q)
+            clearActiveClaudeQuery(scope, q)
             // Also capture from result if we missed earlier
-            if (result.session_id && !getCardSessionId(req.cardId, req.provider)) {
-              setCardSessionId(req.cardId, req.provider, result.session_id)
+            if (result.session_id && !getCardSessionId(scope, req.provider)) {
+              setCardSessionId(scope, req.provider, result.session_id)
             }
           }
         }
 
         // Generator finished -- ensure done is sent
-        if (isActiveQuery(req.cardId, q)) {
-          if (!sawAssistantOutput && !assistantText.trim()) {
+        if (isActiveQuery(scope, q)) {
+          if (!sawAssistantOutput && !assistantText.value.trim()) {
             runtimeSession.isStreaming = false
             void upsertRuntimeSessionState(req, runtimeSession)
-            sendStream(req.cardId, {
+            sendStream(scope, {
               type: 'error',
               error: 'Claude stream ended before producing assistant output. Only preflight/context events were emitted, so the turn was not saved as a blank reply. Please resend the message.',
             })
-            clearActiveQuery(req.cardId, q)
+            clearActiveQuery(scope, q)
             return
           }
-          if (assistantText.trim()) {
+          if (assistantText.value.trim()) {
             runtimeSession.messages = [
               ...runtimeMessages,
-              { role: 'assistant', content: assistantText },
+              { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
             ]
           }
           runtimeSession.isStreaming = false
           void upsertRuntimeSessionState(req, runtimeSession)
-          sendStream(req.cardId, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
-          clearActiveQuery(req.cardId, q)
+          sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+          clearActiveQuery(scope, q)
         }
       } catch (err) {
-        if (wasClaudeQueryIntentionallyClosed(q) || !isActiveQuery(req.cardId, q)) {
+        if (wasClaudeQueryIntentionallyClosed(q) || !isActiveQuery(scope, q)) {
           log('generator closed for inactive Claude query:', err instanceof Error ? err.message : String(err))
-          clearActiveQuery(req.cardId, q)
+          clearActiveQuery(scope, q)
           return
         }
-        const errorMessage = formatClaudeSdkError(err, claudeStderr)
+        const errorMessage = formatClaudeSdkError(err, claudeStderr.value)
         log('generator error:', errorMessage)
-        if (assistantText.trim()) {
+        if (assistantText.value.trim()) {
           runtimeSession.messages = [
             ...runtimeMessages,
-            { role: 'assistant', content: assistantText },
+            { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
           ]
         }
         runtimeSession.isStreaming = false
         void upsertRuntimeSessionState(req, runtimeSession)
-        sendStream(req.cardId, { type: 'error', error: errorMessage })
-        clearActiveQuery(req.cardId, q)
+        sendStream(scope, { type: 'error', error: errorMessage })
+        clearActiveQuery(scope, q)
       }
     })()
   } catch (err) {
-    const errorMessage = formatClaudeSdkError(err, claudeStderr)
+    const errorMessage = formatClaudeSdkError(err, claudeStderr.value)
     log('query() threw:', errorMessage)
-    sendStream(req.cardId, { type: 'error', error: errorMessage })
+    sendStream(scope, { type: 'error', error: errorMessage })
   }
 }

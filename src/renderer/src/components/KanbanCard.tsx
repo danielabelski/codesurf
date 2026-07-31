@@ -71,7 +71,7 @@ export const MODELS: Record<string, string[]> = {
   shell:    []
 }
 
-const MCP_CONFIG = '~/.codesurf/mcp-server.json'
+const MCP_CONFIG = '$CODESURF_MCP_CONFIG'
 const BUILTIN_TOOLS = ['read', 'write', 'edit', 'bash', 'computer', 'web_search', 'browser']
 
 function resolveMcpConfigPath(input: string): string {
@@ -108,8 +108,11 @@ export function buildLaunchCmd(card: KanbanCardData, briefPath?: string, agentPa
   const bin = agentPath ?? card.agent
   const parts: string[] = [shQuote(bin)]
   if (card.model) parts.push(`--model ${shQuote(card.model)}`)
-  const mcpConfigPath = resolveMcpConfigPath(card.mcpConfig ?? MCP_CONFIG)
-  parts.push(`--mcp-config ${shQuote(mcpConfigPath)}`)
+  if (card.mcpConfig) {
+    parts.push(`--mcp-config ${shQuote(resolveMcpConfigPath(card.mcpConfig))}`)
+  } else {
+    parts.push('--mcp-config "$CODESURF_MCP_CONFIG"')
+  }
   if (briefPath) {
     if (card.agent === 'claude') parts.push(`--print "$(cat ${shQuote(briefPath)})"`)
     else if (card.agent === 'codex') parts.push(`exec "$(cat ${shQuote(briefPath)})"`)
@@ -124,7 +127,17 @@ export function buildLaunchCmd(card: KanbanCardData, briefPath?: string, agentPa
 
 // ─── KanbanCard ───────────────────────────────────────────────────────────────
 
-function CardAgentRunner({ termId, workspaceDir, launchCmd }: { termId: string; workspaceDir: string; launchCmd?: string }): null {
+function CardAgentRunner({
+  termId,
+  workspaceId,
+  workspaceDir,
+  launchCmd,
+}: {
+  termId: string
+  workspaceId: string
+  workspaceDir: string
+  launchCmd?: string
+}): null {
   useEffect(() => {
     if (!launchCmd) return
 
@@ -132,7 +145,7 @@ function CardAgentRunner({ termId, workspaceDir, launchCmd }: { termId: string; 
 
     void (async () => {
       try {
-        await window.electron?.terminal?.create(termId, workspaceDir)
+        await window.electron?.terminal?.create(termId, workspaceId, workspaceDir)
         if (cancelled) return
         await window.electron?.terminal?.write(termId, `${launchCmd}\n`)
       } catch (error) {
@@ -144,15 +157,16 @@ function CardAgentRunner({ termId, workspaceDir, launchCmd }: { termId: string; 
 
     return () => {
       cancelled = true
-      void window.electron?.terminal?.destroy(termId).catch(() => {})
+      void window.electron?.terminal?.destroy(termId, workspaceId).catch(() => {})
     }
-  }, [termId, workspaceDir, launchCmd])
+  }, [termId, workspaceId, workspaceDir, launchCmd])
 
   return null
 }
 
 interface Props {
   card: KanbanCardData
+  workspaceId: string
   workspaceDir: string
   active: boolean
   dragging: boolean
@@ -169,7 +183,7 @@ interface Props {
 }
 
 function KanbanCardInner({
-  card, workspaceDir, active, dragging, isRunning: _isRunning, allCards,
+  card, workspaceId, workspaceDir, active, dragging, isRunning: _isRunning, allCards,
   onUpdate, onRemove, onLaunch, onPause, onSave, onFocus, onDragStart, onDragEnd
 }: Props): JSX.Element {
   const [expanded, setExpanded] = useState(false)
@@ -336,7 +350,14 @@ function KanbanCardInner({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {card.launched && <CardAgentRunner termId={termId} workspaceDir={workspaceDir} launchCmd={launchCmd} />}
+      {card.launched && (
+        <CardAgentRunner
+          termId={termId}
+          workspaceId={workspaceId}
+          workspaceDir={workspaceDir}
+          launchCmd={launchCmd}
+        />
+      )}
 
       {/* ── Collapsed header ── */}
       <div

@@ -779,6 +779,7 @@ test('terminal metadata failure prevents success publication and remains restart
   releaseTerminalMetadata.resolve()
   await waitFor(() => !manager.listLiveJobIds().includes(job.id))
   await waitFor(async () => (await manager.getJobState(job.id))?.status === 'failed')
+  await waitFor(() => metadataWrites.includes('failed'))
 
   const streamed = writtenEvents(response)
   assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])

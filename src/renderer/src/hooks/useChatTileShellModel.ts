@@ -286,7 +286,7 @@ export function useChatTileShellModel(opts: UseChatTileShellModelOptions) {
   useEffect(() => { ensureChatMdStyle() }, [])
 
   useChatTileLifecycleEffects({
-    tileId, sessionId, linkedSessionEntryId, provider, model, mode,
+    workspaceId, tileId, sessionId, linkedSessionEntryId, provider, model, mode,
     workspaceDir, executionTarget, cloudHostId,
     settingsExecution: settings?.execution ?? null,
     jobId, jobSequence, isStreaming, isStreamingRef, messages, historicalMessages,

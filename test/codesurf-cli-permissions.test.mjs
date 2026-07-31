@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 const ROOT_DIR = process.cwd()
 const CLI = join(ROOT_DIR, 'bin', 'codesurf.cjs')
+await mkdir(join(ROOT_DIR, '.tmp'), { recursive: true })
 
 async function runCodesurf(args, options) {
   const result = await execFileAsync(process.execPath, [CLI, ...args], {

@@ -30,25 +30,30 @@ export function assertSafeBusEventType(type: string): BusEventType {
   return safe as BusEventType
 }
 
-function extractScopedId(source: string): string | null {
-  const match = source.match(/^(?:browser|terminal|chat|tile|extension|kanban|image):([^:*]+)$/)
-  return match?.[1] ?? null
+function extractScopedIdentity(source: string): {
+  workspaceId: string | null
+  scopedId: string
+} | null {
+  const match = source.match(
+    /^(?:browser|terminal|chat|tile|extension|kanban|image):([^:*]+)(?::([^:*]+))?$/,
+  )
+  if (!match) return null
+  return match[2]
+    ? { workspaceId: match[1], scopedId: match[2] }
+    : { workspaceId: null, scopedId: match[1] }
 }
 
 function channelMatchesSourceScope(channel: string, source: string): boolean {
-  const scopedId = extractScopedId(source)
-  if (!scopedId) return true
+  const identity = extractScopedIdentity(source)
+  if (!identity) return true
+  const { workspaceId, scopedId } = identity
 
-  const allowed = new Set([
-    `tile:${scopedId}`,
-    `ctx:${scopedId}`,
-    `card:${scopedId}`,
-    `browser:${scopedId}`,
-    `terminal:${scopedId}`,
-    `chat:${scopedId}`,
-    `kanban:${scopedId}`,
-    `image:${scopedId}`,
-  ])
+  const allowed = new Set(
+    ['tile', 'ctx', 'card', 'browser', 'terminal', 'chat', 'kanban', 'image']
+      .map(prefix => workspaceId
+        ? `${prefix}:${workspaceId}:${scopedId}`
+        : `${prefix}:${scopedId}`),
+  )
 
   if (allowed.has(channel)) return true
 

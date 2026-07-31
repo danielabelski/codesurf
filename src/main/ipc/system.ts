@@ -208,17 +208,22 @@ export function registerSystemIPC(): void {
     }
   })
 
-  ipcMain.handle('system:cleanupTile', (_, tileId: string) => {
-    if (!tileId || typeof tileId !== 'string') return { ok: false }
+  ipcMain.handle('system:cleanupTile', (_, workspaceId: string, tileId: string) => {
+    if (
+      !workspaceId
+      || typeof workspaceId !== 'string'
+      || !tileId
+      || typeof tileId !== 'string'
+    ) return { ok: false }
     // 1. Drop all bus history pinned to this tile. Cards and agent context are
     //    published on separate prefixes (card:/ctx:), so drop those too —
     //    otherwise their ring buffers accumulate for the life of the process.
     const channelsDropped =
-      bus.dropChannelsMatching(`tile:${tileId}`) +
-      bus.dropChannelsMatching(`card:${tileId}`) +
-      bus.dropChannelsMatching(`ctx:${tileId}`)
+      bus.dropChannelsMatching(`tile:${workspaceId}:${tileId}`) +
+      bus.dropChannelsMatching(`card:${workspaceId}:${tileId}`) +
+      bus.dropChannelsMatching(`ctx:${workspaceId}:${tileId}`)
     // 2. Clear peer state (agent state, messages, links)
-    removePeerTile(tileId)
+    removePeerTile(workspaceId, tileId)
     // 3. Schedule a debounced GC
     scheduleGC()
     return { ok: true, channelsDropped }

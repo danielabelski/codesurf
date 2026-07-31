@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { resolvePrincipal } from '../src/main/mcp/auth.ts'
+import type { TileTokenRecord } from '../src/main/mcp/auth.ts'
 import { randomUUID } from 'node:crypto'
 
 /**
@@ -11,19 +12,22 @@ import { randomUUID } from 'node:crypto'
  */
 describe('tile MCP token principal model (SEC-05)', () => {
   const GLOBAL = randomUUID()
-  const tileTokens = new Map<string, string>()
+  const tileTokens = new Map<string, TileTokenRecord>()
 
-  function tokenFor(tileId: string): string {
-    let t = tileTokens.get(tileId)
-    if (!t) {
-      t = randomUUID()
-      tileTokens.set(tileId, t)
+  function tokenFor(workspaceId: string, tileId: string): string {
+    const key = `${workspaceId}\0${tileId}`
+    let record = tileTokens.get(key)
+    if (!record) {
+      record = { workspaceId, tileId, token: randomUUID() }
+      tileTokens.set(key, record)
     }
-    return t
+    return record.token
   }
 
-  function entry(tileId?: string): { type: string, url: string, headers: { Authorization: string } } {
-    const token = tileId ? tokenFor(tileId) : GLOBAL
+  function entry(
+    scope?: { workspaceId: string, tileId: string },
+  ): { type: string, url: string, headers: { Authorization: string } } {
+    const token = scope ? tokenFor(scope.workspaceId, scope.tileId) : GLOBAL
     return {
       type: 'http',
       url: 'http://127.0.0.1:1234/mcp',
@@ -44,24 +48,36 @@ describe('tile MCP token principal model (SEC-05)', () => {
 
   test('with tileId uses a distinct token that resolves to that tile', () => {
     const globalEntry = entry()
-    const tileEntry = entry('tile-alpha')
+    const tileEntry = entry({ workspaceId: 'workspace-a', tileId: 'tile-alpha' })
     assert.notEqual(globalEntry.headers.Authorization, tileEntry.headers.Authorization)
     const principal = resolvePrincipal(
       tileEntry.headers.Authorization.slice('Bearer '.length),
       GLOBAL,
       tileTokens,
     )
-    assert.deepEqual(principal, { kind: 'tile', tileId: 'tile-alpha' })
+    assert.deepEqual(principal, {
+      kind: 'tile',
+      workspaceId: 'workspace-a',
+      tileId: 'tile-alpha',
+    })
   })
 
   test('same tileId yields a stable token', () => {
-    assert.equal(entry('tile-stable').headers.Authorization, entry('tile-stable').headers.Authorization)
+    const scope = { workspaceId: 'workspace-a', tileId: 'tile-stable' }
+    assert.equal(entry(scope).headers.Authorization, entry(scope).headers.Authorization)
   })
 
   test('different tileIds yield different tokens', () => {
     assert.notEqual(
-      entry('tile-a').headers.Authorization,
-      entry('tile-b').headers.Authorization,
+      entry({ workspaceId: 'workspace-a', tileId: 'tile-a' }).headers.Authorization,
+      entry({ workspaceId: 'workspace-a', tileId: 'tile-b' }).headers.Authorization,
+    )
+  })
+
+  test('the same tile ID in different workspaces gets distinct tokens', () => {
+    assert.notEqual(
+      entry({ workspaceId: 'workspace-a', tileId: 'tile-a' }).headers.Authorization,
+      entry({ workspaceId: 'workspace-b', tileId: 'tile-a' }).headers.Authorization,
     )
   })
 })

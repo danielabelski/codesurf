@@ -269,7 +269,9 @@ function startupError(message, managed, cause) {
     managed.stdout.trim() ? `stdout:\n${managed.stdout.trim()}` : '',
     managed.stderr.trim() ? `stderr:\n${managed.stderr.trim()}` : '',
   ].filter(Boolean).join('\n')
-  return new Error(`${message}${diagnostics ? `\n${diagnostics}` : ''}`, { cause })
+  const error = new Error(`${message}${diagnostics ? `\n${diagnostics}` : ''}`, { cause })
+  error.childPid = managed.child.pid
+  return error
 }
 
 export async function spawnDaemon({
@@ -329,6 +331,9 @@ export async function spawnDaemon({
       }
     }, startupTimeoutMs, 25)
   } catch (error) {
+    const startupFailure = error?.childPid
+      ? error
+      : startupError(error.message, managed, error)
     let shutdownError = null
     try {
       await managed.stop({ termTimeoutMs, killTimeoutMs })
@@ -340,11 +345,11 @@ export async function spawnDaemon({
     }
     if (shutdownError) {
       throw new AggregateError(
-        [error, shutdownError],
+        [startupFailure, shutdownError],
         'daemon startup failed and its child did not shut down cleanly',
       )
     }
-    throw error
+    throw startupFailure
   }
 
   const requests = createRequestHelpers(pidInfo)

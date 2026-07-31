@@ -198,8 +198,8 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath, is
 
   React.useEffect(() => {
     if (!workspaceId || !tileId || !window.electron?.bus) return
-    const subscriberId = `image:${tileId}:mcp`
-    const unsubscribe = window.electron.bus.subscribe(`tile:${tileId}`, subscriberId, (evt: any) => {
+    const subscriberId = `image:${workspaceId}:${tileId}:mcp`
+    const unsubscribe = window.electron.bus.subscribe(`tile:${workspaceId}:${tileId}`, subscriberId, (evt: any) => {
       const payload = evt?.payload && typeof evt.payload === 'object' ? evt.payload as Record<string, unknown> : {}
       if (payload.tileId !== tileId && payload.cardId !== tileId) return
       const command = typeof payload.command === 'string' ? payload.command : ''
@@ -299,12 +299,12 @@ export function ImageTile({ tileId, workspaceId, filePath, onReplaceFilePath, is
     if (!prompt || !window.electron?.image?.edit) return
     setInstruction('')
     setEditStatus({ status: 'running', message: 'Editing image...' })
-    void window.electron.image.edit({ tileId, prompt }).then(result => {
+    void window.electron.image.edit({ workspaceId, tileId, prompt }).then(result => {
       if (!result.ok) setEditStatus({ status: 'error', message: result.error ?? 'Image edit failed' })
     }).catch(err => {
       setEditStatus({ status: 'error', message: err instanceof Error ? err.message : String(err) })
     })
-  }, [instruction, tileId])
+  }, [instruction, workspaceId, tileId])
 
   const formatBytes = (bytes: number | null): string => {
     if (bytes === null) return 'unknown'

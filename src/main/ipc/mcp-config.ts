@@ -92,7 +92,12 @@ export function registerMcpConfigIPC(): void {
       const cfg = JSON.parse(raw) as { mcpServers?: Record<string, unknown>, url?: string, updatedAt?: string }
       const contexBase = (typeof cfg.url === 'string' ? `${cfg.url.replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
       const contexServer = normalizeMcpServer(cfg.mcpServers?.codesurf ?? cfg.mcpServers?.contex ?? { url: contexBase }, contexBase)
+      delete contexServer.headers
+      delete contexServer.token
       const customServers = normalizeMcpServers(servers)
+      delete customServers.codesurf
+      delete customServers.contex
+      delete (cfg as Record<string, unknown>).token
       cfg.mcpServers = {
         codesurf: contexServer,
         ...customServers
@@ -119,13 +124,16 @@ export function registerMcpConfigIPC(): void {
       await fsP.mkdir(dir, { recursive: true })
       const p = join(dir, 'mcp-servers.json')
       const normalized = normalizeMcpServers(servers)
+      delete normalized.codesurf
+      delete normalized.contex
       await fsP.writeFile(p, JSON.stringify(normalized, null, 2))
       return normalized
     } catch (e) { return null }
   })
 
-  // Merged config for a workspace — global + workspace servers combined
-  // This is what you'd point Claude Code / Cursor / any MCP client at
+  // Merged third-party config for trusted UI inspection. CodeSurf itself is
+  // omitted because agents must receive a per-tile credential, never the
+  // renderer's global bearer.
   ipcMain.handle('mcp:getMergedConfig', async (_, workspaceId: string) => {
     try {
       // Global config
@@ -153,23 +161,17 @@ export function registerMcpConfigIPC(): void {
 
       // Merge: global mcpServers + workspace servers
       const globalServers = (globalCfg as Record<string, Record<string, unknown>>).mcpServers ?? {}
-      const globalCfgUrl = (globalCfg as { url?: string }).url
-      const contexBase = (typeof globalCfgUrl === 'string' ? `${String(globalCfgUrl).replace(/\/$/, '')}/mcp` : undefined) ?? getRuntimeContexBase()
-
-      const normalizedGlobal = normalizeMcpServers(globalServers, (name) => {
-        if ((name === 'codesurf' || name === 'contex') && contexBase) return contexBase
-        return undefined
-      })
-      if (contexBase) {
-        normalizedGlobal['codesurf'] = {
-          ...(normalizedGlobal['codesurf'] ?? {}),
-          ...buildContexHttpMcpServerEntry(contexBase),
-        }
-      }
+      const normalizedGlobal = normalizeMcpServers(globalServers)
       const normalizedWorkspace = normalizeMcpServers(wsServers)
+      delete normalizedGlobal.codesurf
+      delete normalizedGlobal.contex
+      delete normalizedWorkspace.codesurf
+      delete normalizedWorkspace.contex
+      const safeGlobalCfg = { ...globalCfg }
+      delete safeGlobalCfg.token
 
       const merged = {
-        ...(globalCfg as object),
+        ...safeGlobalCfg,
         mcpServers: {
           ...normalizedGlobal,
           ...normalizedWorkspace

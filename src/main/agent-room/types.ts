@@ -26,6 +26,11 @@ export interface RoomMember {
   acknowledgedSeq: number
   joinedAt: number
   updatedAt: number
+  truncation?: {
+    task: boolean
+    filesOmitted: number
+    fileFieldsTruncated: number
+  }
 }
 
 export interface RoomEvent {
@@ -44,6 +49,7 @@ export interface RoomEvent {
 
 export interface AgentRoom {
   id: string
+  workspaceId: string
   /** Stable fingerprint of sorted member ids for reconciling wire graphs. */
   memberKey: string
   members: Map<string, RoomMember>
@@ -55,20 +61,31 @@ export interface AgentRoom {
 
 export interface RoomSnapshot {
   id: string
+  workspaceId: string
   memberKey: string
   members: RoomMember[]
   eventCount: number
   latestSequence: number
   createdAt: number
   updatedAt: number
+  truncation?: {
+    membersOmitted: number
+    memberFieldsTruncated: number
+  }
 }
 
 export interface ConsumeResult {
+  workspaceId: string | null
   roomId: string | null
   text: string
   events: RoomEvent[]
   latestSequence: number
   members: RoomMember[]
+  truncation?: {
+    eventsOmitted: number
+    eventFieldsTruncated: number
+    membersOmitted: number
+  }
 }
 
 export interface PostInput {

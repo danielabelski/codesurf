@@ -456,7 +456,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       }
     }
   }, [workspaceId, tileId, navigate, reload, goBack, goForward, switchMode, publishEvidenceSnapshot])
-
   const focusAddressInput = useCallback(() => {
     requestAnimationFrame(() => {
       const input = inputRef.current
