@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodesurfRelay } from './relay'
 import { RelayRuntime } from './runtime'
-import type { RelayAgentExecutor } from './types'
+import type { RelayAgentExecutor, RelayTurnInput } from './types'
 
 /**
  * Integration tests for the relay system.
@@ -463,10 +463,11 @@ describe('integration', () => {
     it('should trigger agent on direct message via event', async () => {
       await relay.init()
 
+      const runTurn = vi.fn().mockImplementation(async () => {
+        return JSON.stringify({ ready: true, status: 'ready' })
+      })
       const mockExecutor: RelayAgentExecutor = {
-        runTurn: vi.fn().mockImplementation(async () => {
-          return JSON.stringify({ ready: true, status: 'ready' })
-        }),
+        runTurn,
       }
 
       const runtime = new RelayRuntime(relay, {
@@ -498,6 +499,7 @@ describe('integration', () => {
         task: 'Listen for messages',
         channels: [],
       })
+      expect(runTurn).toHaveBeenCalledTimes(1)
 
       // Alice sends message to Bob
       await relay.sendDirectMessage('alice', {
@@ -506,15 +508,18 @@ describe('integration', () => {
         body: 'Hi Bob!',
       })
 
-      // Wait for event processing
-      await new Promise(r => setTimeout(r, 50))
+      await vi.waitFor(() => {
+        expect(runTurn).toHaveBeenCalledTimes(2)
+      })
+      const secondTurn = runTurn.mock.calls[1][0] as RelayTurnInput
+      expect(secondTurn.unreadDirectMessages).toHaveLength(1)
+      expect(secondTurn.unreadDirectMessages[0].meta.from).toBe('alice')
+      expect(secondTurn.unreadDirectMessages[0].body).toBe('Hi Bob!')
+      await vi.waitFor(async () => {
+        expect(await relay.listUnreadDirectMessages('bob')).toHaveLength(0)
+      })
 
-      // Verify Bob got the message
-      const bobInbox = await relay.listUnreadDirectMessages('bob')
-      expect(bobInbox.length).toBe(1)
-      expect(bobInbox[0].meta.from).toBe('alice')
-
-      runtime.destroy()
+      await runtime.destroy()
     })
   })
 })

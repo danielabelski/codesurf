@@ -61,6 +61,7 @@ interface RuntimeAgentState {
   ready: boolean
   executor: RelayAgentExecutor
   epoch: number
+  pendingTick: boolean
   activeTurn: ActiveRuntimeTurn | null
   activeTick: ActiveRuntimeTick | null
   providerTeardowns: Set<Promise<void>>
@@ -300,6 +301,7 @@ export class RelayRuntime {
       ready: false,
       executor,
       epoch: 1,
+      pendingTick: false,
       activeTurn: null,
       activeTick: null,
       providerTeardowns: new Set(),
@@ -410,30 +412,47 @@ export class RelayRuntime {
   async schedule(participantId: string): Promise<void> {
     this.assertActive()
     const state = this.agents.get(participantId)
-    if (!state || !state.running || state.activeTick) return
+    if (!state || !state.running) return
+    if (state.activeTick) {
+      state.pendingTick = true
+      await state.activeTick.promise
+      return
+    }
     const epoch = state.epoch
-    const controller = new AbortController()
-    const activeTurn: ActiveRuntimeTurn = {
-      epoch,
-      controller,
-      providerTeardown: Promise.resolve(),
-    }
-    state.activeTurn = activeTurn
+    let activeTick!: ActiveRuntimeTick
     let tickPromise!: Promise<void>
-    tickPromise = this.runAgentTickWithErrorHandling(
-      participantId,
-      state,
-      epoch,
-      activeTurn,
-    )
-    const activeTick: ActiveRuntimeTick = { epoch, promise: tickPromise }
+    tickPromise = (async () => {
+      try {
+        do {
+          state.pendingTick = false
+          const controller = new AbortController()
+          const activeTurn: ActiveRuntimeTurn = {
+            epoch,
+            controller,
+            providerTeardown: Promise.resolve(),
+          }
+          state.activeTurn = activeTurn
+          try {
+            await this.runAgentTickWithErrorHandling(
+              participantId,
+              state,
+              epoch,
+              activeTurn,
+            )
+          } finally {
+            if (state.activeTurn === activeTurn) state.activeTurn = null
+          }
+        } while (
+          state.pendingTick
+          && this.isParticipantCurrent(participantId, state, epoch)
+        )
+      } finally {
+        if (state.activeTick === activeTick) state.activeTick = null
+      }
+    })()
+    activeTick = { epoch, promise: tickPromise }
     state.activeTick = activeTick
-    try {
-      await tickPromise
-    } finally {
-      if (state.activeTick === activeTick) state.activeTick = null
-      if (state.activeTurn === activeTurn) state.activeTurn = null
-    }
+    await tickPromise
   }
 
   private async tick(

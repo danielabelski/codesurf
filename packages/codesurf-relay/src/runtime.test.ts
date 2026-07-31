@@ -172,6 +172,95 @@ describe('runtime', () => {
       runtime.destroy()
     })
 
+    it('queues another turn when a direct message arrives during an active turn', async () => {
+      let markFirstTurnStarted!: () => void
+      const firstTurnStarted = new Promise<void>(resolve => {
+        markFirstTurnStarted = resolve
+      })
+      let releaseFirstTurn!: () => void
+      const firstTurnReleased = new Promise<void>(resolve => {
+        releaseFirstTurn = resolve
+      })
+      let turnCount = 0
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async () => {
+          turnCount += 1
+          if (turnCount === 1) {
+            markFirstTurnStarted()
+            await firstTurnReleased
+          }
+          return '{"ready": true, "status": "ready"}'
+        }),
+      }
+      const queuedMessage: RelayMessage = {
+        mailbox: 'inbox',
+        filename: 'queued.md',
+        meta: {
+          protocol: 'codesurf-relay/v1',
+          id: 'queued-message',
+          threadId: 'queued-message',
+          scope: 'direct',
+          kind: 'request',
+          priority: 'normal',
+          from: 'agent-2',
+          to: 'agent-1',
+          subject: 'Arrived during turn',
+          status: 'unread',
+          createdAt: '2026-07-31T00:00:00.000Z',
+          createdTs: Date.now(),
+          updatedAt: '2026-07-31T00:00:00.000Z',
+          updatedTs: Date.now(),
+          bcc: 'central',
+        },
+        body: 'Process me in the next turn',
+      }
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-1',
+        name: 'Agent 1',
+        kind: 'agent',
+        status: 'ready',
+        channels: [],
+      } as RelayParticipant)
+      vi.mocked(mockRelay.listUnreadDirectMessages).mockResolvedValue([])
+
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+      })
+      const spawning = runtime.spawn({
+        id: 'agent-1',
+        name: 'Agent 1',
+        task: 'Process every direct message',
+      })
+
+      await firstTurnStarted
+      vi.mocked(mockRelay.listUnreadDirectMessages).mockResolvedValue([
+        queuedMessage,
+      ])
+      mockRelay.events.emit('event', {
+        type: 'direct_message',
+        timestamp: Date.now(),
+        payload: {
+          from: 'agent-2',
+          to: 'agent-1',
+          message: queuedMessage,
+        },
+      })
+      releaseFirstTurn()
+
+      await spawning
+      expect(executor.runTurn).toHaveBeenCalledTimes(2)
+      const secondTurn = vi.mocked(executor.runTurn).mock.calls[1][0]
+      expect(secondTurn.unreadDirectMessages).toEqual([queuedMessage])
+      expect(mockRelay.markDirectMessagesRead).toHaveBeenCalledWith(
+        'agent-1',
+        [queuedMessage],
+        expect.objectContaining({
+          assertActive: expect.any(Function),
+        }),
+      )
+      await runtime.destroy()
+    })
+
     it('should emit error event when agent fails', async () => {
       const failingExecutor: RelayAgentExecutor = {
         runTurn: vi.fn().mockRejectedValue(new Error('Agent crashed')),
