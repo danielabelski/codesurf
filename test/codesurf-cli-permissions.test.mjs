@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -23,10 +24,11 @@ async function runCodesurf(args, options) {
 }
 
 test('codesurf permissions CLI writes the same persisted grant shape used by chat', async t => {
-  const homeDir = await mkdtemp(join(ROOT_DIR, '.tmp', 'codesurf-cli-permissions-'))
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-cli-permissions-'))
   const workspaceDir = join(homeDir, 'workspace')
   const codesurfHome = join(homeDir, '.codesurf')
   await mkdir(workspaceDir, { recursive: true })
+  const resolvedWorkspaceDir = await realpath(workspaceDir)
   await mkdir(codesurfHome, { recursive: true, mode: 0o755 })
   if (process.platform !== 'win32') await chmod(codesurfHome, 0o755)
   t.after(async () => {
@@ -48,7 +50,7 @@ test('codesurf permissions CLI writes the same persisted grant shape used by cha
   assert.equal(allowResult.grant.toolName, 'Write')
   assert.equal(allowResult.grant.action, 'allow')
   assert.equal(allowResult.grant.scope, 'today')
-  assert.equal(allowResult.grant.workspaceDir, resolve(workspaceDir))
+  assert.equal(allowResult.grant.workspaceDir, resolvedWorkspaceDir)
   assert.match(allowResult.grant.expiresAt, /^\d{4}-\d{2}-\d{2}T/)
 
   const denyOutput = await runCodesurf([
@@ -63,7 +65,7 @@ test('codesurf permissions CLI writes the same persisted grant shape used by cha
   assert.equal(denyResult.grants.length, 1)
   assert.equal(denyResult.grant.action, 'deny')
   assert.equal(denyResult.grant.scope, 'never')
-  assert.equal(denyResult.grant.workspaceDir, resolve(workspaceDir))
+  assert.equal(denyResult.grant.workspaceDir, resolvedWorkspaceDir)
 
   const permissionsFile = join(codesurfHome, 'permissions.json')
   const store = JSON.parse(await readFile(permissionsFile, 'utf8'))
@@ -85,7 +87,7 @@ test('codesurf permissions CLI writes the same persisted grant shape used by cha
 })
 
 test('codesurf permissions CLI can write global grants for all workspaces', async t => {
-  const homeDir = await mkdtemp(join(ROOT_DIR, '.tmp', 'codesurf-cli-permissions-global-'))
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-cli-permissions-global-'))
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
   t.after(async () => {
@@ -114,7 +116,7 @@ test('codesurf permissions CLI can write global grants for all workspaces', asyn
 })
 
 test('codesurf chat help dispatches without launching the desktop app', async t => {
-  const homeDir = await mkdtemp(join(ROOT_DIR, '.tmp', 'codesurf-cli-chat-help-'))
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-cli-chat-help-'))
   t.after(async () => {
     await rm(homeDir, { recursive: true, force: true })
   })
