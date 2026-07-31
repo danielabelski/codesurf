@@ -22,6 +22,7 @@ import {
   runBoundedSubprocess,
   type BoundedSubprocessResult,
 } from './bounded-subprocess'
+import { createRelayProviderCancellation } from './provider-cancellation'
 
 // Daemon-produced paths that should be intrinsically Read-allowed without
 // requiring a workspace-level grant. These directories exist solely because
@@ -65,6 +66,7 @@ async function runRelayProviderCli(options: {
   args: string[]
   env: NodeJS.ProcessEnv
   timeoutMs: number
+  signal?: AbortSignal
 }): Promise<BoundedSubprocessResult> {
   return await runBoundedSubprocess({
     ...options,
@@ -105,12 +107,18 @@ function thinkingForClaude(thinking?: string): { type: string; budget_tokens?: n
   return thinkingMap[thinking ?? 'adaptive'] ?? { type: 'adaptive' }
 }
 
-async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+async function runClaudeTurn(
+  participantId: string,
+  spawnRequest: RelaySpawnRequest,
+  input: RelayTurnInput,
+  timeoutMs = 300_000,
+  signal?: AbortSignal,
+): Promise<string> {
+  const cancellation = createRelayProviderCancellation('Claude', signal)
   const claudePermissionMode = modeForClaude(spawnRequest.mode)
   const workspaceDir = workspaceDirFromSpawnRequest(spawnRequest)
-  const abortController = new AbortController()
   const options: Options = {
-    abortController,
+    abortController: cancellation.abortController,
     model: spawnRequest.model ?? 'claude-sonnet-4-6',
     permissionMode: claudePermissionMode as any,
     thinking: thinkingForClaude(spawnRequest.thinking) as any,
@@ -173,49 +181,59 @@ async function runClaudeTurn(participantId: string, spawnRequest: RelaySpawnRequ
     ;(options as any).pathToClaudeCodeExecutable = claudePath
   }
 
-  const q = query({ prompt: input.prompt, options })
-  let text = ''
-
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => {
-      // Cancel the SDK subprocess so it stops running (and billing) instead of
-      // finishing the turn in the background with its result silently discarded.
-      abortController.abort()
-      reject(new Error(`Claude turn timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-  })
-
-  const queryPromise = (async () => {
-    for await (const msg of q) {
-      const sid = (msg as any).session_id
-      if (sid) claudeSessions.set(participantId, sid)
-
-      if (msg.type === 'assistant') {
-        const blocks = (msg as any).message?.content ?? []
-        const blockText = blocks
-          .filter((block: { type?: string; text?: string }) => block.type === 'text' && typeof block.text === 'string')
-          .map((block: { text?: string }) => block.text)
-          .join('')
-        if (blockText) text += blockText
-      }
-
-      if (msg.type === 'result') {
-        const result = (msg as any).result
-        if (typeof result === 'string' && result.trim()) return result
-      }
-    }
-    return text
-  })()
-
   try {
-    return await Promise.race([queryPromise, timeoutPromise])
+    const q = query({ prompt: input.prompt, options })
+    let text = ''
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => {
+        // Cancel the SDK subprocess so it stops running (and billing) instead of
+        // finishing the turn in the background with its result silently discarded.
+        cancellation.abortController.abort()
+        reject(new Error(`Claude turn timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+    })
+
+    const queryPromise = (async () => {
+      for await (const msg of q) {
+        const sid = (msg as any).session_id
+        if (sid) claudeSessions.set(participantId, sid)
+
+        if (msg.type === 'assistant') {
+          const blocks = (msg as any).message?.content ?? []
+          const blockText = blocks
+            .filter((block: { type?: string; text?: string }) => block.type === 'text' && typeof block.text === 'string')
+            .map((block: { text?: string }) => block.text)
+            .join('')
+          if (blockText) text += blockText
+        }
+
+        if (msg.type === 'result') {
+          const result = (msg as any).result
+          if (typeof result === 'string' && result.trim()) return result
+        }
+      }
+      return text
+    })()
+
+    return await Promise.race([
+      queryPromise,
+      timeoutPromise,
+      cancellation.cancelled,
+    ])
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle)
+    cancellation.dispose()
   }
 }
 
-async function runCodexTurn(spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+async function runCodexTurn(
+  spawnRequest: RelaySpawnRequest,
+  input: RelayTurnInput,
+  timeoutMs = 300_000,
+  signal?: AbortSignal,
+): Promise<string> {
   const codexBin = getAgentPath('codex') || 'codex'
   const shellPath = getShellEnvPath()
   const workspaceDir = workspaceDirFromSpawnRequest(spawnRequest)
@@ -240,6 +258,7 @@ async function runCodexTurn(spawnRequest: RelaySpawnRequest, input: RelayTurnInp
     ],
     env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
     timeoutMs,
+    signal,
   })
   if (result.code !== 0) {
     throw new Error(sanitizeAgentCliDiagnostic(result.stderr.trim() || `Codex exited with ${result.code}`))
@@ -247,7 +266,13 @@ async function runCodexTurn(spawnRequest: RelaySpawnRequest, input: RelayTurnInp
   return result.stdout.trim()
 }
 
-async function runOpenCodeTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+async function runOpenCodeTurn(
+  participantId: string,
+  spawnRequest: RelaySpawnRequest,
+  input: RelayTurnInput,
+  timeoutMs = 300_000,
+  signal?: AbortSignal,
+): Promise<string> {
   const opencodeBin = getAgentPath('opencode') || 'opencode'
   const shellPath = getShellEnvPath()
   const workspaceDir = workspaceDirFromSpawnRequest(spawnRequest)
@@ -272,6 +297,7 @@ async function runOpenCodeTurn(participantId: string, spawnRequest: RelaySpawnRe
     args,
     env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
     timeoutMs,
+    signal,
   })
   if (result.code !== 0) {
     throw new Error(sanitizeAgentCliDiagnostic(
@@ -330,7 +356,13 @@ function selectOpenClawAgentId(openclawBin: string, shellPath?: string | null, p
   return agents.find(agent => agent.isDefault)?.id ?? agents[0]?.id ?? 'main'
 }
 
-async function runOpenClawTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+async function runOpenClawTurn(
+  participantId: string,
+  spawnRequest: RelaySpawnRequest,
+  input: RelayTurnInput,
+  timeoutMs = 300_000,
+  signal?: AbortSignal,
+): Promise<string> {
   const openclawBin = getAgentPath('openclaw') || 'openclaw'
   const shellPath = getShellEnvPath()
   const existingSessionId = openClawSessions.get(participantId) ?? null
@@ -356,6 +388,7 @@ async function runOpenClawTurn(participantId: string, spawnRequest: RelaySpawnRe
     args,
     env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
     timeoutMs,
+    signal,
   })
   if (result.code !== 0) {
     throw new Error(sanitizeAgentCliDiagnostic(
@@ -368,7 +401,13 @@ async function runOpenClawTurn(participantId: string, spawnRequest: RelaySpawnRe
   return parsed.text || result.stdout.trim()
 }
 
-async function runHermesTurn(participantId: string, spawnRequest: RelaySpawnRequest, input: RelayTurnInput, timeoutMs = 300_000): Promise<string> {
+async function runHermesTurn(
+  participantId: string,
+  spawnRequest: RelaySpawnRequest,
+  input: RelayTurnInput,
+  timeoutMs = 300_000,
+  signal?: AbortSignal,
+): Promise<string> {
   const hermesBin = getAgentPath('hermes') || 'hermes'
   const shellPath = getShellEnvPath()
 
@@ -411,6 +450,7 @@ async function runHermesTurn(participantId: string, spawnRequest: RelaySpawnRequ
     args,
     env: { ...process.env, ...(shellPath && { PATH: shellPath }) },
     timeoutMs,
+    signal,
   })
   if (result.code !== 0) {
     throw new Error(sanitizeAgentCliDiagnostic(result.stderr.trim() || `Hermes exited with ${result.code}`))
@@ -434,18 +474,50 @@ class MainProcessRelayExecutor implements RelayAgentExecutor {
     private readonly spawnRequest: RelaySpawnRequest,
   ) {}
 
-  async runTurn(input: RelayTurnInput): Promise<string> {
+  async runTurn(
+    input: RelayTurnInput,
+    signal?: AbortSignal,
+  ): Promise<string> {
     switch (this.spawnRequest.provider) {
       case 'claude':
-        return runClaudeTurn(this.participantId, this.spawnRequest, input, this.spawnRequest.timeoutMs)
+        return runClaudeTurn(
+          this.participantId,
+          this.spawnRequest,
+          input,
+          this.spawnRequest.timeoutMs,
+          signal,
+        )
       case 'codex':
-        return runCodexTurn(this.spawnRequest, input, this.spawnRequest.timeoutMs)
+        return runCodexTurn(
+          this.spawnRequest,
+          input,
+          this.spawnRequest.timeoutMs,
+          signal,
+        )
       case 'opencode':
-        return runOpenCodeTurn(this.participantId, this.spawnRequest, input, this.spawnRequest.timeoutMs)
+        return runOpenCodeTurn(
+          this.participantId,
+          this.spawnRequest,
+          input,
+          this.spawnRequest.timeoutMs,
+          signal,
+        )
       case 'openclaw':
-        return runOpenClawTurn(this.participantId, this.spawnRequest, input, this.spawnRequest.timeoutMs)
+        return runOpenClawTurn(
+          this.participantId,
+          this.spawnRequest,
+          input,
+          this.spawnRequest.timeoutMs,
+          signal,
+        )
       case 'hermes':
-        return runHermesTurn(this.participantId, this.spawnRequest, input, this.spawnRequest.timeoutMs)
+        return runHermesTurn(
+          this.participantId,
+          this.spawnRequest,
+          input,
+          this.spawnRequest.timeoutMs,
+          signal,
+        )
       default:
         throw new Error(`Unsupported relay provider: ${this.spawnRequest.provider ?? 'unknown'}`)
     }

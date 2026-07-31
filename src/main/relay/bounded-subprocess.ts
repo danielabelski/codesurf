@@ -11,6 +11,7 @@ export const RELAY_SUBPROCESS_KILL_WAIT_MS = 1_000
 
 export type BoundedSubprocessFailureReason =
   | 'spawn'
+  | 'abort'
   | 'timeout'
   | 'stdout-limit'
   | 'stderr-limit'
@@ -62,6 +63,7 @@ export type RunBoundedSubprocessOptions = {
   termGraceMs?: number
   killWaitMs?: number
   windowsHide?: boolean
+  signal?: AbortSignal
 }
 
 type CloseResult = {
@@ -227,6 +229,17 @@ export async function runBoundedSubprocess(
   )
   const timeoutMs = positiveLimit(options.timeoutMs, 0, 'timeoutMs')
   const label = options.label?.trim() || options.command
+  if (options.signal?.aborted) {
+    throw new BoundedSubprocessError({
+      reason: 'abort',
+      message: `${label} turn was cancelled before launch`,
+      command: options.command,
+      pid: null,
+      stdout: '',
+      stderr: '',
+      cause: options.signal.reason,
+    })
+  }
 
   const spawnOptions: SpawnOptions = {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -316,10 +329,15 @@ export async function runBoundedSubprocess(
     rejectOutcome = reject
   })
 
+  const cleanupOutcome = (): void => {
+    clearTimeout(timeoutHandle)
+    options.signal?.removeEventListener('abort', onAbort)
+  }
+
   const rejectFailure = (reason: BoundedSubprocessFailureReason, message: string, cause?: unknown): void => {
     if (outcomeSettled) return
     outcomeSettled = true
-    clearTimeout(timeoutHandle)
+    cleanupOutcome()
     rejectOutcome(new BoundedSubprocessError({
       reason,
       message,
@@ -351,12 +369,22 @@ export async function runBoundedSubprocess(
     })()
   }
 
+  const onAbort = (): void => {
+    startFailure(
+      'abort',
+      `${label} turn was cancelled`,
+      options.signal?.reason,
+    )
+  }
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+  if (options.signal?.aborted) onAbort()
+
   proc.once('error', error => {
     startFailure('spawn', `${label} failed to start: ${error.message}`, error)
   })
 
   void closePromise.then(result => {
-    clearTimeout(timeoutHandle)
+    cleanupOutcome()
     if (failure || outcomeSettled) return
     outcomeSettled = true
     resolveOutcome({

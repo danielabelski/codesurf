@@ -32,6 +32,27 @@ function expectBoundedError(error: unknown): BoundedSubprocessError {
 }
 
 describe('bounded relay subprocess lifecycle', () => {
+  test('rejects a pre-aborted turn without launching a child', async () => {
+    const controller = new AbortController()
+    const reason = new Error('runtime disposed')
+    controller.abort(reason)
+
+    const error = await runBoundedSubprocess({
+      command: resolve(process.cwd(), 'test/fixtures/relay-process/missing-command'),
+      label: 'cancelled fixture',
+      timeoutMs: 2_000,
+      signal: controller.signal,
+    }).then(
+      () => assert.fail('expected cancellation'),
+      expectBoundedError,
+    )
+
+    assert.equal(error.reason, 'abort')
+    assert.equal(error.pid, null)
+    assert.equal(error.cause, reason)
+    assert.match(error.message, /cancelled before launch/)
+  })
+
   test('returns bounded stdout, stderr, and exit metadata on success', async () => {
     const result = await runBoundedSubprocess({
       command: process.execPath,
@@ -164,6 +185,39 @@ describe('bounded relay subprocess lifecycle', () => {
     assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0)
     assert.ok(error.pid && Number.isSafeInteger(error.pid) && error.pid > 0)
     await waitForPidExit(error.pid)
+    await waitForPidExit(grandchildPid)
+  })
+
+  test('aborts an active process group including its grandchild', {
+    skip: process.platform === 'win32' ? 'POSIX process-group assertion' : false,
+  }, async () => {
+    const controller = new AbortController()
+    const reason = new Error('workspace stopped')
+    const turn = runBoundedSubprocess({
+      command: process.execPath,
+      args: [fixture, 'grandchild-parent-exits'],
+      label: 'cancelled process-tree fixture',
+      timeoutMs: 5_000,
+      stdoutMaxBytes: 1_024,
+      stderrMaxBytes: 1_024,
+      termGraceMs: 100,
+      killWaitMs: 750,
+      signal: controller.signal,
+    })
+    const abortHandle = setTimeout(() => controller.abort(reason), 150)
+
+    const error = await turn.then(
+      () => assert.fail('expected cancellation'),
+      expectBoundedError,
+    ).finally(() => clearTimeout(abortHandle))
+
+    assert.equal(error.reason, 'abort')
+    assert.equal(error.cause, reason)
+    const match = error.stdout.match(/grandchild:(\d+)/)
+    assert.ok(match, `missing grandchild pid in ${JSON.stringify(error.stdout)}`)
+    const grandchildPid = Number(match[1])
+    assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0)
+    if (error.pid) await waitForPidExit(error.pid)
     await waitForPidExit(grandchildPid)
   })
 
