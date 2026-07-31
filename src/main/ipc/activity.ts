@@ -6,6 +6,7 @@ import {
   deleteActivity,
   clearTileActivity,
   getActivityByAgent,
+  getActivityHealth,
 } from '../activity-store'
 import { createActivityIPCHandlers } from '../activity-ipc-handlers.ts'
 
@@ -17,6 +18,7 @@ export function registerActivityIPC(): void {
     delete: deleteActivity,
     clearTile: clearTileActivity,
     byAgent: getActivityByAgent,
+    health: getActivityHealth,
   })
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.handle(channel, handler)

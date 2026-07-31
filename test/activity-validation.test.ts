@@ -36,8 +36,8 @@ function assertValidationCode(fn: () => unknown, code: string): void {
 }
 
 describe('activity input validation', () => {
-  test('accepts bounded canonical upserts and clones JSON metadata', () => {
-    const metadata = { nested: { count: 2 } }
+  test('accepts bounded canonical upserts and clones scalar JSON metadata', () => {
+    const metadata = { count: 2, cached: true, source: 'drawer', detail: null }
     const result = validateActivityUpsertInput({
       id: 'shared-id',
       tileId: 'tile-a',
@@ -60,7 +60,6 @@ describe('activity input validation', () => {
       agent: 'agent-a',
     })
     assert.notEqual(result.metadata, metadata)
-    assert.notEqual(result.metadata?.nested, metadata.nested)
   })
 
   test('rejects traversal and non-canonical workspace identifiers', () => {
@@ -108,7 +107,7 @@ describe('activity input validation', () => {
     }), 'input_too_large')
   })
 
-  test('rejects cyclic, non-JSON, deep, and oversized metadata', () => {
+  test('rejects nested, non-JSON, complex, and oversized metadata', () => {
     const cyclic: Record<string, unknown> = {}
     cyclic.self = cyclic
     assertValidationCode(() => validateActivityUpsertInput({
@@ -116,7 +115,13 @@ describe('activity input validation', () => {
       type: 'task',
       title: 'Task',
       metadata: cyclic,
-    }), 'metadata_too_deep')
+    }), 'invalid_metadata')
+    assertValidationCode(() => validateActivityUpsertInput({
+      tileId: 'tile-a',
+      type: 'task',
+      title: 'Task',
+      metadata: { nested: { count: 1 } },
+    }), 'invalid_metadata')
     assertValidationCode(() => validateActivityUpsertInput({
       tileId: 'tile-a',
       type: 'task',
@@ -129,6 +134,12 @@ describe('activity input validation', () => {
       title: 'Task',
       metadata: { payload: 'x'.repeat(MAX_ACTIVITY_METADATA_BYTES) },
     }), 'input_too_large')
+    assertValidationCode(() => validateActivityUpsertInput({
+      tileId: 'tile-a',
+      type: 'task',
+      title: 'Task',
+      metadata: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`k${index}`, index])),
+    }), 'metadata_too_complex')
   })
 
   test('normalizes query filters and enforces the result limit', () => {

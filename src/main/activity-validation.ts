@@ -1,32 +1,32 @@
 import type {
+  ActivityMetadata,
   ActivityQuery,
   ActivityRecord,
   ActivityStatus,
   ActivityType,
   ActivityUpsertInput,
 } from '../shared/activity-types.ts'
+import { ACTIVITY_LIMITS } from '../shared/activity-types.ts'
 import { MAX_ACTIVITY_RECORDS } from './activity-cap.ts'
 import { assertSafeWorkspaceArtifactId } from './storage/workspaceArtifacts.ts'
 
 export const ACTIVITY_DOCUMENT_VERSION = 1
 export const MAX_ACTIVITY_FILE_BYTES = 32 * 1024 * 1024
-export const MAX_ACTIVITY_WORKSPACE_ID_LENGTH = 128
-export const MAX_ACTIVITY_TILE_ID_LENGTH = 256
-export const MAX_ACTIVITY_ID_LENGTH = 256
-export const MAX_ACTIVITY_TITLE_LENGTH = 512
-export const MAX_ACTIVITY_DETAIL_LENGTH = 4096
-export const MAX_ACTIVITY_AGENT_LENGTH = 256
-export const MAX_ACTIVITY_METADATA_BYTES = 4096
+export const MAX_ACTIVITY_WORKSPACE_ID_LENGTH = ACTIVITY_LIMITS.workspaceId
+export const MAX_ACTIVITY_TILE_ID_LENGTH = ACTIVITY_LIMITS.tileId
+export const MAX_ACTIVITY_ID_LENGTH = ACTIVITY_LIMITS.id
+export const MAX_ACTIVITY_TITLE_LENGTH = ACTIVITY_LIMITS.title
+export const MAX_ACTIVITY_DETAIL_LENGTH = ACTIVITY_LIMITS.detail
+export const MAX_ACTIVITY_AGENT_LENGTH = ACTIVITY_LIMITS.agent
+export const MAX_ACTIVITY_METADATA_BYTES = ACTIVITY_LIMITS.metadataBytes
 export const MAX_ACTIVITY_QUERY_LIMIT = 500
 export const MAX_ACTIVITY_QUERY_RESPONSE_BYTES = 1024 * 1024
 
 const ACTIVITY_TYPES = new Set<ActivityType>(['task', 'tool', 'skill', 'context'])
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(['pending', 'running', 'done', 'error', 'paused'])
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
-const MAX_METADATA_DEPTH = 8
-const MAX_METADATA_NODES = 1024
 const MAX_METADATA_KEY_LENGTH = 128
-const MAX_METADATA_STRING_LENGTH = 2048
+const MAX_METADATA_STRING_LENGTH = ACTIVITY_LIMITS.metadataString
 
 export interface ParsedActivityDocument {
   records: ActivityRecord[]
@@ -133,49 +133,36 @@ function validateActivityStatus(value: unknown): ActivityStatus {
   return value as ActivityStatus
 }
 
-function cloneJsonValue(
-  value: unknown,
-  path: string,
-  depth: number,
-  budget: { nodes: number },
-): unknown {
-  budget.nodes += 1
-  if (budget.nodes > MAX_METADATA_NODES) fail('metadata_too_complex', 'metadata contains too many values')
-  if (depth > MAX_METADATA_DEPTH) fail('metadata_too_deep', 'metadata is nested too deeply')
-  if (value === null || typeof value === 'boolean') return value
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) fail('invalid_metadata', `${path} must be a finite number`)
-    return value
-  }
-  if (typeof value === 'string') {
-    if (value.length > MAX_METADATA_STRING_LENGTH) {
-      fail('input_too_large', `${path} exceeds ${MAX_METADATA_STRING_LENGTH} characters`)
-    }
-    return value
-  }
-  if (Array.isArray(value)) {
-    return value.map((item, index) => cloneJsonValue(item, `${path}[${index}]`, depth + 1, budget))
-  }
-  if (!isPlainObject(value)) fail('invalid_metadata', `${path} must contain only JSON values`)
-
-  const entries: Array<[string, unknown]> = []
-  for (const [key, child] of Object.entries(value)) {
-    if (!key || key.length > MAX_METADATA_KEY_LENGTH || CONTROL_CHARACTERS.test(key)) {
-      fail('invalid_metadata', `${path} contains an invalid key`)
-    }
-    entries.push([key, cloneJsonValue(child, `${path}.${key}`, depth + 1, budget)])
-  }
-  return Object.fromEntries(entries)
-}
-
-function validateMetadata(value: unknown): Record<string, unknown> | undefined {
+function validateMetadata(value: unknown): ActivityMetadata | undefined {
   if (value === undefined) return undefined
-  const metadata = cloneJsonValue(value, 'metadata', 0, { nodes: 0 })
-  if (!isPlainObject(metadata)) fail('invalid_metadata', 'metadata must be an object')
+  if (!isPlainObject(value)) fail('invalid_metadata', 'metadata must be an object')
+  const rawEntries = Object.entries(value)
+  if (rawEntries.length > ACTIVITY_LIMITS.metadataKeys) {
+    fail('metadata_too_complex', `metadata exceeds ${ACTIVITY_LIMITS.metadataKeys} fields`)
+  }
+  const entries: Array<[string, string | number | boolean | null]> = []
+  for (const [key, child] of rawEntries) {
+    if (!key || key.length > MAX_METADATA_KEY_LENGTH || CONTROL_CHARACTERS.test(key)) {
+      fail('invalid_metadata', 'metadata contains an invalid key')
+    }
+    if (child === null || typeof child === 'boolean') {
+      entries.push([key, child])
+    } else if (typeof child === 'number' && Number.isFinite(child)) {
+      entries.push([key, child])
+    } else if (typeof child === 'string') {
+      if (child.length > MAX_METADATA_STRING_LENGTH) {
+        fail('input_too_large', `metadata.${key} exceeds ${MAX_METADATA_STRING_LENGTH} characters`)
+      }
+      entries.push([key, child])
+    } else {
+      fail('invalid_metadata', 'metadata values must be scalar JSON values')
+    }
+  }
+  const metadata = Object.fromEntries(entries)
   if (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > MAX_ACTIVITY_METADATA_BYTES) {
     fail('input_too_large', `metadata exceeds ${MAX_ACTIVITY_METADATA_BYTES} bytes`)
   }
-  return metadata
+  return metadata as ActivityMetadata
 }
 
 export function validateActivityUpsertInput(value: unknown): ActivityUpsertInput {

@@ -1,4 +1,5 @@
 import { describe, test } from 'node:test'
+import assert from 'node:assert/strict'
 import { expect } from './node-expect.ts'
 import {
   createElectrobunElectronFacade,
@@ -18,6 +19,7 @@ describe('Electrobun window.electron facade', () => {
         return getDefaultElectrobunInvokeResponse(channel)
       },
     })
+    expect(facade.__codesurfHostKind).toBe('electrobun')
 
     await facade.workspace.list()
     await facade.settings.get()
@@ -64,5 +66,10 @@ describe('Electrobun window.electron facade', () => {
     expect(getDefaultElectrobunInvokeResponse('bus:publish')).toBe(true)
     expect(getDefaultElectrobunInvokeResponse('pets:list')).toEqual([])
     expect(getDefaultElectrobunInvokeResponse('webview:setFrameRate')).toMatchObject({ ok: true })
+    expect(getDefaultElectrobunInvokeResponse('activity:health')).toEqual({
+      available: false,
+      status: 'unavailable',
+    })
+    assert.throws(() => getDefaultElectrobunInvokeResponse('activity:upsert'))
   })
 })

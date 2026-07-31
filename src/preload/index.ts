@@ -514,6 +514,7 @@ const electronApi = {
     delete: (workspaceId: string, tileId: string, id: string) => ipcRenderer.invoke('activity:delete', workspaceId, tileId, id),
     clearTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('activity:clearTile', workspaceId, tileId),
     byAgent: (workspaceId: string) => ipcRenderer.invoke('activity:byAgent', workspaceId),
+    health: (workspaceId: string) => ipcRenderer.invoke('activity:health', workspaceId),
   },
 
   // CodeSurf protocol (.codesurf folder)

@@ -1,4 +1,5 @@
 import type {
+  ActivityHealthSnapshot,
   ActivityQuery,
   ActivityRecord,
   ActivityUpsertInput,
@@ -18,6 +19,7 @@ export interface ActivityIPCService {
   delete(workspaceId: string, tileId: string, id: string): Promise<boolean>
   clearTile(workspaceId: string, tileId: string): Promise<number>
   byAgent(workspaceId: string): Promise<Record<string, ActivityRecord[]>>
+  health(workspaceId: string): Promise<ActivityHealthSnapshot>
 }
 
 export function createActivityIPCHandlers(service: ActivityIPCService) {
@@ -57,6 +59,9 @@ export function createActivityIPCHandlers(service: ActivityIPCService) {
     ),
     'activity:byAgent': (_event: unknown, workspaceId: unknown) => (
       service.byAgent(validateActivityWorkspaceId(workspaceId))
+    ),
+    'activity:health': (_event: unknown, workspaceId: unknown) => (
+      service.health(validateActivityWorkspaceId(workspaceId))
     ),
   }
 }

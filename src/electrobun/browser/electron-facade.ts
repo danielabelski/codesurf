@@ -57,6 +57,10 @@ function cloneDefaultSettings(): AppSettings {
 }
 
 export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
+  if (channel === 'activity:health') return { available: false, status: 'unavailable' }
+  if (channel.startsWith('activity:')) {
+    throw new Error('Activity persistence is unavailable in the Electrobun host')
+  }
   if (channel === 'settings:get') return cloneDefaultSettings()
   if (channel === 'settings:set') return cloneDefaultSettings()
   if (channel === 'settings:getRawJson') return JSON.stringify({ version: 1, settings: cloneDefaultSettings() }, null, 2)
@@ -163,7 +167,6 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
     || channel.startsWith('ext:')
     || channel.startsWith('extensions:')
     || channel.startsWith('tileContext:')
-    || channel.startsWith('activity:')
     || channel.startsWith('permissions:')
     || channel.startsWith('execution:')
     || channel.startsWith('dreaming:')
@@ -210,6 +213,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
   let zoomLevel = 0
 
   return {
+    __codesurfHostKind: 'electrobun',
     appearance: {
       shouldUseDark: makeInvoker(invoke, 'appearance:shouldUseDark'),
       setThemeSource: makeInvoker(invoke, 'appearance:setThemeSource'),
@@ -470,6 +474,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       delete: makeInvoker(invoke, 'activity:delete'),
       clearTile: makeInvoker(invoke, 'activity:clearTile'),
       byAgent: makeInvoker(invoke, 'activity:byAgent'),
+      health: makeInvoker(invoke, 'activity:health'),
     },
     collab: {
       ensureDir: makeInvoker(invoke, 'collab:ensureDir'),

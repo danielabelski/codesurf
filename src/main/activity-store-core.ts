@@ -3,6 +3,7 @@ import type {
   ActivityHealthEvent,
   ActivityHealthOperation,
   ActivityHealthSnapshot,
+  ActivityMetadata,
   ActivityQuery,
   ActivityRecord,
 } from '../shared/activity-types.ts'
@@ -106,7 +107,7 @@ function cloneRecord(record: ActivityRecord): ActivityRecord {
     ...record,
     ...(record.metadata === undefined
       ? {}
-      : { metadata: JSON.parse(JSON.stringify(record.metadata)) as Record<string, unknown> }),
+      : { metadata: { ...record.metadata } }),
   }
 }
 
@@ -115,9 +116,9 @@ function cloneRecords(records: ActivityRecord[]): ActivityRecord[] {
 }
 
 function mergeMetadata(
-  existing: Record<string, unknown> | undefined,
-  patch: Record<string, unknown> | undefined,
-): Record<string, unknown> | undefined {
+  existing: ActivityMetadata | undefined,
+  patch: ActivityMetadata | undefined,
+): ActivityMetadata | undefined {
   if (patch === undefined) return existing
   return Object.fromEntries([
     ...Object.entries(existing ?? {}),

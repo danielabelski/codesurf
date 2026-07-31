@@ -26,7 +26,7 @@ export async function installHostBridge(): Promise<InstallResult> {
   const hostBase = resolveHostBase()
 
   const w = window as Window & {
-    electron?: typeof window.electron
+    electron?: typeof window.electron & { __codesurfHostKind?: string }
     __CODESURF_PLATFORM__?: CodesurfPlatform
     __CODESURF_HOST__?: string
     __CODESURF_CAPABILITIES__?: Record<string, boolean>
@@ -44,6 +44,13 @@ export async function installHostBridge(): Promise<InstallResult> {
 
   // Never clobber a real preload bridge
   if (w.electron) {
+    if (w.electron.__codesurfHostKind === 'electrobun') {
+      w.__CODESURF_PLATFORM__ = 'native'
+      w.__CODESURF_CAPABILITIES__ = defaultCapabilitiesFor('native', {
+        terminalAvailable: isTerminalTransportAvailable(),
+      })
+      return { platform: 'native', hostBase, installedBridge: false }
+    }
     w.__CODESURF_PLATFORM__ = 'electron'
     w.__CODESURF_CAPABILITIES__ = defaultCapabilitiesFor('electron')
     return { platform: 'electron', hostBase, installedBridge: false }

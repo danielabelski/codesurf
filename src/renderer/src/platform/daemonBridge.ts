@@ -843,7 +843,16 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
       onMessageChanged: () => noopUnsub(),
     },
     activity: {
-      clearTile: async () => {},
+      upsert: notAvailable('activity.upsert'),
+      query: notAvailable('activity.query'),
+      byTile: notAvailable('activity.byTile'),
+      delete: notAvailable('activity.delete'),
+      clearTile: notAvailable('activity.clearTile'),
+      byAgent: notAvailable('activity.byAgent'),
+      health: async () => ({
+        available: false,
+        status: 'unavailable' as const,
+      }),
     },
     agentPaths: {
       needsSetup: async () => false,

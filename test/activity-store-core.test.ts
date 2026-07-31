@@ -153,7 +153,7 @@ describe('ActivityStore identity and query behavior', () => {
   test('queries are pure, cloned, ordered, filtered, and bounded', async () => {
     const persistence = new MemoryPersistence()
     persistence.data.set('workspace-1', [
-      activity('older', { metadata: { nested: { value: 'original' } } }),
+      activity('older', { metadata: { value: 'original' } }),
       activity('newer', { updatedAt: 200, title: 'x'.repeat(300) }),
     ])
     const store = new ActivityStore({
@@ -163,13 +163,13 @@ describe('ActivityStore identity and query behavior', () => {
 
     const first = await store.query({ workspaceId: 'workspace-1' })
     assert.deepEqual(first.map(record => record.id), ['newer', 'older'])
-    ;(first[1].metadata!.nested as Record<string, unknown>).value = 'mutated'
+    first[1].metadata!.value = 'mutated'
     first.reverse()
 
     const second = await store.query({ workspaceId: 'workspace-1' })
     assert.deepEqual(second.map(record => record.id), ['newer', 'older'])
     assert.equal(
-      (second[1].metadata!.nested as Record<string, unknown>).value,
+      second[1].metadata!.value,
       'original',
     )
     assert.ok(Buffer.byteLength(JSON.stringify(second), 'utf8') <= 700)

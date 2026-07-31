@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import type {
+  ActivityHealthSnapshot,
   ActivityQuery,
   ActivityRecord,
   ActivityUpsertInput,
@@ -57,6 +58,10 @@ function serviceFixture() {
       calls.push({ method: 'byAgent', args: [workspaceId] })
       return {}
     },
+    async health(workspaceId): Promise<ActivityHealthSnapshot> {
+      calls.push({ method: 'health', args: [workspaceId] })
+      return { available: true, status: 'healthy' }
+    },
   }
   return { handlers: createActivityIPCHandlers(service), calls }
 }
@@ -69,6 +74,7 @@ describe('activity IPC handlers', () => {
       'activity:byTile',
       'activity:clearTile',
       'activity:delete',
+      'activity:health',
       'activity:query',
       'activity:upsert',
     ])
@@ -144,7 +150,7 @@ describe('activity IPC handlers', () => {
         status: 'done',
         title: 'Read',
         detail: '[object Object]',
-        metadata: { tool_id: 'tool-1', input: { path: 'README.md' } },
+        metadata: { tool_id: 'tool-1', input_path: 'README.md' },
       },
       {
         id: 'file-1',
@@ -187,12 +193,14 @@ describe('activity IPC handlers', () => {
     await handlers['activity:byTile'](null, 'workspace-1', 'tile-a')
     await handlers['activity:clearTile'](null, 'workspace-1', 'tile-a')
     await handlers['activity:byAgent'](null, 'workspace-1')
+    await handlers['activity:health'](null, 'workspace-1')
 
     assert.deepEqual(calls.map(call => call.method), [
       'query',
       'byTile',
       'clearTile',
       'byAgent',
+      'health',
     ])
   })
 })

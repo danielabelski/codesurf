@@ -3,7 +3,7 @@
 /// <reference types="vite-plugin-pwa/react" />
 
  import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
- import type { ActivityQuery, ActivityRecord, ActivityUpsertInput, ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
+ import type { ActivityHealthSnapshot, ActivityQuery, ActivityRecord, ActivityUpsertInput, ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
 
 interface ElectronAPI {
   appearance: {
@@ -367,6 +367,7 @@ interface ElectronAPI {
     delete(workspaceId: string, tileId: string, id: string): Promise<boolean>
     clearTile(workspaceId: string, tileId: string): Promise<number>
     byAgent(workspaceId: string): Promise<Record<string, ActivityRecord[]>>
+    health(workspaceId: string): Promise<ActivityHealthSnapshot>
   }
   collab: {
     ensureDir(workspacePath: string, tileId: string): Promise<boolean>
