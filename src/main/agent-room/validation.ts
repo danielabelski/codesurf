@@ -22,6 +22,7 @@ export const MAX_RETAINED_EVENT_BYTES = 1024 * 1024
 export const MAX_PROMPT_BYTES = 32 * 1024
 
 const SAFE_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/
+const WINDOWS_DEVICE_ID = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 const BLOCKED_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
 export class AgentRoomValidationError extends Error {
@@ -35,7 +36,8 @@ export function isValidAgentRoomId(value: unknown): value is string {
   if (typeof value !== 'string') return false
   if (!value || Buffer.byteLength(value, 'utf8') > MAX_TILE_ID_BYTES) return false
   if (!SAFE_ID.test(value)) return false
-  if (value === '.' || value === '..' || value.includes('..')) return false
+  if (value === '.' || value === '..' || value.includes('..') || value.endsWith('.')) return false
+  if (WINDOWS_DEVICE_ID.test(value)) return false
   return true
 }
 
@@ -192,11 +194,13 @@ function normalizeMetadataValue(value: unknown, depth: number, budget: MetadataB
       .sort()
     for (const key of keys.slice(0, MAX_METADATA_OBJECT_KEYS)) {
       const boundedKey = truncateUtf8(key, 128)
-      output[boundedKey] = normalizeMetadataValue(
-        (value as Record<string, unknown>)[key],
-        depth + 1,
-        budget,
-      )
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (!descriptor || !('value' in descriptor)) {
+        budget.truncated = true
+        output[boundedKey] = metadataMarker('accessor property')
+      } else {
+        output[boundedKey] = normalizeMetadataValue(descriptor.value, depth + 1, budget)
+      }
     }
     if (keys.length > MAX_METADATA_OBJECT_KEYS) {
       budget.truncated = true

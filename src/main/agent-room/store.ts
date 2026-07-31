@@ -45,6 +45,8 @@ import {
 
 // tileId → roomId
 const membership = new Map<string, string>()
+// Filesystems on macOS and Windows are commonly case-insensitive.
+const caseFoldedMembership = new Map<string, string>()
 // roomId → room
 const rooms = new Map<string, AgentRoom>()
 const ownedRoomFiles = new Set<string>()
@@ -95,11 +97,31 @@ function memberKeyOf(tileIds: Iterable<string>): string {
   return [...tileIds].sort().join('|')
 }
 
+function setRoomMembership(tileId: string, roomId: string): void {
+  const foldedId = tileId.toLowerCase()
+  const existingId = caseFoldedMembership.get(foldedId)
+  if (existingId && existingId !== tileId) {
+    throw new AgentRoomValidationError('Tile ID collides on a case-insensitive filesystem')
+  }
+  membership.set(tileId, roomId)
+  caseFoldedMembership.set(foldedId, tileId)
+}
+
+function deleteRoomMembership(tileId: string, expectedRoomId?: string): void {
+  if (expectedRoomId && membership.get(tileId) !== expectedRoomId) return
+  membership.delete(tileId)
+  const foldedId = tileId.toLowerCase()
+  if (caseFoldedMembership.get(foldedId) === tileId) {
+    caseFoldedMembership.delete(foldedId)
+  }
+}
+
 function tileTypeFor(tileTypes: unknown, tileId: string): string {
   if (!tileTypes || typeof tileTypes !== 'object') return 'unknown'
   try {
-    if (!Object.hasOwn(tileTypes, tileId)) return 'unknown'
-    return boundTileType((tileTypes as Record<string, unknown>)[tileId])
+    const descriptor = Object.getOwnPropertyDescriptor(tileTypes, tileId)
+    if (!descriptor || !('value' in descriptor)) return 'unknown'
+    return boundTileType(descriptor.value)
   } catch {
     return 'unknown'
   }
@@ -177,7 +199,10 @@ function snapshot(room: AgentRoom): RoomSnapshot {
 
 function ensureMember(room: AgentRoom, tileId: string, tileType = 'unknown'): RoomMember {
   let member = room.members.get(tileId)
-  if (member) return member
+  if (member) {
+    setRoomMembership(tileId, room.id)
+    return member
+  }
   const now = Date.now()
   member = {
     tileId,
@@ -190,8 +215,8 @@ function ensureMember(room: AgentRoom, tileId: string, tileType = 'unknown'): Ro
     joinedAt: now,
     updatedAt: now,
   }
+  setRoomMembership(tileId, room.id)
   room.members.set(tileId, member)
-  membership.set(tileId, room.id)
   return member
 }
 
@@ -211,6 +236,14 @@ export function syncMembership(
 
   const component = new Set<string>([tileId, ...peerIds])
   if (component.size > MAX_ROOM_MEMBERS) return null
+  const foldedComponent = new Set<string>()
+  for (const id of component) {
+    const foldedId = id.toLowerCase()
+    if (foldedComponent.has(foldedId)) return null
+    const existingId = caseFoldedMembership.get(foldedId)
+    if (existingId && existingId !== id) return null
+    foldedComponent.add(foldedId)
+  }
   if (component.size < 2) {
     // Alone — leave any previous room
     leaveRoom(tileId)
@@ -278,7 +311,7 @@ export function syncMembership(
   for (const mid of [...host.members.keys()]) {
     if (!component.has(mid)) {
       host.members.delete(mid)
-      if (membership.get(mid) === host.id) membership.delete(mid)
+      deleteRoomMembership(mid, host.id)
       todosByTile.delete(mid)
       removeInboxArtifact(mid)
     }
@@ -322,7 +355,7 @@ function dissolveRoom(roomId: string): void {
   const room = rooms.get(roomId)
   if (!room) return
   for (const mid of room.members.keys()) {
-    if (membership.get(mid) === roomId) membership.delete(mid)
+    deleteRoomMembership(mid, roomId)
     todosByTile.delete(mid)
     removeInboxArtifact(mid)
   }
@@ -345,7 +378,7 @@ export function leaveRoom(tileId: string): void {
   removeInboxArtifact(tileId)
   if (!rid) return
   const room = rooms.get(rid)
-  membership.delete(tileId)
+  deleteRoomMembership(tileId)
   if (!room) return
   room.members.delete(tileId)
   room.memberKey = memberKeyOf(room.members.keys())
@@ -759,6 +792,7 @@ async function disposeAgentRoomsInternal(): Promise<void> {
     persistence.removeFile(path, { pruneEmptyParent: true })
   }
   membership.clear()
+  caseFoldedMembership.clear()
   rooms.clear()
   todosByTile.clear()
 

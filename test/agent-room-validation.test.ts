@@ -37,6 +37,11 @@ describe('agent-room validation primitives', () => {
       'a\u007fb',
       'tîle',
       'a\u202eb',
+      'tile.',
+      'CON',
+      'nul.txt',
+      'COM9',
+      'lpt1.log',
       `a${'b'.repeat(MAX_TILE_ID_BYTES)}`,
     ]) {
       assert.equal(isValidAgentRoomId(value), false, JSON.stringify(value))
@@ -64,14 +69,17 @@ describe('agent-room validation primitives', () => {
     assert.match(json, /truncated/i)
     assert.equal(json.includes('"self":{'), false)
 
+    let getterCalls = 0
     const hostile: Record<string, unknown> = {}
     Object.defineProperty(hostile, 'throwing', {
       enumerable: true,
       get() {
-        throw new Error('getter should not escape validation')
+        getterCalls += 1
+        throw new Error('getter must not run during validation')
       },
     })
-    assert.match(JSON.stringify(boundMetadata(hostile)), /metadata access failed/i)
+    assert.match(JSON.stringify(boundMetadata(hostile)), /accessor property/i)
+    assert.equal(getterCalls, 0)
   })
 
   test('bounds target and file array inspection to the retained prefix', () => {

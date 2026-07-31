@@ -113,6 +113,30 @@ describe('AgentRoomPersistenceQueue', () => {
     assert.equal(queue.getStats().pendingPaths, 0)
   })
 
+  test('serializes case-folded path aliases before applying the newest spelling', async () => {
+    const adapter = new MemoryAdapter()
+    adapter.blockFirst = true
+    const queue = new AgentRoomPersistenceQueue(adapter, { caseInsensitivePaths: true })
+
+    queue.writeJson('/virtual/Inbox/ROOM.md', { revision: 'A' })
+    await adapter.firstStarted.promise
+    queue.writeJson('/virtual/inbox/ROOM.md', { revision: 'B' })
+    await Promise.resolve()
+
+    assert.equal(adapter.writes.length, 1)
+    adapter.firstRelease.resolve()
+    await queue.flush()
+
+    assert.deepEqual(adapter.writes.map(write => ({
+      path: write.path,
+      value: JSON.parse(write.contents),
+    })), [
+      { path: '/virtual/Inbox/ROOM.md', value: { revision: 'A' } },
+      { path: '/virtual/inbox/ROOM.md', value: { revision: 'B' } },
+    ])
+    assert.equal(queue.getStats().pendingPaths, 0)
+  })
+
   test('coalesces 100 concurrent updates without allowing an older write to win', async () => {
     const adapter = new MemoryAdapter()
     adapter.blockFirst = true

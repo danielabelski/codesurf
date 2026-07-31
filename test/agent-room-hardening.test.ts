@@ -36,6 +36,11 @@ describe('agent-room validation and bounds', () => {
       'a\u007fb',
       'tîle',
       'a\u202eb',
+      'tile.',
+      'CON',
+      'nul.txt',
+      'COM9',
+      'lpt1.log',
       `a${'b'.repeat(limits.MAX_TILE_ID_BYTES)}`,
     ]
 
@@ -160,6 +165,16 @@ describe('agent-room validation and bounds', () => {
 })
 
 describe('agent-room lifecycle', () => {
+  test('rejects case-folded tile collisions and clears the index on dispose', async () => {
+    assert.ok(room.updateLinks('Case-A', ['case-peer']))
+    assert.equal(room.updateLinks('case-a', ['other-peer']), null)
+    assert.ok(room.getRoomForTile('Case-A'))
+    assert.equal(room.getRoomForTile('case-a'), null)
+
+    await room.disposeAgentRooms()
+    assert.ok(room.updateLinks('case-a', ['other-peer']))
+  })
+
   test('does not resurrect todos after leave and rejoin', async () => {
     room.updateLinks('todo-a', ['todo-b'])
     room.addTodo('todo-a', 'must disappear')

@@ -237,8 +237,8 @@ const defaultRetryScheduler: AgentRoomRetryScheduler = {
 }
 
 type PersistenceOperation =
-  | { revision: number, kind: 'write', contents: string }
-  | { revision: number, kind: 'delete', pruneEmptyParent: boolean }
+  | { revision: number, path: string, kind: 'write', contents: string }
+  | { revision: number, path: string, kind: 'delete', pruneEmptyParent: boolean }
 
 interface PersistencePathState {
   nextRevision: number
@@ -253,15 +253,21 @@ interface PersistencePathState {
 export class AgentRoomPersistenceQueue {
   private readonly adapter: AgentRoomFileAdapter
   private readonly retryScheduler: AgentRoomRetryScheduler
+  private readonly caseInsensitivePaths: boolean
   private readonly states = new Map<string, PersistencePathState>()
   private disposed = false
 
   constructor(
     adapter: AgentRoomFileAdapter,
-    options: { retryScheduler?: AgentRoomRetryScheduler } = {},
+    options: {
+      retryScheduler?: AgentRoomRetryScheduler
+      caseInsensitivePaths?: boolean
+    } = {},
   ) {
     this.adapter = adapter
     this.retryScheduler = options.retryScheduler ?? defaultRetryScheduler
+    this.caseInsensitivePaths = options.caseInsensitivePaths
+      ?? (process.platform === 'darwin' || process.platform === 'win32')
   }
 
   writeJson(path: string, value: unknown): void {
@@ -270,12 +276,18 @@ export class AgentRoomPersistenceQueue {
   }
 
   writeText(path: string, contents: string): void {
-    this.schedule(path, revision => ({ revision, kind: 'write', contents }))
+    this.schedule(path, (revision, normalizedPath) => ({
+      revision,
+      path: normalizedPath,
+      kind: 'write',
+      contents,
+    }))
   }
 
   removeFile(path: string, options: { pruneEmptyParent?: boolean } = {}): void {
-    this.schedule(path, revision => ({
+    this.schedule(path, (revision, normalizedPath) => ({
       revision,
+      path: normalizedPath,
       kind: 'delete',
       pruneEmptyParent: options.pruneEmptyParent === true,
     }))
@@ -283,11 +295,12 @@ export class AgentRoomPersistenceQueue {
 
   private schedule(
     path: string,
-    createOperation: (revision: number) => PersistenceOperation,
+    createOperation: (revision: number, normalizedPath: string) => PersistenceOperation,
   ): void {
     if (this.disposed) throw new Error('Agent-room persistence queue is disposed')
     const normalizedPath = resolve(path)
-    const state = this.states.get(normalizedPath) ?? {
+    const stateKey = this.caseInsensitivePaths ? normalizedPath.toLowerCase() : normalizedPath
+    const state = this.states.get(stateKey) ?? {
       nextRevision: 0,
       appliedRevision: 0,
       latest: null,
@@ -297,19 +310,19 @@ export class AgentRoomPersistenceQueue {
       lastError: null,
     }
     state.nextRevision += 1
-    state.latest = createOperation(state.nextRevision)
+    state.latest = createOperation(state.nextRevision, normalizedPath)
     state.lastError = null
     if (state.retryHandle !== null) {
       this.retryScheduler.cancel(state.retryHandle)
       state.retryHandle = null
     }
-    this.states.set(normalizedPath, state)
-    this.startDrain(normalizedPath, state)
+    this.states.set(stateKey, state)
+    this.startDrain(stateKey, state)
   }
 
-  private startDrain(path: string, state: PersistencePathState): void {
+  private startDrain(stateKey: string, state: PersistencePathState): void {
     if (state.running || !state.latest || state.appliedRevision >= state.latest.revision) return
-    const running = this.drain(path, state)
+    const running = this.drain(stateKey, state)
     state.running = running
     void running.finally(() => {
       if (state.running === running) state.running = null
@@ -318,7 +331,7 @@ export class AgentRoomPersistenceQueue {
         && state.appliedRevision < state.latest.revision
         && state.retryHandle === null
       ) {
-        this.startDrain(path, state)
+        this.startDrain(stateKey, state)
         return
       }
       if (
@@ -326,19 +339,19 @@ export class AgentRoomPersistenceQueue {
         && state.appliedRevision >= state.latest.revision
         && state.retryHandle === null
       ) {
-        this.states.delete(path)
+        this.states.delete(stateKey)
       }
     })
   }
 
-  private async drain(path: string, state: PersistencePathState): Promise<void> {
+  private async drain(stateKey: string, state: PersistencePathState): Promise<void> {
     while (state.latest && state.appliedRevision < state.latest.revision) {
       const operation = state.latest
       try {
         if (operation.kind === 'write') {
-          await this.adapter.writeFileAtomic(path, operation.contents)
+          await this.adapter.writeFileAtomic(operation.path, operation.contents)
         } else {
-          await this.adapter.removeOwnedFile(path, {
+          await this.adapter.removeOwnedFile(operation.path, {
             pruneEmptyParent: operation.pruneEmptyParent,
           })
         }
@@ -348,18 +361,18 @@ export class AgentRoomPersistenceQueue {
       } catch (error) {
         state.failures += 1
         state.lastError = error instanceof Error ? error : new Error(String(error))
-        this.scheduleRetry(path, state)
+        this.scheduleRetry(stateKey, state)
         return
       }
     }
   }
 
-  private scheduleRetry(path: string, state: PersistencePathState): void {
+  private scheduleRetry(stateKey: string, state: PersistencePathState): void {
     if (state.retryHandle !== null || this.disposed) return
     const delayMs = Math.min(1000, 50 * (2 ** Math.min(state.failures - 1, 5)))
     state.retryHandle = this.retryScheduler.schedule(() => {
       state.retryHandle = null
-      this.startDrain(path, state)
+      this.startDrain(stateKey, state)
     }, delayMs)
   }
 
@@ -376,14 +389,14 @@ export class AgentRoomPersistenceQueue {
       if (entries.length === 0) break
       let madeProgress = false
 
-      for (const [path, state] of entries) {
+      for (const [stateKey, state] of entries) {
         this.cancelRetry(state)
         if (state.running) await state.running
         this.cancelRetry(state)
         if (state.latest && state.appliedRevision < state.latest.revision) {
           const priorApplied = state.appliedRevision
           state.lastError = null
-          this.startDrain(path, state)
+          this.startDrain(stateKey, state)
           if (state.running) await state.running
           madeProgress ||= state.appliedRevision > priorApplied
           if (state.latest && state.appliedRevision < state.latest.revision && state.lastError) {
@@ -391,7 +404,7 @@ export class AgentRoomPersistenceQueue {
           }
         }
         if (state.latest && state.appliedRevision >= state.latest.revision) {
-          this.states.delete(path)
+          this.states.delete(stateKey)
         }
       }
 
