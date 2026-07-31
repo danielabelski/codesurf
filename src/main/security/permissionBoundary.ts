@@ -26,7 +26,12 @@ import {
   ExtensionMediaConsentManager,
   ExtensionMediaConsentStore,
 } from './extensionMediaConsent'
-import type { SensitiveMediaCapability } from '../../shared/extension-sensitive-media'
+import {
+  EXTENSION_MEDIA_DIALOG_TEXT_BYTES,
+  getSafeExtensionMediaAttribution,
+  sanitizeExtensionMediaDialogText,
+  type SensitiveMediaCapability,
+} from '../../shared/extension-sensitive-media'
 
 export interface ElectronPermissionBoundaryOptions {
   readonly developmentRendererUrl?: string
@@ -80,16 +85,35 @@ export function installElectronPermissionBoundary(
     async request => {
       const owner = request.owner as BrowserWindow | undefined
       if (!owner || owner.isDestroyed()) return false
+      const attribution = getSafeExtensionMediaAttribution(
+        request.extensionId,
+        request.extensionName,
+        request.reason,
+      )
       const kindLabel: Record<SensitiveMediaCapability, string> = {
         microphone: 'microphone',
         camera: 'camera',
         'display-capture': 'screen or window',
       }
+      const message = sanitizeExtensionMediaDialogText(
+        `${attribution.name} wants to use your ${kindLabel[request.kind]}`,
+        `${attribution.id} wants to use this media capability`,
+        EXTENSION_MEDIA_DIALOG_TEXT_BYTES.message,
+      )
+      const detail = sanitizeExtensionMediaDialogText(
+        [
+          attribution.reason ? `Reason: ${attribution.reason}.` : '',
+          `Extension ID: ${attribution.id}.`,
+          'You can revoke access by disabling the extension.',
+        ].filter(Boolean).join(' '),
+        `Extension ID: ${attribution.id}.`,
+        EXTENSION_MEDIA_DIALOG_TEXT_BYTES.detail,
+      )
       const result = await dialog.showMessageBox(owner, {
         type: 'question',
         title: 'Extension media permission',
-        message: `${request.extensionName} wants to use your ${kindLabel[request.kind]}`,
-        detail: `Allow extension "${request.extensionId}" to use this capability? You can revoke access by disabling the extension.`,
+        message,
+        detail,
         buttons: ['Allow', 'Deny'],
         defaultId: 1,
         cancelId: 1,
@@ -230,21 +254,54 @@ export function installElectronPermissionBoundary(
         return false
       }
     },
-    selectDisplaySource: async ({ owner, sources }) => {
+    selectDisplaySource: async ({ owner, requester, sources }) => {
       const choices = sources.slice(0, MAX_DISPLAY_SOURCE_CHOICES)
       if (choices.length === 0) return undefined
+      const attribution = requester.kind === 'extension'
+        ? getSafeExtensionMediaAttribution(
+          requester.extension.id,
+          requester.extension.name,
+          requester.extension.declaredMediaReasons['display-capture'],
+        )
+        : undefined
+      const message = attribution
+        ? sanitizeExtensionMediaDialogText(
+          `Choose what ${attribution.name} may share`,
+          `Choose what ${attribution.id} may share`,
+          EXTENSION_MEDIA_DIALOG_TEXT_BYTES.message,
+        )
+        : 'Choose what CodeSurf may share'
+      const detail = attribution
+        ? sanitizeExtensionMediaDialogText(
+          [
+            attribution.reason ? `Reason: ${attribution.reason}.` : '',
+            `Extension ID: ${attribution.id}.`,
+            sources.length > choices.length
+              ? `Showing the first ${choices.length} available sources.`
+              : 'Nothing is shared until you choose a source.',
+          ].filter(Boolean).join(' '),
+          `Extension ID: ${attribution.id}.`,
+          EXTENSION_MEDIA_DIALOG_TEXT_BYTES.detail,
+        )
+        : sources.length > choices.length
+          ? `Showing the first ${choices.length} available sources.`
+          : 'Nothing is shared until you choose a source.'
       const cancelId = choices.length
       const result = await dialog.showMessageBox(
         owner as unknown as BrowserWindow,
         {
           type: 'question',
           title: 'Share a screen or window',
-          message: 'Choose what CodeSurf may share',
-          detail: sources.length > choices.length
-            ? `Showing the first ${choices.length} available sources.`
-            : 'Nothing is shared until you choose a source.',
+          message,
+          detail,
           buttons: [
-            ...choices.map((source, index) => source.name.trim() || `Source ${index + 1}`),
+            ...choices.map((source, index) => {
+              return sanitizeExtensionMediaDialogText(
+                source.name,
+                `Source ${index + 1}`,
+                EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
+              )
+            }),
             'Cancel',
           ],
           defaultId: cancelId,

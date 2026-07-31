@@ -56,6 +56,140 @@ describe('permission boundary display capture', () => {
       await requestDisplay(trusted.session, displayRequest),
       { video: harness.sources[1] },
     )
+    const selection = harness.displaySelections.at(-1)
+    assert.equal(selection?.requester.kind, 'extension')
+    if (selection?.requester.kind === 'extension') {
+      assert.equal(selection.requester.extension.id, 'sharing-extension')
+      assert.equal(
+        selection.requester.extension.identity,
+        harness.extensions.get('sharing-extension')?.identity,
+      )
+    }
+  })
+
+  test('attributes host and extension display selectors to the requesting principal', async () => {
+    const host = createHarness()
+    const hostWindow = host.makeWindow()
+    host.boundary.registerAppWindow(hostWindow.window)
+    assert.equal(
+      await requestPermission(hostWindow.session, hostWindow.contents, 'media', {
+        ...mainFrameDetails(host.appUrl),
+        mediaTypes: [],
+      }),
+      true,
+    )
+    assert.deepEqual(
+      await requestDisplay(hostWindow.session, {
+        frame: hostWindow.contents.mainFrame,
+        securityOrigin: new URL(host.appUrl).origin,
+        videoRequested: true,
+        audioRequested: false,
+        userGesture: true,
+      }),
+      { video: host.sources[1] },
+    )
+    assert.deepEqual(host.displaySelections.at(-1)?.requester, { kind: 'host' })
+
+    const extension = createHarness()
+    const extensionWindow = extension.makeWindow()
+    extension.boundary.registerAppWindow(extensionWindow.window)
+    extension.setExtension('presenter', {
+      name: 'Presenter',
+      declaredMedia: ['display-capture'],
+      declaredMediaReasons: {
+        'display-capture': 'Present a selected project window',
+      },
+    })
+    const extensionUrl = 'codesurf-ext://presenter'
+    const child = new FakeFrame(`${extensionUrl}/index.html`, extensionUrl, 48)
+    child.parent = extensionWindow.contents.mainFrame
+    child.top = extensionWindow.contents.mainFrame
+    extension.attachFrame(extensionWindow.contents, child)
+    assert.equal(
+      await requestPermission(
+        extensionWindow.session,
+        extensionWindow.contents,
+        'display-capture',
+        {
+          isMainFrame: false,
+          requestingUrl: child.url,
+          securityOrigin: `${extensionUrl}/`,
+        },
+      ),
+      true,
+    )
+    assert.deepEqual(
+      await requestDisplay(extensionWindow.session, {
+        frame: child,
+        securityOrigin: `${extensionUrl}/`,
+        videoRequested: true,
+        audioRequested: false,
+        userGesture: true,
+      }),
+      { video: extension.sources[1] },
+    )
+    const extensionRequester = extension.displaySelections.at(-1)?.requester
+    assert.equal(extensionRequester?.kind, 'extension')
+    if (extensionRequester?.kind === 'extension') {
+      assert.equal(extensionRequester.extension.name, 'Presenter')
+      assert.equal(
+        extensionRequester.extension.declaredMediaReasons['display-capture'],
+        'Present a selected project window',
+      )
+    }
+  })
+
+  test('fails closed when the extension principal changes while its chooser is open', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('sharing-extension', {
+      declaredMedia: ['display-capture'],
+    })
+    harness.setExtensionConsent('sharing-extension', ['display-capture'])
+    const extensionUrl = 'codesurf-ext://sharing-extension'
+    const child = new FakeFrame(`${extensionUrl}/index.html`, extensionUrl, 49)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+    const details = {
+      isMainFrame: false,
+      requestingUrl: child.url,
+      securityOrigin: `${extensionUrl}/`,
+    }
+    assert.equal(
+      await requestPermission(
+        trusted.session,
+        trusted.contents,
+        'display-capture',
+        details,
+      ),
+      true,
+    )
+
+    let resolveSelection: ((source: typeof harness.sources[number]) => void) | undefined
+    let markSelectionStarted: (() => void) | undefined
+    const selectionStarted = new Promise<void>(resolve => {
+      markSelectionStarted = resolve
+    })
+    harness.setDisplaySelector(async () => {
+      markSelectionStarted?.()
+      return await new Promise(resolve => {
+        resolveSelection = resolve
+      })
+    })
+    const pending = requestDisplay(trusted.session, {
+      frame: child,
+      securityOrigin: `${extensionUrl}/`,
+      videoRequested: true,
+      audioRequested: false,
+      userGesture: true,
+    })
+    await selectionStarted
+    harness.navigate(trusted.contents, child)
+    resolveSelection?.(harness.sources[1])
+
+    assert.deepEqual(await pending, {})
   })
 
   test('denies invalid extension display identity and revokes grants on navigation or disable', async () => {

@@ -4,6 +4,7 @@ import {
   createPermissionBoundary,
   type BrowserWindowLike,
   type DisplayMediaRequest,
+  type DisplaySourceSelection,
   type ExtensionPermissionDescriptor,
   type FrameLike,
   type FrameNavigationIdentity,
@@ -167,6 +168,10 @@ export function createHarness(options?: {
     return mediaResults[kind] ?? false
   }
   let selectedSource: DisplaySource | undefined = sources[1]
+  let displaySelector: (
+    selection: DisplaySourceSelection<DisplaySource>,
+  ) => Promise<DisplaySource | undefined> = async () => selectedSource
+  const displaySelections: DisplaySourceSelection<DisplaySource>[] = []
   let selectionCount = 0
 
   const runtime: PermissionBoundaryRuntime<DisplaySource> = {
@@ -226,9 +231,10 @@ export function createHarness(options?: {
       return await mediaRequester(kind)
     },
     getDisplaySources: async () => sources,
-    selectDisplaySource: async () => {
+    selectDisplaySource: async selection => {
       selectionCount += 1
-      return selectedSource
+      displaySelections.push(selection)
+      return await displaySelector(selection)
     },
     warn: () => undefined,
   }
@@ -263,6 +269,7 @@ export function createHarness(options?: {
     boundary,
     contentsListeners,
     defaultSession,
+    displaySelections,
     extensionConsentPrompts,
     extensionConsentReasons,
     extensionConsents,
@@ -311,6 +318,9 @@ export function createHarness(options?: {
       extensionConsents.set(`${id}:${identity}`, new Set(kinds))
     },
     setSelectedSource: (source: DisplaySource | undefined) => { selectedSource = source },
+    setDisplaySelector: (
+      selector: typeof displaySelector,
+    ) => { displaySelector = selector },
     selectionCount: () => selectionCount,
     sources,
   }
