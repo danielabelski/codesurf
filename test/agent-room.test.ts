@@ -1,6 +1,16 @@
-import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import {
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, beforeEach, describe, it } from 'node:test'
+
+const testHome = await mkdtemp(join(tmpdir(), 'codesurf-agent-room-compat-'))
+process.env.CODESURF_HOME = testHome
+const { CODESURF_HOME } = await import('../src/main/paths.ts')
+assert.equal(CODESURF_HOME, testHome)
+
+const {
+  disposeAgentRooms,
   updateLinks,
   post,
   consume,
@@ -9,7 +19,16 @@ import {
   publishTurnSummary,
   getRoomForTile,
   leaveRoom,
-} from '../src/main/agent-room/store.ts'
+} = await import('../src/main/agent-room/store.ts')
+
+beforeEach(async () => {
+  await disposeAgentRooms()
+})
+
+after(async () => {
+  await disposeAgentRooms()
+  await rm(testHome, { recursive: true, force: true })
+})
 
 describe('agent-room', () => {
   it('creates a room when two tiles are wired', () => {

@@ -8,7 +8,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import { bus } from '../event-bus.ts'
+import { CODESURF_HOME } from '../paths.ts'
+import {
+  AgentRoomPersistenceQueue,
+  NodeAgentRoomFileAdapter,
+} from './persistence.ts'
 import type {
   AgentRoom,
   ConsumeResult,
@@ -19,24 +25,123 @@ import type {
   RoomMember,
   RoomSnapshot,
 } from './types.ts'
-
-const MAX_EVENTS_PER_ROOM = 500
+import {
+  AgentRoomValidationError,
+  MAX_PROMPT_BYTES,
+  MAX_ROOM_MEMBERS,
+  MAX_TODOS_PER_TILE,
+  boundDisplayName,
+  boundEventText,
+  boundMemberFiles,
+  boundMemberTask,
+  boundMetadata,
+  boundTargetTileIds,
+  boundTileType,
+  capRetainedEvents,
+  isValidAgentRoomId,
+  retainedEventBytes,
+  truncateUtf8,
+} from './validation.ts'
 
 // tileId → roomId
 const membership = new Map<string, string>()
 // roomId → room
 const rooms = new Map<string, AgentRoom>()
+const ownedRoomFiles = new Set<string>()
+const ownedInboxFiles = new Set<string>()
+
+function createPersistenceQueue(): AgentRoomPersistenceQueue {
+  return new AgentRoomPersistenceQueue(new NodeAgentRoomFileAdapter(CODESURF_HOME))
+}
+
+let persistence = createPersistenceQueue()
+let disposing = false
+let disposePromise: Promise<void> | null = null
 
 // Optional PTY notifier for terminal tiles (secondary; primary is consume)
 type NotifyCallback = (tileId: string, line: string) => void
 let notifyTerminalFn: NotifyCallback | null = null
 
-export function setTerminalNotifier(fn: NotifyCallback): void {
-  notifyTerminalFn = fn
+const ROOM_EVENT_KINDS = new Set<RoomEventKind>([
+  'message',
+  'task',
+  'handoff',
+  'summary',
+  'status',
+  'finding',
+  'blocker',
+  'question',
+  'decision',
+  'fileChanged',
+  'testResult',
+  'reviewFinding',
+])
+const MEMBER_STATUSES = new Set<MemberStatus>([
+  'idle',
+  'working',
+  'blocked',
+  'waiting',
+  'done',
+  'unknown',
+])
+const MAX_STANDING_PROMPT_BYTES = 8 * 1024
+const MAX_EVENT_PROMPT_BYTES = MAX_PROMPT_BYTES - MAX_STANDING_PROMPT_BYTES - 2
+
+export function setTerminalNotifier(fn: NotifyCallback | null): void {
+  notifyTerminalFn = disposing ? null : fn
 }
 
 function memberKeyOf(tileIds: Iterable<string>): string {
   return [...tileIds].sort().join('|')
+}
+
+function tileTypeFor(tileTypes: unknown, tileId: string): string {
+  if (!tileTypes || typeof tileTypes !== 'object') return 'unknown'
+  try {
+    if (!Object.hasOwn(tileTypes, tileId)) return 'unknown'
+    return boundTileType((tileTypes as Record<string, unknown>)[tileId])
+  } catch {
+    return 'unknown'
+  }
+}
+
+function copyMember(member: RoomMember): RoomMember {
+  return {
+    ...member,
+    files: [...member.files],
+  }
+}
+
+function copyEvent(event: RoomEvent): RoomEvent {
+  return {
+    ...event,
+    targetTileIds: [...event.targetTileIds],
+    meta: event.meta ? structuredClone(event.meta) : undefined,
+  }
+}
+
+function emptyConsumeResult(): ConsumeResult {
+  return { roomId: null, text: '', events: [], latestSequence: 0, members: [] }
+}
+
+function roomFilePath(roomId: string): string {
+  return join(CODESURF_HOME, 'rooms', `${roomId}.json`)
+}
+
+function inboxFilePath(tileId: string): string {
+  return join(CODESURF_HOME, 'room-inboxes', tileId, 'ROOM.md')
+}
+
+function removeRoomArtifact(roomId: string): void {
+  const path = roomFilePath(roomId)
+  if (!ownedRoomFiles.delete(path)) return
+  persistence.removeFile(path, { pruneEmptyParent: true })
+}
+
+function removeInboxArtifact(tileId: string): void {
+  const path = inboxFilePath(tileId)
+  if (!ownedInboxFiles.delete(path)) return
+  persistence.removeFile(path, { pruneEmptyParent: true })
 }
 
 function publishRoom(room: AgentRoom, type: string, payload: Record<string, unknown>): void {
@@ -60,7 +165,9 @@ function snapshot(room: AgentRoom): RoomSnapshot {
   return {
     id: room.id,
     memberKey: room.memberKey,
-    members: [...room.members.values()].sort((a, b) => a.tileId.localeCompare(b.tileId)),
+    members: [...room.members.values()]
+      .map(copyMember)
+      .sort((a, b) => a.tileId.localeCompare(b.tileId)),
     eventCount: room.events.length,
     latestSequence: Math.max(0, room.nextSequence - 1),
     createdAt: room.createdAt,
@@ -74,7 +181,7 @@ function ensureMember(room: AgentRoom, tileId: string, tileType = 'unknown'): Ro
   const now = Date.now()
   member = {
     tileId,
-    tileType,
+    tileType: boundTileType(tileType),
     status: 'unknown',
     task: '',
     files: [],
@@ -97,7 +204,13 @@ export function syncMembership(
   peerIds: string[],
   tileTypes: Record<string, string> = {},
 ): RoomSnapshot | null {
-  const component = new Set<string>([tileId, ...peerIds.filter(Boolean)])
+  if (disposing) return null
+  if (!isValidAgentRoomId(tileId) || !Array.isArray(peerIds)) return null
+  if (peerIds.length >= MAX_ROOM_MEMBERS) return null
+  if (peerIds.some(peerId => !isValidAgentRoomId(peerId))) return null
+
+  const component = new Set<string>([tileId, ...peerIds])
+  if (component.size > MAX_ROOM_MEMBERS) return null
   if (component.size < 2) {
     // Alone — leave any previous room
     leaveRoom(tileId)
@@ -115,6 +228,7 @@ export function syncMembership(
       if (!room) continue
       for (const mid of room.members.keys()) {
         if (!component.has(mid)) {
+          if (component.size >= MAX_ROOM_MEMBERS) return null
           component.add(mid)
           growing = true
         }
@@ -128,7 +242,7 @@ export function syncMembership(
   for (const room of rooms.values()) {
     if (room.memberKey === key) {
       for (const id of component) {
-        ensureMember(room, id, tileTypes[id] ?? 'unknown')
+        ensureMember(room, id, tileTypeFor(tileTypes, id))
       }
       room.updatedAt = Date.now()
       writeRoomFiles(room)
@@ -165,6 +279,8 @@ export function syncMembership(
     if (!component.has(mid)) {
       host.members.delete(mid)
       if (membership.get(mid) === host.id) membership.delete(mid)
+      todosByTile.delete(mid)
+      removeInboxArtifact(mid)
     }
   }
 
@@ -175,10 +291,19 @@ export function syncMembership(
       const old = rooms.get(prev)
       if (old) {
         old.members.delete(id)
-        if (old.members.size < 2) dissolveRoom(old.id)
+        todosByTile.delete(id)
+        removeInboxArtifact(id)
+        if (old.members.size < 2) {
+          dissolveRoom(old.id)
+        } else {
+          old.memberKey = memberKeyOf(old.members.keys())
+          old.updatedAt = Date.now()
+          publishRoom(old, 'membership', { left: id, members: snapshot(old).members })
+          writeRoomFiles(old)
+        }
       }
     }
-    ensureMember(host, id, tileTypes[id] ?? 'unknown')
+    ensureMember(host, id, tileTypeFor(tileTypes, id))
   }
 
   host.memberKey = memberKeyOf(host.members.keys())
@@ -198,18 +323,26 @@ function dissolveRoom(roomId: string): void {
   if (!room) return
   for (const mid of room.members.keys()) {
     if (membership.get(mid) === roomId) membership.delete(mid)
+    todosByTile.delete(mid)
+    removeInboxArtifact(mid)
   }
   rooms.delete(roomId)
+  removeRoomArtifact(roomId)
   bus.publish({
     channel: `room:${roomId}`,
     type: 'system',
     source: 'agent-room',
     payload: { action: 'dissolved', roomId },
   })
+  bus.dropChannel(`room:${roomId}`)
 }
 
 export function leaveRoom(tileId: string): void {
+  if (disposing) return
+  if (!isValidAgentRoomId(tileId)) return
   const rid = membership.get(tileId)
+  todosByTile.delete(tileId)
+  removeInboxArtifact(tileId)
   if (!rid) return
   const room = rooms.get(rid)
   membership.delete(tileId)
@@ -230,6 +363,7 @@ export function removeTile(tileId: string): void {
 }
 
 export function getRoomForTile(tileId: string): RoomSnapshot | null {
+  if (!isValidAgentRoomId(tileId)) return null
   const rid = membership.get(tileId)
   if (!rid) return null
   const room = rooms.get(rid)
@@ -237,44 +371,63 @@ export function getRoomForTile(tileId: string): RoomSnapshot | null {
 }
 
 export function getRoom(roomId: string): RoomSnapshot | null {
+  if (!isValidAgentRoomId(roomId)) return null
   const room = rooms.get(roomId)
   return room ? snapshot(room) : null
 }
 
 export function post(input: PostInput): RoomEvent | null {
+  if (disposing) return null
+  if (!input || !isValidAgentRoomId(input.fromTileId)) return null
+  if (typeof input.text !== 'string') return null
+  if (input.targetTileIds !== undefined && !Array.isArray(input.targetTileIds)) return null
+
   const roomId = membership.get(input.fromTileId)
   if (!roomId) return null
   const room = rooms.get(roomId)
   if (!room) return null
 
-  const member = ensureMember(room, input.fromTileId, input.fromTileType ?? 'unknown')
-  const text = input.text.trim()
+  const member = ensureMember(room, input.fromTileId, boundTileType(input.fromTileType))
+  const text = boundEventText(input.text)
   if (!text) return null
+  const targetTileIds = boundTargetTileIds(input.targetTileIds)
+  if (input.targetTileIds && input.targetTileIds.length > 0 && targetTileIds.length === 0) {
+    return null
+  }
+  let meta = boundMetadata(input.meta)
+  const omittedTargets = (input.targetTileIds?.length ?? 0) - targetTileIds.length
+  if (omittedTargets > 0) {
+    meta = boundMetadata({
+      ...meta,
+      __codesurfTruncatedTargets: `[truncated: ${omittedTargets} target(s)]`,
+    })
+  }
+  const kind = ROOM_EVENT_KINDS.has(input.kind as RoomEventKind)
+    ? input.kind as RoomEventKind
+    : 'message'
 
   const event: RoomEvent = {
     id: randomUUID(),
     sequence: room.nextSequence++,
     roomId: room.id,
-    kind: input.kind ?? 'message',
+    kind,
     fromTileId: input.fromTileId,
     fromTileType: member.tileType || input.fromTileType || 'unknown',
     text,
-    targetTileIds: input.targetTileIds?.filter(Boolean) ?? [],
+    targetTileIds,
     createdAt: Date.now(),
-    meta: input.meta,
+    meta,
   }
 
   room.events.push(event)
-  if (room.events.length > MAX_EVENTS_PER_ROOM) {
-    room.events.splice(0, room.events.length - MAX_EVENTS_PER_ROOM)
-  }
+  room.events = capRetainedEvents(room.events)
   room.updatedAt = Date.now()
 
   // Auto-ack own posts so we don't re-consume our own messages
   member.acknowledgedSeq = Math.max(member.acknowledgedSeq, event.sequence)
   member.updatedAt = Date.now()
 
-  publishRoom(room, 'event', { event })
+  publishRoom(room, 'event', { event: copyEvent(event) })
   writeRoomFiles(room)
 
   // Secondary: brief PTY ping for terminals (not the primary delivery path)
@@ -282,11 +435,18 @@ export function post(input: PostInput): RoomEvent | null {
     if (tid === input.fromTileId) continue
     if (event.targetTileIds.length > 0 && !event.targetTileIds.includes(tid)) continue
     if (m.tileType === 'terminal' && notifyTerminalFn) {
-      notifyTerminalFn(tid, `[codesurf room] ${event.kind} from ${event.fromTileId}: ${text.slice(0, 200)}`)
+      try {
+        notifyTerminalFn(
+          tid,
+          `[codesurf room] ${event.kind} from ${event.fromTileId}: ${truncateUtf8(text, 200)}`,
+        )
+      } catch {
+        // Terminal notification is secondary to the persisted room ledger.
+      }
     }
   }
 
-  return event
+  return copyEvent(event)
 }
 
 function isVisible(event: RoomEvent, tileId: string): boolean {
@@ -299,18 +459,22 @@ function isVisible(event: RoomEvent, tileId: string): boolean {
  * Cursor-gated delivery: returns unread room events for this member and advances ack.
  */
 export function consume(tileId: string): ConsumeResult {
+  if (disposing) return emptyConsumeResult()
+  if (!isValidAgentRoomId(tileId)) return emptyConsumeResult()
   const roomId = membership.get(tileId)
-  if (!roomId) {
-    return { roomId: null, text: '', events: [], latestSequence: 0, members: [] }
-  }
+  if (!roomId) return emptyConsumeResult()
   const room = rooms.get(roomId)
-  if (!room) {
-    return { roomId: null, text: '', events: [], latestSequence: 0, members: [] }
-  }
+  if (!room) return emptyConsumeResult()
 
   const member = ensureMember(room, tileId)
   const pending = room.events.filter(
     (e) => e.sequence > member.acknowledgedSeq && isVisible(e, tileId),
+  )
+  const expiredSequences = Math.max(
+    0,
+    (room.events[0]?.sequence ?? member.acknowledgedSeq + 1)
+      - member.acknowledgedSeq
+      - 1,
   )
 
   if (pending.length > 0) {
@@ -320,11 +484,11 @@ export function consume(tileId: string): ConsumeResult {
     writeRoomFiles(room)
   }
 
-  const text = formatEventsForInject(pending, room)
+  const text = formatEventsForInject(pending, room, MAX_EVENT_PROMPT_BYTES, expiredSequences)
   return {
     roomId: room.id,
     text,
-    events: pending,
+    events: pending.map(copyEvent),
     latestSequence: member.acknowledgedSeq,
     members: snapshot(room).members,
   }
@@ -337,6 +501,9 @@ export function digest(tileId: string): {
   unconsumed: number
   standingText: string
 } {
+  if (!isValidAgentRoomId(tileId)) {
+    return { roomId: null, members: [], unconsumed: 0, standingText: '' }
+  }
   const roomId = membership.get(tileId)
   if (!roomId) {
     return { roomId: null, members: [], unconsumed: 0, standingText: '' }
@@ -369,7 +536,10 @@ export function digest(tileId: string): {
     roomId: room.id,
     members: snapshot(room).members,
     unconsumed,
-    standingText: lines.join('\n'),
+    standingText: truncateUtf8(lines.join('\n'), MAX_STANDING_PROMPT_BYTES, {
+      marker: '\n[truncated]',
+      trim: false,
+    }),
   }
 }
 
@@ -378,6 +548,8 @@ export function setMemberState(
   update: Partial<Pick<RoomMember, 'tileType' | 'status' | 'task' | 'files' | 'displayName'>>,
   opts: { announce?: boolean } = {},
 ): RoomMember | null {
+  if (disposing) return null
+  if (!isValidAgentRoomId(tileId) || !update || typeof update !== 'object') return null
   const roomId = membership.get(tileId)
   if (!roomId) {
     // Not in a room yet — no-op member record isn't useful; chat will sync links first
@@ -385,12 +557,16 @@ export function setMemberState(
   }
   const room = rooms.get(roomId)
   if (!room) return null
-  const member = ensureMember(room, tileId, update.tileType)
-  if (update.tileType) member.tileType = update.tileType
-  if (update.status) member.status = update.status
-  if (update.task !== undefined) member.task = update.task
-  if (update.files) member.files = update.files
-  if (update.displayName !== undefined) member.displayName = update.displayName
+  const member = ensureMember(room, tileId, boundTileType(update.tileType))
+  if (update.tileType !== undefined) member.tileType = boundTileType(update.tileType)
+  if (MEMBER_STATUSES.has(update.status as MemberStatus)) {
+    member.status = update.status as MemberStatus
+  }
+  if (update.task !== undefined) member.task = boundMemberTask(update.task)
+  if (update.files !== undefined) member.files = boundMemberFiles(update.files)
+  if (update.displayName !== undefined) {
+    member.displayName = boundDisplayName(update.displayName)
+  }
   member.updatedAt = Date.now()
   room.updatedAt = Date.now()
 
@@ -404,53 +580,90 @@ export function setMemberState(
     })
   }
 
-  publishRoom(room, 'member_state', { member })
+  publishRoom(room, 'member_state', { member: copyMember(member) })
   writeRoomFiles(room)
-  return member
+  return copyMember(member)
 }
 
-function formatEventsForInject(events: RoomEvent[], room: AgentRoom): string {
+function formatEventsForInject(
+  events: RoomEvent[],
+  room: AgentRoom,
+  maxBytes = MAX_EVENT_PROMPT_BYTES,
+  expiredSequences = 0,
+): string {
   if (events.length === 0) return ''
-  const lines = [
+  const header = [
     '## Shared agent room traffic (new since your last turn)',
     `Room: ${room.id.slice(0, 8)} · ${events.length} event(s)`,
     '',
+    ...(expiredSequences > 0
+      ? [`[retained room traffic unavailable: ${expiredSequences} earlier sequence(s)]`, '']
+      : []),
   ]
-  for (const e of events) {
-    lines.push(`### [${e.kind}] from \`${e.fromTileId}\` (${e.fromTileType}) @ seq ${e.sequence}`)
-    lines.push(e.text)
-    lines.push('')
-  }
-  lines.push(
+  const footer = [
     'Acknowledge this context in your work. To reply to room members use the room_post / peer_send_message MCP tools, or just continue — your turn summary will be shared when the turn ends.',
-  )
-  return lines.join('\n')
+  ]
+  const blocks = events.map(event => [
+    `### [${event.kind}] from \`${event.fromTileId}\` (${event.fromTileType}) @ seq ${event.sequence}`,
+    event.text,
+    '',
+  ].join('\n'))
+  let selected: string[] = []
+  let omitted = events.length
+
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const candidate = [blocks[index]!, ...selected]
+    const candidateOmitted = index
+    const lines = [
+      ...header,
+      ...(candidateOmitted > 0
+        ? [`[earlier room traffic omitted: ${candidateOmitted} event(s)]`, '']
+        : []),
+      ...candidate,
+      ...footer,
+    ]
+    if (Buffer.byteLength(lines.join('\n'), 'utf8') > maxBytes) break
+    selected = candidate
+    omitted = candidateOmitted
+  }
+
+  const lines = [
+    ...header,
+    ...(omitted > 0 ? [`[earlier room traffic omitted: ${omitted} event(s)]`, ''] : []),
+    ...selected,
+    ...footer,
+  ]
+  return truncateUtf8(lines.join('\n'), maxBytes, {
+    marker: '\n[truncated]',
+    trim: false,
+  })
 }
 
 // ── Filesystem helpers for terminal agents ───────────────────────────────────
 
-import { promises as fs } from 'node:fs'
-import { join } from 'node:path'
-import { CODESURF_HOME } from '../paths.ts'
-
-/** Best-effort room files under ~/.codesurf/rooms and per-tile room.md */
+/** Revisioned, atomic room files under ~/.codesurf/rooms and per-tile inboxes. */
 function writeRoomFiles(room: AgentRoom): void {
   const snap = snapshot(room)
   const payload = {
     ...snap,
-    recentEvents: room.events.slice(-40),
+    recentEvents: room.events.slice(-40).map(copyEvent),
   }
-  const dir = join(CODESURF_HOME, 'rooms')
-  void fs.mkdir(dir, { recursive: true }).then(() =>
-    fs.writeFile(join(dir, `${room.id}.json`), JSON.stringify(payload, null, 2)),
-  ).catch(() => {})
+  const path = roomFilePath(room.id)
+  ownedRoomFiles.add(path)
+  persistence.writeJson(path, payload)
 
   // Per-member inbox files for terminals that can read the filesystem
   for (const m of room.members.values()) {
     const pending = room.events.filter(
       (e) => e.sequence > m.acknowledgedSeq && isVisible(e, m.tileId),
     )
-    const body = [
+    const expiredSequences = Math.max(
+      0,
+      (room.events[0]?.sequence ?? m.acknowledgedSeq + 1)
+        - m.acknowledgedSeq
+        - 1,
+    )
+    const body = truncateUtf8([
       `# Agent Room`,
       ``,
       `- room_id: \`${room.id}\``,
@@ -459,16 +672,17 @@ function writeRoomFiles(room: AgentRoom): void {
       `- unconsumed: ${pending.length}`,
       ``,
       pending.length
-        ? formatEventsForInject(pending, room)
+        ? formatEventsForInject(pending, room, MAX_EVENT_PROMPT_BYTES, expiredSequences)
         : '_No pending room traffic. Use MCP `room_status` / `room_consume` or wait for peers._',
       ``,
-    ].join('\n')
+    ].join('\n'), MAX_PROMPT_BYTES, {
+      marker: '\n[truncated]',
+      trim: false,
+    })
 
-    // Store under home so we don't need workspace path here
-    const tileDir = join(CODESURF_HOME, 'room-inboxes', m.tileId)
-    void fs.mkdir(tileDir, { recursive: true }).then(() =>
-      fs.writeFile(join(tileDir, 'ROOM.md'), body),
-    ).catch(() => {})
+    const inboxPath = inboxFilePath(m.tileId)
+    ownedInboxFiles.add(inboxPath)
+    persistence.writeText(inboxPath, body)
   }
 }
 
@@ -503,30 +717,124 @@ export interface PeerAgentState {
 
 const todosByTile = new Map<string, PeerTodo[]>()
 
+export function getAgentRoomStats(): {
+  rooms: number
+  memberships: number
+  todos: number
+  ownedRoomFiles: number
+  ownedInboxFiles: number
+  pendingPersistencePaths: number
+  retainedEventBytes: number
+} {
+  let todoCount = 0
+  for (const todos of todosByTile.values()) todoCount += todos.length
+  let eventBytes = 0
+  for (const room of rooms.values()) eventBytes += retainedEventBytes(room.events)
+  return {
+    rooms: rooms.size,
+    memberships: membership.size,
+    todos: todoCount,
+    ownedRoomFiles: ownedRoomFiles.size,
+    ownedInboxFiles: ownedInboxFiles.size,
+    pendingPersistencePaths: persistence.getStats().pendingPaths,
+    retainedEventBytes: eventBytes,
+  }
+}
+
+export async function flushAgentRooms(): Promise<void> {
+  if (disposePromise) {
+    await disposePromise
+    return
+  }
+  await persistence.flush()
+}
+
+async function disposeAgentRoomsInternal(): Promise<void> {
+  notifyTerminalFn = null
+  for (const roomId of rooms.keys()) bus.dropChannel(`room:${roomId}`)
+  for (const path of ownedRoomFiles) {
+    persistence.removeFile(path, { pruneEmptyParent: true })
+  }
+  for (const path of ownedInboxFiles) {
+    persistence.removeFile(path, { pruneEmptyParent: true })
+  }
+  membership.clear()
+  rooms.clear()
+  todosByTile.clear()
+
+  await persistence.dispose()
+  ownedRoomFiles.clear()
+  ownedInboxFiles.clear()
+  persistence = createPersistenceQueue()
+}
+
+export function disposeAgentRooms(): Promise<void> {
+  if (disposePromise) return disposePromise
+  disposing = true
+  const operation = disposeAgentRoomsInternal()
+    .finally(() => {
+      disposing = false
+      disposePromise = null
+    })
+  disposePromise = operation
+  return operation
+}
+
 export function setState(
   tileId: string,
   update: Partial<Omit<PeerAgentState, 'tileId' | 'updatedAt' | 'todos' | 'roomId'>>,
 ): PeerAgentState {
+  if (disposing) {
+    return {
+      tileId: isValidAgentRoomId(tileId) ? tileId : 'invalid',
+      tileType: 'unknown',
+      status: 'idle',
+      task: '',
+      files: [],
+      todos: [],
+      updatedAt: Date.now(),
+      roomId: null,
+    }
+  }
+  const safeUpdate = update && typeof update === 'object' ? update : {}
+  if (!isValidAgentRoomId(tileId)) {
+    return {
+      tileId: 'invalid',
+      tileType: boundTileType(safeUpdate.tileType),
+      status: MEMBER_STATUSES.has(safeUpdate.status as MemberStatus)
+        ? safeUpdate.status as MemberStatus
+        : 'idle',
+      task: boundMemberTask(safeUpdate.task),
+      files: boundMemberFiles(safeUpdate.files),
+      todos: [],
+      updatedAt: Date.now(),
+      roomId: null,
+    }
+  }
   const member = setMemberState(tileId, {
-    tileType: update.tileType,
-    status: update.status as MemberStatus | undefined,
-    task: update.task,
-    files: update.files,
+    tileType: safeUpdate.tileType,
+    status: safeUpdate.status as MemberStatus | undefined,
+    task: safeUpdate.task,
+    files: safeUpdate.files,
   }, { announce: true })
   const room = getRoomForTile(tileId)
   return {
     tileId,
-    tileType: member?.tileType ?? update.tileType ?? 'unknown',
-    status: member?.status ?? update.status ?? 'idle',
-    task: member?.task ?? update.task ?? '',
-    files: member?.files ?? update.files ?? [],
-    todos: todosByTile.get(tileId) ?? [],
+    tileType: member?.tileType ?? boundTileType(safeUpdate.tileType),
+    status: member?.status
+      ?? (MEMBER_STATUSES.has(safeUpdate.status as MemberStatus)
+        ? safeUpdate.status as MemberStatus
+        : 'idle'),
+    task: member?.task ?? boundMemberTask(safeUpdate.task),
+    files: member?.files ?? boundMemberFiles(safeUpdate.files),
+    todos: (todosByTile.get(tileId) ?? []).map(todo => ({ ...todo })),
     updatedAt: Date.now(),
     roomId: room?.id ?? null,
   }
 }
 
 export function getState(tileId: string): PeerAgentState | null {
+  if (!isValidAgentRoomId(tileId)) return null
   const room = getRoomForTile(tileId)
   if (!room) return null
   const m = room.members.find((x) => x.tileId === tileId)
@@ -536,14 +844,15 @@ export function getState(tileId: string): PeerAgentState | null {
     tileType: m.tileType,
     status: m.status,
     task: m.task,
-    files: m.files,
-    todos: todosByTile.get(tileId) ?? [],
+    files: [...m.files],
+    todos: (todosByTile.get(tileId) ?? []).map(todo => ({ ...todo })),
     updatedAt: m.updatedAt,
     roomId: room.id,
   }
 }
 
 export function getLinkedPeerStates(tileId: string): PeerAgentState[] {
+  if (!isValidAgentRoomId(tileId)) return []
   const room = getRoomForTile(tileId)
   if (!room) return []
   return room.members
@@ -553,18 +862,27 @@ export function getLinkedPeerStates(tileId: string): PeerAgentState[] {
       tileType: m.tileType,
       status: m.status,
       task: m.task,
-      files: m.files,
-      todos: todosByTile.get(m.tileId) ?? [],
+      files: [...m.files],
+      todos: (todosByTile.get(m.tileId) ?? []).map(todo => ({ ...todo })),
       updatedAt: m.updatedAt,
       roomId: room.id,
     }))
 }
 
 export function addTodo(tileId: string, text: string): PeerTodo {
+  if (disposing) throw new AgentRoomValidationError('Agent rooms are disposing')
+  if (!isValidAgentRoomId(tileId)) {
+    throw new AgentRoomValidationError('Invalid tileId')
+  }
+  const boundedText = boundEventText(text)
+  if (!boundedText) throw new AgentRoomValidationError('Todo text is empty')
   const list = todosByTile.get(tileId) ?? []
+  if (list.length >= MAX_TODOS_PER_TILE) {
+    throw new AgentRoomValidationError(`Todo limit of ${MAX_TODOS_PER_TILE} reached`)
+  }
   const todo: PeerTodo = {
-    id: `todo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    text,
+    id: `todo-${randomUUID()}`,
+    text: boundedText,
     done: false,
     createdAt: Date.now(),
   }
@@ -573,13 +891,15 @@ export function addTodo(tileId: string, text: string): PeerTodo {
   post({
     fromTileId: tileId,
     kind: 'task',
-    text: `todo added: ${text}`,
+    text: `todo added: ${boundedText}`,
     meta: { todoId: todo.id },
   })
-  return todo
+  return { ...todo }
 }
 
 export function completeTodo(tileId: string, todoId: string): boolean {
+  if (disposing) return false
+  if (!isValidAgentRoomId(tileId) || !isValidAgentRoomId(todoId)) return false
   const list = todosByTile.get(tileId) ?? []
   const todo = list.find((t) => t.id === todoId)
   if (!todo || todo.done) return false
@@ -594,23 +914,29 @@ export function completeTodo(tileId: string, todoId: string): boolean {
 }
 
 export function sendMessage(fromTileId: string, toTileId: string, text: string): PeerMessage {
-  const event = post({
-    fromTileId,
-    targetTileIds: [toTileId],
-    kind: 'message',
-    text,
-  })
+  const boundedText = boundEventText(text)
+  const event = isValidAgentRoomId(fromTileId)
+    && isValidAgentRoomId(toTileId)
+    && boundedText
+    ? post({
+        fromTileId,
+        targetTileIds: [toTileId],
+        kind: 'message',
+        text: boundedText,
+      })
+    : null
   return {
     id: event?.id ?? randomUUID(),
-    from: fromTileId,
+    from: isValidAgentRoomId(fromTileId) ? fromTileId : 'invalid',
     fromType: event?.fromTileType ?? 'unknown',
-    text,
+    text: boundedText,
     timestamp: event?.createdAt ?? Date.now(),
     read: false,
   }
 }
 
 export function readMessages(tileId: string): PeerMessage[] {
+  if (!isValidAgentRoomId(tileId)) return []
   const result = consume(tileId)
   return result.events.map((e) => ({
     id: e.id,
@@ -623,6 +949,7 @@ export function readMessages(tileId: string): PeerMessage[] {
 }
 
 export function getUnreadMessages(tileId: string): PeerMessage[] {
+  if (!isValidAgentRoomId(tileId)) return []
   const roomId = membership.get(tileId)
   if (!roomId) return []
   const room = rooms.get(roomId)
@@ -650,6 +977,13 @@ export function prepareTurnContext(tileId: string, tileType = 'chat'): {
   systemExtra: string
   consumed: ConsumeResult
 } {
+  if (!isValidAgentRoomId(tileId)) {
+    return {
+      roomId: null,
+      systemExtra: '',
+      consumed: emptyConsumeResult(),
+    }
+  }
   const d = digest(tileId)
   const consumed = consume(tileId)
   // Ensure member type is recorded
@@ -659,7 +993,10 @@ export function prepareTurnContext(tileId: string, tileType = 'chat'): {
   const parts = [d.standingText, consumed.text].filter((s) => s.trim().length > 0)
   return {
     roomId: d.roomId,
-    systemExtra: parts.join('\n\n'),
+    systemExtra: truncateUtf8(parts.join('\n\n'), MAX_PROMPT_BYTES, {
+      marker: '\n[truncated]',
+      trim: false,
+    }),
     consumed,
   }
 }
@@ -670,14 +1007,15 @@ export function publishTurnSummary(
   summary: string,
   tileType = 'chat',
 ): RoomEvent | null {
-  const text = summary.trim()
+  if (!isValidAgentRoomId(tileId) || typeof summary !== 'string') return null
+  const text = boundEventText(summary)
   if (!text) return null
   setMemberState(tileId, { tileType, status: 'idle' })
   return post({
     fromTileId: tileId,
     fromTileType: tileType,
     kind: 'summary',
-    text: text.slice(0, 4000),
+    text,
   })
 }
 
