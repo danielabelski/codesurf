@@ -211,7 +211,10 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
           throw lastError
         }
 
-        const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
+        const status = await awaitAbortable(
+          hooks.getStatus().catch(() => ({ running: false as const, info: null })),
+          options.signal,
+        )
         if (!status.running) {
           hooks.invalidate()
         }
@@ -345,7 +348,12 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         disconnectError = error instanceof Error ? error : new Error(String(error))
       } finally {
         if (reader) {
-          try { await reader.cancel() } catch {}
+          try {
+            // Cancellation is cleanup, not part of successful delivery or
+            // consumer-error settlement. Observe a late rejection without
+            // allowing a non-cooperative underlying stream to hang this call.
+            void reader.cancel().catch(() => {})
+          } catch {}
           try { reader.releaseLock() } catch {}
         }
       }
@@ -369,7 +377,10 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         )
       } catch (stateError) {
         if (options.signal?.aborted) throw abortReason(options.signal)
-        const daemonStatus = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
+        const daemonStatus = await awaitAbortable(
+          hooks.getStatus().catch(() => ({ running: false as const, info: null })),
+          options.signal,
+        )
         if (!daemonStatus.running) hooks.invalidate()
         if (reconnectCount >= maxReconnectAttempts) {
           throw (disconnectError ?? (stateError instanceof Error ? stateError : new Error(String(stateError))))

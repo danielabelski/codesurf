@@ -1491,9 +1491,11 @@ export function createChatJobManager({
   heartbeatMs = 15_000,
   timelineMaxQueuedEvents = 512,
   timelineMaxQueuedBytes = 4 * 1024 * 1024,
+  timelineMaxFailedRecords = 128,
   timelineAppendMaxAttempts = 3,
   timelineAppendRetryDelayMs = 25,
   timelineAppend = (path, data) => fs.appendFile(path, data, 'utf8'),
+  metadataWrite = (path, data) => fs.writeFile(path, data, 'utf8'),
 }) {
   const jobsDir = join(homeDir, 'jobs')
   const timelinesDir = join(homeDir, 'timelines')
@@ -1540,12 +1542,15 @@ export function createChatJobManager({
   const METADATA_FLUSH_MS = 250
   const TIMELINE_EVENT_LIMIT = Math.max(1, Number(timelineMaxQueuedEvents) || 512)
   const TIMELINE_BYTE_LIMIT = Math.max(1, Number(timelineMaxQueuedBytes) || 4 * 1024 * 1024)
+  const TIMELINE_FAILED_RECORD_LIMIT = Math.max(1, Number(timelineMaxFailedRecords) || 128)
   const TIMELINE_APPEND_ATTEMPTS = Math.max(1, Number(timelineAppendMaxAttempts) || 3)
   const TIMELINE_RETRY_DELAY_MS = Math.max(0, Number(timelineAppendRetryDelayMs) || 0)
   const metadataFlushTimers = new Map() // jobId -> timeout
   const timelinePersistence = new Map() // jobId -> bounded queue record
   const timelineWriteTails = new Map() // jobId -> latest queued entry promise
   const reconciliationLocks = new Map() // jobId -> Promise<metadata>
+  const failedCleanupTasks = new Set()
+  let timelineFailureOrdinal = 0
 
   class TimelinePersistenceError extends Error {
     constructor(jobId, cause) {
@@ -1577,10 +1582,98 @@ export function createChatJobManager({
         error: null,
         failureEvents: [],
         failureMetadata: null,
+        failureOrdinal: 0,
+        durableFailureMetadata: null,
+        finalizationPromise: null,
       }
       timelinePersistence.set(jobId, record)
     }
     return record
+  }
+
+  function scheduleFailedRecordFinalization(record) {
+    if (record.finalizationPromise) return record.finalizationPromise
+    const finalization = (async () => {
+      const persistedMetadata = await readJobMetadata(record.jobId)
+        ?? record.failureMetadata
+      if (!persistedMetadata) return null
+
+      let inspected = await inspectTimeline(record.jobId)
+      const publicError = record.failureMetadata?.error
+        ?? `Timeline persistence failed: ${record.error?.detail ?? record.error?.message ?? 'Unknown error'}`
+      try {
+        if (!inspected.terminalSeen) {
+          if (inspected.lastEventType !== 'error') {
+            await appendReconciliationEvent(record.jobId, {
+              jobId: record.jobId,
+              sequence: inspected.maxSequence + 1,
+              timestamp: Date.now(),
+              type: 'error',
+              error: publicError,
+            })
+          }
+          inspected = await inspectTimeline(record.jobId)
+          if (!inspected.terminalSeen) {
+            await appendReconciliationEvent(record.jobId, {
+              jobId: record.jobId,
+              sequence: inspected.maxSequence + 1,
+              timestamp: Date.now(),
+              type: 'done',
+            })
+          }
+          inspected = await inspectTimeline(record.jobId)
+        }
+      } catch {
+        // The timeline may remain unavailable even though atomic metadata writes
+        // work. Persist a truthful terminal state at the actual disk high-water
+        // mark; never claim the in-memory failure-event sequences are durable.
+        inspected = await inspectTimeline(record.jobId)
+      }
+
+      const now = new Date().toISOString()
+      const terminalMetadata = {
+        ...persistedMetadata,
+        status: 'failed',
+        error: publicError,
+        updatedAt: now,
+        completedAt: persistedMetadata.completedAt ?? now,
+        lastSequence: inspected.maxSequence,
+        timelinePersistenceFailed: !inspected.terminalSeen,
+      }
+      await writeJobMetadata(terminalMetadata)
+      record.durableFailureMetadata = terminalMetadata
+      return terminalMetadata
+    })().finally(() => {
+      failedCleanupTasks.delete(finalization)
+    })
+    // Keep an observer attached even if callers only need eventual cleanup.
+    finalization.catch(() => {})
+    record.finalizationPromise = finalization
+    failedCleanupTasks.add(finalization)
+    return finalization
+  }
+
+  function enforceFailedTimelineRecordLimit() {
+    const evictable = Array.from(timelinePersistence.values())
+      .filter(record => record.failed && !liveJobs.has(record.jobId))
+      .sort((a, b) => a.failureOrdinal - b.failureOrdinal)
+    const excess = evictable.length - TIMELINE_FAILED_RECORD_LIMIT
+    if (excess <= 0) return
+
+    for (const record of evictable.slice(0, excess)) {
+      const evict = () => {
+        if (timelinePersistence.get(record.jobId) !== record) return
+        timelinePersistence.delete(record.jobId)
+        timelineWriteTails.delete(record.jobId)
+        reconciliationLocks.delete(record.jobId)
+        clearMetadataFlush(record.jobId)
+        enforceFailedTimelineRecordLimit()
+      }
+      // Durable finalization is best-effort. The original metadata remains in an
+      // active state when it fails, which restart reconciliation understands.
+      // A persistent storage fault must not defeat the aggregate memory cap.
+      void scheduleFailedRecordFinalization(record).then(evict, evict)
+    }
   }
 
   function failTimelinePersistence(record, cause) {
@@ -1590,6 +1683,7 @@ export function createChatJobManager({
       : new TimelinePersistenceError(record.jobId, cause)
     record.failed = true
     record.error = failure
+    record.failureOrdinal = ++timelineFailureOrdinal
     clearMetadataFlush(record.jobId)
 
     for (const entry of record.entries) entry.reject(failure)
@@ -1636,6 +1730,7 @@ export function createChatJobManager({
     record.entries.length = 0
     record.queuedBytes = 0
     timelineWriteTails.delete(record.jobId)
+    enforceFailedTimelineRecordLimit()
     return failure
   }
 
@@ -1779,7 +1874,7 @@ export function createChatJobManager({
     const finalPath = jobMetaPath(job.id)
     const tmpPath = `${finalPath}.tmp-${randomUUID()}`
     try {
-      await fs.writeFile(tmpPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8')
+      await metadataWrite(tmpPath, `${JSON.stringify(job, null, 2)}\n`)
       await fs.rename(tmpPath, finalPath)
     } catch (err) {
       try { await fs.unlink(tmpPath) } catch {}
@@ -1863,11 +1958,14 @@ export function createChatJobManager({
     // Accept into the bounded queue before fanout. The queue starts its append
     // concurrently, but provider delivery does not await disk latency.
     const timelineWrite = enqueueTimelineWrite(jobId, payload)
+    const publishAfterPersistence = event.type === 'done'
 
-    if (live) {
+    if (live && !publishAfterPersistence) {
       live.metadata = metadata
     }
-    subscriberRegistry.publish(jobId, payload)
+    if (!publishAfterPersistence) {
+      subscriberRegistry.publish(jobId, payload)
+    }
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
     // completedAt, sessionId must be durable right away) or when the job has no
@@ -1886,6 +1984,16 @@ export function createChatJobManager({
         )
       }
       if (timelinePersisted) {
+        if (live && publishAfterPersistence) {
+          live.metadata = metadata
+        }
+        if (publishAfterPersistence) {
+          // A successful terminal closes subscribers, so it must be the final
+          // step after the exact timeline entry is known durable. If the append
+          // fails, failTimelinePersistence publishes the failure terminal pair
+          // while the original subscribers are still registered.
+          subscriberRegistry.publish(jobId, payload)
+        }
         await writeJobMetadata(metadata)
       }
     } else {
@@ -3379,6 +3487,11 @@ export function createChatJobManager({
     } finally {
       liveJobs.delete(job.id)
       clearMetadataFlush(job.id)
+      const failedPersistence = timelinePersistence.get(job.id)
+      if (failedPersistence?.failed) {
+        void scheduleFailedRecordFinalization(failedPersistence)
+      }
+      enforceFailedTimelineRecordLimit()
       activeJobCount = Math.max(0, activeJobCount - 1)
       pumpJobQueue()
     }
@@ -3450,9 +3563,20 @@ export function createChatJobManager({
     const queueIdx = jobQueue.findIndex(item => item.live?.id === jobId)
     if (queueIdx !== -1) {
       jobQueue.splice(queueIdx, 1)
-      liveJobs.delete(jobId)
-      await appendEvent(jobId, { type: 'error', error: 'Job cancelled' })
-      await appendEvent(jobId, { type: 'done' })
+      try {
+        await appendEvent(jobId, { type: 'error', error: 'Job cancelled' })
+        await appendEvent(jobId, { type: 'done' })
+      } catch (error) {
+        if (!isTimelinePersistenceError(error)) throw error
+      } finally {
+        liveJobs.delete(jobId)
+        clearMetadataFlush(jobId)
+        const failedPersistence = timelinePersistence.get(jobId)
+        if (failedPersistence?.failed) {
+          void scheduleFailedRecordFinalization(failedPersistence)
+        }
+        enforceFailedTimelineRecordLimit()
+      }
       return { ok: true }
     }
     if (live?.cancel) {
@@ -3466,8 +3590,10 @@ export function createChatJobManager({
 
   async function getJobState(jobId) {
     const failedPersistence = timelinePersistence.get(jobId)
-    if (failedPersistence?.failureMetadata) {
-      return { ...failedPersistence.failureMetadata }
+    const failedState = failedPersistence?.durableFailureMetadata
+      ?? failedPersistence?.failureMetadata
+    if (failedState) {
+      return { ...failedState }
     }
     return await readJobMetadata(jobId)
   }
@@ -3563,12 +3689,16 @@ export function createChatJobManager({
       const metadata = await readJobMetadata(jobId)
       if (!metadata || liveJobs.has(jobId)) return metadata
       const active = metadata.status === 'running' || metadata.status === 'queued'
-      if (!active) return metadata
+      const persistenceFailed = metadata.timelinePersistenceFailed === true
+      if (!active && !persistenceFailed) return metadata
 
       const inspected = await inspectTimeline(jobId)
       let maxSequence = inspected.maxSequence
       let lastError = inspected.lastError
       const now = new Date().toISOString()
+      const recoveryError = persistenceFailed
+        ? String(metadata.error ?? 'Timeline persistence failed')
+        : INTERRUPTED_JOB_ERROR
 
       if (!inspected.terminalSeen) {
         if (inspected.lastEventType !== 'error') {
@@ -3577,11 +3707,11 @@ export function createChatJobManager({
             sequence: maxSequence + 1,
             timestamp: Date.now(),
             type: 'error',
-            error: INTERRUPTED_JOB_ERROR,
+            error: recoveryError,
           }
           await appendReconciliationEvent(jobId, errorEvent)
           maxSequence = errorEvent.sequence
-          lastError = INTERRUPTED_JOB_ERROR
+          lastError = recoveryError
         }
         const doneEvent = {
           jobId,
@@ -3595,11 +3725,12 @@ export function createChatJobManager({
 
       const terminalMetadata = {
         ...metadata,
-        status: lastError ? 'failed' : 'completed',
-        error: lastError,
+        status: lastError || persistenceFailed ? 'failed' : 'completed',
+        error: lastError ?? (persistenceFailed ? recoveryError : null),
         updatedAt: now,
         completedAt: metadata.completedAt ?? now,
         lastSequence: maxSequence,
+        timelinePersistenceFailed: false,
       }
       // Strict ordering: both timeline terminal records are durable before the
       // metadata status and high-water mark advance.
@@ -3660,7 +3791,11 @@ export function createChatJobManager({
     if (
       !live
       && !persistenceFailure
-      && (persistedMetadata?.status === 'running' || persistedMetadata?.status === 'queued')
+      && (
+        persistedMetadata?.status === 'running'
+        || persistedMetadata?.status === 'queued'
+        || persistedMetadata?.timelinePersistenceFailed === true
+      )
     ) {
       persistedMetadata = await reconcileInterruptedJob(jobId)
     }
@@ -3795,6 +3930,9 @@ export function createChatJobManager({
           try { proc.kill('SIGKILL') } catch { /* already gone */ }
         }
       }
+    }
+    if (failedCleanupTasks.size > 0) {
+      await Promise.allSettled(Array.from(failedCleanupTasks))
     }
   }
 

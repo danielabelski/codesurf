@@ -495,16 +495,87 @@ test('permanent timeline failure bounds pending state and stops a long provider 
   assert.notEqual(durable.status, 'completed')
 })
 
-test('many failed jobs release their retained payload queues', async t => {
-  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-many-failures-'))
+test('done remains invisible until durable and append failure streams only the failure terminal', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-terminal-barrier-'))
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
+  const releaseProvider = deferred()
+  const doneAppendStarted = deferred()
+  const releaseDoneAppend = deferred()
   const manager = createChatJobManager({
     homeDir,
     heartbeatMs: 0,
-    maxConcurrentJobs: 3,
+    timelineAppendMaxAttempts: 1,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      const event = JSON.parse(data)
+      if (event.type === 'done') {
+        doneAppendStarted.resolve()
+        await releaseDoneAppend.promise
+        throw new Error('simulated done persistence failure')
+      }
+      await appendFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('before terminal')
+      await releaseProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  t.after(async () => {
+    releaseProvider.resolve()
+    releaseDoneAppend.resolve()
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  const timelinePath = join(homeDir, 'timelines', `${job.id}.jsonl`)
+  await waitFor(async () => (await readFile(timelinePath, 'utf8')).includes('"text":"before terminal"'))
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(job.id, 0, response), true)
+  releaseProvider.resolve()
+  await doneAppendStarted.promise
+
+  assert.equal(writtenEvents(response).some(event => event.type === 'done'), false)
+  assert.equal(response.endCalls, 0)
+
+  releaseDoneAppend.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  const events = writtenEvents(response)
+  assert.deepEqual(events.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.match(events.at(-2)?.error, /timeline persistence failed/i)
+  assert.equal(events.filter(event => event.type === 'done').length, 1)
+  assert.equal(response.endCalls, 1)
+
+  const durableEvents = (await readFile(timelinePath, 'utf8'))
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map(line => JSON.parse(line))
+  assert.equal(durableEvents.some(event => event.type === 'done'), false)
+  assert.equal((await manager.getJobState(job.id))?.status, 'failed')
+})
+
+test('failed-record cap evicts oldest payload state after durable fail-closed finalization', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-many-failures-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const retainedLimit = 3
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    maxConcurrentJobs: 1,
     timelineMaxQueuedEvents: 4,
     timelineMaxQueuedBytes: 1_024,
+    timelineMaxFailedRecords: retainedLimit,
     timelineAppendMaxAttempts: 1,
     timelineAppendRetryDelayMs: 0,
     timelineAppend: async () => {
@@ -516,8 +587,10 @@ test('many failed jobs release their retained payload queues', async t => {
       }
     })(),
   })
+  let restartedManager = null
   t.after(async () => {
     await manager.shutdown()
+    await restartedManager?.shutdown()
     await rm(homeDir, { recursive: true, force: true })
   })
 
@@ -533,13 +606,271 @@ test('many failed jobs release their retained payload queues', async t => {
   }
   await waitFor(() => manager.listLiveJobIds().length === 0)
 
-  for (const job of jobs) {
+  const evicted = jobs.slice(0, -retainedLimit)
+  const retained = jobs.slice(-retainedLimit)
+  await waitFor(async () => (
+    await Promise.all(evicted.map(job => manager.getJobState(job.id)))
+  ).every(state => state?.status === 'failed' && state.timelinePersistenceFailed === true))
+
+  for (const job of evicted) {
+    assert.deepEqual(manager.getPersistenceState(job.id), {
+      failed: false,
+      queuedEvents: 0,
+      queuedBytes: 0,
+    })
+    const state = await manager.getJobState(job.id)
+    assert.equal(state.status, 'failed')
+    assert.equal(state.timelinePersistenceFailed, true)
+  }
+  for (const job of retained) {
     const persistence = manager.getPersistenceState(job.id)
     assert.equal(persistence.failed, true)
     assert.equal(persistence.queuedEvents, 0)
     assert.equal(persistence.queuedBytes, 0)
     assert.equal((await manager.getJobState(job.id))?.status, 'failed')
   }
+
+  await manager.shutdown()
+  restartedManager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  for (const job of jobs) {
+    const response = new FakeResponse()
+    assert.equal(await restartedManager.streamJob(job.id, 0, response), false)
+    assert.deepEqual(writtenEvents(response).slice(-2).map(event => event.type), ['error', 'done'])
+    const state = await restartedManager.getJobState(job.id)
+    assert.equal(state.status, 'failed')
+    assert.match(state.error, /timeline persistence/i)
+    assert.equal(state.timelinePersistenceFailed, false)
+    const durableEvents = (await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line))
+    assert.deepEqual(durableEvents.map(event => event.type), ['error', 'done'])
+  }
+})
+
+test('failed-record cap remains bounded when best-effort finalization also fails', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-finalization-failures-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseTimelineFailure = deferred()
+  const retainedLimit = 3
+  let rejectMetadataWrites = false
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    maxConcurrentJobs: 1,
+    timelineMaxFailedRecords: retainedLimit,
+    timelineAppendMaxAttempts: 1,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async () => {
+      await releaseTimelineFailure.promise
+      throw new Error('timeline storage unavailable')
+    },
+    metadataWrite: async (path, data) => {
+      if (rejectMetadataWrites) throw new Error('metadata storage unavailable')
+      await writeFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('will fail persistence')
+    })(),
+  })
+  let restartedManager = null
+  t.after(async () => {
+    releaseTimelineFailure.resolve()
+    rejectMetadataWrites = false
+    await manager.shutdown()
+    await restartedManager?.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const jobs = []
+  for (let index = 0; index < 12; index += 1) {
+    jobs.push(await manager.startJob({
+      provider: 'claude',
+      model: 'test',
+      mode: 'bypassPermissions',
+      workspaceDir,
+      messages: [{ role: 'user', content: `go-${index}` }],
+    }))
+  }
+
+  rejectMetadataWrites = true
+  releaseTimelineFailure.resolve()
+  await waitFor(() => manager.listLiveJobIds().length === 0)
+  const evicted = jobs.slice(0, -retainedLimit)
+  const retained = jobs.slice(-retainedLimit)
+  await waitFor(() => evicted.every(
+    job => manager.getPersistenceState(job.id).failed === false,
+  ))
+
+  for (const job of evicted) {
+    assert.deepEqual(manager.getPersistenceState(job.id), {
+      failed: false,
+      queuedEvents: 0,
+      queuedBytes: 0,
+    })
+    const durable = JSON.parse(await readFile(join(homeDir, 'jobs', `${job.id}.json`), 'utf8'))
+    assert.ok(durable.status === 'running' || durable.status === 'queued')
+    assert.notEqual(durable.status, 'completed')
+  }
+  for (const job of retained) {
+    assert.equal(manager.getPersistenceState(job.id).failed, true)
+    assert.equal((await manager.getJobState(job.id))?.status, 'failed')
+  }
+
+  // Recovery starts from the truthful active metadata left behind when the
+  // failure marker could not be written. No evicted job is resurrected active.
+  await manager.shutdown()
+  rejectMetadataWrites = false
+  restartedManager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+  for (const job of jobs) {
+    const response = new FakeResponse()
+    assert.equal(await restartedManager.streamJob(job.id, 0, response), false)
+    assert.deepEqual(writtenEvents(response).slice(-2).map(event => event.type), ['error', 'done'])
+    const recovered = await restartedManager.getJobState(job.id)
+    assert.equal(recovered.status, 'failed')
+    assert.match(recovered.error, /interrupted/i)
+  }
+})
+
+test('failed-record eviction never removes the current live failure or its subscriber terminal', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-live-failure-cap-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseSecondProvider = deferred()
+  let invocation = 0
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    maxConcurrentJobs: 1,
+    timelineMaxFailedRecords: 1,
+    timelineAppendMaxAttempts: 1,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async () => {
+      throw new Error('storage unavailable')
+    },
+    claudeQuery: () => {
+      invocation += 1
+      const currentInvocation = invocation
+      return (async function* () {
+        if (currentInvocation === 2) await releaseSecondProvider.promise
+        yield textDelta(`failure-${currentInvocation}`)
+      })()
+    },
+  })
+  t.after(async () => {
+    releaseSecondProvider.resolve()
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const first = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'first' }],
+  })
+  await waitFor(() => !manager.listLiveJobIds().includes(first.id))
+  assert.equal(manager.getPersistenceState(first.id).failed, true)
+
+  const second = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'second' }],
+  })
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(second.id, 0, response), true)
+  assert.equal(manager.listLiveJobIds().includes(second.id), true)
+
+  releaseSecondProvider.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(second.id))
+  await waitFor(() => manager.getPersistenceState(first.id).failed === false)
+
+  assert.deepEqual(writtenEvents(response).slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(manager.getPersistenceState(second.id).failed, true)
+  assert.equal((await manager.getJobState(second.id))?.status, 'failed')
+  const evictedState = await manager.getJobState(first.id)
+  assert.equal(evictedState.status, 'failed')
+  assert.equal(evictedState.timelinePersistenceFailed, true)
+})
+
+test('queued cancellation retains live failure context and participates in failed-record eviction', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-queued-cancel-failure-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseRunningProvider = deferred()
+  const failedTimelinePaths = new Set()
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    maxConcurrentJobs: 1,
+    timelineMaxFailedRecords: 1,
+    timelineAppendMaxAttempts: 1,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      if (failedTimelinePaths.has(path)) throw new Error('queued cancellation storage failure')
+      await appendFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('occupying the only slot')
+      await releaseRunningProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  let running = null
+  t.after(async () => {
+    releaseRunningProvider.resolve()
+    await waitFor(() => !manager.listLiveJobIds().includes(running?.id))
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  running = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'running' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(homeDir, 'timelines', `${running.id}.jsonl`), 'utf8')
+  ).includes('occupying the only slot'))
+
+  const queued = []
+  for (const content of ['queued-one', 'queued-two']) {
+    const job = await manager.startJob({
+      provider: 'claude',
+      model: 'test',
+      mode: 'bypassPermissions',
+      workspaceDir,
+      messages: [{ role: 'user', content }],
+    })
+    assert.equal(job.status, 'queued')
+    failedTimelinePaths.add(join(homeDir, 'timelines', `${job.id}.jsonl`))
+    queued.push(job)
+  }
+
+  const responses = queued.map(() => new FakeResponse())
+  for (let index = 0; index < queued.length; index += 1) {
+    assert.equal(await manager.streamJob(queued[index].id, 0, responses[index]), true)
+    assert.deepEqual(await manager.cancelJob(queued[index].id), { ok: true })
+  }
+  await waitFor(() => manager.getPersistenceState(queued[0].id).failed === false)
+
+  for (const response of responses) {
+    assert.deepEqual(writtenEvents(response).slice(-2).map(event => event.type), ['error', 'done'])
+    assert.equal(response.endCalls, 1)
+  }
+  assert.equal(manager.listLiveJobIds().includes(queued[0].id), false)
+  assert.equal(manager.listLiveJobIds().includes(queued[1].id), false)
+  assert.equal(manager.getPersistenceState(queued[1].id).failed, true)
+  assert.equal((await manager.getJobState(queued[1].id))?.status, 'failed')
+  const evicted = await manager.getJobState(queued[0].id)
+  assert.equal(evicted.status, 'failed')
+  assert.equal(evicted.timelinePersistenceFailed, true)
 })
 
 test('replay buffers live and terminal events until drain, then emits each sequence exactly once', async t => {

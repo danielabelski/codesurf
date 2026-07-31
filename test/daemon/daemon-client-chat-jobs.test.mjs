@@ -428,6 +428,170 @@ test('request aborts promptly while daemon startup is slow', async t => {
   assert.equal(fetchCalled, false)
 })
 
+test('request aborts promptly while daemon status recovery is slow and observes its late rejection', async t => {
+  const originalFetch = globalThis.fetch
+  const unhandled = []
+  let markStatusStarted
+  let rejectStatus
+  const statusStarted = new Promise(resolve => {
+    markStatusStarted = resolve
+  })
+  const pendingStatus = new Promise((_, reject) => {
+    rejectStatus = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+  globalThis.fetch = async () => {
+    throw new Error('transport unavailable')
+  }
+  const client = createDaemonClient({
+    ensureRunning: async () => ({
+      pid: 123,
+      port: 4567,
+      token: 'secret-token',
+      startedAt: new Date(0).toISOString(),
+      protocolVersion: 1,
+      appVersion: 'test',
+    }),
+    getStatus: () => {
+      markStatusStarted()
+      return pendingStatus
+    },
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const request = client.request('/chat/job/state?jobId=job-1', {
+    signal: controller.signal,
+  })
+  await statusStarted
+  controller.abort()
+
+  await assert.rejects(request, error => error?.name === 'AbortError')
+  rejectStatus(new Error('late status failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
+test('streamJobEvents aborts promptly while post-EOF status recovery is slow', async t => {
+  const originalFetch = globalThis.fetch
+  let markStatusStarted
+  const statusStarted = new Promise(resolve => {
+    markStatusStarted = resolve
+  })
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ error: 'job state unavailable' }, 404)
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+  const client = createDaemonClient({
+    ensureRunning: async () => ({
+      pid: 123,
+      port: 4567,
+      token: 'secret-token',
+      startedAt: new Date(0).toISOString(),
+      protocolVersion: 1,
+      appVersion: 'test',
+    }),
+    getStatus: () => {
+      markStatusStarted()
+      return new Promise(() => {})
+    },
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const stream = client.streamJobEvents({
+    jobId: 'job-1',
+    signal: controller.signal,
+    reconnectDelayMs: 0,
+    onEvent() {},
+  })
+  await statusStarted
+  controller.abort()
+
+  await assert.rejects(stream, error => error?.name === 'AbortError')
+})
+
+test('never-settling reader cancellation cannot block terminal or consumer-error settlement', async t => {
+  const originalFetch = globalThis.fetch
+  const unhandled = []
+  let fetchAttempt = 0
+  let rejectFirstCancel
+  const firstCancel = new Promise((_, reject) => {
+    rejectFirstCancel = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async () => {
+    fetchAttempt += 1
+    const terminal = fetchAttempt === 1
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(terminal
+          ? 'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"done"}\n\n'
+          : 'data: {"jobId":"job-2","sequence":1,"timestamp":1,"type":"text","text":"hello"}\n\n'))
+      },
+      cancel() {
+        return terminal ? firstCancel : new Promise(() => {})
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient([])
+  await Promise.race([
+    client.streamJobEvents({
+      jobId: 'job-1',
+      onEvent() {},
+    }),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('terminal settlement waited for reader.cancel()')),
+      250,
+    )),
+  ])
+
+  await assert.rejects(
+    Promise.race([
+      client.streamJobEvents({
+        jobId: 'job-2',
+        onEvent() {
+          throw new Error('consumer failed promptly')
+        },
+      }),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('consumer error waited for reader.cancel()')),
+        250,
+      )),
+    ]),
+    /consumer failed promptly/,
+  )
+
+  rejectFirstCancel(new Error('late cancel failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
 test('read-only daemon requests retry once after a transient response', async t => {
   const originalFetch = globalThis.fetch
   const calls = []
