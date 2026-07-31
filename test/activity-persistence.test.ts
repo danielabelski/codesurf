@@ -282,6 +282,76 @@ describe('file activity persistence', () => {
     }
   })
 
+  test('deduplicates quarantine on restart and enforces count and aggregate-byte retention', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const raws = [1, 2, 3].map(marker => Buffer.from(`{broken-${marker}-${'x'.repeat(24)}`))
+      const persistence = createFileActivityPersistence({
+        homeDir,
+        maxQuarantineFiles: 2,
+        maxQuarantineBytes: raws[0].byteLength * 2,
+      })
+      await mkdir(dirname(filePath), { recursive: true })
+
+      for (const raw of raws) {
+        await writeFile(filePath, raw)
+        assert.equal((await persistence.load('workspace-1')).needsRewrite, true)
+      }
+      const retained = (await readdir(dirname(filePath)))
+        .filter(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+      assert.equal(retained.length, 2)
+      const retainedBytes = await Promise.all(
+        retained.map(name => stat(join(dirname(filePath), name)).then(info => info.size)),
+      )
+      assert.ok(retainedBytes.reduce((total, size) => total + size, 0) <= raws[0].byteLength * 2)
+
+      await writeFile(filePath, raws[2])
+      await persistence.load('workspace-1')
+      assert.deepEqual(
+        (await readdir(dirname(filePath)))
+          .filter(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+          .sort(),
+        retained.sort(),
+      )
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('does not duplicate quarantine when a rewrite fails and the source is loaded again', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const raw = Buffer.from('{broken')
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, raw)
+      const persistence = createFileActivityPersistence({
+        homeDir,
+        writeHooks: {
+          beforeRename(path) {
+            if (path === filePath) throw new Error('injected pre-commit failure')
+          },
+        },
+      })
+      const store = new ActivityStore({ persistence })
+      await store.query({ workspaceId: 'workspace-1' })
+      await assert.rejects(store.flushAll())
+      assert.deepEqual(await readFile(filePath), raw)
+
+      const restarted = createFileActivityPersistence({ homeDir })
+      await restarted.load('workspace-1')
+      assert.equal(
+        (await readdir(dirname(filePath)))
+          .filter(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+          .length,
+        1,
+      )
+    } finally {
+      await cleanup()
+    }
+  })
+
   test('caps oversized legacy arrays through bounded migration without quarantine', async () => {
     const { homeDir, cleanup } = await fixture()
     try {
@@ -451,6 +521,71 @@ describe('file activity persistence', () => {
       assert.equal(replaced, true)
     } finally {
       await cleanup()
+    }
+  })
+
+  test('wraps a deterministic realpath race in a sanitized persistence error', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const activityDir = dirname(filePath)
+      await mkdir(activityDir, { recursive: true })
+      await writeFile(filePath, JSON.stringify({
+        version: ACTIVITY_DOCUMENT_VERSION,
+        records: [record()],
+      }))
+      const persistence = createFileActivityPersistence({
+        homeDir,
+        readHooks: {
+          async afterAncestorInspect() {
+            await rename(activityDir, `${activityDir}.moved`)
+          },
+        },
+      })
+      await assert.rejects(
+        persistence.load('workspace-1'),
+        (error: unknown) => (
+          error instanceof ActivityPersistenceError
+          && error.code === 'path_changed'
+          && !error.message.includes(homeDir)
+        ),
+      )
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('reports post-rename and directory-sync failures as committed-but-uncertain', async () => {
+    for (const failurePoint of ['afterRename', 'beforeDirectorySync'] as const) {
+      const { homeDir, cleanup } = await fixture()
+      try {
+        const filePath = activityStorePath(homeDir, 'workspace-1')
+        const persistence = createFileActivityPersistence({
+          homeDir,
+          writeHooks: {
+            [failurePoint](path: string) {
+              if (path === filePath) throw new Error(`injected ${failurePoint}`)
+            },
+          },
+        })
+        await assert.rejects(
+          persistence.save('workspace-1', [record()]),
+          (error: unknown) => (
+            error instanceof ActivityPersistenceError
+            && error.code === 'commit_uncertain'
+          ),
+        )
+        assert.deepEqual(
+          JSON.parse(await readFile(filePath, 'utf8')).records,
+          [record()],
+        )
+        assert.deepEqual(
+          (await readdir(dirname(filePath))).filter(name => name.endsWith('.tmp')),
+          [],
+        )
+      } finally {
+        await cleanup()
+      }
     }
   })
 

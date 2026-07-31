@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants, promises as fs } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -33,12 +33,23 @@ export interface ActivityPersistence {
 export interface FileActivityPersistenceOptions {
   homeDir: string
   maxFileBytes?: number
+  maxQuarantineFiles?: number
+  maxQuarantineBytes?: number
   readHooks?: {
+    afterAncestorInspect?: (filePath: string) => void | Promise<void>
     afterOpen?: (filePath: string) => void | Promise<void>
+  }
+  writeHooks?: {
+    afterAncestorInspect?: (filePath: string) => void | Promise<void>
+    beforeRename?: (filePath: string) => void | Promise<void>
+    afterRename?: (filePath: string) => void | Promise<void>
+    beforeDirectorySync?: (filePath: string) => void | Promise<void>
   }
 }
 
 export const ACTIVITY_QUARANTINE_PREFIX = 'activity.quarantine-'
+export const MAX_ACTIVITY_QUARANTINE_FILES = 3
+export const MAX_ACTIVITY_QUARANTINE_BYTES = 64 * 1024 * 1024
 
 export class ActivityPersistenceError extends Error {
   readonly code: string
@@ -88,7 +99,10 @@ interface ActivityWriteBoundary extends ActivityReadBoundary {
   directoryHandle: Awaited<ReturnType<typeof fs.open>>
 }
 
-async function captureReadBoundary(filePath: string): Promise<ActivityReadBoundary | null> {
+async function captureReadBoundary(
+  filePath: string,
+  hooks?: FileActivityPersistenceOptions['readHooks'],
+): Promise<ActivityReadBoundary | null> {
   const activityDir = dirname(filePath)
   const workspaceDir = dirname(activityDir)
   const workspacesDir = dirname(workspaceDir)
@@ -109,9 +123,17 @@ async function captureReadBoundary(filePath: string): Promise<ActivityReadBounda
     identities.push(info)
   }
 
-  const [canonicalRoot, canonicalWorkspace, canonicalActivityDir] = await Promise.all(
-    paths.map(path => fs.realpath(path)),
-  )
+  await hooks?.afterAncestorInspect?.(filePath)
+  let canonicalRoot: string
+  let canonicalWorkspace: string
+  let canonicalActivityDir: string
+  try {
+    [canonicalRoot, canonicalWorkspace, canonicalActivityDir] = await Promise.all(
+      paths.map(path => fs.realpath(path)),
+    )
+  } catch (error) {
+    throw persistenceError('path_changed', 'Activity storage path changed during inspection', filePath, error)
+  }
   if (
     !isContained(canonicalRoot, canonicalWorkspace)
     || !isContained(canonicalWorkspace, canonicalActivityDir)
@@ -139,7 +161,10 @@ async function verifyReadBoundary(boundary: ActivityReadBoundary, filePath: stri
   }
 }
 
-async function prepareWriteBoundary(filePath: string): Promise<ActivityWriteBoundary> {
+async function prepareWriteBoundary(
+  filePath: string,
+  hooks?: FileActivityPersistenceOptions['writeHooks'],
+): Promise<ActivityWriteBoundary> {
   const activityDir = dirname(filePath)
   const workspaceDir = dirname(activityDir)
   const workspacesDir = dirname(workspaceDir)
@@ -163,7 +188,13 @@ async function prepareWriteBoundary(filePath: string): Promise<ActivityWriteBoun
     identities.push(info)
   }
 
-  const canonicalPaths = await Promise.all(paths.map(path => fs.realpath(path)))
+  await hooks?.afterAncestorInspect?.(filePath)
+  let canonicalPaths: string[]
+  try {
+    canonicalPaths = await Promise.all(paths.map(path => fs.realpath(path)))
+  } catch (error) {
+    throw persistenceError('path_changed', 'Activity storage path changed during inspection', filePath, error)
+  }
   for (let index = 1; index < canonicalPaths.length; index += 1) {
     if (!isContained(canonicalPaths[index - 1], canonicalPaths[index])) {
       throw persistenceError('unsafe_path', 'Activity storage path escapes its workspace root', filePath)
@@ -230,8 +261,12 @@ async function syncDirectoryHandle(handle: ActivityWriteBoundary['directoryHandl
   }
 }
 
-async function durableAtomicWrite(filePath: string, content: string | Uint8Array): Promise<void> {
-  const boundary = await prepareWriteBoundary(filePath)
+async function durableAtomicWrite(
+  filePath: string,
+  content: string | Uint8Array,
+  hooks?: FileActivityPersistenceOptions['writeHooks'],
+): Promise<void> {
+  const boundary = await prepareWriteBoundary(filePath, hooks)
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`
   let handle
   let temporaryIdentity: BigIntStats | null = null
@@ -273,8 +308,10 @@ async function durableAtomicWrite(filePath: string, content: string | Uint8Array
     ) {
       throw persistenceError('path_changed', 'Activity store changed before commit', filePath)
     }
+    await hooks?.beforeRename?.(filePath)
     await fs.rename(temporaryPath, filePath)
     renamed = true
+    await hooks?.afterRename?.(filePath)
     await verifyReadBoundary(boundary, filePath)
     const committedInfo = await fs.lstat(filePath, { bigint: true })
     if (
@@ -285,6 +322,7 @@ async function durableAtomicWrite(filePath: string, content: string | Uint8Array
     ) {
       throw persistenceError('path_changed', 'Activity store changed during commit', filePath)
     }
+    await hooks?.beforeDirectorySync?.(filePath)
     await syncDirectoryHandle(boundary.directoryHandle)
   } catch (error) {
     await handle?.close().catch(() => {})
@@ -294,28 +332,103 @@ async function durableAtomicWrite(filePath: string, content: string | Uint8Array
         await fs.unlink(temporaryPath).catch(() => {})
       }
     }
+    if (renamed) {
+      throw persistenceError(
+        'commit_uncertain',
+        'Activity store commit durability could not be confirmed',
+        filePath,
+        error,
+      )
+    }
     throw error
   } finally {
     await boundary.directoryHandle.close().catch(() => {})
   }
 }
 
-async function quarantineActivityBytes(filePath: string, bytes: Uint8Array): Promise<string> {
-  const quarantinePath = join(
-    dirname(filePath),
-    `${ACTIVITY_QUARANTINE_PREFIX}${Date.now()}-${randomUUID()}.json`,
-  )
-  await durableAtomicWrite(quarantinePath, bytes)
-  return quarantinePath
+interface QuarantinePolicy {
+  maxFiles: number
+  maxBytes: number
+}
+
+async function fileMatchesBytes(path: string, bytes: Uint8Array): Promise<boolean> {
+  const handle = await fs.open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => null)
+  if (!handle) return false
+  try {
+    const info = await handle.stat({ bigint: true })
+    if (!info.isFile() || info.size !== BigInt(bytes.byteLength)) return false
+    const existing = await handle.readFile()
+    return existing.equals(Buffer.from(bytes))
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+async function pruneActivityQuarantines(directory: string, policy: QuarantinePolicy): Promise<void> {
+  const names = (await fs.readdir(directory))
+    .filter(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX) && name.endsWith('.json'))
+  const entries = (await Promise.all(names.map(async name => {
+    const path = join(directory, name)
+    const info = await fs.lstat(path, { bigint: true }).catch(() => null)
+    return info?.isFile() && !info.isSymbolicLink() ? { name, path, info } : null
+  })))
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .sort((left, right) => (
+      Number(right.info.mtimeNs - left.info.mtimeNs)
+      || right.name.localeCompare(left.name)
+    ))
+
+  let keptFiles = 0
+  let keptBytes = 0n
+  for (const entry of entries) {
+    const canKeep = (
+      keptFiles < policy.maxFiles
+      && keptBytes + entry.info.size <= BigInt(policy.maxBytes)
+    )
+    if (canKeep) {
+      keptFiles += 1
+      keptBytes += entry.info.size
+      continue
+    }
+    const current = await fs.lstat(entry.path, { bigint: true }).catch(() => null)
+    if (current && sameIdentity(current, entry.info)) {
+      await fs.unlink(entry.path)
+    }
+  }
+}
+
+async function quarantineActivityBytes(
+  filePath: string,
+  bytes: Uint8Array,
+  policy: QuarantinePolicy,
+  hooks?: FileActivityPersistenceOptions['writeHooks'],
+): Promise<string | null> {
+  const directory = dirname(filePath)
+  const digest = createHash('sha256').update(bytes).digest('hex')
+  let quarantinePath = join(directory, `${ACTIVITY_QUARANTINE_PREFIX}${digest}.json`)
+  if (!(await fileMatchesBytes(quarantinePath, bytes))) {
+    const existing = await fs.lstat(quarantinePath, { bigint: true }).catch(() => null)
+    if (existing) {
+      quarantinePath = join(
+        directory,
+        `${ACTIVITY_QUARANTINE_PREFIX}${digest}-${randomUUID()}.json`,
+      )
+    }
+    await durableAtomicWrite(quarantinePath, bytes, hooks)
+  }
+  await pruneActivityQuarantines(directory, policy)
+  return await fs.lstat(quarantinePath).then(() => quarantinePath).catch(() => null)
 }
 
 async function loadActivityFile(
   filePath: string,
   workspaceId: string,
   maxFileBytes: number,
+  quarantinePolicy: QuarantinePolicy,
   hooks?: FileActivityPersistenceOptions['readHooks'],
+  writeHooks?: FileActivityPersistenceOptions['writeHooks'],
 ): Promise<LoadedActivityRecords> {
-  const boundary = await captureReadBoundary(filePath)
+  const boundary = await captureReadBoundary(filePath, hooks)
   if (!boundary) return { records: [], needsRewrite: false }
 
   let pathInfo: BigIntStats
@@ -402,7 +515,7 @@ async function loadActivityFile(
     try {
       text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
     } catch {
-      await quarantineActivityBytes(filePath, bytes)
+      await quarantineActivityBytes(filePath, bytes, quarantinePolicy, writeHooks)
       return { records: [], needsRewrite: true }
     }
 
@@ -410,14 +523,14 @@ async function loadActivityFile(
     try {
       value = JSON.parse(text)
     } catch {
-      await quarantineActivityBytes(filePath, bytes)
+      await quarantineActivityBytes(filePath, bytes, quarantinePolicy, writeHooks)
       return { records: [], needsRewrite: true }
     }
 
     try {
       const recovered = recoverActivityDocument(value, workspaceId)
       if (recovered.requiresQuarantine) {
-        await quarantineActivityBytes(filePath, bytes)
+        await quarantineActivityBytes(filePath, bytes, quarantinePolicy, writeHooks)
       }
       const capped = capActivityRecords(recovered.records)
       const fitted = fitActivityRecordsToDocument(capped, maxFileBytes)
@@ -448,11 +561,19 @@ async function loadActivityFile(
 export function createFileActivityPersistence(options: FileActivityPersistenceOptions): ActivityPersistence {
   const homeDir = resolve(options.homeDir)
   const maxFileBytes = options.maxFileBytes ?? MAX_ACTIVITY_FILE_BYTES
+  const maxQuarantineFiles = options.maxQuarantineFiles ?? MAX_ACTIVITY_QUARANTINE_FILES
+  const maxQuarantineBytes = options.maxQuarantineBytes ?? MAX_ACTIVITY_QUARANTINE_BYTES
   if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1) {
     throw new TypeError('maxFileBytes must be a positive integer')
   }
   if (maxFileBytes < EMPTY_ACTIVITY_DOCUMENT_BYTES) {
     throw new TypeError(`maxFileBytes must be at least ${EMPTY_ACTIVITY_DOCUMENT_BYTES}`)
+  }
+  if (!Number.isSafeInteger(maxQuarantineFiles) || maxQuarantineFiles < 0) {
+    throw new TypeError('maxQuarantineFiles must be a non-negative integer')
+  }
+  if (!Number.isSafeInteger(maxQuarantineBytes) || maxQuarantineBytes < 0) {
+    throw new TypeError('maxQuarantineBytes must be a non-negative integer')
   }
 
   return {
@@ -462,7 +583,12 @@ export function createFileActivityPersistence(options: FileActivityPersistenceOp
         activityStorePath(homeDir, workspaceId),
         workspaceId,
         maxFileBytes,
+        {
+          maxFiles: maxQuarantineFiles,
+          maxBytes: maxQuarantineBytes,
+        },
         options.readHooks,
+        options.writeHooks,
       )
     },
     async save(workspaceIdValue, records) {
@@ -473,7 +599,7 @@ export function createFileActivityPersistence(options: FileActivityPersistenceOp
         throw persistenceError('file_too_large', `Activity store exceeds ${maxFileBytes} bytes`, filePath)
       }
       try {
-        await durableAtomicWrite(filePath, serialized)
+        await durableAtomicWrite(filePath, serialized, options.writeHooks)
       } catch (error) {
         if (error instanceof ActivityPersistenceError) throw error
         throw persistenceError('write_failed', 'Unable to persist the activity store', filePath, error)
