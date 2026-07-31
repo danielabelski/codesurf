@@ -8,6 +8,10 @@
 
 import { relative, resolve, sep } from 'path'
 import type { ChatRequest } from './types'
+import {
+  createChatStreamScope,
+  type ChatStreamScope,
+} from './room-stream-scope.ts'
 
 export type RuntimeCheckpointRequest = Pick<
   ChatRequest,
@@ -88,7 +92,7 @@ type CheckpointIo = {
     sessionEntryId: string,
     body: Record<string, unknown>,
   ) => Promise<{ ok: boolean; error?: string; checkpoint?: { id?: string } }>
-  sendStream: (cardId: string, event: Record<string, unknown>) => void
+  sendStream: (scope: ChatStreamScope, event: Record<string, unknown>) => void
   log: (...args: unknown[]) => void
 }
 
@@ -123,8 +127,9 @@ export function emitCheckpointSaved(
 ): void {
   const summary = buildCheckpointSavedSummary(toolName, filePaths, req.workspaceDir)
   const toolId = `codesurf-checkpoint-${checkpointId}`
-  sendStream(req.cardId, { type: 'tool_start', toolId, toolName: 'Checkpoint saved' })
-  sendStream(req.cardId, { type: 'tool_summary', toolId, toolName: 'Checkpoint saved', text: summary })
+  const scope = createChatStreamScope(req.workspaceId, req.cardId)
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Checkpoint saved' })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Checkpoint saved', text: summary })
 }
 
 /**

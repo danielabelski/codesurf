@@ -8,9 +8,24 @@ import { daemonClient } from '../daemon/client'
 import { broadcastToRenderer } from '../utils/broadcast'
 import { log as scopedLog } from '../utils/logger.ts'
 import type { ChatMessage, ChatRequest, RuntimeChatSessionState } from './types'
-import { publishTurnSummary } from '../agent-room'
+import {
+  acknowledgeThrough,
+  publishTurnSummary,
+  setMemberState,
+} from '../agent-room'
+import {
+  RoomStreamAccumulator,
+  chatStreamScopeKey,
+  createChatStreamScope,
+  type ChatStreamScope,
+} from './room-stream-scope.ts'
 
 export type { RuntimeChatSessionState } from './types'
+export {
+  chatStreamScopeKey,
+  createChatStreamScope,
+  type ChatStreamScope,
+} from './room-stream-scope.ts'
 
 const chatLog = scopedLog.scope('Chat')
 
@@ -21,35 +36,78 @@ export function log(...args: unknown[]): void {
   chatLog.debug(...args)
 }
 
-/** Accumulated assistant text for room turn summaries (cleared on done). */
-const assistantTextByCard = new Map<string, string>()
+const roomStreamAccumulator = new RoomStreamAccumulator(
+  (workspaceId, cardId, summary) => {
+    try {
+      publishTurnSummary(workspaceId, cardId, summary, 'chat')
+    } catch {
+      // room optional
+    }
+  },
+  (workspaceId, cardId) => {
+    try {
+      setMemberState(workspaceId, cardId, { tileType: 'chat', status: 'idle' })
+    } catch {
+      // room optional
+    }
+  },
+)
 
-export function sendStream(cardId: string, event: Record<string, unknown>): void {
+export function chatRequestScope(
+  req: Pick<ChatRequest, 'workspaceId' | 'cardId'>,
+): ChatStreamScope {
+  return createChatStreamScope(req.workspaceId, req.cardId)
+}
+
+const pendingRoomAcknowledgements = new Map<string, {
+  workspaceId: string
+  cardId: string
+  sequence: number
+}>()
+
+export function registerRoomContextAcknowledgement(req: ChatRequest): void {
+  const workspaceId = String(req.workspaceId ?? '').trim()
+  const cardId = String(req.cardId ?? '').trim()
+  const sequence = req.roomAckSequence
+  if (!workspaceId || !cardId || !Number.isSafeInteger(sequence) || Number(sequence) < 0) {
+    return
+  }
+  const scope = createChatStreamScope(workspaceId, cardId)
+  pendingRoomAcknowledgements.set(chatStreamScopeKey(scope), {
+    workspaceId,
+    cardId,
+    sequence: Number(sequence),
+  })
+}
+
+export function acknowledgeRoomContext(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const key = chatStreamScopeKey(scope)
+  const pending = pendingRoomAcknowledgements.get(key)
+  if (!pending) return
+  pendingRoomAcknowledgements.delete(key)
+  acknowledgeThrough(pending.workspaceId, pending.cardId, pending.sequence)
+}
+
+export function sendStream(scope: ChatStreamScope, event: Record<string, unknown>): void {
   log('sendStream', event.type, event.text ? `"${String(event.text).slice(0, 50)}"` : '', event.error ?? '')
 
-  const type = String(event.type ?? '')
-  if (type === 'text' || type === 'assistant' || type === 'delta') {
-    const chunk = String(event.text ?? event.delta ?? '')
-    if (chunk) {
-      assistantTextByCard.set(cardId, (assistantTextByCard.get(cardId) ?? '') + chunk)
-    }
-  }
-  if (type === 'done') {
-    const summary = (assistantTextByCard.get(cardId) ?? '').trim()
-    assistantTextByCard.delete(cardId)
-    if (summary) {
-      try {
-        publishTurnSummary(cardId, summary.slice(0, 2000), 'chat')
-      } catch {
-        // room optional
-      }
-    }
-  }
-  if (type === 'error') {
-    assistantTextByCard.delete(cardId)
+  const acknowledgementKey = chatStreamScopeKey(scope)
+  if (event.type === 'error') {
+    pendingRoomAcknowledgements.delete(acknowledgementKey)
+  } else if (pendingRoomAcknowledgements.has(acknowledgementKey)) {
+    const pending = pendingRoomAcknowledgements.get(acknowledgementKey)!
+    pendingRoomAcknowledgements.delete(acknowledgementKey)
+    acknowledgeThrough(pending.workspaceId, pending.cardId, pending.sequence)
   }
 
-  broadcastToRenderer('agent:stream', { cardId, ...event })
+  roomStreamAccumulator.record(scope, event)
+
+  broadcastToRenderer('agent:stream', {
+    workspaceId: scope.workspaceId,
+    cardId: scope.cardId,
+    ...event,
+  })
 }
 
 export function cloneChatMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -83,25 +141,43 @@ export const activeProcesses = new Map<string, ChildProcess>()
 // Active HTTP requests (proxy-backed providers)
 export const activeHttpRequests = new Map<string, http.ClientRequest>()
 
-// Stored session IDs for multi-turn conversations (keyed by `cardId:provider`).
+// Stored session IDs for multi-turn conversations. New entries are explicitly
+// workspace scoped. Legacy card-only entries are retained on load/write so an
+// older app can still read the file, but scoped requests never claim them.
 export const sessionIds = new Map<string, string>()
 
-export function sessionStorageKey(cardId: string, provider: string): string {
-  return `${cardId}:${provider}`
+export function sessionStorageKey(scope: ChatStreamScope, provider: string): string {
+  if (!scope.workspaceId) return `${scope.cardId}:${provider}`
+  return `v2:${JSON.stringify([scope.workspaceId, scope.cardId, provider])}`
 }
 
-export function getCardSessionId(cardId: string, provider: string): string | undefined {
-  return sessionIds.get(sessionStorageKey(cardId, provider))
+export function getCardSessionId(scope: ChatStreamScope, provider: string): string | undefined {
+  return sessionIds.get(sessionStorageKey(scope, provider))
 }
 
-export function setCardSessionId(cardId: string, provider: string, sessionId: string): void {
-  sessionIds.set(sessionStorageKey(cardId, provider), sessionId)
+export function setCardSessionId(scope: ChatStreamScope, provider: string, sessionId: string): void {
+  sessionIds.set(sessionStorageKey(scope, provider), sessionId)
   persistSessionIds()
 }
 
-export function deleteCardSessionIds(cardId: string): void {
+function isSessionKeyForScope(key: string, scope: ChatStreamScope): boolean {
+  if (!scope.workspaceId) {
+    return key === scope.cardId || key.startsWith(`${scope.cardId}:`)
+  }
+  if (!key.startsWith('v2:')) return false
+  try {
+    const parsed = JSON.parse(key.slice(3))
+    return Array.isArray(parsed)
+      && parsed[0] === scope.workspaceId
+      && parsed[1] === scope.cardId
+  } catch {
+    return false
+  }
+}
+
+export function deleteCardSessionIds(scope: ChatStreamScope): void {
   for (const key of [...sessionIds.keys()]) {
-    if (key === cardId || key.startsWith(`${cardId}:`)) {
+    if (isSessionKeyForScope(key, scope)) {
       sessionIds.delete(key)
     }
   }
@@ -145,12 +221,13 @@ function loadPersistedSessionIds(): void {
 // Load persisted session IDs on module init.
 loadPersistedSessionIds()
 
-export function isActiveQuery(cardId: string, query: Query): boolean {
-  return activeQueries.get(cardId) === query
+export function isActiveQuery(scope: ChatStreamScope, query: Query): boolean {
+  return activeQueries.get(chatStreamScopeKey(scope)) === query
 }
 
-export function clearActiveQuery(cardId: string, query: Query): void {
-  if (isActiveQuery(cardId, query)) {
-    activeQueries.delete(cardId)
+export function clearActiveQuery(scope: ChatStreamScope, query: Query): void {
+  const key = chatStreamScopeKey(scope)
+  if (isActiveQuery(scope, query)) {
+    activeQueries.delete(key)
   }
 }

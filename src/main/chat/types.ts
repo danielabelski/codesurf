@@ -90,6 +90,8 @@ export interface ChatRequest {
   memoryPrompt?: string
   /** Agent-room standing + consumed traffic for this turn (main injects). */
   roomContext?: string
+  /** Main-process-only cursor reservation; never trusted from renderer input. */
+  roomAckSequence?: number
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle

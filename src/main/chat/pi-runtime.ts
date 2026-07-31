@@ -33,6 +33,11 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { CODESURF_HOME } from '../paths'
+import {
+  chatStreamScopeKey,
+  createChatStreamScope,
+  type ChatStreamScope,
+} from './room-stream-scope.ts'
 import { buildAsyncExecutionPrompt, type AsyncExecutionContext } from './prompt-builders'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from './prompt-conventions'
 
@@ -58,6 +63,7 @@ interface CsagentImageAttachment {
 /** The subset of the chat request this runtime consumes. */
 export interface CsagentRunRequest {
   cardId: string
+  workspaceId?: string
   model: string
   workspaceDir?: string
   sessionId?: string | null
@@ -198,10 +204,14 @@ let _csagentAuth: any = null // AuthStorage singleton (shares ~/.pi/agent/auth.j
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _csagentModels: any = null // ModelRegistry singleton
 
-const csagentSessions = new Map<string, PiAgentSession>() // cardId -> live session
-const csagentUnsubs = new Map<string, () => void>() // cardId -> subscribe disposer
-const csagentSessionIds = new Map<string, string>() // cardId -> runtime sessionId (DEDICATED — never the shared sessionIds map)
-const csagentContextKeys = new Map<string, string>() // cardId -> last injected CodeSurf context overlay
+const csagentSessions = new Map<string, PiAgentSession>()
+const csagentUnsubs = new Map<string, () => void>()
+const csagentSessionIds = new Map<string, string>()
+const csagentContextKeys = new Map<string, string>()
+
+function csagentScope(req: Pick<CsagentRunRequest, 'workspaceId' | 'cardId'>): ChatStreamScope {
+  return createChatStreamScope(req.workspaceId, req.cardId)
+}
 
 /** Package name of the user's installed pi runtime (never bundled by this app). */
 const PI_PKG = '@mariozechner/pi-coding-agent'
@@ -379,6 +389,7 @@ async function buildCsagentImages(
  *     microtask in a single batch, so a token storm cannot storm agent:stream.
  */
 function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessionEvent) => void {
+  const scopeKey = chatStreamScopeKey(csagentScope(req))
   const pending: StreamEvent[] = []
   let scheduled = false
   // This pi build delivers a whole assistant message via message_end (no
@@ -421,10 +432,10 @@ function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessio
   const emitDone = (): void => {
     if (doneEmitted) return
     doneEmitted = true
-    const stats = safeStats(req.cardId)
+    const stats = safeStats(scopeKey)
     enqueue({
       type: 'done',
-      sessionId: csagentSessionIds.get(req.cardId) ?? stats?.sessionId,
+      sessionId: csagentSessionIds.get(scopeKey) ?? stats?.sessionId,
       cost: stats?.cost,
       turns: stats?.assistantMessages,
     })
@@ -524,9 +535,9 @@ function summarizeToolResult(isError: boolean | undefined, value: unknown): stri
   return safeJson(value).slice(0, 500)
 }
 
-function safeStats(cardId: string): PiSessionStats | undefined {
+function safeStats(scopeKey: string): PiSessionStats | undefined {
   try {
-    return csagentSessions.get(cardId)?.getSessionStats()
+    return csagentSessions.get(scopeKey)?.getSessionStats()
   } catch {
     return undefined
   }
@@ -535,16 +546,18 @@ function safeStats(cardId: string): PiSessionStats | undefined {
 /**
  * Start (or resume) a CodeSurf Agent turn in-process and stream the reply.
  *
- * The caller passes `emit` (typically `(ev) => sendStream(req.cardId, ev)`),
+ * The caller passes `emit` with an immutable workspace/card scope captured by
+ * the provider invocation,
  * keeping this module decoupled from the host's window-fanout. On any failure to
  * load the runtime or create the session, emits an `{type:'error'}` followed by
  * `{type:'done'}` and returns (mirrors the OpenCode degrade path).
  */
 export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Promise<void> {
+  const scopeKey = chatStreamScopeKey(csagentScope(req))
   // Restore a stored runtime sessionId for resume (the caller persists it via
   // the `session` event; on a fresh turn after restart req.sessionId carries it).
-  if (req.sessionId && !csagentSessionIds.has(req.cardId)) {
-    csagentSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !csagentSessionIds.has(scopeKey)) {
+    csagentSessionIds.set(scopeKey, req.sessionId)
   }
 
   let rt: PiRuntime
@@ -572,7 +585,7 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
     // locate the existing file by the stored sessionId rather than guessing a path
     // — otherwise SessionManager.open would silently start an empty session and we
     // would lose conversation history on every turn after the first.
-    const storedId = csagentSessionIds.get(req.cardId)
+    const storedId = csagentSessionIds.get(scopeKey)
     const resumePath = storedId ? findSessionFile(storedId) : undefined
     const sessionManager = resumePath
       ? rt.SessionManager.open(resumePath, CSAGENT_SESSION_DIR, req.workspaceDir)
@@ -594,28 +607,28 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
       thinkingLevel: mapThinking(req.thinking),
       ...(model ? { model } : {}),
     })
-    csagentSessions.set(req.cardId, session)
+    csagentSessions.set(scopeKey, session)
 
     // Emit the runtime sessionId once so the tile persists it for resume.
     const sid = session.sessionId
     if (sid) {
-      csagentSessionIds.set(req.cardId, sid)
+      csagentSessionIds.set(scopeKey, sid)
       emit({ type: 'session', sessionId: sid })
     }
 
     // Tap the typed event stream.
     const unsub = session.subscribe(makeTranslator(req, emit))
-    csagentUnsubs.set(req.cardId, unsub)
+    csagentUnsubs.set(scopeKey, unsub)
 
     // First/idle prompt: NO streamingBehavior (only required while streaming).
     const images = await buildCsagentImages(req.imageAttachments)
     const contextPreamble = buildCsagentContextPreamble(req)
     const contextKey = String(contextPreamble ?? '').trim()
-    const shouldInjectContext = Boolean(contextKey) && (!storedId || csagentContextKeys.get(req.cardId) !== contextKey)
+    const shouldInjectContext = Boolean(contextKey) && (!storedId || csagentContextKeys.get(scopeKey) !== contextKey)
     const promptText = shouldInjectContext
       ? `${contextPreamble}\n\n---\n\n${req.prompt}`
       : req.prompt
-    if (shouldInjectContext) csagentContextKeys.set(req.cardId, contextKey)
+    if (shouldInjectContext) csagentContextKeys.set(scopeKey, contextKey)
     await session.prompt(promptText, {
       ...(images.length > 0 ? { images } : {}),
       source: 'interactive',
@@ -648,8 +661,8 @@ function findSessionFile(sessionId: string | undefined): string | undefined {
  * Stop the current turn for a card. The runtime's abort() does NOT clear the
  * queue, so we clearQueue() explicitly, then prune the per-card maps.
  */
-export async function stopCsagent(cardId: string): Promise<void> {
-  const session = csagentSessions.get(cardId)
+export async function stopCsagent(scope: ChatStreamScope): Promise<void> {
+  const session = csagentSessions.get(chatStreamScopeKey(scope))
   if (!session) return
   try {
     await session.abort()
@@ -664,8 +677,8 @@ export async function stopCsagent(cardId: string): Promise<void> {
 }
 
 /** Native mid-turn steering (2nd steerable provider after Claude). */
-export async function steerCsagent(cardId: string, text: string): Promise<boolean> {
-  const session = csagentSessions.get(cardId)
+export async function steerCsagent(scope: ChatStreamScope, text: string): Promise<boolean> {
+  const session = csagentSessions.get(chatStreamScopeKey(scope))
   if (!session) return false
   await session.steer(text)
   return true
@@ -675,37 +688,39 @@ export async function steerCsagent(cardId: string, text: string): Promise<boolea
  * Dispose a card's runtime state: drop the subscribe listener, dispose the live
  * session, and delete the cardId key from ALL THREE dedicated maps.
  */
-export function disposeCsagent(cardId: string): void {
+export function disposeCsagent(scope: ChatStreamScope): void {
+  const scopeKey = chatStreamScopeKey(scope)
   try {
-    csagentUnsubs.get(cardId)?.()
+    csagentUnsubs.get(scopeKey)?.()
   } catch {
     /* listener already gone */
   }
   try {
-    csagentSessions.get(cardId)?.dispose()
+    csagentSessions.get(scopeKey)?.dispose()
   } catch {
     /* already disposed */
   }
-  csagentUnsubs.delete(cardId)
-  csagentSessions.delete(cardId)
-  csagentSessionIds.delete(cardId)
-  csagentContextKeys.delete(cardId)
+  csagentUnsubs.delete(scopeKey)
+  csagentSessions.delete(scopeKey)
+  csagentSessionIds.delete(scopeKey)
+  csagentContextKeys.delete(scopeKey)
 }
 
 /**
  * Clear a card's session bookkeeping WITHOUT disposing a live session (mirrors
  * chat:clearSession — same tile, fresh conversation).
  */
-export function clearCsagentSession(cardId: string): void {
-  csagentUnsubs.delete(cardId)
-  csagentSessions.delete(cardId)
-  csagentSessionIds.delete(cardId)
-  csagentContextKeys.delete(cardId)
+export function clearCsagentSession(scope: ChatStreamScope): void {
+  const scopeKey = chatStreamScopeKey(scope)
+  csagentUnsubs.delete(scopeKey)
+  csagentSessions.delete(scopeKey)
+  csagentSessionIds.delete(scopeKey)
+  csagentContextKeys.delete(scopeKey)
 }
 
 /** True if a live CodeSurf Agent session exists for the card (for dispatch). */
-export function hasCsagentSession(cardId: string): boolean {
-  return csagentSessions.has(cardId)
+export function hasCsagentSession(scope: ChatStreamScope): boolean {
+  return csagentSessions.has(chatStreamScopeKey(scope))
 }
 
 /**
