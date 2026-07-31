@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { promises as fs } from 'node:fs'
+import { promises as fs, renameSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { writeFilesAtomically } from './atomicFileWrites'
 import { parseRelayMessage, renderRelayMessage } from './markdown'
@@ -930,80 +930,196 @@ export class CodesurfRelay {
     )
   }
 
-  async waitForReady(ids: string[], options: RelayWaitOptions = {}): Promise<void> {
+  async waitForReady(
+    ids: string[],
+    options: RelayWaitOptions = {},
+    context?: RelayOperationContext,
+  ): Promise<void> {
+    assertActive(context)
     const timeoutMs = options.timeoutMs ?? 60_000
     const pending = new Set(ids)
-    const current = await this.listParticipants()
-    current.filter(participant => participant.status === 'ready').forEach(participant => pending.delete(participant.id))
     if (pending.size === 0) return
 
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
+    await awaitActive(() => new Promise<void>((resolve, reject) => {
+      let settled = false
+      let unsubscribe = () => {}
+      const cleanup = () => {
+        clearTimeout(timer)
         unsubscribe()
-        reject(new Error(`Timed out waiting for ready: ${Array.from(pending).join(', ')}`))
+        context?.signal?.removeEventListener('abort', onAbort)
+      }
+      const fail = (error: Error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+      const succeed = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve()
+      }
+      const timer = setTimeout(() => {
+        fail(new Error(`Timed out waiting for ready: ${Array.from(pending).join(', ')}`))
       }, timeoutMs)
 
       const listener = (event: RelayEvent) => {
         if (event.type !== 'ready') return
         pending.delete((event.payload as { participantId: string }).participantId)
-        if (pending.size === 0) {
-          clearTimeout(timer)
-          unsubscribe()
-          resolve()
-        }
+        if (pending.size === 0) succeed()
+      }
+      const onAbort = () => fail(new Error('Relay wait was cancelled'))
+
+      context?.signal?.addEventListener('abort', onAbort, { once: true })
+      try {
+        assertActive(context)
+        unsubscribe = this.on(listener)
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)))
+        return
       }
 
-      const unsubscribe = this.on(listener)
-    })
+      void this.listParticipants(context).then(
+        current => {
+          if (settled) return
+          current
+            .filter(participant => participant.status === 'ready')
+            .forEach(participant => pending.delete(participant.id))
+          if (pending.size === 0) succeed()
+        },
+        error => fail(
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      )
+    }), context)
   }
 
-  async waitForAny(ids: string[], options: RelayWaitOptions = {}): Promise<RelayParticipant> {
+  async waitForAny(
+    ids: string[],
+    options: RelayWaitOptions = {},
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant> {
+    assertActive(context)
     const timeoutMs = options.timeoutMs ?? 5 * 60_000
     const doneStates = new Set<RelayParticipantStatus>(['done', 'error', 'stopped'])
-    const current = await this.listParticipants()
-    const immediate = current.find(participant => ids.includes(participant.id) && doneStates.has(participant.status))
-    if (immediate) return immediate
 
-    return new Promise<RelayParticipant>((resolve, reject) => {
-      const timer = setTimeout(() => {
+    return awaitActive(() => new Promise<RelayParticipant>((resolve, reject) => {
+      let settled = false
+      let unsubscribe = () => {}
+      const cleanup = () => {
+        clearTimeout(timer)
         unsubscribe()
-        reject(new Error(`Timed out waiting for any of: ${ids.join(', ')}`))
+        context?.signal?.removeEventListener('abort', onAbort)
+      }
+      const fail = (error: Error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+      const succeed = (participant: RelayParticipant) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(participant)
+      }
+      const timer = setTimeout(() => {
+        fail(new Error(`Timed out waiting for any of: ${ids.join(', ')}`))
       }, timeoutMs)
 
-      const listener = async (event: RelayEvent) => {
+      const listener = (event: RelayEvent) => {
         if (event.type !== 'participant_status') return
         const payload = event.payload as { participantId: string; status: RelayParticipantStatus }
         if (!ids.includes(payload.participantId)) return
         if (!doneStates.has(payload.status)) return
-        clearTimeout(timer)
-        unsubscribe()
-        const participant = await this.getParticipant(payload.participantId)
-        if (!participant) return reject(new Error(`Participant disappeared: ${payload.participantId}`))
-        resolve(participant)
+        void this.getParticipant(payload.participantId, context).then(
+          participant => {
+            if (!participant) {
+              fail(new Error(`Participant disappeared: ${payload.participantId}`))
+              return
+            }
+            succeed(participant)
+          },
+          error => fail(
+            error instanceof Error ? error : new Error(String(error)),
+          ),
+        )
+      }
+      const onAbort = () => fail(new Error('Relay wait was cancelled'))
+
+      context?.signal?.addEventListener('abort', onAbort, { once: true })
+      try {
+        assertActive(context)
+        unsubscribe = this.on(listener)
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)))
+        return
       }
 
-      const unsubscribe = this.on(listener)
-    })
+      void this.listParticipants(context).then(
+        current => {
+          if (settled) return
+          const immediate = current.find(
+            participant => ids.includes(participant.id)
+              && doneStates.has(participant.status),
+          )
+          if (immediate) succeed(immediate)
+        },
+        error => fail(
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      )
+    }), context)
   }
 
-  async moveMessage(participantId: string, fromMailbox: Exclude<RelayMailbox, 'channel' | 'central'>, toMailbox: Exclude<RelayMailbox, 'channel' | 'central'>, filename: string): Promise<boolean> {
+  async moveMessage(
+    participantId: string,
+    fromMailbox: Exclude<RelayMailbox, 'channel' | 'central'>,
+    toMailbox: Exclude<RelayMailbox, 'channel' | 'central'>,
+    filename: string,
+    context?: RelayOperationContext,
+  ): Promise<boolean> {
+    assertActive(context)
     validateMessageFilename(filename)
     try {
-      await ensureDir(this.participantMailboxDir(participantId, toMailbox))
-      await fs.rename(
-        join(this.participantMailboxDir(participantId, fromMailbox), filename),
-        join(this.participantMailboxDir(participantId, toMailbox), basename(filename)),
+      await awaitActive(
+        () => ensureDir(this.participantMailboxDir(participantId, toMailbox)),
+        context,
       )
-      const participant = await this.getParticipant(participantId)
+      const participant = await this.getParticipant(participantId, context)
       if (participant?.tileId) {
-        await ensureDir(this.tileMailboxDir(participant.tileId, toMailbox))
-        await fs.rename(
-          join(this.tileMailboxDir(participant.tileId, fromMailbox), filename),
-          join(this.tileMailboxDir(participant.tileId, toMailbox), basename(filename)),
-        ).catch(() => undefined)
+        await awaitActive(
+          () => ensureDir(this.tileMailboxDir(participant.tileId!, toMailbox)),
+          context,
+        )
+      }
+
+      assertActive(context)
+      renameSync(
+        join(this.participantMailboxDir(participantId, fromMailbox), filename),
+        join(
+          this.participantMailboxDir(participantId, toMailbox),
+          basename(filename),
+        ),
+      )
+      if (participant?.tileId) {
+        try {
+          renameSync(
+            join(
+              this.tileMailboxDir(participant.tileId, fromMailbox),
+              filename,
+            ),
+            join(
+              this.tileMailboxDir(participant.tileId, toMailbox),
+              basename(filename),
+            ),
+          )
+        } catch {}
       }
       return true
-    } catch {
+    } catch (error) {
+      assertActive(context)
       return false
     }
   }

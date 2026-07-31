@@ -372,6 +372,36 @@ describe('integration', () => {
       expect(memories.length).toBe(1)
       expect(memories[0].meta.subject).toBe('Important decision')
     })
+
+    it('should cancel relay waits and release their event subscription', async () => {
+      await relay.init()
+      const controller = new AbortController()
+      const cancellation = new Error('relay generation stopped')
+      let active = true
+      const listenerCountBeforeWait = relay.events.listenerCount('event')
+
+      const waiting = relay.waitForReady(
+        ['never-ready'],
+        { timeoutMs: 60_000 },
+        {
+          signal: controller.signal,
+          assertActive() {
+            if (!active) throw cancellation
+          },
+        },
+      )
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait + 1,
+      )
+
+      active = false
+      controller.abort()
+      await expect(waiting).rejects.toBe(cancellation)
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait,
+      )
+    })
   })
 
   describe('RelayRuntime with real relay', () => {
