@@ -425,6 +425,8 @@ function TileChromeComponent({
   return (
     <div
       data-tile-chrome="true"
+      data-tile-id={tile.id}
+      data-tile-type={tile.type}
       className="absolute"
       style={{
         // While dragging/resizing, position via a GPU-composited transform so movement
@@ -492,6 +494,7 @@ function TileChromeComponent({
         {/* Titlebar */}
         <div
           ref={titlebarRef}
+          data-tile-titlebar="true"
           style={{
             height: tile.hideTitlebar ? 0 : 32,
             background: titlebarColor ?? theme.surface.titlebar,

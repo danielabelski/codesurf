@@ -357,4 +357,220 @@ test.describe('Canvas IPC surface', () => {
     }
   })
 
+  test('real pointer gestures focus, drag, resize, and persist a tile', async () => {
+    const launch = await launchCodeSurfElectron()
+
+    try {
+      const { page } = launch
+      await waitForElectronBridge(page, 'canvas.save')
+
+      const workspaceId = await page.evaluate(async () => {
+        const workspace = await window.electron.workspace.create('e2e-pointer-tile')
+        await window.electron.canvas.save(workspace.id, {
+          tiles: [
+            {
+              id: 'e2e-pointer-a',
+              type: 'note',
+              label: 'Pointer A',
+              x: 100,
+              y: 90,
+              width: 300,
+              height: 210,
+              zIndex: 1,
+            },
+            {
+              id: 'e2e-pointer-b',
+              type: 'note',
+              label: 'Pointer B',
+              x: 500,
+              y: 120,
+              width: 300,
+              height: 210,
+              zIndex: 2,
+            },
+          ],
+          groups: [],
+          viewport: { tx: 0, ty: 0, zoom: 1 },
+          nextZIndex: 3,
+        })
+        await window.electron.workspace.setActive(workspace.id)
+        return workspace.id
+      })
+
+      await page.reload()
+      await waitForElectronBridge(page, 'canvas.load')
+      await dismissAgentSetupIfPresent(page)
+
+      const tileA = page.locator('[data-tile-id="e2e-pointer-a"]')
+      const tileB = page.locator('[data-tile-id="e2e-pointer-b"]')
+      await expect(tileA).toBeVisible({ timeout: 45_000 })
+      await expect(tileB).toBeVisible()
+
+      const initialBox = await tileA.boundingBox()
+      const otherZIndex = await tileB.evaluate(element => Number(getComputedStyle(element).zIndex))
+      expect(initialBox).not.toBeNull()
+
+      const titlebar = tileA.locator('[data-tile-titlebar="true"]')
+      const titlebarBox = await titlebar.boundingBox()
+      expect(titlebarBox).not.toBeNull()
+      const dragStart = {
+        x: titlebarBox!.x + titlebarBox!.width / 2,
+        y: titlebarBox!.y + titlebarBox!.height / 2,
+      }
+      await page.mouse.move(dragStart.x, dragStart.y)
+      await page.mouse.down()
+      await page.mouse.move(dragStart.x + 96, dragStart.y + 64, { steps: 8 })
+      await page.mouse.up()
+
+      await expect.poll(async () => (await tileA.boundingBox())?.x ?? 0).toBeGreaterThan(initialBox!.x + 60)
+      await expect.poll(async () => (await tileA.boundingBox())?.y ?? 0).toBeGreaterThan(initialBox!.y + 35)
+      await expect.poll(
+        async () => tileA.evaluate(element => Number(getComputedStyle(element).zIndex)),
+      ).toBeGreaterThan(otherZIndex)
+
+      const movedBox = await tileA.boundingBox()
+      const resizeHandle = tileA.locator('[data-resize-dir="se"]')
+      const resizeBox = await resizeHandle.boundingBox()
+      expect(movedBox).not.toBeNull()
+      expect(resizeBox).not.toBeNull()
+      const resizeStart = {
+        // Stay inside the tile-facing quadrant. The link-discovery sensors
+        // intentionally begin at the outer edge of the same corner.
+        x: resizeBox!.x + 2,
+        y: resizeBox!.y + 2,
+      }
+      const resizeHitTarget = await page.evaluate(({ x, y }) => {
+        const element = document.elementFromPoint(x, y)
+        return {
+          resizeDir: element?.getAttribute('data-resize-dir'),
+          tileChrome: element?.getAttribute('data-tile-chrome'),
+          tileId: element?.getAttribute('data-tile-id'),
+          tag: element?.tagName,
+        }
+      }, resizeStart)
+      expect(resizeHitTarget).toEqual({
+        resizeDir: 'se',
+        tileChrome: null,
+        tileId: null,
+        tag: 'DIV',
+      })
+      await page.mouse.move(resizeStart.x, resizeStart.y)
+      await page.mouse.down()
+      await page.mouse.move(resizeStart.x + 80, resizeStart.y + 48, { steps: 8 })
+      await page.mouse.up()
+
+      await expect.poll(async () => (await tileA.boundingBox())?.width ?? 0).toBeGreaterThan(movedBox!.width + 50)
+      await expect.poll(async () => (await tileA.boundingBox())?.height ?? 0).toBeGreaterThan(movedBox!.height + 25)
+
+      await expect.poll(async () => page.evaluate(async ({ id }) => {
+        const state = await window.electron.canvas.load(id)
+        const tile = state?.tiles?.find(candidate => candidate.id === 'e2e-pointer-a')
+        return Boolean(
+          tile
+          && tile.x >= 180
+          && tile.y >= 140
+          && tile.width >= 360
+          && tile.height >= 240,
+        )
+      }, { id: workspaceId })).toBe(true)
+    } finally {
+      await closeCodeSurfElectron(launch)
+    }
+  })
+
+  test('real pointer group drag moves every rendered member and persists the result', async () => {
+    const launch = await launchCodeSurfElectron()
+
+    try {
+      const { page } = launch
+      await waitForElectronBridge(page, 'canvas.save')
+
+      const workspaceId = await page.evaluate(async () => {
+        const workspace = await window.electron.workspace.create('e2e-pointer-group')
+        await window.electron.canvas.save(workspace.id, {
+          tiles: [
+            {
+              id: 'e2e-group-a',
+              type: 'note',
+              label: 'Group A',
+              groupId: 'e2e-group',
+              x: 120,
+              y: 120,
+              width: 260,
+              height: 180,
+              zIndex: 1,
+            },
+            {
+              id: 'e2e-group-b',
+              type: 'note',
+              label: 'Group B',
+              groupId: 'e2e-group',
+              x: 460,
+              y: 120,
+              width: 260,
+              height: 180,
+              zIndex: 2,
+            },
+          ],
+          groups: [{ id: 'e2e-group', label: 'Pointer Group' }],
+          viewport: { tx: 0, ty: 0, zoom: 1 },
+          nextZIndex: 3,
+        })
+        await window.electron.workspace.setActive(workspace.id)
+        return workspace.id
+      })
+
+      await page.reload()
+      await waitForElectronBridge(page, 'canvas.load')
+      await dismissAgentSetupIfPresent(page)
+
+      const tileA = page.locator('[data-tile-id="e2e-group-a"]')
+      const tileB = page.locator('[data-tile-id="e2e-group-b"]')
+      const frame = page.locator('[data-canvas-group-id="e2e-group"]')
+      await expect(tileA).toBeVisible({ timeout: 45_000 })
+      await expect(tileB).toBeVisible()
+      await expect(frame).toBeVisible()
+
+      const beforeA = await tileA.boundingBox()
+      const beforeB = await tileB.boundingBox()
+      expect(beforeA).not.toBeNull()
+      expect(beforeB).not.toBeNull()
+
+      const moveHandle = frame.locator('[data-group-move-handle="true"]')
+      await expect(moveHandle).toBeVisible()
+      const moveHandleBox = await moveHandle.boundingBox()
+      expect(moveHandleBox).not.toBeNull()
+      const dragStart = {
+        x: moveHandleBox!.x + moveHandleBox!.width / 2,
+        y: moveHandleBox!.y + moveHandleBox!.height / 2,
+      }
+
+      await page.mouse.move(dragStart.x, dragStart.y)
+      await page.mouse.down()
+      await page.mouse.move(dragStart.x + 72, dragStart.y + 56, { steps: 8 })
+      await page.mouse.up()
+
+      await expect.poll(async () => (await tileA.boundingBox())?.x ?? 0).toBeGreaterThan(beforeA!.x + 45)
+      await expect.poll(async () => (await tileA.boundingBox())?.y ?? 0).toBeGreaterThan(beforeA!.y + 30)
+      await expect.poll(async () => (await tileB.boundingBox())?.x ?? 0).toBeGreaterThan(beforeB!.x + 45)
+      await expect.poll(async () => (await tileB.boundingBox())?.y ?? 0).toBeGreaterThan(beforeB!.y + 30)
+
+      await expect.poll(async () => page.evaluate(async ({ id }) => {
+        const state = await window.electron.canvas.load(id)
+        const a = state?.tiles?.find(candidate => candidate.id === 'e2e-group-a')
+        const b = state?.tiles?.find(candidate => candidate.id === 'e2e-group-b')
+        return Boolean(
+          a
+          && b
+          && a.x >= 175
+          && a.y >= 160
+          && b.x >= 515
+          && b.y >= 160,
+        )
+      }, { id: workspaceId })).toBe(true)
+    } finally {
+      await closeCodeSurfElectron(launch)
+    }
+  })
+
 })
