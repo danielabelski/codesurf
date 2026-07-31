@@ -93,7 +93,7 @@ export function registerRelayIPC(): void {
       typeof workspacePath !== 'string' || typeof from !== 'string' ||
       !isRelayDirectMessageDraft(draft)
     ) {
-      return { ok: false, error: 'Invalid sendDirectMessage payload' }
+      throw new TypeError('Invalid sendDirectMessage payload')
     }
     return sendWorkspaceDirectRelayMessage(workspacePath, from, draft)
   })
@@ -103,7 +103,7 @@ export function registerRelayIPC(): void {
       typeof workspacePath !== 'string' || typeof from !== 'string' ||
       !isRelayChannelMessageDraft(draft)
     ) {
-      return { ok: false, error: 'Invalid sendChannelMessage payload' }
+      throw new TypeError('Invalid sendChannelMessage payload')
     }
     return sendWorkspaceChannelRelayMessage(workspacePath, from, draft)
   })
@@ -122,7 +122,7 @@ export function registerRelayIPC(): void {
       typeof participantId !== 'string' ||
       !isRelayWorkContext(work)
     ) {
-      return { ok: false, error: 'Invalid setWorkContext payload' }
+      throw new TypeError('Invalid setWorkContext payload')
     }
     return setWorkspaceRelayWorkContext(workspacePath, participantId, work)
   })
@@ -136,7 +136,7 @@ export function registerRelayIPC(): void {
       typeof workspacePath !== 'string' ||
       !isRelaySpawnRequest(request)
     ) {
-      return { ok: false, error: 'Invalid spawnAgent payload' }
+      throw new TypeError('Invalid spawnAgent payload')
     }
     return spawnWorkspaceRelayAgent(workspacePath, request)
   })

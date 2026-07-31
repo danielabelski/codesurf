@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
+  RELAY_IPC_LIMITS,
   isRelayChannelMessageDraft,
   isRelayDirectMessageDraft,
   isRelaySpawnRequest,
@@ -68,6 +69,76 @@ describe('relay IPC payload validation', () => {
     assert.equal(isRelayWorkContext({
       summary: 'Invalid work',
       files: [42],
+    }), false)
+  })
+
+  test('enforces bounded provider prompt and collection inputs', () => {
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'a'.repeat(RELAY_IPC_LIMITS.taskBytes),
+      channels: Array.from(
+        { length: RELAY_IPC_LIMITS.channelItems },
+        (_, index) => `channel-${index}`,
+      ),
+    }), true)
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'a'.repeat(RELAY_IPC_LIMITS.taskBytes + 1),
+    }), false)
+    assert.equal(isRelaySpawnRequest({
+      name: 'n'.repeat(RELAY_IPC_LIMITS.nameBytes + 1),
+      task: 'Review the shared file',
+    }), false)
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'Review the shared file',
+      channels: Array.from(
+        { length: RELAY_IPC_LIMITS.channelItems + 1 },
+        (_, index) => `channel-${index}`,
+      ),
+    }), false)
+  })
+
+  test('enforces bounded message, work, and structured payload inputs', () => {
+    const boundedMetadata = {
+      value: 'a'.repeat(RELAY_IPC_LIMITS.structuredBytes - 12),
+    }
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'Review the shared file',
+      metadata: boundedMetadata,
+    }), true)
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'Review the shared file',
+      metadata: {
+        value: `${boundedMetadata.value}a`,
+      },
+    }), false)
+    assert.equal(isRelayDirectMessageDraft({
+      to: 'agent-b',
+      subject: 's'.repeat(RELAY_IPC_LIMITS.subjectBytes + 1),
+      body: 'Body',
+    }), false)
+    assert.equal(isRelayDirectMessageDraft({
+      to: 'agent-b',
+      subject: 'Subject',
+      body: 'b'.repeat(RELAY_IPC_LIMITS.bodyBytes + 1),
+    }), false)
+    assert.equal(isRelayWorkContext({
+      summary: 'Bounded work',
+      files: Array.from(
+        { length: RELAY_IPC_LIMITS.listItems + 1 },
+        (_, index) => `src/file-${index}.ts`,
+      ),
+    }), false)
+
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    assert.equal(isRelaySpawnRequest({
+      name: 'Reviewer',
+      task: 'Review the shared file',
+      metadata: cyclic,
     }), false)
   })
 })

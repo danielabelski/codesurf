@@ -32,24 +32,138 @@ const PROVIDERS = new Set<NonNullable<RelaySpawnRequest['provider']>>([
   'unknown',
 ])
 
+export const RELAY_IPC_LIMITS = {
+  idBytes: 128,
+  nameBytes: 256,
+  taskBytes: 32 * 1024,
+  subjectBytes: 1024,
+  bodyBytes: 64 * 1024,
+  shortTextBytes: 1024,
+  pathBytes: 4096,
+  listItems: 128,
+  channelItems: 64,
+  requestBytes: 128 * 1024,
+  structuredBytes: 64 * 1024,
+  structuredDepth: 8,
+  structuredEntries: 1024,
+} as const
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
+function isBoundedString(
+  value: unknown,
+  maxBytes: number,
+  allowEmpty = false,
+): value is string {
+  return (
+    typeof value === 'string'
+    && (allowEmpty || value.trim().length > 0)
+    && Buffer.byteLength(value, 'utf8') <= maxBytes
+  )
 }
 
-function isOptionalString(value: unknown): value is string | undefined {
-  return value === undefined || typeof value === 'string'
+function isOptionalBoundedString(
+  value: unknown,
+  maxBytes: number,
+): value is string | undefined {
+  return value === undefined || isBoundedString(value, maxBytes, true)
+}
+
+function isBoundedStringList(
+  value: unknown,
+  maxItems: number,
+  maxItemBytes: number,
+  allowEmpty = false,
+): value is string[] {
+  return (
+    Array.isArray(value)
+    && value.length <= maxItems
+    && value.every(item => isBoundedString(
+      item,
+      maxItemBytes,
+      allowEmpty,
+    ))
+  )
+}
+
+function isBoundedStructuredValue(
+  value: unknown,
+  maxBytes = RELAY_IPC_LIMITS.structuredBytes,
+): boolean {
+  const stack: Array<{ value: unknown; depth: number }> = [{
+    value,
+    depth: 0,
+  }]
+  const seen = new Set<object>()
+  let bytes = 0
+  let entries = 0
+
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    if (current.value === null || current.value === undefined) {
+      bytes += 4
+    } else if (typeof current.value === 'string') {
+      bytes += Buffer.byteLength(current.value, 'utf8')
+    } else if (
+      typeof current.value === 'number'
+      && Number.isFinite(current.value)
+    ) {
+      bytes += 8
+    } else if (typeof current.value === 'boolean') {
+      bytes += 5
+    } else if (
+      Array.isArray(current.value)
+      || isRecord(current.value)
+    ) {
+      if (current.depth >= RELAY_IPC_LIMITS.structuredDepth) return false
+      if (seen.has(current.value)) return false
+      seen.add(current.value)
+      if (Array.isArray(current.value)) {
+        entries += current.value.length
+        for (const item of current.value) {
+          stack.push({ value: item, depth: current.depth + 1 })
+        }
+      } else {
+        const pairs = Object.entries(current.value)
+        entries += pairs.length
+        for (const [key, item] of pairs) {
+          bytes += Buffer.byteLength(key, 'utf8')
+          stack.push({ value: item, depth: current.depth + 1 })
+        }
+      }
+    } else {
+      return false
+    }
+    if (
+      bytes > maxBytes
+      || entries > RELAY_IPC_LIMITS.structuredEntries
+    ) {
+      return false
+    }
+  }
+  try {
+    const serialized = JSON.stringify(value)
+    return (
+      serialized !== undefined
+      && Buffer.byteLength(serialized, 'utf8') <= maxBytes
+    )
+  } catch {
+    return false
+  }
+}
+
+function isBoundedRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && isBoundedStructuredValue(value)
 }
 
 function hasValidMessageFields(value: Record<string, unknown>): boolean {
   return (
-    isNonEmptyString(value.subject)
-    && isNonEmptyString(value.body)
-    && isOptionalString(value.threadId)
-    && isOptionalString(value.replyToId)
+    isBoundedString(value.subject, RELAY_IPC_LIMITS.subjectBytes)
+    && isBoundedString(value.body, RELAY_IPC_LIMITS.bodyBytes)
+    && isOptionalBoundedString(value.threadId, RELAY_IPC_LIMITS.idBytes)
+    && isOptionalBoundedString(value.replyToId, RELAY_IPC_LIMITS.idBytes)
     && (
       value.kind === undefined
       || (
@@ -64,7 +178,7 @@ function hasValidMessageFields(value: Record<string, unknown>): boolean {
         && PRIORITIES.has(value.priority as RelayPriority)
       )
     )
-    && (value.data === undefined || isRecord(value.data))
+    && (value.data === undefined || isBoundedRecord(value.data))
   )
 }
 
@@ -73,7 +187,8 @@ export function isRelayDirectMessageDraft(
 ): value is RelayDirectMessageDraft {
   return (
     isRecord(value)
-    && isNonEmptyString(value.to)
+    && isBoundedStructuredValue(value, RELAY_IPC_LIMITS.requestBytes)
+    && isBoundedString(value.to, RELAY_IPC_LIMITS.idBytes)
     && hasValidMessageFields(value)
   )
 }
@@ -83,7 +198,8 @@ export function isRelayChannelMessageDraft(
 ): value is RelayChannelMessageDraft {
   return (
     isRecord(value)
-    && isNonEmptyString(value.channel)
+    && isBoundedStructuredValue(value, RELAY_IPC_LIMITS.requestBytes)
+    && isBoundedString(value.channel, RELAY_IPC_LIMITS.idBytes)
     && hasValidMessageFields(value)
   )
 }
@@ -91,15 +207,18 @@ export function isRelayChannelMessageDraft(
 export function isRelaySpawnRequest(
   value: unknown,
 ): value is RelaySpawnRequest {
-  if (!isRecord(value)) return false
+  if (
+    !isRecord(value)
+    || !isBoundedStructuredValue(value, RELAY_IPC_LIMITS.requestBytes)
+  ) return false
   return (
-    isNonEmptyString(value.name)
-    && isNonEmptyString(value.task)
-    && isOptionalString(value.id)
-    && isOptionalString(value.tileId)
-    && isOptionalString(value.model)
-    && isOptionalString(value.mode)
-    && isOptionalString(value.thinking)
+    isBoundedString(value.name, RELAY_IPC_LIMITS.nameBytes)
+    && isBoundedString(value.task, RELAY_IPC_LIMITS.taskBytes)
+    && isOptionalBoundedString(value.id, RELAY_IPC_LIMITS.idBytes)
+    && isOptionalBoundedString(value.tileId, RELAY_IPC_LIMITS.idBytes)
+    && isOptionalBoundedString(value.model, RELAY_IPC_LIMITS.shortTextBytes)
+    && isOptionalBoundedString(value.mode, RELAY_IPC_LIMITS.shortTextBytes)
+    && isOptionalBoundedString(value.thinking, RELAY_IPC_LIMITS.shortTextBytes)
     && (
       value.provider === undefined
       || (
@@ -109,12 +228,13 @@ export function isRelaySpawnRequest(
     )
     && (
       value.channels === undefined
-      || (
-        Array.isArray(value.channels)
-        && value.channels.every(isNonEmptyString)
+      || isBoundedStringList(
+        value.channels,
+        RELAY_IPC_LIMITS.channelItems,
+        RELAY_IPC_LIMITS.idBytes,
       )
     )
-    && (value.metadata === undefined || isRecord(value.metadata))
+    && (value.metadata === undefined || isBoundedRecord(value.metadata))
     && (
       value.timeoutMs === undefined
       || (
@@ -128,32 +248,66 @@ export function isRelaySpawnRequest(
 export function isRelayWorkContext(
   value: unknown,
 ): value is RelayWorkContext {
-  if (!isRecord(value) || !isNonEmptyString(value.summary)) return false
-  const stringListKeys = [
-    'files',
-    'topics',
-    'collaborators',
-    'blockers',
-  ] as const
-  for (const key of stringListKeys) {
-    const candidate = value[key]
-    if (
-      candidate !== undefined
-      && (
-        !Array.isArray(candidate)
-        || !candidate.every(item => typeof item === 'string')
-      )
-    ) {
-      return false
-    }
-  }
+  if (
+    !isRecord(value)
+    || !isBoundedString(value.summary, RELAY_IPC_LIMITS.taskBytes)
+    || !isBoundedStructuredValue(value, RELAY_IPC_LIMITS.requestBytes)
+  ) return false
   return (
-    isOptionalString(value.branch)
-    && isOptionalString(value.worktreePath)
+    isOptionalBoundedString(value.branch, RELAY_IPC_LIMITS.pathBytes)
+    && isOptionalBoundedString(value.worktreePath, RELAY_IPC_LIMITS.pathBytes)
+    && isOptionalBoundedString(
+      value.updatedAt,
+      RELAY_IPC_LIMITS.shortTextBytes,
+    )
+    && (
+      value.updatedTs === undefined
+      || (
+        Number.isSafeInteger(value.updatedTs)
+        && (value.updatedTs as number) >= 0
+      )
+    )
+    && (
+      value.files === undefined
+      || isBoundedStringList(
+        value.files,
+        RELAY_IPC_LIMITS.listItems,
+        RELAY_IPC_LIMITS.pathBytes,
+        true,
+      )
+    )
+    && (
+      value.topics === undefined
+      || isBoundedStringList(
+        value.topics,
+        RELAY_IPC_LIMITS.listItems,
+        RELAY_IPC_LIMITS.shortTextBytes,
+        true,
+      )
+    )
+    && (
+      value.collaborators === undefined
+      || isBoundedStringList(
+        value.collaborators,
+        RELAY_IPC_LIMITS.listItems,
+        RELAY_IPC_LIMITS.idBytes,
+        true,
+      )
+    )
+    && (
+      value.blockers === undefined
+      || isBoundedStringList(
+        value.blockers,
+        RELAY_IPC_LIMITS.listItems,
+        RELAY_IPC_LIMITS.pathBytes,
+        true,
+      )
+    )
     && (
       value.impacts === undefined
       || (
         Array.isArray(value.impacts)
+        && value.impacts.length <= RELAY_IPC_LIMITS.listItems
         && value.impacts.every(impact => (
           isRecord(impact)
           && (
@@ -161,8 +315,14 @@ export function isRelayWorkContext(
             || impact.targetType === 'human'
             || impact.targetType === 'system'
           )
-          && isOptionalString(impact.targetId)
-          && isNonEmptyString(impact.description)
+          && isOptionalBoundedString(
+            impact.targetId,
+            RELAY_IPC_LIMITS.idBytes,
+          )
+          && isBoundedString(
+            impact.description,
+            RELAY_IPC_LIMITS.pathBytes,
+          )
           && (
             impact.severity === 'low'
             || impact.severity === 'medium'
