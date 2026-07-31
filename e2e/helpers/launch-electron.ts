@@ -30,6 +30,7 @@ const E2E_AGENT_IDS = [
   'amp',
   'kilo',
 ] as const
+type E2EAgentId = typeof E2E_AGENT_IDS[number]
 
 export interface LaunchedElectronApp {
   app: ElectronApplication
@@ -40,6 +41,7 @@ export interface LaunchedElectronApp {
 
 export type LaunchCodeSurfOptions = {
   seedSettings?: Record<string, unknown>
+  agentScripts?: Partial<Record<E2EAgentId, string>>
 }
 
 async function waitForProcessExit(
@@ -131,6 +133,20 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
     await mkdir(userDataDir, { recursive: true })
     const canonicalUserDataDir = await realpath(userDataDir)
     const now = new Date().toISOString()
+    const seededAgentPaths = new Map<E2EAgentId, string>()
+    const agentScripts = options?.agentScripts ?? {}
+    if (Object.keys(agentScripts).length > 0) {
+      const agentBinDir = join(homeDir, 'e2e-agents')
+      await mkdir(agentBinDir, { recursive: true })
+      for (const id of E2E_AGENT_IDS) {
+        const script = agentScripts[id]
+        if (typeof script !== 'string') continue
+        const scriptPath = join(agentBinDir, id)
+        await writeFile(scriptPath, script, { mode: 0o755 })
+        seededAgentPaths.set(id, scriptPath)
+      }
+    }
+
     await writeFile(
       join(codesurfHome, 'agent-paths.json'),
       JSON.stringify({
@@ -139,8 +155,8 @@ export async function launchCodeSurfElectron(options?: LaunchCodeSurfOptions): P
         ...Object.fromEntries(E2E_AGENT_IDS.map(id => [
           id,
           {
-            path: null,
-            version: null,
+            path: seededAgentPaths.get(id) ?? null,
+            version: seededAgentPaths.has(id) ? 'e2e-fixture' : null,
             detectedAt: now,
             confirmed: true,
           },
