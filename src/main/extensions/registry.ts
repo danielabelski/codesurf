@@ -235,6 +235,22 @@ function sameRootBinding(
     && left.birthtimeMs === right.birthtimeMs
 }
 
+type PriorRootAuthority = {
+  readonly root: ExtensionMediaRootBinding
+  readonly power: boolean
+}
+
+function rootReplacementRequiresRestriction(
+  prior: PriorRootAuthority,
+  current: ExtensionMediaRootBinding,
+  currentIsPower: boolean,
+): boolean {
+  if (sameRootBinding(prior.root, current)) return false
+  return prior.root.lexicalRoot === current.lexicalRoot
+    || prior.power
+    || currentIsPower
+}
+
 function sameMediaResourceAttestation(
   left: ExtensionMediaResourceAttestation,
   right: ExtensionMediaResourceAttestation,
@@ -352,6 +368,8 @@ export class ExtensionRegistry {
    *  gallery as available-to-install entries. */
   private catalogDirs: string[]
   private rescanQueue: Promise<void> = Promise.resolve()
+  private rescanPriorRootBindings:
+    ReadonlyMap<string, PriorRootAuthority> | null = null
   private readonly onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
   private readonly activatePower: typeof activatePowerExtension
 
@@ -728,6 +746,19 @@ export class ExtensionRegistry {
       extensionId: manifest.id,
       manifestEnabled: manifest._enabled,
     })
+    const priorRootBinding = this.rescanPriorRootBindings?.get(manifest.id)
+    if (
+      priorRootBinding
+      && rootReplacementRequiresRestriction(
+        priorRootBinding,
+        rootBinding,
+        manifest.tier === 'power',
+      )
+    ) {
+      // Do not execute a same-id replacement before rescan has durably revoked
+      // the previous installation's authority.
+      manifest._enabled = false
+    }
 
     // Namespace tile types with ext: prefix
     normalizeTileTypes(manifest)
@@ -834,6 +865,17 @@ export class ExtensionRegistry {
       extensionId: manifest.id,
       manifestEnabled: manifest._enabled,
     })
+    const priorRootBinding = this.rescanPriorRootBindings?.get(manifest.id)
+    if (
+      priorRootBinding
+      && rootReplacementRequiresRestriction(
+        priorRootBinding,
+        rootBinding,
+        manifest.tier === 'power',
+      )
+    ) {
+      manifest._enabled = false
+    }
 
     // Namespace tiles
     normalizeTileTypes(manifest)
