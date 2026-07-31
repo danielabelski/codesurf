@@ -47,6 +47,57 @@ export interface ExtensionMediaRootBinding {
   readonly birthtimeMs: number | bigint
 }
 
+export interface ExtensionMediaResourceAttestation {
+  readonly digest: string
+  readonly dev: number | bigint
+  readonly ino: number | bigint
+  readonly mode: number | bigint
+  readonly size: number
+  readonly mtimeMs: number | bigint
+  readonly ctimeMs: number | bigint
+  readonly birthtimeMs: number | bigint
+}
+
+export interface ExtensionMediaResourceAttestations extends Iterable<
+  readonly [string, ExtensionMediaResourceAttestation]
+> {
+  readonly size: number
+  get(path: string): ExtensionMediaResourceAttestation | undefined
+  has(path: string): boolean
+}
+
+export interface ExtensionMediaAttestation {
+  readonly identity: string
+  readonly resources: ExtensionMediaResourceAttestations
+}
+
+class ImmutableResourceAttestations implements ExtensionMediaResourceAttestations {
+  readonly #resources: ReadonlyMap<string, ExtensionMediaResourceAttestation>
+
+  constructor(resources: ReadonlyMap<string, ExtensionMediaResourceAttestation>) {
+    this.#resources = new Map(resources)
+    Object.freeze(this)
+  }
+
+  get size(): number {
+    return this.#resources.size
+  }
+
+  get(path: string): ExtensionMediaResourceAttestation | undefined {
+    return this.#resources.get(path)
+  }
+
+  has(path: string): boolean {
+    return this.#resources.has(path)
+  }
+
+  [Symbol.iterator](): IterableIterator<
+    readonly [string, ExtensionMediaResourceAttestation]
+  > {
+    return this.#resources[Symbol.iterator]()
+  }
+}
+
 export class ExtensionMediaIdentityError extends Error {
   constructor(message: string) {
     super(message)
@@ -250,6 +301,7 @@ async function hashDirectory(
   relativeDirectory: string,
   depth: number,
   budget: IdentityBudget,
+  resources: Map<string, ExtensionMediaResourceAttestation>,
 ): Promise<void> {
   if (depth > MAX_EXTENSION_IDENTITY_DEPTH) {
     fail(`Extension exceeds media identity depth budget (${MAX_EXTENSION_IDENTITY_DEPTH})`)
@@ -306,6 +358,7 @@ async function hashDirectory(
         relativePath,
         depth + 1,
         budget,
+        resources,
       )
       continue
     }
@@ -317,6 +370,7 @@ async function hashDirectory(
         relativePath,
         entryBefore,
         budget,
+        resources,
       )
       continue
     }
@@ -341,6 +395,7 @@ async function hashFile(
   relativePath: string,
   before: FileInfo,
   budget: IdentityBudget,
+  resources: Map<string, ExtensionMediaResourceAttestation>,
 ): Promise<void> {
   const fileSize = safeFileSize(before, relativePath)
   budget.files += 1
@@ -382,6 +437,7 @@ async function hashFile(
     ])
 
     const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES)
+    const resourceHash = createHash('sha256')
     let offset = 0
     while (offset < openedSize) {
       const length = Math.min(buffer.byteLength, openedSize - offset)
@@ -390,6 +446,7 @@ async function hashFile(
         fail(`Extension file changed during media identity read: ${absolutePath}`)
       }
       hash.update(buffer.subarray(0, bytesRead))
+      resourceHash.update(buffer.subarray(0, bytesRead))
       offset += bytesRead
     }
 
@@ -398,6 +455,16 @@ async function hashFile(
       fail(`Extension file changed during media identity read: ${absolutePath}`)
     }
     await assertStablePath(canonicalRoot, absolutePath, opened)
+    resources.set(relativePath, Object.freeze({
+      digest: `sha256:${resourceHash.digest('hex')}`,
+      dev: opened.dev,
+      ino: opened.ino,
+      mode: opened.mode,
+      size: openedSize,
+      mtimeMs: opened.mtimeMs,
+      ctimeMs: opened.ctimeMs,
+      birthtimeMs: opened.birthtimeMs,
+    }))
   } finally {
     await handle.close().catch(() => undefined)
   }
@@ -411,11 +478,11 @@ async function hashFile(
  * no-follow handles. Symlinks contribute their link text and metadata but their
  * targets are never traversed or read.
  */
-export async function computeExtensionMediaIdentity(
+export async function computeExtensionMediaAttestation(
   extensionRoot: string,
   manifest: ExtensionManifest,
   expectedRoot?: ExtensionMediaRootBinding,
-): Promise<string> {
+): Promise<ExtensionMediaAttestation> {
   const rootBinding = await captureExtensionMediaRoot(extensionRoot)
   if (expectedRoot && !sameRootBinding(rootBinding, expectedRoot)) {
     fail(`Extension root changed before computing media identity: ${rootBinding.lexicalRoot}`)
@@ -440,6 +507,7 @@ export async function computeExtensionMediaIdentity(
   }
 
   const hash = createHash('sha256')
+  const resources = new Map<string, ExtensionMediaResourceAttestation>()
   updateRecord(hash, [
     'codesurf-extension-media-identity-v2',
     canonicalRoot,
@@ -455,8 +523,22 @@ export async function computeExtensionMediaIdentity(
     '',
     0,
     { entries: 0, files: 0, totalBytes: 0 },
+    resources,
   )
   await assertStablePath(canonicalRoot, canonicalRoot, rootStat)
   await assertRootBindingCurrent(rootBinding)
-  return `sha256:${hash.digest('hex')}`
+  return Object.freeze({
+    identity: `sha256:${hash.digest('hex')}`,
+    resources: new ImmutableResourceAttestations(resources),
+  })
+}
+
+export async function computeExtensionMediaIdentity(
+  extensionRoot: string,
+  manifest: ExtensionManifest,
+  expectedRoot?: ExtensionMediaRootBinding,
+): Promise<string> {
+  return (
+    await computeExtensionMediaAttestation(extensionRoot, manifest, expectedRoot)
+  ).identity
 }
