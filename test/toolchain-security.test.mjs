@@ -133,6 +133,7 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
   assert.match(ciWorkflow, /npm ci --omit=dev/)
   assert.match(ciWorkflow, /npm run build:web && npm run verify:web-build/)
   assert.match(ciWorkflow, /npm run test:npm-package/)
+  assert.match(ciWorkflow, /npm run smoke:electrobun/)
   assert.match(ciWorkflow, /npm --prefix apps\/chat-app run build/)
 
   const manifest = await readJson(resolve(ROOT_DIR, 'package.json'))

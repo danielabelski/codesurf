@@ -121,6 +121,9 @@ jobs:
       - name: Build, install, and smoke npm package
         run: npm run test:npm-package
 
+      - name: Build and smoke Electrobun runtime
+        run: npm run smoke:electrobun
+
       - name: Run Playwright E2E suite
         run: npm run test:e2e
 
