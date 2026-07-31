@@ -13,6 +13,7 @@ import {
   setWorkspaceRelayWorkContext,
   spawnWorkspaceRelayAgent,
   startRelayServices,
+  stopAllRelayServices,
   stopWorkspaceRelayAgent,
   syncWorkspaceRelayParticipants,
   updateWorkspaceRelayMessageStatus,
@@ -137,6 +138,7 @@ export function registerRelayIPC(): void {
 
 export function unregisterRelayIPC(): void {
   deactivateCanvasRelayProjectionSync()
+  setRelayHostActive(false)
   for (const ch of RELAY_CHANNELS) {
     try {
       ipcMain.removeHandler(ch)
@@ -144,5 +146,8 @@ export function unregisterRelayIPC(): void {
       /* ignore */
     }
   }
-  setRelayHostActive(false)
+  // Removing the ordinary entry points and invalidating the service generation
+  // are one lifecycle operation. Any handler already suspended in init/spawn
+  // observes the inactive generation before it can publish fresh resources.
+  stopAllRelayServices()
 }

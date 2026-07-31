@@ -50,7 +50,7 @@ import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
 import { stopAllRelayServices } from './relay/service'
-import { deactivateCanvasRelayProjectionSync } from './relay/canvasProjection'
+import { unregisterRelayIPC } from './ipc/relay'
 import { normalizeSafeExternalUrl } from './utils/externalUrl'
 import { log } from './utils/logger.ts'
 
@@ -970,7 +970,7 @@ function runAppShutdownCleanup(): void {
     console.warn('[MCP] Failed to stop local server during shutdown:', error)
   })
   stopAllCollabWatchers()
-  deactivateCanvasRelayProjectionSync()
+  unregisterRelayIPC()
   extensionRegistry?.deactivateAll()
   stopAllRelayServices()
   killAllChatProcesses()
