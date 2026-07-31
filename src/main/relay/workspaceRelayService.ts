@@ -8,6 +8,7 @@ import type {
   RelaySpawnRequest,
   RelayTurnInput,
 } from '../../../packages/codesurf-relay/src/index.ts'
+import type { TileState } from '../../shared/types'
 
 export type RelayOperationGuard = {
   isActive: () => boolean
@@ -94,6 +95,94 @@ export class WorkspaceRelayService {
     )
     this.assertActive(lifecycleGuard)
     return instance
+  }
+
+  async syncWorkspaceRelayParticipants(
+    workspaceId: string,
+    workspacePath: string,
+    tiles: TileState[],
+    guard?: RelayOperationGuard,
+  ): Promise<RelayParticipant[]> {
+    let lifecycleGuard: RelayLifecycleGuard
+    try {
+      lifecycleGuard = this.captureOperationGuard(guard)
+    } catch (error) {
+      if (error instanceof RelayOperationCancelledError) return []
+      throw error
+    }
+
+    try {
+      const { relay } = await this.getWorkspaceRelayForGuard(
+        workspacePath,
+        lifecycleGuard,
+      )
+      const operationContext = this.createRelayOperationContext(lifecycleGuard)
+      const seen = new Set<string>()
+
+      for (const tile of tiles) {
+        if (tile.type !== 'chat') continue
+        const tileState = await this.awaitGuarded(
+          () => this.dependencies.readTileState(workspaceId, tile.id),
+          lifecycleGuard,
+        )
+        const provider = tileState?.provider ?? 'claude'
+        const model = tileState?.model ?? undefined
+        const agentMode = Boolean(tileState?.agentMode)
+        const name = (tileState?.title as string | undefined)
+          ?? `Agent ${tile.id.slice(-4)}`
+
+        seen.add(tile.id)
+        await this.awaitGuarded(
+          () => relay.upsertParticipant({
+            id: tile.id,
+            name,
+            kind: 'agent',
+            status: agentMode ? 'ready' : 'stopped',
+            tileId: tile.id,
+            provider,
+            model,
+            channels: [],
+            metadata: {
+              tileType: tile.type,
+              x: tile.x,
+              y: tile.y,
+              width: tile.width,
+              height: tile.height,
+              agentMode,
+            },
+          }, operationContext),
+          lifecycleGuard,
+        )
+      }
+
+      const existing = await this.awaitGuarded(
+        () => relay.listParticipants(),
+        lifecycleGuard,
+      )
+      const stale = existing.filter(participant => (
+        participant.kind === 'agent'
+        && participant.tileId
+        && !seen.has(participant.tileId)
+      ))
+      for (const participant of stale) {
+        await this.awaitGuarded(
+          () => relay.setParticipantStatus(
+            participant.id,
+            'stopped',
+            operationContext,
+          ),
+          lifecycleGuard,
+        )
+      }
+
+      return await this.awaitGuarded(
+        () => relay.listParticipants(),
+        lifecycleGuard,
+      )
+    } catch (error) {
+      if (error instanceof RelayOperationCancelledError) return []
+      throw error
+    }
   }
 
   stopAll(): void {
