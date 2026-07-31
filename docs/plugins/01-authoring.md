@@ -15,7 +15,7 @@ Create `~/.codesurf/extensions/my-plugin/extension.json` (or
   "name": "My Plugin",
   "version": "1.0.0",
   "manifestVersion": 2,
-  "tier": "safe",                 // safe = sandboxed iframe; power = node main.js
+  "tier": "safe",                 // safe = sandboxed iframe; power = trusted Node main.js
   "contributes": {
     "commands": [
       { "id": "my.hi", "title": "My: Say hi", "slash": "hi", "run": { "method": "hi" } }
@@ -124,6 +124,20 @@ not currently documented as a public registry dependency. External plugins shoul
 use `extension.json` and the runtime bridge until a published package is announced.
 
 ## Power tier (`tier: "power"` + `main.js`)
+
+POWER plugins are native-code-equivalent dependencies. Non-bundled POWER
+plugins run in an Electron utility-process child by default, which isolates a
+crash from the main process but is **not a security sandbox**. Plugin code
+retains ambient Node.js access, including filesystem, process spawning,
+networking, environment variables, and arbitrary package imports.
+
+Manifest capability requests and the grants recorded at enable time govern
+access to brokered **CodeSurf APIs** such as canvas, relay, and host filesystem
+methods. They do not confine Node built-ins such as `node:fs` or
+`node:child_process`. Review POWER code as carefully as a native application
+before enabling it. Bundled POWER plugins currently use the legacy in-main
+path, and `CODESURF_POWER_BROKER=0` is an explicit compatibility escape hatch
+that also selects that legacy path.
 
 ```js
 module.exports = {
