@@ -115,6 +115,630 @@ test('streamJobEvents parses SSE without putting bearer token in the URL', async
   assert.equal(events[0].text, 'hi')
 })
 
+test('streamJobEvents reconnects active EOF from the last delivered sequence and deduplicates replay', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  let streamAttempt = 0
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since'), options })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'running', lastSequence: 4 })
+    }
+    assert.equal(parsed.pathname, '/chat/job/events')
+    streamAttempt += 1
+    const chunks = streamAttempt === 1
+      ? [
+          'data: {"jobId":"job-1","sequence":4,"timestamp":1,"type":"text","text":"first"}\n\n',
+        ]
+      : [
+          'data: {"jobId":"job-1","sequence":4,"timestamp":1,"type":"text","text":"duplicate"}\n\n',
+          'data: {"jobId":"job-1","sequence":5,"timestamp":2,"type":"text","text":"second"}\n\n',
+          'data: {"jobId":"job-1","sequence":6,"timestamp":3,"type":"done"}\n\n',
+        ]
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await client.streamJobEvents({
+    jobId: 'job-1',
+    since: 3,
+    reconnectDelayMs: 0,
+    onEvent: event => {
+      events.push(event)
+    },
+  })
+
+  assert.deepEqual(events.map(event => event.sequence), [4, 5, 6])
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['3', '4'],
+  )
+  assert.equal(calls.filter(call => call.path === '/chat/job/state').length, 1)
+})
+
+test('streamJobEvents recovers a transient sequence gap from the last contiguous event', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  let streamAttempt = 0
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since') })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'running', lastSequence: 3 })
+    }
+    streamAttempt += 1
+    const chunks = streamAttempt === 1
+      ? [
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+      : [
+          'data: {"jobId":"job-1","sequence":2,"timestamp":2,"type":"text","text":"two"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await client.streamJobEvents({
+    jobId: 'job-1',
+    reconnectDelayMs: 0,
+    onEvent(event) {
+      events.push(event)
+    },
+  })
+
+  assert.deepEqual(events.map(event => event.sequence), [1, 2, 3])
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['0', '1'],
+  )
+})
+
+test('streamJobEvents never acknowledges or delivers done across a persistent sequence gap', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since') })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 3 })
+    }
+    const since = Number(parsed.searchParams.get('since') ?? 0)
+    const chunks = since === 0
+      ? [
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ]
+      : ['data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n']
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      maxReconnectAttempts: 3,
+      reconnectDelayMs: 0,
+      onEvent(event) {
+        events.push(event)
+      },
+    }),
+    /sequence gap for job job-1: expected 2, received 3/i,
+  )
+
+  assert.deepEqual(events.map(event => event.sequence), [1])
+  assert.equal(events.some(event => event.type === 'done'), false)
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['0', '1'],
+  )
+})
+
+test('streamJobEvents rejects a recorded gap when terminal metadata is stale', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push(parsed.pathname)
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 1 })
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"one"}\n\n',
+        ))
+        controller.enqueue(encoder.encode(
+          'data: {"jobId":"job-1","sequence":3,"timestamp":3,"type":"done"}\n\n',
+        ))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      reconnectDelayMs: 0,
+      onEvent(event) {
+        events.push(event)
+      },
+    }),
+    /sequence gap/i,
+  )
+
+  assert.deepEqual(events.map(event => event.sequence), [1])
+  assert.equal(events.some(event => event.type === 'done'), false)
+  assert.equal(calls.filter(path => path === '/chat/job/events').length, 1)
+  assert.equal(calls.filter(path => path === '/chat/job/state').length, 1)
+})
+
+test('streamJobEvents performs one terminal catch-up replay and delivers failed error plus done', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  let streamAttempt = 0
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push({ path: parsed.pathname, since: parsed.searchParams.get('since') })
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'failed', lastSequence: 6 })
+    }
+    streamAttempt += 1
+    const chunks = streamAttempt === 1
+      ? ['data: {"jobId":"job-1","sequence":4,"timestamp":1,"type":"text","text":"before failure"}\n\n']
+      : [
+          'data: {"jobId":"job-1","sequence":5,"timestamp":2,"type":"error","error":"provider failed"}\n\n',
+          'data: {"jobId":"job-1","sequence":6,"timestamp":3,"type":"done"}\n\n',
+        ]
+    return new Response(new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  const events = []
+  await client.streamJobEvents({
+    jobId: 'job-1',
+    since: 3,
+    maxReconnectAttempts: 0,
+    reconnectDelayMs: 0,
+    onEvent: event => {
+      events.push(event)
+    },
+  })
+
+  assert.deepEqual(events.map(event => event.type), ['text', 'error', 'done'])
+  assert.deepEqual(events.map(event => event.sequence), [4, 5, 6])
+  assert.deepEqual(
+    calls.filter(call => call.path === '/chat/job/events').map(call => call.since),
+    ['3', '4'],
+  )
+  assert.equal(calls.filter(call => call.path === '/chat/job/state').length, 1)
+})
+
+test('streamJobEvents bounds terminal catch-up to one replay when the terminal frame stays missing', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    calls.push(parsed.pathname)
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'completed', lastSequence: 1 })
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      maxReconnectAttempts: 10,
+      reconnectDelayMs: 0,
+      onEvent() {},
+    }),
+    /terminal replay ended before delivering the terminal event/i,
+  )
+
+  assert.equal(calls.filter(path => path === '/chat/job/events').length, 2)
+  assert.equal(calls.filter(path => path === '/chat/job/state').length, 1)
+})
+
+test('streamJobEvents cancels and releases the reader when a consumer callback fails', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  let cancelCalls = 0
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(
+        'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"text","text":"hello"}\n\n',
+      ))
+    },
+    cancel() {
+      cancelCalls += 1
+    },
+  }), { status: 200 })
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      reconnectDelayMs: 0,
+      onEvent() {
+        throw new Error('consumer failed')
+      },
+    }),
+    /consumer failed/,
+  )
+  assert.equal(cancelCalls, 1)
+})
+
+test('streamJobEvents bounds active EOF reconnect attempts and never busy-loops', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url))
+    calls.push(parsed.pathname)
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'running', lastSequence: 0 })
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.streamJobEvents({
+      jobId: 'job-1',
+      maxReconnectAttempts: 2,
+      reconnectDelayMs: 1,
+      onEvent() {},
+    }),
+    /ended unexpectedly/i,
+  )
+
+  assert.equal(calls.filter(path => path === '/chat/job/events').length, 3)
+  assert.equal(calls.filter(path => path === '/chat/job/state').length, 3)
+})
+
+test('streamJobEvents aborts reconnect backoff without issuing another request', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async (url) => {
+    const parsed = new URL(String(url))
+    calls.push(parsed.pathname)
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ id: 'job-1', status: 'running', lastSequence: 0 })
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+
+  const controller = new AbortController()
+  const client = makeClient(calls)
+  const streamPromise = client.streamJobEvents({
+    jobId: 'job-1',
+    signal: controller.signal,
+    maxReconnectAttempts: 3,
+    reconnectDelayMs: 10_000,
+    onEvent() {},
+  })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  controller.abort()
+
+  await assert.rejects(streamPromise, error => error?.name === 'AbortError')
+  assert.equal(calls.filter(path => path === '/chat/job/events').length, 1)
+})
+
+test('streamJobEvents aborts promptly while daemon startup is slow and observes the abandoned startup rejection', async t => {
+  const originalFetch = globalThis.fetch
+  const fetchCalls = []
+  const unhandled = []
+  let rejectStartup
+  const startup = new Promise((_, reject) => {
+    rejectStartup = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+  globalThis.fetch = async (...args) => {
+    fetchCalls.push(args)
+    throw new Error('fetch should not run')
+  }
+  const client = createDaemonClient({
+    ensureRunning: () => startup,
+    getStatus: async () => ({ running: false, info: null }),
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const startedAt = Date.now()
+  const stream = client.streamJobEvents({
+    jobId: 'job-1',
+    signal: controller.signal,
+    onEvent() {},
+  })
+  setTimeout(() => controller.abort(), 10)
+
+  await assert.rejects(stream, error => error?.name === 'AbortError')
+  assert.ok(Date.now() - startedAt < 250)
+  assert.equal(fetchCalls.length, 0)
+
+  rejectStartup(new Error('late startup failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
+test('request aborts promptly while daemon startup is slow', async t => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  let fetchCalled = false
+  globalThis.fetch = async () => {
+    fetchCalled = true
+    throw new Error('fetch should not run')
+  }
+  const startup = new Promise(() => {})
+  const client = createDaemonClient({
+    ensureRunning: () => startup,
+    getStatus: async () => ({ running: false, info: null }),
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const request = client.request('/chat/job/state?jobId=job-1', {
+    signal: controller.signal,
+  })
+  setTimeout(() => controller.abort(), 10)
+
+  await assert.rejects(request, error => error?.name === 'AbortError')
+  assert.equal(fetchCalled, false)
+})
+
+test('request aborts promptly while daemon status recovery is slow and observes its late rejection', async t => {
+  const originalFetch = globalThis.fetch
+  const unhandled = []
+  let markStatusStarted
+  let rejectStatus
+  const statusStarted = new Promise(resolve => {
+    markStatusStarted = resolve
+  })
+  const pendingStatus = new Promise((_, reject) => {
+    rejectStatus = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+  globalThis.fetch = async () => {
+    throw new Error('transport unavailable')
+  }
+  const client = createDaemonClient({
+    ensureRunning: async () => ({
+      pid: 123,
+      port: 4567,
+      token: 'secret-token',
+      startedAt: new Date(0).toISOString(),
+      protocolVersion: 1,
+      appVersion: 'test',
+    }),
+    getStatus: () => {
+      markStatusStarted()
+      return pendingStatus
+    },
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const request = client.request('/chat/job/state?jobId=job-1', {
+    signal: controller.signal,
+  })
+  await statusStarted
+  controller.abort()
+
+  await assert.rejects(request, error => error?.name === 'AbortError')
+  rejectStatus(new Error('late status failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
+test('streamJobEvents aborts promptly while post-EOF status recovery is slow', async t => {
+  const originalFetch = globalThis.fetch
+  let markStatusStarted
+  const statusStarted = new Promise(resolve => {
+    markStatusStarted = resolve
+  })
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = async url => {
+    const parsed = new URL(String(url))
+    if (parsed.pathname === '/chat/job/state') {
+      return jsonResponse({ error: 'job state unavailable' }, 404)
+    }
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.close()
+      },
+    }), { status: 200 })
+  }
+  const client = createDaemonClient({
+    ensureRunning: async () => ({
+      pid: 123,
+      port: 4567,
+      token: 'secret-token',
+      startedAt: new Date(0).toISOString(),
+      protocolVersion: 1,
+      appVersion: 'test',
+    }),
+    getStatus: () => {
+      markStatusStarted()
+      return new Promise(() => {})
+    },
+    invalidate() {},
+  })
+  const controller = new AbortController()
+  const stream = client.streamJobEvents({
+    jobId: 'job-1',
+    signal: controller.signal,
+    reconnectDelayMs: 0,
+    onEvent() {},
+  })
+  await statusStarted
+  controller.abort()
+
+  await assert.rejects(stream, error => error?.name === 'AbortError')
+})
+
+test('never-settling reader cancellation cannot block terminal or consumer-error settlement', async t => {
+  const originalFetch = globalThis.fetch
+  const unhandled = []
+  let fetchAttempt = 0
+  let rejectFirstCancel
+  const firstCancel = new Promise((_, reject) => {
+    rejectFirstCancel = reject
+  })
+  const onUnhandled = reason => {
+    unhandled.push(reason)
+  }
+  process.on('unhandledRejection', onUnhandled)
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    process.off('unhandledRejection', onUnhandled)
+  })
+
+  const encoder = new TextEncoder()
+  globalThis.fetch = async () => {
+    fetchAttempt += 1
+    const terminal = fetchAttempt === 1
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(terminal
+          ? 'data: {"jobId":"job-1","sequence":1,"timestamp":1,"type":"done"}\n\n'
+          : 'data: {"jobId":"job-2","sequence":1,"timestamp":1,"type":"text","text":"hello"}\n\n'))
+      },
+      cancel() {
+        return terminal ? firstCancel : new Promise(() => {})
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient([])
+  await Promise.race([
+    client.streamJobEvents({
+      jobId: 'job-1',
+      onEvent() {},
+    }),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('terminal settlement waited for reader.cancel()')),
+      250,
+    )),
+  ])
+
+  await assert.rejects(
+    Promise.race([
+      client.streamJobEvents({
+        jobId: 'job-2',
+        onEvent() {
+          throw new Error('consumer failed promptly')
+        },
+      }),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('consumer error waited for reader.cancel()')),
+        250,
+      )),
+    ]),
+    /consumer failed promptly/,
+  )
+
+  rejectFirstCancel(new Error('late cancel failure'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(unhandled, [])
+})
+
 test('read-only daemon requests retry once after a transient response', async t => {
   const originalFetch = globalThis.fetch
   const calls = []
