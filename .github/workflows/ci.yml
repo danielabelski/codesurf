@@ -104,7 +104,7 @@ jobs:
         run: npm run lint && npm run format:check
 
       - name: Typecheck
-        run: npm run typecheck
+        run: npm run typecheck:go && npm run typecheck:tsc
 
       - name: Run authoritative test gate
         run: npm test
@@ -114,6 +114,12 @@ jobs:
 
       - name: Build and verify web/PWA artifacts
         run: npm run build:web && npm run verify:web-build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Smoke built web runtime
+        run: npm run test:web-smoke
 
       - name: Build standalone chat app
         run: npm --prefix apps/chat-app run build

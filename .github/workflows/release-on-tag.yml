@@ -87,8 +87,52 @@ jobs:
       - name: Lint and verify formatting
         run: npm run lint && npm run format:check
 
+      - name: Typecheck release sources
+        run: npm run typecheck:go && npm run typecheck:tsc
+
       - name: Run release gate tests
         run: npm test
+
+      - name: Build Electron app for E2E
+        run: npm run build
+
+      - name: Build and verify web/PWA artifacts
+        run: npm run build:web && npm run verify:web-build
+
+      - name: Build standalone chat app
+        run: npm --prefix apps/chat-app run build
+
+      - name: Build, install, and smoke npm package
+        run: npm run test:npm-package
+
+      - name: Build and smoke Electrobun runtime
+        run: npm run smoke:electrobun
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run Electron Playwright E2E suite
+        run: npm run test:e2e
+
+      - name: Smoke built web runtime
+        run: npm run test:web-smoke
+
+      - name: Verify production-only install in an isolated worktree
+        shell: bash
+        run: |
+          VERIFY_PARENT="$(mktemp -d "${RUNNER_TEMP}/codesurf-production-install.XXXXXX")"
+          VERIFY_WORKTREE="${VERIFY_PARENT}/worktree"
+          cleanup() {
+            if [ -d "${VERIFY_WORKTREE}" ]; then
+              git worktree remove --force "${VERIFY_WORKTREE}"
+            fi
+            rmdir "${VERIFY_PARENT}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "${VERIFY_WORKTREE}" HEAD
+          npm --prefix "${VERIFY_WORKTREE}" ci --omit=dev
+          npm --prefix "${VERIFY_WORKTREE}" audit --omit=dev --audit-level=low
 
       - name: Build and publish GitHub release
         run: npm run release:github
