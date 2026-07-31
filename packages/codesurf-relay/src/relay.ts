@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { promises as fs } from 'node:fs'
 import { basename, join } from 'node:path'
+import { writeFilesAtomically } from './atomicFileWrites'
 import { parseRelayMessage, renderRelayMessage } from './markdown'
 import type {
   RelayChannel,
@@ -14,6 +15,7 @@ import type {
   RelayMessageListItem,
   RelayMessageMeta,
   RelayMessageStatus,
+  RelayOperationContext,
   RelayParticipant,
   RelayParticipantStatus,
   RelayPriority,
@@ -92,9 +94,33 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   }
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
-  await ensureDir(join(path, '..'))
-  await fs.writeFile(path, JSON.stringify(value, null, 2))
+function assertActive(context?: RelayOperationContext): void {
+  context?.assertActive()
+}
+
+async function awaitActive<T>(
+  operation: () => Promise<T>,
+  context?: RelayOperationContext,
+): Promise<T> {
+  assertActive(context)
+  try {
+    const result = await operation()
+    assertActive(context)
+    return result
+  } catch (error) {
+    assertActive(context)
+    throw error
+  }
+}
+
+async function writeJson(
+  path: string,
+  value: unknown,
+  context?: RelayOperationContext,
+): Promise<void> {
+  await writeFilesAtomically([
+    { path, content: JSON.stringify(value, null, 2) },
+  ], context)
 }
 
 async function readMessage(path: string, mailbox: RelayMailbox, filename: string): Promise<RelayMessage | null> {
@@ -123,20 +149,27 @@ export class CodesurfRelay {
     }
   }
 
-  async init(): Promise<void> {
+  async init(context?: RelayOperationContext): Promise<void> {
+    assertActive(context)
     if (this.initialized) return
-    if (this.initializing) return this.initializing
+    if (this.initializing) {
+      await awaitActive(() => this.initializing!, context)
+      return
+    }
 
-    this.initializing = (async () => {
-      await Promise.all([
+    const initializing = (async () => {
+      await awaitActive(() => Promise.all([
         ensureDir(this.paths.participants),
         ensureDir(this.paths.channels),
         ensureDir(this.paths.archive),
         ensureDir(this.paths.relationships),
-      ])
+      ]).then(() => undefined), context)
 
       const systemFile = this.participantFile('system')
-      const existing = await readJson<RelayParticipant | null>(systemFile, null)
+      const existing = await awaitActive(
+        () => readJson<RelayParticipant | null>(systemFile, null),
+        context,
+      )
       if (!existing) {
         const stamp = nowStamp()
         const systemParticipant: RelayParticipant = {
@@ -149,21 +182,26 @@ export class CodesurfRelay {
           readyTs: stamp.ts,
           metadata: {},
         }
-        await Promise.all([
+        await awaitActive(() => Promise.all([
           ensureDir(this.participantMailboxDir('system', 'inbox')),
           ensureDir(this.participantMailboxDir('system', 'sent')),
           ensureDir(this.participantMailboxDir('system', 'memory')),
           ensureDir(this.participantMailboxDir('system', 'bin')),
           ensureDir(join(this.participantDir('system'), 'cursors')),
-        ])
-        await writeJson(systemFile, systemParticipant)
+        ]).then(() => undefined), context)
+        await writeJson(systemFile, systemParticipant, context)
       }
 
+      assertActive(context)
       this.initialized = true
-      this.initializing = null
     })()
+    this.initializing = initializing
 
-    return this.initializing
+    try {
+      await awaitActive(() => initializing, context)
+    } finally {
+      if (this.initializing === initializing) this.initializing = null
+    }
   }
 
   on(listener: (event: RelayEvent) => void): () => void {
@@ -171,7 +209,12 @@ export class CodesurfRelay {
     return () => this.events.off('event', listener)
   }
 
-  private emit<K extends keyof RelayEventMap>(type: K, payload: RelayEventMap[K]): void {
+  private emit<K extends keyof RelayEventMap>(
+    type: K,
+    payload: RelayEventMap[K],
+    context?: RelayOperationContext,
+  ): void {
+    assertActive(context)
     this.events.emit('event', { type, timestamp: Date.now(), payload } as RelayEvent)
   }
 
@@ -211,26 +254,47 @@ export class CodesurfRelay {
     return join(this.workspacePath, '.codesurf', tileId, 'messages', mailbox)
   }
 
-  async listParticipants(): Promise<RelayParticipant[]> {
-    await this.init()
+  async listParticipants(
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant[]> {
+    await this.init(context)
     try {
-      const entries = await fs.readdir(this.paths.participants)
-      const participants = await Promise.all(entries.map(id => readJson<RelayParticipant | null>(this.participantFile(id), null)))
+      const entries = await awaitActive(
+        () => fs.readdir(this.paths.participants),
+        context,
+      )
+      const participants = await awaitActive(
+        () => Promise.all(entries.map(id => (
+          readJson<RelayParticipant | null>(this.participantFile(id), null)
+        ))),
+        context,
+      )
       return participants.filter(Boolean).sort((a, b) => a!.name.localeCompare(b!.name)) as RelayParticipant[]
-    } catch {
+    } catch (error) {
+      assertActive(context)
       return []
     }
   }
 
-  async getParticipant(id: string): Promise<RelayParticipant | null> {
-    await this.init()
-    return readJson<RelayParticipant | null>(this.participantFile(id), null)
+  async getParticipant(
+    id: string,
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant | null> {
+    await this.init(context)
+    return awaitActive(
+      () => readJson<RelayParticipant | null>(this.participantFile(id), null),
+      context,
+    )
   }
 
-  async upsertParticipant(input: Partial<RelayParticipant> & Pick<RelayParticipant, 'id' | 'name' | 'kind' | 'status'>): Promise<RelayParticipant> {
+  async upsertParticipant(
+    input: Partial<RelayParticipant> & Pick<RelayParticipant, 'id' | 'name' | 'kind' | 'status'>,
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant> {
+    assertActive(context)
     validateParticipantId(input.id)
-    await this.init()
-    const existing = await this.getParticipant(input.id)
+    await this.init(context)
+    const existing = await this.getParticipant(input.id, context)
     const participant: RelayParticipant = {
       id: input.id,
       name: input.name,
@@ -251,29 +315,35 @@ export class CodesurfRelay {
       metadata: { ...(existing?.metadata ?? {}), ...(input.metadata ?? {}) },
     }
 
-    await Promise.all([
+    await awaitActive(() => Promise.all([
       ensureDir(this.participantMailboxDir(participant.id, 'inbox')),
       ensureDir(this.participantMailboxDir(participant.id, 'sent')),
       ensureDir(this.participantMailboxDir(participant.id, 'memory')),
       ensureDir(this.participantMailboxDir(participant.id, 'bin')),
       ensureDir(join(this.participantDir(participant.id), 'cursors')),
-    ])
-    await writeJson(this.participantFile(participant.id), participant)
+    ]).then(() => undefined), context)
+    await writeJson(this.participantFile(participant.id), participant, context)
 
     for (const channel of participant.channels) {
-      await this.joinChannel(channel, participant.id)
+      await this.joinChannel(channel, participant.id, context)
     }
 
-    this.emit('participant_upserted', { participant })
+    this.emit('participant_upserted', { participant }, context)
     if (participant.status === 'ready') {
-      this.emit('ready', { participantId: participant.id })
+      this.emit('ready', { participantId: participant.id }, context)
     }
-    await this.writeRelationshipsSnapshot()
+    await this.writeRelationshipsSnapshot(context)
+    assertActive(context)
     return participant
   }
 
-  async setParticipantStatus(participantId: string, status: RelayParticipantStatus): Promise<RelayParticipant> {
-    const participant = await this.getParticipant(participantId)
+  async setParticipantStatus(
+    participantId: string,
+    status: RelayParticipantStatus,
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant> {
+    assertActive(context)
+    const participant = await this.getParticipant(participantId, context)
     if (!participant) throw new Error(`Unknown participant: ${participantId}`)
     const stamp = nowStamp()
     const next: RelayParticipant = {
@@ -286,13 +356,18 @@ export class CodesurfRelay {
       stoppedAt: ['done', 'stopped', 'error'].includes(status) ? stamp.iso : participant.stoppedAt,
       stoppedTs: ['done', 'stopped', 'error'].includes(status) ? stamp.ts : participant.stoppedTs,
     }
-    await this.upsertParticipant(next)
-    this.emit('participant_status', { participantId, status })
+    await this.upsertParticipant(next, context)
+    this.emit('participant_status', { participantId, status }, context)
     return next
   }
 
-  async updateWorkContext(participantId: string, work: RelayWorkContext): Promise<RelayParticipant> {
-    const participant = await this.getParticipant(participantId)
+  async updateWorkContext(
+    participantId: string,
+    work: RelayWorkContext,
+    context?: RelayOperationContext,
+  ): Promise<RelayParticipant> {
+    assertActive(context)
+    const participant = await this.getParticipant(participantId, context)
     if (!participant) throw new Error(`Unknown participant: ${participantId}`)
     const stamp = nowStamp()
     return this.upsertParticipant({
@@ -309,28 +384,49 @@ export class CodesurfRelay {
         updatedAt: stamp.iso,
         updatedTs: stamp.ts,
       },
-    })
+    }, context)
   }
 
-  async listChannels(): Promise<RelayChannel[]> {
-    await this.init()
+  async listChannels(
+    context?: RelayOperationContext,
+  ): Promise<RelayChannel[]> {
+    await this.init(context)
     try {
-      const entries = await fs.readdir(this.paths.channels)
-      const channels = await Promise.all(entries.map(id => readJson<RelayChannel | null>(this.channelFile(id), null)))
+      const entries = await awaitActive(
+        () => fs.readdir(this.paths.channels),
+        context,
+      )
+      const channels = await awaitActive(
+        () => Promise.all(entries.map(id => (
+          readJson<RelayChannel | null>(this.channelFile(id), null)
+        ))),
+        context,
+      )
       return channels.filter(Boolean).sort((a, b) => a!.name.localeCompare(b!.name)) as RelayChannel[]
-    } catch {
+    } catch (error) {
+      assertActive(context)
       return []
     }
   }
 
-  async getChannel(id: string): Promise<RelayChannel | null> {
-    await this.init()
-    return readJson<RelayChannel | null>(this.channelFile(id), null)
+  async getChannel(
+    id: string,
+    context?: RelayOperationContext,
+  ): Promise<RelayChannel | null> {
+    await this.init(context)
+    return awaitActive(
+      () => readJson<RelayChannel | null>(this.channelFile(id), null),
+      context,
+    )
   }
 
-  async upsertChannel(input: Pick<RelayChannel, 'id' | 'name'> & Partial<RelayChannel>): Promise<RelayChannel> {
-    await this.init()
-    const existing = await this.getChannel(input.id)
+  async upsertChannel(
+    input: Pick<RelayChannel, 'id' | 'name'> & Partial<RelayChannel>,
+    context?: RelayOperationContext,
+  ): Promise<RelayChannel> {
+    assertActive(context)
+    await this.init(context)
+    const existing = await this.getChannel(input.id, context)
     const stamp = nowStamp()
     const channel: RelayChannel = {
       id: input.id,
@@ -345,24 +441,44 @@ export class CodesurfRelay {
       updatedTs: stamp.ts,
     }
 
-    await ensureDir(this.channelMessagesDir(channel.id))
-    await writeJson(this.channelFile(channel.id), channel)
+    await awaitActive(
+      () => ensureDir(this.channelMessagesDir(channel.id)),
+      context,
+    )
+    await writeJson(this.channelFile(channel.id), channel, context)
     return channel
   }
 
-  async joinChannel(channelId: string, participantId: string): Promise<RelayChannel> {
-    const channel = await this.upsertChannel({ id: channelId, name: channelId })
+  async joinChannel(
+    channelId: string,
+    participantId: string,
+    context?: RelayOperationContext,
+  ): Promise<RelayChannel> {
+    const channel = await this.upsertChannel(
+      { id: channelId, name: channelId },
+      context,
+    )
     if (!channel.members.includes(participantId)) {
-      const next = await this.upsertChannel({ ...channel, members: [...channel.members, participantId] })
+      const next = await this.upsertChannel({
+        ...channel,
+        members: [...channel.members, participantId],
+      }, context)
       return next
     }
     return channel
   }
 
-  async leaveChannel(channelId: string, participantId: string): Promise<RelayChannel | null> {
-    const channel = await this.getChannel(channelId)
+  async leaveChannel(
+    channelId: string,
+    participantId: string,
+    context?: RelayOperationContext,
+  ): Promise<RelayChannel | null> {
+    const channel = await this.getChannel(channelId, context)
     if (!channel) return null
-    return this.upsertChannel({ ...channel, members: channel.members.filter(member => member !== participantId) })
+    return this.upsertChannel({
+      ...channel,
+      members: channel.members.filter(member => member !== participantId),
+    }, context)
   }
 
   private async writeMessageCopies(options: {
@@ -688,9 +804,18 @@ export class CodesurfRelay {
     return hints.sort((a, b) => order[a.priority] - order[b.priority] || a.summary.localeCompare(b.summary))
   }
 
-  async writeRelationshipsSnapshot(): Promise<void> {
-    const hints = await this.analyzeRelationships()
-    await writeJson(join(this.paths.relationships, 'latest.json'), { generatedAt: new Date().toISOString(), hints })
+  async writeRelationshipsSnapshot(
+    context?: RelayOperationContext,
+  ): Promise<void> {
+    const hints = await awaitActive(
+      () => this.analyzeRelationships(),
+      context,
+    )
+    await writeJson(
+      join(this.paths.relationships, 'latest.json'),
+      { generatedAt: new Date().toISOString(), hints },
+      context,
+    )
   }
 
   async waitForReady(ids: string[], options: RelayWaitOptions = {}): Promise<void> {
