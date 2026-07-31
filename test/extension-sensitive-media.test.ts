@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -12,6 +13,10 @@ import {
   getDeclaredSensitiveMediaCapabilities,
   getExtensionIframeAllow,
 } from '../src/shared/extension-sensitive-media.ts'
+import {
+  captureExtensionMediaRoot,
+  computeExtensionMediaAttestation,
+} from '../src/main/extensions/media-identity.ts'
 
 describe('extension sensitive media consent', () => {
   const identityA = `sha256:${'a'.repeat(64)}`
@@ -290,5 +295,48 @@ describe('extension sensitive media consent', () => {
       extensionTile,
       /MCP-UI proxy frames deliberately receive no sensitive media policy/,
     )
+  })
+
+  test('LiveKit uses the pinned local client bundle and includes it in media attestation', async () => {
+    const expectedDigest = 'a77a2f4c363e93099d7c135721c9ec81d6c5bacc691796dad799222e33cbfb31'
+    for (const root of [
+      join(process.cwd(), 'bundled-extensions/livekit-rooms'),
+      join(process.cwd(), 'examples/extensions/livekit-rooms'),
+    ]) {
+      const mainHtml = await fs.readFile(join(root, 'tiles/index.html'), 'utf8')
+      const roomHtml = await fs.readFile(join(root, 'tiles/room/index.html'), 'utf8')
+      assert.match(mainHtml, /\.\.\/vendor\/livekit-client-2\.21\.0\/livekit-client\.umd\.js/)
+      assert.match(roomHtml, /\.\.\/\.\.\/vendor\/livekit-client-2\.21\.0\/livekit-client\.umd\.js/)
+      assert.doesNotMatch(`${mainHtml}\n${roomHtml}`, /jsdelivr|livekit-client@2/)
+
+      const vendorKey = 'vendor/livekit-client-2.21.0/livekit-client.umd.js'
+      const vendorBytes = await fs.readFile(join(root, vendorKey))
+      assert.equal(createHash('sha256').update(vendorBytes).digest('hex'), expectedDigest)
+      assert.match(
+        await fs.readFile(
+          join(root, 'vendor/livekit-client-2.21.0/PROVENANCE.md'),
+          'utf8',
+        ),
+        new RegExp(expectedDigest),
+      )
+      assert.match(
+        await fs.readFile(join(root, 'vendor/livekit-client-2.21.0/LICENSE'), 'utf8'),
+        /Apache License/,
+      )
+
+      const manifest = JSON.parse(
+        await fs.readFile(join(root, 'extension.json'), 'utf8'),
+      )
+      const rootBinding = await captureExtensionMediaRoot(root)
+      const attestation = await computeExtensionMediaAttestation(
+        root,
+        manifest,
+        rootBinding,
+      )
+      assert.equal(
+        attestation.resources.get(vendorKey)?.digest,
+        `sha256:${expectedDigest}`,
+      )
+    }
   })
 })
