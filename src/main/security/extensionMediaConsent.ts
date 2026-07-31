@@ -1,8 +1,10 @@
-import { promises as fs } from 'node:fs'
-import { randomUUID } from 'node:crypto'
-import { basename, dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { CODESURF_HOME } from '../paths.ts'
 import { isValidExtensionId } from '../extensions/identity.ts'
+import {
+  readSecurityStateFile,
+  writeSecurityStateAtomic,
+} from './durableSecurityState.ts'
 import {
   isExtensionMediaIdentity,
   isSensitiveMediaCapability,
@@ -38,6 +40,7 @@ export interface ExtensionMediaConsentStoreOptions {
 }
 
 const DEFAULT_CONSENT_PATH = join(CODESURF_HOME, 'extension-sensitive-media-consent.json')
+const MAX_CONSENT_BYTES = 1024 * 1024
 
 function emptyConsent(): PersistedConsent {
   return { version: 2, decisions: [] }
@@ -137,7 +140,11 @@ export class ExtensionMediaConsentStore {
     extensionIdentity: string,
     kind: SensitiveMediaCapability,
   ): ExtensionMediaConsentDecision | undefined {
-    if (!isValidExtensionId(extensionId) || !isExtensionMediaIdentity(extensionIdentity)) {
+    if (
+      !isValidExtensionId(extensionId)
+      || !isExtensionMediaIdentity(extensionIdentity)
+      || !isSensitiveMediaCapability(kind)
+    ) {
       return undefined
     }
     return this.persisted.decisions.find(decision => {
@@ -158,78 +165,72 @@ export class ExtensionMediaConsentStore {
     if (!isExtensionMediaIdentity(extensionIdentity)) {
       throw new Error('Invalid extension media identity')
     }
-    await this.ready
-    const existing = this.persisted.decisions.find(entry => {
-      return entry.extensionId === extensionId
-        && entry.extensionIdentity === extensionIdentity
-    })
-    if (existing) {
-      existing.grants[kind] = decision
-    } else {
-      this.persisted.decisions.push({
-        extensionId,
-        extensionIdentity,
-        grants: { [kind]: decision },
-      })
+    if (!isSensitiveMediaCapability(kind)) {
+      throw new Error('Invalid sensitive media capability')
     }
-    await this.persist()
+    if (decision !== 'allow' && decision !== 'deny') {
+      throw new Error('Invalid extension media consent decision')
+    }
+    await this.ready
+    await this.update((current) => {
+      const decisions = current.decisions.map(entry => ({
+        ...entry,
+        grants: { ...entry.grants },
+      }))
+      const existing = decisions.find(entry => {
+        return entry.extensionId === extensionId
+          && entry.extensionIdentity === extensionIdentity
+      })
+      if (existing) {
+        existing.grants[kind] = decision
+      } else {
+        decisions.push({
+          extensionId,
+          extensionIdentity,
+          grants: { [kind]: decision },
+        })
+      }
+      return { version: 2, decisions }
+    })
   }
 
   async revokeExtension(extensionId: string): Promise<void> {
     if (!isValidExtensionId(extensionId)) return
     await this.ready
-    const remaining = this.persisted.decisions.filter(decision => {
-      return decision.extensionId !== extensionId
+    await this.update((current) => {
+      const decisions = current.decisions.filter(decision => {
+        return decision.extensionId !== extensionId
+      })
+      return decisions.length === current.decisions.length
+        ? current
+        : { version: 2, decisions }
     })
-    if (remaining.length === this.persisted.decisions.length) return
-    this.persisted = { version: 2, decisions: remaining }
-    await this.persist()
   }
 
   private async load(): Promise<void> {
-    try {
-      const raw = await fs.readFile(this.filePath, 'utf8')
-      const parsed = parseConsent(raw)
-      this.persisted = parsed.consent
-      if (parsed.rewrite) {
-        await this.writeSnapshot(JSON.stringify(this.persisted, null, 2))
-      } else {
-        await fs.chmod(this.filePath, 0o600)
-      }
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT') this.persisted = emptyConsent()
-    }
+    const raw = await readSecurityStateFile(this.filePath, MAX_CONSENT_BYTES)
+    if (raw === null) return
+    const parsed = parseConsent(raw)
+    await this.writeSnapshot(JSON.stringify(parsed.consent, null, 2))
+    this.persisted = parsed.consent
   }
 
-  private async persist(): Promise<void> {
-    const snapshot = JSON.stringify(this.persisted, null, 2)
-    const run = (): Promise<void> => this.writeSnapshot(snapshot)
+  private async update(
+    updater: (current: PersistedConsent) => PersistedConsent,
+  ): Promise<void> {
+    const run = async (): Promise<void> => {
+      const next = updater(this.persisted)
+      if (next === this.persisted) return
+      await this.writeSnapshot(JSON.stringify(next, null, 2))
+      this.persisted = next
+    }
     const result = this.writeQueue.then(run, run)
     this.writeQueue = result.catch(() => undefined)
     await result
   }
 
   private async writeSnapshot(snapshot: string): Promise<void> {
-    const directory = dirname(this.filePath)
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 })
-    const temporaryPath = join(
-      directory,
-      `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
-    )
-    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
-    try {
-      handle = await fs.open(temporaryPath, 'wx', 0o600)
-      await handle.writeFile(snapshot, 'utf8')
-      await handle.sync()
-      await handle.close()
-      handle = undefined
-      await fs.rename(temporaryPath, this.filePath)
-      await fs.chmod(this.filePath, 0o600)
-    } finally {
-      await handle?.close().catch(() => undefined)
-      await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
-    }
+    await writeSecurityStateAtomic(this.filePath, snapshot)
   }
 }
 
@@ -268,6 +269,7 @@ export class ExtensionMediaConsentManager {
     if (
       !isValidExtensionId(request.extensionId)
       || !isExtensionMediaIdentity(request.extensionIdentity)
+      || !isSensitiveMediaCapability(request.kind)
     ) return false
     if (this.revocationsByExtension.has(request.extensionId)) return false
     await this.ready

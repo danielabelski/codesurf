@@ -259,6 +259,36 @@ describe('extension sensitive media consent', () => {
     assert.equal(manager.hasConsent('racy-extension', identityA, 'camera'), false)
   })
 
+  test('a consent-store load failure rejects readiness and never prompts or grants', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-load-failure-'))
+    const store = new ExtensionMediaConsentStore({ filePath: directory })
+    let promptCalls = 0
+    const manager = new ExtensionMediaConsentManager(store, async () => {
+      promptCalls += 1
+      return true
+    })
+
+    await assert.rejects(manager.ready)
+    assert.equal(
+      manager.hasConsent('media-extension', identityA, 'camera'),
+      false,
+    )
+    await assert.rejects(
+      manager.requestConsent({
+        extensionId: 'media-extension',
+        extensionIdentity: identityA,
+        extensionName: 'Media Extension',
+        kind: 'camera',
+      }),
+    )
+    await assert.rejects(manager.revokeExtension('media-extension'))
+    assert.equal(promptCalls, 0)
+    assert.equal(
+      manager.hasConsent('media-extension', identityA, 'camera'),
+      false,
+    )
+  })
+
   test('derives iframe allow directives only from declared sensitive capabilities', () => {
     const declared = getDeclaredSensitiveMediaCapabilities([
       { name: 'network' },
