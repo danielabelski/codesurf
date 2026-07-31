@@ -737,18 +737,28 @@ function extractTaggedUserContext(messages, openTag, closeTag) {
   return { messages: nextMessages, text }
 }
 
-export function revalidateDaemonContextRequest(request = {}) {
-  const peerContext = buildPeerContextPrompt(request.peers)
-  const extractedFiles = extractTaggedUserContext(
-    request.messages,
+function extractComposedUserContext(messages) {
+  const files = extractTaggedUserContext(
+    messages,
     '<codesurf_file_context trust="untrusted" source="workspace-files">',
     '</codesurf_file_context>',
   )
-  const extractedRoom = extractTaggedUserContext(
-    extractedFiles.messages,
+  const room = extractTaggedUserContext(
+    files.messages,
     '<codesurf_peer_context trust="untrusted" source="agent-room">',
     '</codesurf_peer_context>',
   )
+  return {
+    messages: room.messages,
+    room: room.text,
+    fileReferences: files.text,
+  }
+}
+
+export function revalidateDaemonContextRequest(request = {}) {
+  const peerContext = buildPeerContextPrompt(request.peers)
+  const primaryContext = extractComposedUserContext(request.messages)
+  const expandedContext = extractComposedUserContext(request.expandedMessages)
   const skillsSummary = boundOptionalContext(
     request.skillsSummary,
     MAX_SKILLS_SUMMARY_BYTES,
@@ -763,8 +773,8 @@ export function revalidateDaemonContextRequest(request = {}) {
     activityConvention: buildCodeSurfActivityConvention(),
     async: buildAsyncExecutionPrompt(request.asyncExecution),
     peer: peerContext.fragment?.text,
-    room: request.roomContext ?? extractedRoom.text,
-    fileReferences: request.fileReferencePrompt ?? extractedFiles.text,
+    room: request.roomContext ?? primaryContext.room ?? expandedContext.room,
+    fileReferences: request.fileReferencePrompt ?? primaryContext.fileReferences ?? expandedContext.fileReferences,
   })
   const persona = fragmentFor(context, 'persona')
   const memory = fragmentFor(context, 'memory')
@@ -775,9 +785,9 @@ export function revalidateDaemonContextRequest(request = {}) {
       peers: peerContext.peers,
       [validatedContextPrompt]: context.systemPrompt,
       contextPrompt: undefined,
-      messages: appendComposedUserContext(extractedRoom.messages, context.userSuffix),
+      messages: appendComposedUserContext(primaryContext.messages, context.userSuffix),
       ...(Array.isArray(request.expandedMessages)
-        ? { expandedMessages: appendComposedUserContext(request.expandedMessages, context.userSuffix) }
+        ? { expandedMessages: appendComposedUserContext(expandedContext.messages, context.userSuffix) }
         : {}),
       memoryPrompt: memory?.text,
       roomContext: undefined,

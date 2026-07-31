@@ -74,6 +74,32 @@ test('daemon composes room context once as bounded untrusted user data', () => {
   assert.equal(result.metadata.roomContext.truncated, false)
 })
 
+test('daemon strips and recomposes tagged context independently for prepared message arrays', () => {
+  const suffix = [
+    '<codesurf_peer_context trust="untrusted" source="agent-room">',
+    'ROOM-CONTEXT-ONCE-4812',
+    '</codesurf_peer_context>',
+    '',
+    '<codesurf_file_context trust="untrusted" source="workspace-files">',
+    'FILE-CONTEXT-ONCE-5934',
+    '</codesurf_file_context>',
+  ].join('\n')
+  const prepared = `Review the prepared context.\n\n${suffix}`
+  const result = revalidateDaemonContextRequest({
+    messages: [{ role: 'user', content: prepared }],
+    expandedMessages: [{ role: 'user', content: prepared }],
+  })
+
+  for (const messages of [result.request.messages, result.request.expandedMessages]) {
+    const content = messages?.[0]?.content ?? ''
+    assert.equal(content.match(/ROOM-CONTEXT-ONCE-4812/g)?.length, 1)
+    assert.equal(content.match(/FILE-CONTEXT-ONCE-5934/g)?.length, 1)
+    assert.equal(content.match(/<codesurf_peer_context /g)?.length, 1)
+    assert.equal(content.match(/<codesurf_file_context /g)?.length, 1)
+  }
+  assert.ok(result.metadata.context.aggregateBytes <= CHAT_CONTEXT_LIMITS.aggregateBytes)
+})
+
 test('daemon revalidates peer context before Claude and Codex provider prompt construction', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-peer-context-'))
   const workspaceDir = join(homeDir, 'workspace')
