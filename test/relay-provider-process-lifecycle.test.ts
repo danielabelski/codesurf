@@ -193,6 +193,7 @@ describe('bounded relay subprocess lifecycle', () => {
   }, async () => {
     const controller = new AbortController()
     const reason = new Error('workspace stopped')
+    const abortAfterMs = 1_000
     const turn = runBoundedSubprocess({
       command: process.execPath,
       args: [fixture, 'grandchild-parent-exits'],
@@ -204,7 +205,10 @@ describe('bounded relay subprocess lifecycle', () => {
       killWaitMs: 750,
       signal: controller.signal,
     })
-    const abortHandle = setTimeout(() => controller.abort(reason), 150)
+    // Match the timeout-tree test's startup margin: this fixture must start
+    // two Node processes and announce the grandchild before cancellation.
+    // A 150ms timer races fixture boot under the aggregate suite's load.
+    const abortHandle = setTimeout(() => controller.abort(reason), abortAfterMs)
 
     const error = await turn.then(
       () => assert.fail('expected cancellation'),
