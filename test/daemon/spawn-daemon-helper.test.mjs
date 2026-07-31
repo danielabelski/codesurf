@@ -115,7 +115,9 @@ test('spawnDaemon keeps its home until an uncooperative child reaches final exit
 test('spawnDaemon bounds failed startup, reaches final exit, and cleans its home', {
   skip: process.platform === 'win32',
 }, async t => {
-  const startupTimeoutMs = 150
+  // The child still needs enough time to enter userland and publish its audit
+  // PID before this test intentionally withholds daemon startup state.
+  const startupTimeoutMs = 1_000
   const termTimeoutMs = 50
   const killTimeoutMs = 2_000
   const homeDir = await makeDaemonTestTempDir('spawn-daemon-startup-home-')
@@ -138,7 +140,7 @@ test('spawnDaemon bounds failed startup, reaches final exit, and cleans its home
       termTimeoutMs,
       killTimeoutMs,
     }),
-    /Timed out after 150ms/,
+    /Timed out after 1000ms/,
   )
 
   assert.ok(Date.now() - startedAt < startupTimeoutMs + termTimeoutMs + killTimeoutMs + 500)
