@@ -61,8 +61,13 @@ describe('extension sensitive media consent', () => {
       },
     }))
     await fs.writeFile(
-      join(directory, 'plugin-capability-grants.json'),
-      JSON.stringify({ grandfathered: ['camera'] }),
+      join(directory, 'extension-security-state.json'),
+      JSON.stringify({
+        version: 1,
+        disabledExtensionIds: [],
+        enabledCatalogExtensionIds: [],
+        grants: { grandfathered: ['camera'] },
+      }),
     )
 
     const store = new ExtensionMediaConsentStore({ filePath })
