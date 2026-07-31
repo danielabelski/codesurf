@@ -6,8 +6,8 @@
 
 ## The smallest plugin
 
-Create `~/.codesurf/extensions/my-plugin/extension.json` (or a workspace
-`.contex/extensions/...`):
+Create `~/.codesurf/extensions/my-plugin/extension.json` (or
+`<workspace>/.codesurf/extensions/my-plugin/extension.json`):
 
 ```jsonc
 {
@@ -52,9 +52,9 @@ tile when clicked.
 
 A `safe` (iframe) plugin's HTML automatically gets the host theme: the bridge injects
 the `--ct-*` design tokens + a base stylesheet, so plain `<button>`/`<input>` already
-look native. For host-rendered (`component`) UIs, import `@codesurf/ui`
-(`Button`, `Input`, `Switch`, `Select`, `Field`, `SettingsControl`). Override styles
-only when you want something bespoke.
+look native. The host-rendered control kit is currently internal to the CodeSurf
+renderer and is not a published `@codesurf/ui` package. External plugins should use
+the injected tokens and standard HTML controls.
 
 ## settingsSections — declarative, themed controls
 
@@ -108,7 +108,7 @@ Appears as "Layout: My Review" in `⌘⇧P`; selecting it builds the arrangement
 accepts any built-in (`chat`, `terminal`, `code`, `files`, `note`, `browser`, …) or
 `ext:<your-type>`.
 
-## Typed authoring (optional)
+## Typed authoring inside this repository
 
 ```ts
 import { definePlugin } from '@codesurf/plugin'
@@ -118,7 +118,10 @@ export default definePlugin({
 })
 ```
 
-`@codesurf/plugin` also exports `CodesurfBridge` to type `window.codesurf`.
+The repository maps `@codesurf/plugin` to `packages/codesurf-plugin` during local
+builds; it also exports `CodesurfBridge` to type `window.codesurf`. This package is
+not currently documented as a public registry dependency. External plugins should
+use `extension.json` and the runtime bridge until a published package is announced.
 
 ## Power tier (`tier: "power"` + `main.js`)
 

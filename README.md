@@ -122,7 +122,7 @@ CodeSurf stores app data under `~/.codesurf`.
 Default app-created workspaces go under:
 
 ```text
-~/codesurf/workspaces/
+~/.codesurf/workspaces/
 ```
 
 Project-backed workspaces can point at any folder you open.
