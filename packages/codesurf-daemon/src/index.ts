@@ -40,6 +40,28 @@ export {
   defaultCodesurfHome,
 } from './paths.js'
 
+export {
+  AGENT_MODE_RESOLUTION_DENIED_ERROR,
+  ChatPolicyError,
+  DEFAULT_PERSONAS,
+  MAX_PERSONA_COUNT,
+  MAX_PERSONA_DOCUMENT_BYTES,
+  MAX_PERSONA_ID_BYTES,
+  MAX_PERSONA_INHERITANCE_DEPTH,
+  MAX_PERSONA_PROMPT_BYTES,
+  MAX_PERSONA_TOOLS,
+  assertProviderPersonaEnforceable,
+  bindChatRequestToWorkspace,
+  codexExecPermissionArgs,
+  listAuthoritativePersonas,
+  overlayAuthoritativePersonas,
+  resolveAuthoritativePersona,
+  stripUntrustedPrivilegedChatContext,
+  type ChatPolicyErrorCode,
+  type PolicyPersona,
+  type PolicyPersonaBinding,
+} from './chat-policy.js'
+
 export type {
   AggregatedSessionEntry,
   AutoDreamPolicySummary,

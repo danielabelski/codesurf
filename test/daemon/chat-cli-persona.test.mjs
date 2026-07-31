@@ -53,15 +53,16 @@ test('parseChatArgs: no persona flags → persona null, list flag false', () => 
 
 test('buildStartRequest: carries agentId and NEVER an agentMode', () => {
   const args = resolveChatArgs(parseChatArgs(['--persona', 'ask']), '/no/such/home')
-  const request = buildStartRequest({ args, prior: null, message: 'go' })
+  const request = buildStartRequest({ args, prior: null, message: 'go', workspaceId: 'ws-cli' })
   assert.equal(request.agentId, 'ask', 'the persona id is sent as agentId')
+  assert.equal(request.workspaceId, 'ws-cli', 'chat starts against a registered workspace id')
   assert.ok(!('agentMode' in request), 'the CLI must NEVER send a trusted agentMode payload')
   assert.deepEqual(request.messages, [{ role: 'user', content: 'go' }])
 })
 
 test('buildStartRequest: no persona → no agentId key and still no agentMode', () => {
   const args = resolveChatArgs(parseChatArgs(['hi']), '/no/such/home')
-  const request = buildStartRequest({ args, prior: null, message: 'go' })
+  const request = buildStartRequest({ args, prior: null, message: 'go', workspaceId: 'ws-cli' })
   assert.ok(!('agentId' in request), 'no persona selected → no agentId field')
   assert.ok(!('agentMode' in request), 'never an agentMode')
 })

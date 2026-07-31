@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout, stderr } from 'node:process';
-import { dirname, join, resolve } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDaemonClient, } from './client.js';
 import { createDaemonManager, resolveDaemonScriptFromCandidates, } from './manager.js';
@@ -240,11 +241,15 @@ function identityFor(args) {
  */
 export function buildStartRequest(params) {
     const { args, prior, message } = params;
+    const workspaceId = String(params.workspaceId ?? '').trim();
+    if (!workspaceId)
+        throw new Error('A registered workspace is required to start chat');
     const request = {
         provider: args.provider,
         model: args.model,
         mode: args.mode,
         runMode: 'foreground',
+        workspaceId,
         workspaceDir: args.workspaceDir,
         sessionId: prior?.sessionId ?? null,
         messages: [{ role: 'user', content: message }],
@@ -517,7 +522,12 @@ async function startTurn(ctx, message) {
             });
     }
     const prior = ctx.args.resume ? readChatCliSession(ctx.homeDir, identityFor(ctx.args)) : null;
-    const request = buildStartRequest({ args: ctx.args, prior, message: trimmed });
+    const request = buildStartRequest({
+        args: ctx.args,
+        prior,
+        message: trimmed,
+        workspaceId: ctx.workspaceId,
+    });
     const job = await ctx.client.startChatJob(request);
     const session = upsertChatCliSession(ctx.homeDir, {
         provider: ctx.args.provider,
@@ -619,6 +629,31 @@ async function fetchPersonaModelSeed(client, agentId, workspaceDir) {
         return null;
     }
 }
+async function canonicalDirectory(path) {
+    const canonical = await realpath(path);
+    if (!(await stat(canonical)).isDirectory()) {
+        throw new Error(`Chat workspace is not a directory: ${path}`);
+    }
+    return canonical;
+}
+async function resolveRegisteredChatWorkspace(client, workspaceDir) {
+    const canonicalRoot = await canonicalDirectory(workspaceDir);
+    const workspaces = await client.listWorkspaces();
+    for (const workspace of workspaces) {
+        try {
+            if (await canonicalDirectory(workspace.path) === canonicalRoot)
+                return workspace.id;
+        }
+        catch {
+            // Ignore stale registry entries and continue to an exact usable root.
+        }
+    }
+    const created = await client.createWorkspaceWithPath(basename(canonicalRoot) || 'Workspace', canonicalRoot);
+    if (!created?.id || await canonicalDirectory(created.path) !== canonicalRoot) {
+        throw new Error('The daemon did not register the requested chat workspace');
+    }
+    return created.id;
+}
 async function interactiveLoop(ctx) {
     if (!ctx.readline)
         return;
@@ -658,6 +693,7 @@ export async function runCodesurfChatCli(argv, options = {}) {
         ? await fetchPersonaModelSeed(client, selectedAgentId, parsed.workspaceDir)
         : null;
     const args = resolveChatArgs(parsed, homeDir, personaSeed);
+    const workspaceId = await resolveRegisteredChatWorkspace(client, args.workspaceDir);
     if (args.newSession)
         clearChatCliSession(homeDir, identityFor(args));
     const readline = isTTY() && !args.message
@@ -667,6 +703,7 @@ export async function runCodesurfChatCli(argv, options = {}) {
         client,
         homeDir,
         args,
+        workspaceId,
         readline,
         currentJobId: null,
         currentAbortController: null,

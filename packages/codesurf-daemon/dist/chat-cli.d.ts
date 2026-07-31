@@ -50,6 +50,7 @@ export declare function buildStartRequest(params: {
     args: ResolvedChatArgs;
     prior: ChatCliSession | null;
     message: string;
+    workspaceId: string;
 }): DaemonChatJobRequest;
 export declare function runCodesurfChatCli(argv: string[], options?: ChatCliRunOptions): Promise<number>;
 export {};

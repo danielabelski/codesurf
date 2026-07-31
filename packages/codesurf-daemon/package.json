@@ -38,6 +38,11 @@
       "import": "./dist/chat-session-store.js",
       "default": "./dist/chat-session-store.js"
     },
+    "./chat-policy": {
+      "types": "./dist/chat-policy.d.ts",
+      "import": "./dist/chat-policy.js",
+      "default": "./dist/chat-policy.js"
+    },
     "./paths": {
       "types": "./dist/paths.d.ts",
       "import": "./dist/paths.js",

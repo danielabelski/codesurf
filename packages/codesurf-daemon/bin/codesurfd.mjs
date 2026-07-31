@@ -15,8 +15,14 @@ import { createCheckpointStore } from './checkpoints.mjs'
 import { loadMemoryContext } from './memory-loader.mjs'
 import { createSkillsIndex } from './skills-index.mjs'
 import { expandFileReferences } from './file-references.mjs'
-import { listPersonas } from './agent-mode-resolver.mjs'
+import { listPersonas, resolveAuthoritativeAgentMode } from './agent-mode-resolver.mjs'
 import { createDreamingManager, DREAMING_DEFAULTS } from '../vendor/dreaming.mjs'
+import {
+  ChatPolicyError,
+  assertProviderPersonaEnforceable,
+  bindChatRequestToWorkspace,
+  stripUntrustedPrivilegedChatContext,
+} from '../dist/chat-policy.js'
 
 const HOME = process.env.CODESURF_HOME || join(homedir(), '.codesurf')
 const PID_PATH = process.env.CODESURF_DAEMON_PID_PATH || join(HOME, 'daemon', 'pid.json')
@@ -2299,6 +2305,42 @@ function getMaterializedWorkspace(workspaceId) {
   return materializeWorkspace(workspace, state.projects)
 }
 
+async function canonicalizeDaemonChatRequest(input) {
+  // These fields become higher-precedence provider prompts or select the
+  // execution root. The browser-facing route must never accept preassembled
+  // copies from its caller; rebuild them below from the registered workspace.
+  const requestInput = stripUntrustedPrivilegedChatContext(input)
+  let request = { ...requestInput, agentMode: null }
+  const workspaceId = typeof request.workspaceId === 'string' ? request.workspaceId.trim() : ''
+  if (!workspaceId) {
+    throw new ChatPolicyError('CHAT_WORKSPACE_REQUIRED', 'workspaceId must be a non-empty string')
+  }
+
+  const state = readWorkspaceState()
+  const workspace = state.workspaces.find(entry => entry.id === workspaceId)
+  if (!workspace) {
+    throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${workspaceId}`)
+  }
+  const materialized = materializeWorkspace(workspace, state.projects)
+  request = await bindChatRequestToWorkspace(request, {
+    id: workspaceId,
+    path: materialized.path,
+  })
+
+  const authoritative = await resolveAuthoritativeAgentMode({
+    agentId: request.agentId,
+    resolveWorkspaceRoot: () => request.workspaceDir,
+  })
+  if (!authoritative.ok) {
+    throw new ChatPolicyError('CHAT_PERSONA_DENIED', authoritative.error)
+  }
+  assertProviderPersonaEnforceable(request.provider, authoritative.agentMode)
+  return {
+    ...request,
+    agentMode: authoritative.agentMode,
+  }
+}
+
 async function loadWorkspaceMemoryContext(workspaceId, executionTarget = 'local') {
   const materialized = getMaterializedWorkspace(workspaceId)
   return await loadMemoryContext({
@@ -3294,7 +3336,16 @@ const server = createServer(async (req, res) => {
         sendJson(res, 400, { error: 'request is required' })
         return
       }
-      let request = body.request
+      let request
+      try {
+        request = await canonicalizeDaemonChatRequest(body.request)
+      } catch (error) {
+        if (error instanceof ChatPolicyError) {
+          sendJson(res, 400, { error: error.message, code: error.code })
+          return
+        }
+        throw error
+      }
       const needsMemoryPrompt = !String(request?.memoryPrompt ?? '').trim()
       const needsContextBuckets = !(request?.contextBuckets && typeof request.contextBuckets === 'object')
       if ((needsMemoryPrompt || needsContextBuckets) && typeof request?.workspaceId === 'string' && request.workspaceId.trim()) {
