@@ -14,19 +14,23 @@ import {
 } from '../src/shared/extension-sensitive-media.ts'
 
 describe('extension sensitive media consent', () => {
+  const identityA = `sha256:${'a'.repeat(64)}`
+  const identityB = `sha256:${'b'.repeat(64)}`
+
   test('persists exact extension and kind decisions atomically with mode 0600', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-consent-'))
     const filePath = join(directory, 'consent.json')
     const store = new ExtensionMediaConsentStore({ filePath })
 
-    await store.setDecision('camera-tools', 'camera', 'allow')
-    await store.setDecision('camera-tools', 'microphone', 'deny')
+    await store.setDecision('camera-tools', identityA, 'camera', 'allow')
+    await store.setDecision('camera-tools', identityA, 'microphone', 'deny')
 
     const restarted = new ExtensionMediaConsentStore({ filePath })
     await restarted.ready
-    assert.equal(restarted.getDecision('camera-tools', 'camera'), 'allow')
-    assert.equal(restarted.getDecision('camera-tools', 'microphone'), 'deny')
-    assert.equal(restarted.getDecision('other-extension', 'camera'), undefined)
+    assert.equal(restarted.getDecision('camera-tools', identityA, 'camera'), 'allow')
+    assert.equal(restarted.getDecision('camera-tools', identityA, 'microphone'), 'deny')
+    assert.equal(restarted.getDecision('camera-tools', identityB, 'camera'), undefined)
+    assert.equal(restarted.getDecision('other-extension', identityA, 'camera'), undefined)
     assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600)
     assert.deepEqual(
       (await fs.readdir(directory)).filter(name => name.includes('.tmp')),
@@ -34,7 +38,7 @@ describe('extension sensitive media consent', () => {
     )
   })
 
-  test('does not import generic grants, legacy shapes, or malformed identities', async () => {
+  test('migrates legacy id-only consent fail-closed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-legacy-'))
     const filePath = join(directory, 'consent.json')
     await fs.writeFile(filePath, JSON.stringify({
@@ -58,10 +62,13 @@ describe('extension sensitive media consent', () => {
 
     const store = new ExtensionMediaConsentStore({ filePath })
     await store.ready
-    assert.equal(store.getDecision('../attacker', 'camera'), undefined)
-    assert.equal(store.getDecision('valid', 'camera'), 'allow')
-    assert.equal(store.getDecision('valid', 'microphone'), undefined)
-    assert.equal(store.getDecision('grandfathered', 'camera'), undefined)
+    assert.equal(store.getDecision('../attacker', identityA, 'camera'), undefined)
+    assert.equal(store.getDecision('valid', identityA, 'camera'), undefined)
+    assert.equal(store.getDecision('grandfathered', identityA, 'camera'), undefined)
+    assert.deepEqual(JSON.parse(await fs.readFile(filePath, 'utf8')), {
+      version: 2,
+      decisions: [],
+    })
   })
 
   test('deduplicates identical prompts, serializes distinct prompts, and persists denial on failure', async () => {
@@ -87,16 +94,19 @@ describe('extension sensitive media consent', () => {
 
     const cameraA = manager.requestConsent({
       extensionId: 'media-extension',
+      extensionIdentity: identityA,
       extensionName: 'Media Extension',
       kind: 'camera',
     })
     const cameraB = manager.requestConsent({
       extensionId: 'media-extension',
+      extensionIdentity: identityA,
       extensionName: 'Media Extension',
       kind: 'camera',
     })
     const microphone = manager.requestConsent({
       extensionId: 'media-extension',
+      extensionIdentity: identityA,
       extensionName: 'Media Extension',
       kind: 'microphone',
     })
@@ -113,6 +123,7 @@ describe('extension sensitive media consent', () => {
     assert.equal(
       await manager.requestConsent({
         extensionId: 'media-extension',
+        extensionIdentity: identityA,
         extensionName: 'Media Extension',
         kind: 'camera',
       }),
@@ -123,28 +134,31 @@ describe('extension sensitive media consent', () => {
     assert.equal(
       await manager.requestConsent({
         extensionId: 'broken-extension',
+        extensionIdentity: identityB,
         extensionName: 'Broken Extension',
         kind: 'camera',
       }),
       false,
     )
-    assert.equal(store.getDecision('broken-extension', 'camera'), 'deny')
+    assert.equal(store.getDecision('broken-extension', identityB, 'camera'), 'deny')
   })
 
-  test('revocation removes every decision for only the selected extension', async () => {
+  test('binds consent to install identity and revokes every identity for only one extension', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-revoke-'))
     const filePath = join(directory, 'consent.json')
     const store = new ExtensionMediaConsentStore({ filePath })
-    await store.setDecision('one-extension', 'camera', 'allow')
-    await store.setDecision('one-extension', 'microphone', 'deny')
-    await store.setDecision('two-extension', 'camera', 'allow')
+    await store.setDecision('one-extension', identityA, 'camera', 'allow')
+    await store.setDecision('one-extension', identityA, 'microphone', 'deny')
+    await store.setDecision('one-extension', identityB, 'camera', 'allow')
+    await store.setDecision('two-extension', identityA, 'camera', 'allow')
 
     await store.revokeExtension('one-extension')
     const restarted = new ExtensionMediaConsentStore({ filePath })
     await restarted.ready
-    assert.equal(restarted.getDecision('one-extension', 'camera'), undefined)
-    assert.equal(restarted.getDecision('one-extension', 'microphone'), undefined)
-    assert.equal(restarted.getDecision('two-extension', 'camera'), 'allow')
+    assert.equal(restarted.getDecision('one-extension', identityA, 'camera'), undefined)
+    assert.equal(restarted.getDecision('one-extension', identityB, 'camera'), undefined)
+    assert.equal(restarted.getDecision('one-extension', identityA, 'microphone'), undefined)
+    assert.equal(restarted.getDecision('two-extension', identityA, 'camera'), 'allow')
   })
 
   test('disable during an open prompt cannot resurrect consent', async () => {
@@ -162,6 +176,7 @@ describe('extension sensitive media consent', () => {
     })
     const request = manager.requestConsent({
       extensionId: 'racy-extension',
+      extensionIdentity: identityA,
       extensionName: 'Racy Extension',
       kind: 'camera',
     })
@@ -174,8 +189,8 @@ describe('extension sensitive media consent', () => {
 
     const restarted = new ExtensionMediaConsentStore({ filePath })
     await restarted.ready
-    assert.equal(restarted.getDecision('racy-extension', 'camera'), undefined)
-    assert.equal(manager.hasConsent('racy-extension', 'camera'), false)
+    assert.equal(restarted.getDecision('racy-extension', identityA, 'camera'), undefined)
+    assert.equal(manager.hasConsent('racy-extension', identityA, 'camera'), false)
   })
 
   test('derives iframe allow directives only from declared sensitive capabilities', () => {

@@ -23,6 +23,7 @@ import { log } from '../utils/logger.ts'
 import {
   getDeclaredSensitiveMediaCapabilities,
 } from '../../shared/extension-sensitive-media.ts'
+import { computeExtensionMediaIdentity } from './media-identity.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -106,11 +107,13 @@ async function saveGrantsMap(grants: Record<string, string[]>): Promise<void> {
 
 export interface LoadedExtension {
   manifest: ExtensionManifest
+  mediaIdentity: string
   deactivate?: () => void
 }
 
 export interface ExtensionMediaPermission {
   readonly id: string
+  readonly identity: string
   readonly name: string
   readonly enabled: boolean
   readonly declaredMedia: ReturnType<typeof getDeclaredSensitiveMediaCapabilities>
@@ -203,7 +206,9 @@ export class ExtensionRegistry {
   async rescan(workspacePath?: string | null): Promise<void> {
     const normalizedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
     const run = async (): Promise<void> => {
-      const previousIds = new Set(this.extensions.keys())
+      const previousIdentities = new Map(
+        [...this.extensions].map(([id, extension]) => [id, extension.mediaIdentity]),
+      )
       this.deactivateAll()
       this.extensions.clear()
       this.extraMCPTools = []
@@ -213,7 +218,9 @@ export class ExtensionRegistry {
         await this.scanWorkspace(normalizedWorkspacePath)
       }
       const revokedIds = [
-        ...[...previousIds].filter(id => !this.extensions.has(id)),
+        ...[...previousIdentities].filter(([id, identity]) => {
+          return this.extensions.get(id)?.mediaIdentity !== identity
+        }).map(([id]) => id),
         ...[...this.extensions.values()]
           .filter(extension => !extension.manifest._enabled)
           .map(extension => extension.manifest.id),
@@ -461,6 +468,8 @@ export class ExtensionRegistry {
       return
     }
 
+    const mediaIdentity = await computeExtensionMediaIdentity(extDir, manifest)
+
     // Skip if already loaded (workspace overrides global)
     if (this.extensions.has(manifest.id)) {
       const existing = this.extensions.get(manifest.id)!
@@ -469,7 +478,7 @@ export class ExtensionRegistry {
       this.extensions.delete(manifest.id)
     }
 
-    const loaded: LoadedExtension = { manifest }
+    const loaded: LoadedExtension = { manifest, mediaIdentity }
 
     // Load power tier extensions
     if (manifest.tier === 'power' && manifest.main && manifest._enabled) {
@@ -515,7 +524,11 @@ export class ExtensionRegistry {
     // Namespace tiles
     normalizeTileTypes(manifest)
 
-    const loaded: LoadedExtension = { manifest }
+    if (!manifest._path) {
+      throw new Error(`Adapted extension ${manifest.id} is missing its install path`)
+    }
+    const mediaIdentity = await computeExtensionMediaIdentity(manifest._path, manifest)
+    const loaded: LoadedExtension = { manifest, mediaIdentity }
 
     if (manifest.tier === 'power' && manifest.main && manifest._enabled && manifest._path) {
       const scope: ExtensionScope = opts?.untrustedScope
@@ -546,10 +559,12 @@ export class ExtensionRegistry {
   }
 
   getExtensionMediaPermission(id: string): ExtensionMediaPermission | undefined {
-    const manifest = this.get(id)?.manifest
-    if (!manifest) return undefined
+    const extension = this.get(id)
+    if (!extension) return undefined
+    const { manifest, mediaIdentity } = extension
     return {
       id: manifest.id,
+      identity: mediaIdentity,
       name: manifest.name,
       enabled: manifest._enabled === true,
       declaredMedia: getDeclaredSensitiveMediaCapabilities(manifest.capabilities),

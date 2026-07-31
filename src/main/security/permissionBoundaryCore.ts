@@ -1,5 +1,8 @@
 import { isValidExtensionId } from '../extensions/identity.ts'
-import type { SensitiveMediaCapability } from '../../shared/extension-sensitive-media.ts'
+import {
+  isExtensionMediaIdentity,
+  type SensitiveMediaCapability,
+} from '../../shared/extension-sensitive-media.ts'
 import type {
   BrowserWindowLike,
   DisplayMediaRequest,
@@ -279,11 +282,16 @@ export function createPermissionBoundary<DisplaySource>(
       )
     if (!childFrame) return
     const extension = runtime.getExtensionPermission(location.id)
-    if (!extension || extension.id !== location.id || !extension.enabled) return
+    if (
+      !extension
+      || extension.id !== location.id
+      || !isExtensionMediaIdentity(extension.identity)
+      || !extension.enabled
+    ) return
     const childFrameKey = frameKey(childFrame)
     return {
       frameKey: childFrameKey,
-      key: `extension:${extension.id}:${location.frameOrigin}:${childFrameKey}`,
+      key: `extension:${extension.id}:${extension.identity}:${location.frameOrigin}:${childFrameKey}`,
       kind: 'extension',
       owner,
       extension,
@@ -301,9 +309,11 @@ export function createPermissionBoundary<DisplaySource>(
     return Boolean(
       current
       && current.id === id
+      && isExtensionMediaIdentity(current.identity)
+      && current.identity === principal.extension?.identity
       && current.enabled
       && current.declaredMedia.includes(kind)
-      && runtime.hasExtensionConsent(id, kind),
+      && runtime.hasExtensionConsent(id, current.identity, kind),
     )
   }
 
@@ -340,7 +350,7 @@ export function createPermissionBoundary<DisplaySource>(
     const extension = principal.extension
     if (!extension || kinds.some(kind => !extension.declaredMedia.includes(kind))) return false
     for (const kind of kinds) {
-      if (!runtime.hasExtensionConsent(extension.id, kind)) {
+      if (!runtime.hasExtensionConsent(extension.id, extension.identity, kind)) {
         const allowed = await runtime.requestExtensionConsent(extension, kind, principal.owner)
         if (!isCurrent() || !allowed) return false
       }
@@ -385,12 +395,17 @@ export function createPermissionBoundary<DisplaySource>(
       || !sameFrame(frame.top, webContents.mainFrame)
     ) return
     const extension = runtime.getExtensionPermission(location.id)
-    if (!extension || extension.id !== location.id || !extension.enabled) return
+    if (
+      !extension
+      || extension.id !== location.id
+      || !isExtensionMediaIdentity(extension.identity)
+      || !extension.enabled
+    ) return
     const extensionFrameKey = frameKey(frame)
     return {
       principal: {
         frameKey: extensionFrameKey,
-        key: `extension:${extension.id}:${location.frameOrigin}:${extensionFrameKey}`,
+        key: `extension:${extension.id}:${extension.identity}:${location.frameOrigin}:${extensionFrameKey}`,
         kind: 'extension',
         owner,
         extension,

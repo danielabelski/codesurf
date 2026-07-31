@@ -6,6 +6,10 @@ export const SENSITIVE_MEDIA_CAPABILITIES = [
 
 export type SensitiveMediaCapability = typeof SENSITIVE_MEDIA_CAPABILITIES[number]
 
+export function isExtensionMediaIdentity(value: unknown): value is string {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value)
+}
+
 export function isSensitiveMediaCapability(value: unknown): value is SensitiveMediaCapability {
   return typeof value === 'string'
     && SENSITIVE_MEDIA_CAPABILITIES.includes(value as SensitiveMediaCapability)

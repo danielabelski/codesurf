@@ -434,10 +434,15 @@ test('registry exposes declared media and revokes sensitive consent on disable o
   await registry.rescan()
   assert.deepEqual(registry.getExtensionMediaPermission('media-extension'), {
     id: 'media-extension',
+    identity: registry.getExtensionMediaPermission('media-extension')?.identity,
     name: 'Media Extension',
     enabled: true,
     declaredMedia: ['microphone', 'display-capture'],
   })
+  assert.match(
+    registry.getExtensionMediaPermission('media-extension')?.identity ?? '',
+    /^sha256:[a-f0-9]{64}$/,
+  )
   assert.deepEqual(
     registry.getTileTypes()[0]?.sensitiveMedia,
     ['microphone', 'display-capture'],
@@ -468,5 +473,83 @@ test('registry exposes declared media and revokes sensitive consent on disable o
     revoked.includes('removed:media-extension'),
     true,
     'a disappeared extension must revoke persisted sensitive consent',
+  )
+})
+
+test('media identity follows effective precedence and changes on update or reinstall', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-sensitive-identity-'))
+  const bundledDir = join(temp, 'bundled')
+  const bundledExtensionDir = join(bundledDir, 'media-extension')
+  const workspace = join(temp, 'workspace')
+  const workspaceExtensionDir = join(
+    workspace,
+    '.codesurf',
+    'extensions',
+    'media-extension',
+  )
+  const manifest = (version: string, label: string) => JSON.stringify({
+    id: 'media-extension',
+    name: label,
+    version,
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+    contributes: {
+      tiles: [{ type: 'media', label: 'Media', entry: 'index.html' }],
+    },
+  })
+  await mkdir(bundledExtensionDir, { recursive: true })
+  await writeFile(join(bundledExtensionDir, 'extension.json'), manifest('1.0.0', 'Bundled'))
+  await writeFile(join(bundledExtensionDir, 'index.html'), 'bundled-v1')
+  await mkdir(workspaceExtensionDir, { recursive: true })
+  await writeFile(join(workspaceExtensionDir, 'extension.json'), manifest('2.0.0', 'Workspace'))
+  await writeFile(join(workspaceExtensionDir, 'index.html'), 'workspace-v2')
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const revoked: string[] = []
+  const registry = new ExtensionRegistry({
+    bundledDirs: [bundledDir],
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+
+  await registry.rescan()
+  const bundledIdentityV1 = registry.getExtensionMediaPermission('media-extension')?.identity
+  assert.match(bundledIdentityV1 ?? '', /^sha256:[a-f0-9]{64}$/)
+  await registry.rescan()
+  assert.deepEqual(revoked, [], 'an unchanged compatible rescan keeps grants')
+
+  await registry.rescan(workspace)
+  const workspaceIdentity = registry.getExtensionMediaPermission('media-extension')?.identity
+  assert.notEqual(workspaceIdentity, bundledIdentityV1)
+  assert.equal(registry.get('media-extension')?.manifest.name, 'Workspace')
+  assert.deepEqual(revoked, ['media-extension'])
+
+  await registry.rescan(workspace)
+  assert.deepEqual(revoked, ['media-extension'], 'an unchanged override stays compatible')
+  await registry.rescan(null)
+  assert.equal(registry.getExtensionMediaPermission('media-extension')?.identity, bundledIdentityV1)
+  assert.deepEqual(revoked, ['media-extension', 'media-extension'])
+
+  await writeFile(join(bundledExtensionDir, 'extension.json'), manifest('1.1.0', 'Bundled'))
+  await writeFile(join(bundledExtensionDir, 'index.html'), 'bundled-v1.1')
+  await registry.rescan()
+  const updatedIdentity = registry.getExtensionMediaPermission('media-extension')?.identity
+  assert.notEqual(updatedIdentity, bundledIdentityV1)
+  assert.deepEqual(revoked, ['media-extension', 'media-extension', 'media-extension'])
+
+  await rm(bundledExtensionDir, { recursive: true })
+  await mkdir(bundledExtensionDir, { recursive: true })
+  await writeFile(join(bundledExtensionDir, 'extension.json'), manifest('1.1.0', 'Bundled'))
+  await writeFile(join(bundledExtensionDir, 'index.html'), 'bundled-v1.1')
+  await registry.rescan()
+  assert.notEqual(
+    registry.getExtensionMediaPermission('media-extension')?.identity,
+    updatedIdentity,
+    'a same-path reinstall with identical content gets a new install identity',
+  )
+  assert.deepEqual(
+    revoked,
+    ['media-extension', 'media-extension', 'media-extension', 'media-extension'],
   )
 })

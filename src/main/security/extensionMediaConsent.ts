@@ -4,22 +4,29 @@ import { basename, dirname, join } from 'node:path'
 import { CODESURF_HOME } from '../paths.ts'
 import { isValidExtensionId } from '../extensions/identity.ts'
 import {
+  isExtensionMediaIdentity,
   isSensitiveMediaCapability,
   type SensitiveMediaCapability,
 } from '../../shared/extension-sensitive-media.ts'
 
 export type ExtensionMediaConsentDecision = 'allow' | 'deny'
 
-interface PersistedConsent {
-  readonly version: 1
-  readonly decisions: Record<
-    string,
-    Partial<Record<SensitiveMediaCapability, ExtensionMediaConsentDecision>>
+interface PersistedExtensionConsent {
+  readonly extensionId: string
+  readonly extensionIdentity: string
+  readonly grants: Partial<
+    Record<SensitiveMediaCapability, ExtensionMediaConsentDecision>
   >
+}
+
+interface PersistedConsent {
+  readonly version: 2
+  readonly decisions: PersistedExtensionConsent[]
 }
 
 export interface ExtensionMediaConsentPrompt {
   readonly extensionId: string
+  readonly extensionIdentity: string
   readonly extensionName: string
   readonly kind: SensitiveMediaCapability
   readonly owner?: unknown
@@ -32,40 +39,71 @@ export interface ExtensionMediaConsentStoreOptions {
 const DEFAULT_CONSENT_PATH = join(CODESURF_HOME, 'extension-sensitive-media-consent.json')
 
 function emptyConsent(): PersistedConsent {
-  return { version: 1, decisions: {} }
+  return { version: 2, decisions: [] }
 }
 
-function parseConsent(raw: string): PersistedConsent {
+function parseConsent(raw: string): { consent: PersistedConsent; rewrite: boolean } {
   try {
     const parsed = JSON.parse(raw) as {
       version?: unknown
       decisions?: unknown
     }
-    if (parsed.version !== 1 || !parsed.decisions || typeof parsed.decisions !== 'object') {
-      return emptyConsent()
+    if (parsed.version !== 2 || !Array.isArray(parsed.decisions)) {
+      return { consent: emptyConsent(), rewrite: true }
     }
 
-    const decisions: PersistedConsent['decisions'] = {}
-    for (const [extensionId, value] of Object.entries(parsed.decisions)) {
-      if (!isValidExtensionId(extensionId) || !value || typeof value !== 'object') continue
-      const extensionDecisions: Partial<
+    const decisions: PersistedExtensionConsent[] = []
+    const seen = new Set<string>()
+    let rewrite = false
+    for (const value of parsed.decisions) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        rewrite = true
+        continue
+      }
+      const record = value as {
+        extensionId?: unknown
+        extensionIdentity?: unknown
+        grants?: unknown
+      }
+      if (
+        typeof record.extensionId !== 'string'
+        || !isValidExtensionId(record.extensionId)
+        || !isExtensionMediaIdentity(record.extensionIdentity)
+        || !record.grants
+        || typeof record.grants !== 'object'
+        || Array.isArray(record.grants)
+      ) {
+        rewrite = true
+        continue
+      }
+      const grants: Partial<
         Record<SensitiveMediaCapability, ExtensionMediaConsentDecision>
       > = {}
-      for (const [kind, decision] of Object.entries(value)) {
+      for (const [kind, decision] of Object.entries(record.grants)) {
         if (
           isSensitiveMediaCapability(kind)
           && (decision === 'allow' || decision === 'deny')
         ) {
-          extensionDecisions[kind] = decision
+          grants[kind] = decision
+        } else {
+          rewrite = true
         }
       }
-      if (Object.keys(extensionDecisions).length > 0) {
-        decisions[extensionId] = extensionDecisions
+      const key = `${record.extensionId}\u0000${record.extensionIdentity}`
+      if (Object.keys(grants).length > 0 && !seen.has(key)) {
+        seen.add(key)
+        decisions.push({
+          extensionId: record.extensionId,
+          extensionIdentity: record.extensionIdentity,
+          grants,
+        })
+      } else {
+        rewrite = true
       }
     }
-    return { version: 1, decisions }
+    return { consent: { version: 2, decisions }, rewrite }
   } catch {
-    return emptyConsent()
+    return { consent: emptyConsent(), rewrite: true }
   }
 }
 
@@ -86,24 +124,43 @@ export class ExtensionMediaConsentStore {
 
   getDecision(
     extensionId: string,
+    extensionIdentity: string,
     kind: SensitiveMediaCapability,
   ): ExtensionMediaConsentDecision | undefined {
-    if (!isValidExtensionId(extensionId)) return undefined
-    return this.persisted.decisions[extensionId]?.[kind]
+    if (!isValidExtensionId(extensionId) || !isExtensionMediaIdentity(extensionIdentity)) {
+      return undefined
+    }
+    return this.persisted.decisions.find(decision => {
+      return decision.extensionId === extensionId
+        && decision.extensionIdentity === extensionIdentity
+    })?.grants[kind]
   }
 
   async setDecision(
     extensionId: string,
+    extensionIdentity: string,
     kind: SensitiveMediaCapability,
     decision: ExtensionMediaConsentDecision,
   ): Promise<void> {
     if (!isValidExtensionId(extensionId)) {
       throw new Error(`Invalid extension id: ${extensionId}`)
     }
+    if (!isExtensionMediaIdentity(extensionIdentity)) {
+      throw new Error('Invalid extension media identity')
+    }
     await this.ready
-    this.persisted.decisions[extensionId] = {
-      ...this.persisted.decisions[extensionId],
-      [kind]: decision,
+    const existing = this.persisted.decisions.find(entry => {
+      return entry.extensionId === extensionId
+        && entry.extensionIdentity === extensionIdentity
+    })
+    if (existing) {
+      existing.grants[kind] = decision
+    } else {
+      this.persisted.decisions.push({
+        extensionId,
+        extensionIdentity,
+        grants: { [kind]: decision },
+      })
     }
     await this.persist()
   }
@@ -111,16 +168,24 @@ export class ExtensionMediaConsentStore {
   async revokeExtension(extensionId: string): Promise<void> {
     if (!isValidExtensionId(extensionId)) return
     await this.ready
-    if (!(extensionId in this.persisted.decisions)) return
-    delete this.persisted.decisions[extensionId]
+    const remaining = this.persisted.decisions.filter(decision => {
+      return decision.extensionId !== extensionId
+    })
+    if (remaining.length === this.persisted.decisions.length) return
+    this.persisted = { version: 2, decisions: remaining }
     await this.persist()
   }
 
   private async load(): Promise<void> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf8')
-      this.persisted = parseConsent(raw)
-      await fs.chmod(this.filePath, 0o600)
+      const parsed = parseConsent(raw)
+      this.persisted = parsed.consent
+      if (parsed.rewrite) {
+        await this.writeSnapshot(JSON.stringify(this.persisted, null, 2))
+      } else {
+        await fs.chmod(this.filePath, 0o600)
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code !== 'ENOENT') this.persisted = emptyConsent()
@@ -129,30 +194,32 @@ export class ExtensionMediaConsentStore {
 
   private async persist(): Promise<void> {
     const snapshot = JSON.stringify(this.persisted, null, 2)
-    const run = async (): Promise<void> => {
-      const directory = dirname(this.filePath)
-      await fs.mkdir(directory, { recursive: true, mode: 0o700 })
-      const temporaryPath = join(
-        directory,
-        `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
-      )
-      let handle: Awaited<ReturnType<typeof fs.open>> | undefined
-      try {
-        handle = await fs.open(temporaryPath, 'wx', 0o600)
-        await handle.writeFile(snapshot, 'utf8')
-        await handle.sync()
-        await handle.close()
-        handle = undefined
-        await fs.rename(temporaryPath, this.filePath)
-        await fs.chmod(this.filePath, 0o600)
-      } finally {
-        await handle?.close().catch(() => undefined)
-        await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
-      }
-    }
+    const run = (): Promise<void> => this.writeSnapshot(snapshot)
     const result = this.writeQueue.then(run, run)
     this.writeQueue = result.catch(() => undefined)
     await result
+  }
+
+  private async writeSnapshot(snapshot: string): Promise<void> {
+    const directory = dirname(this.filePath)
+    await fs.mkdir(directory, { recursive: true, mode: 0o700 })
+    const temporaryPath = join(
+      directory,
+      `.${basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
+    )
+    let handle: Awaited<ReturnType<typeof fs.open>> | undefined
+    try {
+      handle = await fs.open(temporaryPath, 'wx', 0o600)
+      await handle.writeFile(snapshot, 'utf8')
+      await handle.sync()
+      await handle.close()
+      handle = undefined
+      await fs.rename(temporaryPath, this.filePath)
+      await fs.chmod(this.filePath, 0o600)
+    } finally {
+      await handle?.close().catch(() => undefined)
+      await fs.rm(temporaryPath, { force: true }).catch(() => undefined)
+    }
   }
 }
 
@@ -177,17 +244,28 @@ export class ExtensionMediaConsentManager {
     return this.store.ready
   }
 
-  hasConsent(extensionId: string, kind: SensitiveMediaCapability): boolean {
-    return this.store.getDecision(extensionId, kind) === 'allow'
+  hasConsent(
+    extensionId: string,
+    extensionIdentity: string,
+    kind: SensitiveMediaCapability,
+  ): boolean {
+    return this.store.getDecision(extensionId, extensionIdentity, kind) === 'allow'
   }
 
   async requestConsent(request: ExtensionMediaConsentPrompt): Promise<boolean> {
-    if (!isValidExtensionId(request.extensionId)) return false
+    if (
+      !isValidExtensionId(request.extensionId)
+      || !isExtensionMediaIdentity(request.extensionIdentity)
+    ) return false
     await this.ready
-    const stored = this.store.getDecision(request.extensionId, request.kind)
+    const stored = this.store.getDecision(
+      request.extensionId,
+      request.extensionIdentity,
+      request.kind,
+    )
     if (stored) return stored === 'allow'
 
-    const key = `${request.extensionId}:${request.kind}`
+    const key = `${request.extensionId}:${request.extensionIdentity}:${request.kind}`
     const pending = this.pendingByKey.get(key)
     if (pending) return pending
     const generation = this.extensionGenerations.get(request.extensionId) ?? 0
@@ -196,7 +274,11 @@ export class ExtensionMediaConsentManager {
       if ((this.extensionGenerations.get(request.extensionId) ?? 0) !== generation) {
         return false
       }
-      const current = this.store.getDecision(request.extensionId, request.kind)
+      const current = this.store.getDecision(
+        request.extensionId,
+        request.extensionIdentity,
+        request.kind,
+      )
       if (current) return current === 'allow'
       let allowed = false
       try {
@@ -209,6 +291,7 @@ export class ExtensionMediaConsentManager {
       }
       await this.store.setDecision(
         request.extensionId,
+        request.extensionIdentity,
         request.kind,
         allowed ? 'allow' : 'deny',
       )

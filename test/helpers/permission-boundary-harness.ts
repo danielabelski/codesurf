@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   createPermissionBoundary,
   type BrowserWindowLike,
@@ -202,17 +203,18 @@ export function createHarness(options?: {
       }
       return match
     },
-    hasExtensionConsent: (extensionId, kind) => {
-      return extensionConsents.get(extensionId)?.has(kind) === true
+    hasExtensionConsent: (extensionId, extensionIdentity, kind) => {
+      return extensionConsents.get(`${extensionId}:${extensionIdentity}`)?.has(kind) === true
     },
     requestExtensionConsent: async (extension, kind) => {
       extensionConsentPrompts.push(`${extension.id}:${kind}`)
       const allowed = await extensionConsentRequester(extension, kind)
       if (!allowed) return false
-      let consent = extensionConsents.get(extension.id)
+      const consentKey = `${extension.id}:${extension.identity}`
+      let consent = extensionConsents.get(consentKey)
       if (!consent) {
         consent = new Set()
-        extensionConsents.set(extension.id, consent)
+        extensionConsents.set(consentKey, consent)
       }
       consent.add(kind)
       return true
@@ -290,6 +292,7 @@ export function createHarness(options?: {
     ) => {
       extensions.set(id, {
         id,
+        identity: config?.identity ?? `sha256:${createHash('sha256').update(id).digest('hex')}`,
         name: config?.name ?? id,
         enabled: config?.enabled ?? true,
         declaredMedia: config?.declaredMedia ?? [],
@@ -299,7 +302,9 @@ export function createHarness(options?: {
       id: string,
       kinds: readonly ('microphone' | 'camera' | 'display-capture')[],
     ) => {
-      extensionConsents.set(id, new Set(kinds))
+      const identity = extensions.get(id)?.identity
+        ?? `sha256:${createHash('sha256').update(id).digest('hex')}`
+      extensionConsents.set(`${id}:${identity}`, new Set(kinds))
     },
     setSelectedSource: (source: DisplaySource | undefined) => { selectedSource = source },
     selectionCount: () => selectionCount,

@@ -179,8 +179,8 @@ export function installElectronPermissionBoundary(
       }
       return match ? asFrame(match) : undefined
     },
-    hasExtensionConsent: (extensionId, kind) => {
-      return consentManager.hasConsent(extensionId, kind)
+    hasExtensionConsent: (extensionId, extensionIdentity, kind) => {
+      return consentManager.hasConsent(extensionId, extensionIdentity, kind)
     },
     getWebContentsForFrame: frame => {
       const contents = electronWebContents.fromFrame(frame as unknown as WebFrameMain)
@@ -214,6 +214,7 @@ export function installElectronPermissionBoundary(
     requestExtensionConsent: (extension, kind, owner) => {
       return consentManager.requestConsent({
         extensionId: extension.id,
+        extensionIdentity: extension.identity,
         extensionName: extension.name,
         kind,
         owner: owner as unknown as BrowserWindow,

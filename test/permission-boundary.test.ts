@@ -292,6 +292,52 @@ describe('permission boundary', () => {
     )
   })
 
+  test('an extension replacement cannot inherit consent or a runtime grant', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    const oldIdentity = `sha256:${'a'.repeat(64)}`
+    const replacementIdentity = `sha256:${'b'.repeat(64)}`
+    harness.setExtension('media-extension', {
+      identity: oldIdentity,
+      declaredMedia: ['microphone'],
+    })
+    harness.setExtensionConsent('media-extension', ['microphone'])
+    const extensionUrl = 'codesurf-ext://media-extension'
+    const details = {
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `${extensionUrl}/index.html`,
+      securityOrigin: `${extensionUrl}/`,
+    }
+    const child = new FakeFrame(details.requestingUrl, extensionUrl, 123)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+    const check = () => trusted.session.checkHandler?.(
+      trusted.contents,
+      'media',
+      details.securityOrigin,
+      { ...details, mediaType: 'audio' },
+    )
+
+    assert.equal(await requestPermission(trusted.session, trusted.contents, 'media', details), true)
+    assert.equal(check(), true)
+    harness.setExtension('media-extension', {
+      identity: replacementIdentity,
+      declaredMedia: ['microphone'],
+    })
+    assert.equal(check(), false)
+
+    assert.equal(await requestPermission(trusted.session, trusted.contents, 'media', details), true)
+    assert.deepEqual(
+      harness.extensionConsentPrompts,
+      ['media-extension:microphone'],
+      'the replacement identity must receive fresh explicit consent',
+    )
+    assert.equal(check(), true)
+  })
+
   test('denies null, destroyed, unregistered, and every non-window content type', () => {
     const harness = createHarness()
     const unregistered = harness.makeWindow()

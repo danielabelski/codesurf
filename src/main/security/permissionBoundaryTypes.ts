@@ -65,6 +65,7 @@ export interface DisplayStreams<DisplaySource> {
 
 export interface ExtensionPermissionDescriptor {
   readonly id: string
+  readonly identity: string
   readonly name: string
   readonly enabled: boolean
   readonly declaredMedia: readonly SensitiveMediaCapability[]
@@ -114,7 +115,11 @@ export interface PermissionBoundaryRuntime<DisplaySource> {
   getOwnerWindow(webContents: WebContentsLike): BrowserWindowLike | undefined
   getSession(webContents: WebContentsLike): PermissionSession<DisplaySource>
   getWebContentsForFrame(frame: FrameLike): WebContentsLike | undefined
-  hasExtensionConsent(extensionId: string, kind: SensitiveMediaCapability): boolean
+  hasExtensionConsent(
+    extensionId: string,
+    extensionIdentity: string,
+    kind: SensitiveMediaCapability,
+  ): boolean
   onSessionCreated(listener: (session: PermissionSession<DisplaySource>) => void): void
   onWebContentsCreated(listener: (webContents: WebContentsLike) => void): void
   onWebContentsNavigation(
