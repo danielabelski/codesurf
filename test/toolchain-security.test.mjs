@@ -98,6 +98,14 @@ test('security-sensitive build tools remain on the reviewed exact versions', asy
   }
 })
 
+test('npm package publication remains gated by its artifact smoke test', async () => {
+  const manifest = await readJson(resolve(ROOT_DIR, 'package.json'))
+  assert.equal(
+    manifest.scripts?.['test:npm-package'],
+    'npm run build:npm && node scripts/smoke-npm-package.mjs',
+  )
+})
+
 test('relay test toolchain remains on the audited Vite and Vitest line', async () => {
   const [manifest, lock] = await Promise.all([
     readJson(resolve(RELAY_DIR, 'package.json')),
