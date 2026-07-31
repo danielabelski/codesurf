@@ -75,6 +75,24 @@ function writtenEvents(response) {
     .map(chunk => JSON.parse(chunk.slice('data: '.length).trim()))
 }
 
+function hasTerminalPair(events) {
+  const terminalTypes = events.slice(-2).map(event => event.type)
+  return terminalTypes[0] === 'error' && terminalTypes[1] === 'done'
+}
+
+async function waitForDurableTerminal(timelinePath) {
+  return await waitFor(async () => {
+    const text = await readFile(timelinePath, 'utf8')
+    if (!text.endsWith('\n')) return null
+    try {
+      const events = text.trim().split('\n').map(line => JSON.parse(line))
+      return hasTerminalPair(events) ? text : null
+    } catch {
+      return null
+    }
+  })
+}
+
 function payload(sequence, text = `event-${sequence}`) {
   return {
     jobId: 'job-1',
@@ -487,14 +505,18 @@ test('outcome-uncertain partial terminal append never concatenates or publishes 
   releaseProvider.resolve()
   await waitFor(() => !manager.listLiveJobIds().includes(job.id))
   await waitFor(async () => (await manager.getJobState(job.id))?.status === 'failed')
-  await waitFor(() => response.endCalls === 1)
+  await waitFor(() => (
+    response.endCalls === 1
+    && hasTerminalPair(writtenEvents(response))
+  ))
 
   const streamed = writtenEvents(response)
   assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
   assert.match(streamed.at(-2)?.error, /partial append without newline|timeline persistence/i)
   assert.equal(streamed.filter(event => event.type === 'done').length, 1)
 
-  const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  const timelinePath = join(homeDir, 'timelines', `${job.id}.jsonl`)
+  const timelineText = await waitForDurableTerminal(timelinePath)
   assert.equal(timelineText.endsWith('\n'), true)
   const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
   assert.deepEqual(durable.map(event => event.sequence), durable.map((_, index) => index + 1))
@@ -549,14 +571,18 @@ test('outcome-uncertain append rejects a different record at the same sequence',
   assert.equal(await manager.streamJob(job.id, 0, response), true)
   releaseProvider.resolve()
   await waitFor(() => !manager.listLiveJobIds().includes(job.id))
-  await waitFor(() => response.endCalls === 1)
+  await waitFor(() => (
+    response.endCalls === 1
+    && hasTerminalPair(writtenEvents(response))
+  ))
 
   const streamed = writtenEvents(response)
   assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
   assert.equal(streamed.filter(event => event.type === 'done').length, 1)
   assert.equal((await manager.getJobState(job.id))?.status, 'failed')
 
-  const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  const timelinePath = join(homeDir, 'timelines', `${job.id}.jsonl`)
+  const timelineText = await waitForDurableTerminal(timelinePath)
   assert.equal(timelineText.endsWith('\n'), true)
   const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
   assert.deepEqual(durable.map(event => event.sequence), durable.map((_, index) => index + 1))
