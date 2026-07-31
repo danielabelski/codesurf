@@ -14,21 +14,15 @@ import {
   type BrowserEvidenceInput,
   type BrowserEvidenceViewport,
 } from '../../../shared/browserEvidence'
-import {
-  HOMEPAGE,
-  createClusoInjectScript,
-  normalizeUrl,
-  safeLoadURL,
-} from './browser/webviewManager'
+import { HOMEPAGE, normalizeUrl } from './browser/webviewManager'
 import { ToolbarButton } from './browser/ToolbarButton'
 import { BrowserEvidenceDrawer } from './browser/BrowserEvidenceDrawer'
 import type { BrowserEvidenceFilter } from './browser/browserEvidenceViewModel'
 import {
   useBrowserWebviewLifecycle,
+  type BrowserMode,
   type BrowserNavigationState,
 } from './browser/useBrowserWebviewLifecycle'
-import clusoEmbedJs from '../assets/cluso/cluso-embed.js?raw'
-import clusoEmbedCss from '../assets/cluso/cluso-embed.css?raw'
 
 
 
@@ -53,9 +47,6 @@ interface Props {
   hideNavbar?: boolean
 }
 
-type BrowserMode = 'desktop' | 'mobile'
-
-
 // ---------------------------------------------------------------------------
 // BrowserTile
 // ---------------------------------------------------------------------------
@@ -65,30 +56,14 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const browserBackground = theme.surface.panel
   const browserToolbarBackground = theme.surface.titlebar
   const browserBorder = theme.border.default
-  const wvContainerRef = useRef<HTMLDivElement>(null)
-  const wvRef = useRef<Electron.WebviewTag | null>(null)
-  const wvReadyRef = useRef(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const mountedRef = useRef(true)
-  const clusoToggleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const peerRelayUnsubscribeRef = useRef<(() => void) | null>(null)
   const mcpCommandUnsubscribeRef = useRef<(() => void) | null>(null)
   const browserEvidenceRef = useRef<BrowserEvidenceEvent[]>([])
 
-  // Track component mount state for async cleanup
-  useEffect(() => {
-    mountedRef.current = true
-    return () => {
-      mountedRef.current = false
-      if (clusoToggleTimerRef.current !== null) {
-        clearTimeout(clusoToggleTimerRef.current)
-        clusoToggleTimerRef.current = null
-      }
-    }
-  }, [])
-
   const initialSrc = useRef(normalizeUrl(initialUrl ?? ''))
   const startUrl = initialSrc.current
+  const prevInitialUrl = useRef(startUrl)
 
   const [addressBar, setAddressBar] = useState(startUrl)
   const [currentUrl, setCurrentUrl] = useState(startUrl)
@@ -96,8 +71,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const [canGoForward, setCanGoForward] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [mode, setMode] = useState<BrowserMode>('desktop')
-  const [, setIsClusoReady] = useState(false)
-  const [, setIsClusoActive] = useState(false)
   const [isToolbarHovered, setIsToolbarHovered] = useState(false)
   const [isAddressFocused, setIsAddressFocused] = useState(false)
   const [stateLoaded, setStateLoaded] = useState(!workspaceId)
@@ -116,7 +89,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   sizeRef.current = { width, height }
 
   const getCurrentViewport = useCallback((): BrowserEvidenceViewport | undefined => {
-    const rect = managedContainerRef.current?.getBoundingClientRect()
+    const rect = wvContainerRef.current?.getBoundingClientRect()
     const viewportWidth = rect && rect.width > 0 ? rect.width : sizeRef.current.width
     const viewportHeight = rect && rect.height > 0 ? rect.height : sizeRef.current.height
     const roundedWidth = Math.max(1, Math.round(viewportWidth))
@@ -212,16 +185,16 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   }, [])
 
   const {
-    containerRef: managedContainerRef,
+    containerRef: wvContainerRef,
     isEmbeddedPreview,
-    isClusoReady: managedClusoReady,
-    isClusoActive: managedClusoActive,
-    loadUrl: loadManagedUrl,
-    goBack: goBackManaged,
-    goForward: goForwardManaged,
-    reload: reloadManaged,
-    stop: stopManaged,
-    setMode: setManagedMode,
+    isClusoReady,
+    isClusoActive,
+    loadUrl,
+    goBack,
+    goForward,
+    reload: reloadWebview,
+    stop,
+    setMode: setWebviewMode,
     toggleCluso,
   } = useBrowserWebviewLifecycle({
     tileId,
@@ -262,10 +235,6 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
         setCurrentUrl(saved.currentUrl)
         initialSrc.current = saved.currentUrl
         prevInitialUrl.current = saved.currentUrl
-        if (wvRef.current) {
-          if (wvReadyRef.current) safeLoadURL(wvRef.current, saved.currentUrl)
-          else wvRef.current.src = saved.currentUrl
-        }
       }
       if (typeof saved.canGoBack === 'boolean') setCanGoBack(saved.canGoBack)
       if (typeof saved.canGoForward === 'boolean') setCanGoForward(saved.canGoForward)
@@ -365,126 +334,16 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     }
   }, [connectedPeers, tileId])
 
-  // Cluso embed assets — loaded once on mount
-  const clusoAssetsRef = useRef<{ js: string | null; css: string | null }>({
-    js: clusoEmbedJs || null,
-    css: clusoEmbedCss || null,
-  })
-
-  // Stable setter refs — avoid re-adding event listeners when state changes
-  const setCurrentUrlRef = useRef(setCurrentUrl)
-  setCurrentUrlRef.current = setCurrentUrl
-  const setPageTitleRef = useRef(setPageTitle)
-  setPageTitleRef.current = setPageTitle
-  const setAddressBarRef = useRef(setAddressBar)
-  setAddressBarRef.current = setAddressBar
-  const setCanGoBackRef = useRef(setCanGoBack)
-  setCanGoBackRef.current = setCanGoBack
-  const setCanGoForwardRef = useRef(setCanGoForward)
-  setCanGoForwardRef.current = setCanGoForward
-  const setIsLoadingRef = useRef(setIsLoading)
-  setIsLoadingRef.current = setIsLoading
-  const setIsClusoReadyRef = useRef(setIsClusoReady)
-  setIsClusoReadyRef.current = setIsClusoReady
-  const setIsClusoActiveRef = useRef(setIsClusoActive)
-  setIsClusoActiveRef.current = setIsClusoActive
-
-  const executeInWebview = useCallback((script: string): Promise<unknown> => {
-    const webview = wvRef.current
-    if (!webview || !mountedRef.current) return Promise.reject(new Error('Webview unavailable'))
-
-    if (wvReadyRef.current) {
-      return webview.executeJavaScript(script)
-    }
-
-    return new Promise((resolve, reject) => {
-      const onReady = () => {
-        if (!mountedRef.current || !wvReadyRef.current) {
-          cleanup()
-          reject(new Error('Webview became unavailable before ready'))
-          return
-        }
-        webview.executeJavaScript(script).then(resolve).catch(reject).finally(cleanup)
-      }
-
-      const cleanup = () => {
-        clearTimeout(timeout)
-        webview.removeEventListener('dom-ready', onReady)
-      }
-
-      const timeout = setTimeout(() => {
-        cleanup()
-        reject(new Error('Webview ready timeout'))
-      }, 5000)
-
-      webview.addEventListener('dom-ready', onReady)
-    })
-  }, [])
-
-  // Inject cluso into the webview — called after each page load
-  const injectCluso = useCallback(() => {
-    const { js, css } = clusoAssetsRef.current
-    if (!js || !css) {
-      console.warn('[Cluso] Assets not loaded yet — skipping injection')
-      return
-    }
-    setIsClusoReadyRef.current(false)
-    setIsClusoActiveRef.current(false)
-    executeInWebview(createClusoInjectScript(js, css))
-      .then(result => {
-        if (typeof result === 'string' && result.includes('ERROR')) console.error('[Cluso] Injection error:', result)
-      })
-      .catch(err => console.error('[Cluso] Injection failed:', err))
-  }, [executeInWebview]) // stable — reads assets via ref
-
-  // Load bundled cluso embed assets (once per mount)
-  useEffect(() => {
-    clusoAssetsRef.current = {
-      js: clusoEmbedJs || null,
-      css: clusoEmbedCss || null,
-    }
-
-    if (!clusoAssetsRef.current.js || !clusoAssetsRef.current.css) {
-      console.warn('[Cluso] Bundled embed assets are missing — inspector will not work')
-      return
-    }
-
-    // The page can finish loading before the component mount effect runs.
-    // If that happened, retry injection now instead of waiting for another navigation.
-    if (mountedRef.current && wvReadyRef.current) injectCluso()
-  }, [injectCluso])
-
   // Navigate when initialUrl prop changes (e.g. opened from sidebar)
-  const prevInitialUrl = useRef(startUrl)
   useEffect(() => {
     const next = normalizeUrl(initialUrl ?? '')
     if (next !== prevInitialUrl.current) {
       prevInitialUrl.current = next
       setAddressBar(next)
       setCurrentUrl(next)
-      loadManagedUrl(next)
+      loadUrl(next)
     }
-  }, [initialUrl, loadManagedUrl])
-
-  // Electron webviews are their own compositor surface. During drag/resize
-  // interactions, hiding the surface is more reliable than pointer-events:none
-  // for keeping dock/drop gestures on the host document.
-  useEffect(() => {
-    const webview = wvRef.current
-    const container = wvContainerRef.current
-    if (!webview) return
-
-    const blockPointerCapture = Boolean(!isVisible || isToolbarHovered || isAddressFocused || isInteracting)
-    const hideWebviewSurface = Boolean(!isVisible || isInteracting)
-
-    webview.style.pointerEvents = blockPointerCapture ? 'none' : 'auto'
-    webview.style.visibility = hideWebviewSurface ? 'hidden' : 'visible'
-    webview.style.opacity = hideWebviewSurface ? '0' : '1'
-
-    if (container) {
-      container.style.pointerEvents = blockPointerCapture ? 'none' : 'auto'
-    }
-  }, [isToolbarHovered, isAddressFocused, isInteracting, isVisible])
+  }, [initialUrl, loadUrl])
 
   // ---- navigation actions -----------------------------------------------
   const navigate = useCallback((rawUrl: string) => {
@@ -492,17 +351,12 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
     setAddressBar(next)
     setCurrentUrl(next)
     setIsLoading(true)
-    loadManagedUrl(next)
-  }, [loadManagedUrl])
-
-  const goBack = goBackManaged
-  const goForward = goForwardManaged
+    loadUrl(next)
+  }, [loadUrl])
 
   const reload = useCallback(() => {
-    if (reloadManaged()) setIsLoading(true)
-  }, [reloadManaged])
-
-  const stop = stopManaged
+    if (reloadWebview()) setIsLoading(true)
+  }, [reloadWebview])
 
   const goHome = useCallback(() => navigate(HOMEPAGE), [navigate])
 
@@ -510,8 +364,8 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
   const switchMode = useCallback((next: BrowserMode) => {
     if (isEmbeddedPreview) return
     setMode(next)
-    setManagedMode(next)
-  }, [isEmbeddedPreview, setManagedMode])
+    setWebviewMode(next)
+  }, [isEmbeddedPreview, setWebviewMode])
 
   const captureEvidenceSnapshot = useCallback(() => {
     publishEvidenceSnapshot('user-capture')
@@ -740,9 +594,9 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
             </ToolbarButton>
             <ToolbarButton
               label="Cluso"
-              title={managedClusoActive ? 'Finish selection' : managedClusoReady ? 'Select elements for chat context' : 'Load selector'}
-              active={managedClusoActive}
-              disabled={!managedClusoReady && !currentUrl}
+              title={isClusoActive ? 'Finish selection' : isClusoReady ? 'Select elements for chat context' : 'Load selector'}
+              active={isClusoActive}
+              disabled={!isClusoReady && !currentUrl}
               onClick={toggleCluso}
             >
               <Crosshair size={12} />
@@ -852,7 +706,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
       {/* Webview container — starts below toolbar (or fills entire tile when navbar hidden) */}
       <div
-        ref={managedContainerRef}
+        ref={wvContainerRef}
         style={{ position: 'absolute', top: hideNavbar ? 0 : 34, left: 0, right: 0, bottom: 0, zIndex: 1, background: browserBackground }}
       />
 
