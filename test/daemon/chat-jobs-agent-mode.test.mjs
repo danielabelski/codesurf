@@ -21,6 +21,7 @@ import {
   createChatJobManager,
   buildCodexExecArgs,
   hermesToolsetsForRequest,
+  revalidateDaemonContextRequest,
   shouldUseHarness,
 } from '../../bin/chat-jobs.mjs'
 import {
@@ -30,6 +31,7 @@ import {
   startCodexSdkThread,
 } from '../../packages/codesurf-daemon/bin/codex-sdk-provider.mjs'
 import { isCodexSdkEnabled } from '../../packages/codesurf-daemon/bin/codex-sdk-settings.mjs'
+import { CHAT_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/context-composer.mjs'
 // Daemon-side AgentMode→tool mapping (Codex sandbox / Hermes toolsets).
 import * as daemonAgentTools from '../../packages/codesurf-daemon/bin/agent-mode-tools.mjs'
 // Runtime providers' shared mapping module (the SAME code chatClaude/chatCodex/
@@ -127,7 +129,7 @@ test('isToolAllowedByAgent: matches across PascalCase/lowercase normalization', 
 
 // ─── harness path ────────────────────────────────────────────────────────────
 
-test('harness: AgentMode.systemPrompt is injected into makeAgent instructions', async () => {
+test('harness consumes the one host-composed context prompt', async () => {
   const captured = {}
   const home = mkdtempSync(join(tmpdir(), 'codesurf-agentmode-'))
   const createAgent = opts => {
@@ -148,7 +150,10 @@ test('harness: AgentMode.systemPrompt is injected into makeAgent instructions', 
     },
     '', // no workspace → bind path is the raw instructionPrompt + persona
     'MEMORY-PROMPT-CONTEXT',
-    { appendEvent: async () => {}, peerPrompt: 'BOUNDED-PEER-CONTEXT' },
+    {
+      appendEvent: async () => {},
+      contextPrompt: 'ZEBRA-PERSONA-9921 You only speak in haiku.\n\nMEMORY-PROMPT-CONTEXT\n\nBOUNDED-PEER-CONTEXT',
+    },
   )
   assert.ok(captured.opts.instructions.includes('ZEBRA-PERSONA-9921'), 'persona systemPrompt must reach instructions')
   assert.ok(captured.opts.instructions.includes('MEMORY-PROMPT-CONTEXT'), 'memory prompt must still be present')
@@ -156,6 +161,75 @@ test('harness: AgentMode.systemPrompt is injected into makeAgent instructions', 
   // persona leads the instructions
   assert.ok(captured.opts.instructions.indexOf('ZEBRA-PERSONA-9921') < captured.opts.instructions.indexOf('MEMORY-PROMPT-CONTEXT'))
   assert.ok(captured.opts.instructions.indexOf('MEMORY-PROMPT-CONTEXT') < captured.opts.instructions.indexOf('BOUNDED-PEER-CONTEXT'))
+})
+
+test('harness model instructions exclude even an oversized workspace bind path', async () => {
+  const captured = {}
+  const home = mkdtempSync(join(tmpdir(), 'codesurf-agentmode-'))
+  const contextPrompt = 'HOST-COMPOSED-CONTEXT'
+  const oversizedBindPath = `/${'oversized-bind-segment/'.repeat(800)}`
+  const runner = createHarnessRunner({
+    homeDir: home,
+    bindWorkspace: () => {},
+    createAgent: opts => {
+      captured.opts = opts
+      return {
+        async createSession(o) { return { sessionId: o?.sessionId ?? 'fake', destroy: async () => {} } },
+        async stream() { return { fullStream: scriptedStream([{ type: 'finish', finishReason: 'stop' }]) } },
+      }
+    },
+  })
+
+  await runner.runHarnessJob(
+    { id: 'oversized-bind-path' },
+    {
+      provider: 'claude',
+      mode: 'default',
+      messages: [{ role: 'user', content: 'hi' }],
+    },
+    oversizedBindPath,
+    '',
+    { appendEvent: async () => {}, contextPrompt },
+  )
+
+  assert.equal(captured.opts.instructions, contextPrompt)
+  assert.ok(Buffer.byteLength(captured.opts.instructions, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
+  assert.doesNotMatch(captured.opts.instructions, /oversized-bind-segment/)
+})
+
+test('harness workspace bind failure stops before agent launch with one terminal pair', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'codesurf-agentmode-'))
+  const events = []
+  let makeAgentCalled = false
+  const runner = createHarnessRunner({
+    homeDir: home,
+    bindWorkspace: () => {
+      throw new Error('BIND-FAIL-SENTINEL')
+    },
+    createAgent: () => {
+      makeAgentCalled = true
+      throw new Error('agent must not be constructed')
+    },
+  })
+
+  await runner.runHarnessJob(
+    { id: 'bind-failure' },
+    {
+      provider: 'claude',
+      mode: 'default',
+      messages: [{ role: 'user', content: 'hi' }],
+    },
+    join(home, 'non-git-workspace'),
+    '',
+    {
+      appendEvent: async (_jobId, event) => { events.push(event) },
+      contextPrompt: 'HOST-COMPOSED-CONTEXT',
+    },
+  )
+
+  assert.equal(makeAgentCalled, false)
+  assert.deepEqual(events.map(event => event.type), ['error', 'done'])
+  assert.match(events[0].error, /BIND-FAIL-SENTINEL/)
 })
 
 test('harness: tools allow-list denies a disallowed tool without prompting, allows a listed one', async () => {
@@ -492,11 +566,12 @@ test('daemon Codex: an explicit deny-all ([]) FAILS CLOSED instead of silently a
 })
 
 test('daemon Codex: AgentMode.systemPrompt is injected into the prompt arg', () => {
-  const args = buildCodexExecArgs({
+  const validated = revalidateDaemonContextRequest({
     provider: 'codex', model: 'gpt-test', mode: 'default',
     messages: [{ role: 'user', content: 'hello' }],
     agentMode: { id: 'z', name: 'Z', systemPrompt: 'CODEX-PERSONA-5512 stay terse.', tools: null },
-  }, '/ws')
+  }).request
+  const args = buildCodexExecArgs(validated, '/ws')
   // The prompt is the final positional arg.
   assert.ok(args[args.length - 1].includes('CODEX-PERSONA-5512'), 'persona must reach the codex prompt')
 })
@@ -875,19 +950,20 @@ test('runtime mapping: codex sandbox + hermes toolsets reflect allow-list (#1)',
 test('contract #1: constructed payloads (not just helpers) reflect AgentMode (#1c)', () => {
   // Codex: the actual `codex exec` argv carries the persona in the prompt AND the
   // sandbox the allow-list dictates — assert the built command, not the helper.
-  const codexArgs = buildCodexExecArgs({
+  const codexRequest = revalidateDaemonContextRequest({
     provider: 'codex', model: 'gpt-test', mode: 'default',
     messages: [{ role: 'user', content: 'go' }],
     agentMode: { id: 'ask', name: 'Ask', systemPrompt: 'PERSONA-1C-CODEX read-only.', tools: ['Read', 'Glob'] },
-  }, '/ws')
+  }).request
+  const codexArgs = buildCodexExecArgs(codexRequest, '/ws')
   assert.equal(codexSandboxAndApproval(codexArgs).sandbox, 'read-only', 'write-free allow-list → read-only in the real argv')
   assert.ok(codexArgs[codexArgs.length - 1].includes('PERSONA-1C-CODEX'), 'persona must be in the real codex prompt arg')
 
   // Hermes: the constructed turn prompt carries the persona on the FIRST turn and
   // on a RESUMED turn (the #1a fix), and the toolset reflects the allow-list.
-  const firstTurn = buildHermesTurnPrompt({ userContent: 'go', agentPersona: 'PERSONA-1C-HERMES.', isFirstTurn: true })
+  const firstTurn = buildHermesTurnPrompt({ userContent: 'go', contextPrompt: 'PERSONA-1C-HERMES.' })
   assert.ok(firstTurn.includes('PERSONA-1C-HERMES'), 'persona present on first Hermes turn')
-  const resumed = buildHermesTurnPrompt({ userContent: 'go', agentPersona: 'PERSONA-1C-HERMES.', isFirstTurn: false })
+  const resumed = buildHermesTurnPrompt({ userContent: 'go', contextPrompt: 'PERSONA-1C-HERMES.' })
   assert.ok(resumed.includes('PERSONA-1C-HERMES'), 'persona present on RESUMED Hermes turn (#1a)')
   assert.equal(
     hermesToolsetsForRequest({ provider: 'hermes', mode: 'full', agentMode: { tools: ['Read', 'Glob'] } }),
@@ -938,7 +1014,7 @@ test('runtime Hermes: buildHermesSpawnArgs (the chatHermes call path) reflects A
   // and the persona rides inside the --query prompt.
   const args = buildHermesSpawnArgs({
     agentMode: { id: 'ask', name: 'Ask', systemPrompt: 'PERSONA-RT-HERMES.', tools: ['Read', 'Glob'] },
-    mode: 'full', model: 'm', userContent: 'go', peerPrompt: 'BOUNDED-PEER-RT-HERMES',
+    mode: 'full', model: 'm', userContent: 'go', contextPrompt: 'PERSONA-RT-HERMES.\n\nBOUNDED-PEER-RT-HERMES',
   })
   const tsIdx = args.indexOf('--toolsets')
   assert.ok(tsIdx >= 0, '--toolsets must be present for a non-empty allow-list')
@@ -957,7 +1033,7 @@ test('runtime Hermes: buildHermesSpawnArgs (the chatHermes call path) reflects A
 test('runtime Codex: buildCodexSpawnArgs (the chatCodex call path) reflects AgentMode in the real argv (#1c)', () => {
   const args = buildCodexSpawnArgs({
     agentMode: { id: 'ask', name: 'Ask', systemPrompt: 'PERSONA-RT-CODEX.', tools: ['Read', 'Glob'] },
-    mode: 'default', model: 'm', userContent: 'go', workspaceDir: '/ws',
+    mode: 'default', model: 'm', userContent: 'go', workspaceDir: '/ws', contextPrompt: 'PERSONA-RT-CODEX.',
   })
   assert.equal(codexSandboxAndApproval(args).sandbox, 'read-only', 'write-free allow-list → read-only sandbox in the real runtime argv')
   assert.ok(args[args.length - 1].includes('PERSONA-RT-CODEX'), 'persona must be in the real codex prompt arg')
@@ -1232,19 +1308,19 @@ test('Hermes: persona is RE-INJECTED on resumed turns, not dropped (#1a)', () =>
   const persona = 'HERMES-PERSONA-9911 act as a security auditor.'
 
   // First turn: persona present (alongside the output convention).
-  const first = buildHermesTurnPrompt({ userContent: 'scan the repo', agentPersona: persona, isFirstTurn: true })
+  const first = buildHermesTurnPrompt({ userContent: 'scan the repo', contextPrompt: persona })
   assert.ok(first.includes(persona), 'persona must lead the first Hermes turn')
   assert.ok(first.includes('scan the repo'))
 
   // RESUMED turn: regression proof. The OLD code returned bare userContent on
   // resume (persona dropped → agent reverted to default mid-session). It must now
   // re-inject the persona so the agent definition stays enforced.
-  const resumed = buildHermesTurnPrompt({ userContent: 'now fix it', agentPersona: persona, isFirstTurn: false })
+  const resumed = buildHermesTurnPrompt({ userContent: 'now fix it', contextPrompt: persona })
   assert.ok(resumed.includes(persona), 'persona MUST be present on a resumed Hermes turn (the #1a fix)')
   assert.ok(resumed.includes('now fix it'))
 
   // No persona configured → resumed turn is exactly the user content (no noise).
-  assert.equal(buildHermesTurnPrompt({ userContent: 'plain', agentPersona: undefined, isFirstTurn: false }), 'plain')
+  assert.equal(buildHermesTurnPrompt({ userContent: 'plain' }), 'plain')
 })
 
 // ─── permission mode persistence round-trip (#2b) ─────────────────────────────

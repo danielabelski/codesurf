@@ -4,6 +4,16 @@ import { resolve, relative, sep } from 'node:path'
 const ATTACHMENT_MARKER = 'Attached file paths:'
 const DEFAULT_MAX_REFERENCES = 6
 const DEFAULT_MAX_BYTES_PER_FILE = 16 * 1024
+const INTERNAL_CONTEXT_TAGS = [
+  {
+    open: '<codesurf_peer_context trust="untrusted" source="agent-room">',
+    close: '</codesurf_peer_context>',
+  },
+  {
+    open: '<codesurf_file_context trust="untrusted" source="workspace-files">',
+    close: '</codesurf_file_context>',
+  },
+]
 
 export async function expandFileReferences({
   message,
@@ -19,17 +29,27 @@ export async function expandFileReferences({
     return {
       changed: false,
       message: normalizedMessage,
+      bodyText: normalizedMessage,
+      contextText: undefined,
       references: [],
       summaryText: undefined,
       inputText: undefined,
     }
   }
 
-  const parsed = parseReferenceMentions(normalizedMessage)
+  // Host-appended room/file context is model-visible user data, not part of
+  // the user's file-reference expression. Protect it before scanning so a
+  // peer message such as `please inspect @secret.txt` cannot make the daemon
+  // read and inline an unrelated workspace file on the next chat turn.
+  const protectedContext = splitTrailingInternalContext(normalizedMessage)
+  const parsed = parseReferenceMentions(protectedContext.bodyText)
+  const bodyText = appendInternalContext(parsed.bodyText, protectedContext.suffixText)
   if (parsed.references.length === 0) {
     return {
       changed: false,
       message: normalizedMessage,
+      bodyText: normalizedMessage,
+      contextText: undefined,
       references: [],
       summaryText: undefined,
       inputText: undefined,
@@ -50,10 +70,12 @@ export async function expandFileReferences({
   }
 
   if (collected.length === 0) {
-    if (parsed.hadAttachmentPaths && parsed.bodyText !== normalizedMessage) {
+    if (parsed.hadAttachmentPaths && bodyText !== normalizedMessage) {
       return {
         changed: true,
-        message: parsed.bodyText,
+        message: bodyText,
+        bodyText,
+        contextText: undefined,
         references: [],
         summaryText: undefined,
         inputText: undefined,
@@ -62,21 +84,25 @@ export async function expandFileReferences({
     return {
       changed: false,
       message: normalizedMessage,
+      bodyText: normalizedMessage,
+      contextText: undefined,
       references: [],
       summaryText: undefined,
       inputText: undefined,
     }
   }
 
-  const messageText = buildExpandedMessage({
-    bodyText: parsed.bodyText,
+  const contextText = buildFileReferenceContext({
     executionTarget,
     references: collected,
   })
+  const messageText = [bodyText.trim(), contextText].filter(Boolean).join('\n\n').trim()
 
   return {
     changed: messageText !== normalizedMessage,
     message: messageText,
+    bodyText,
+    contextText,
     references: collected.map(reference => ({
       source: reference.source,
       displayPath: reference.displayPath,
@@ -89,6 +115,35 @@ export async function expandFileReferences({
     summaryText: buildSummaryText(collected),
     inputText: buildInputText(collected),
   }
+}
+
+function splitTrailingInternalContext(message) {
+  let bodyText = message
+  const suffixes = []
+
+  while (bodyText) {
+    let match = null
+    for (const tag of INTERNAL_CONTEXT_TAGS) {
+      const marker = `\n\n${tag.open}\n`
+      const close = `\n${tag.close}`
+      if (!bodyText.endsWith(close)) continue
+      const start = bodyText.lastIndexOf(marker)
+      if (start < 0) continue
+      if (!match || start > match.start) match = { ...tag, marker, start }
+    }
+    if (!match) break
+    suffixes.unshift(bodyText.slice(match.start + 2))
+    bodyText = bodyText.slice(0, match.start).trimEnd()
+  }
+
+  return {
+    bodyText,
+    suffixText: suffixes.join('\n\n') || undefined,
+  }
+}
+
+function appendInternalContext(bodyText, suffixText) {
+  return [bodyText.trim(), suffixText].filter(Boolean).join('\n\n').trim()
 }
 
 function normalizeWorkspaceDir(value) {
@@ -375,7 +430,7 @@ function normalizeFileContent(value) {
     .trimEnd()
 }
 
-function buildExpandedMessage({ bodyText, executionTarget, references }) {
+function buildFileReferenceContext({ executionTarget, references }) {
   const lines = [
     '## Referenced workspace files',
     executionTarget === 'cloud'
@@ -403,7 +458,7 @@ function buildExpandedMessage({ bodyText, executionTarget, references }) {
     lines.push(`<<<END FILE ${reference.displayPath}>>>`)
   }
 
-  return [bodyText.trim(), lines.join('\n')].filter(Boolean).join('\n\n').trim()
+  return lines.join('\n').trim()
 }
 
 function buildSummaryText(references) {

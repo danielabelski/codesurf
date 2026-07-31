@@ -9,13 +9,11 @@ import {
   revalidateDaemonContextRequest,
 } from '../../bin/chat-jobs.mjs'
 import {
-  MAX_AGGREGATE_INSTRUCTION_BYTES,
-  MAX_PERSONA_PROMPT_BYTES,
-  MAX_SKILLS_PROMPT_BYTES,
   MAX_SKILLS_SUMMARY_BYTES,
   MAX_TRANSCRIPT_CONTEXT_PREVIEW_BYTES,
 } from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 import { PEER_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/peer-context-policy.mjs'
+import { CHAT_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/context-composer.mjs'
 
 async function waitFor(check, timeoutMs = 5_000, intervalMs = 15) {
   const started = Date.now()
@@ -29,46 +27,51 @@ async function waitFor(check, timeoutMs = 5_000, intervalMs = 15) {
 
 test('daemon revalidates inbound memory, skills, summary, and persona prompts by UTF-8 bytes', () => {
   const result = revalidateDaemonContextRequest({
-    memoryPrompt: `${'m'.repeat(MAX_AGGREGATE_INSTRUCTION_BYTES)}é`,
-    skillsPrompt: `${'s'.repeat(MAX_SKILLS_PROMPT_BYTES)}é`,
+    memoryPrompt: `${'m'.repeat(20_000)}é`,
+    skillsPrompt: `${'s'.repeat(20_000)}é`,
     skillsSummary: `${'u'.repeat(MAX_SKILLS_SUMMARY_BYTES)}é`,
+    messages: [{ role: 'user', content: 'hello' }],
     agentMode: {
       id: 'bounded',
       name: 'Bounded',
-      systemPrompt: 'é'.repeat((MAX_PERSONA_PROMPT_BYTES / 2) + 1),
+      systemPrompt: 'é'.repeat(10_000),
       tools: ['Read'],
     },
   })
 
-  assert.ok(Buffer.byteLength(result.request.memoryPrompt, 'utf8') <= MAX_AGGREGATE_INSTRUCTION_BYTES)
-  assert.ok(Buffer.byteLength(result.request.skillsPrompt, 'utf8') <= MAX_SKILLS_PROMPT_BYTES)
+  assert.ok(Buffer.byteLength(result.request.memoryPrompt, 'utf8') <= 1_000)
+  assert.ok(Buffer.byteLength(result.request.skillsPrompt, 'utf8') <= 1_000)
   assert.ok(Buffer.byteLength(result.request.skillsSummary, 'utf8') <= MAX_SKILLS_SUMMARY_BYTES)
-  assert.ok(Buffer.byteLength(result.request.agentMode.systemPrompt, 'utf8') <= MAX_PERSONA_PROMPT_BYTES)
-  assert.match(result.request.memoryPrompt, /maximum aggregate instruction bytes/)
-  assert.match(result.request.skillsPrompt, /maximum skills prompt bytes/)
+  assert.ok(Buffer.byteLength(result.request.agentMode.systemPrompt, 'utf8') <= 1_000)
+  assert.match(result.request.memoryPrompt, /Context truncated: memory/)
+  assert.match(result.request.skillsPrompt, /Context truncated: skills/)
   assert.match(result.request.skillsSummary, /maximum skills summary bytes/)
-  assert.match(result.request.agentMode.systemPrompt, /maximum persona prompt bytes/)
+  assert.match(result.request.agentMode.systemPrompt, /Context truncated: persona/)
   assert.equal(result.metadata.memoryPrompt.truncated, true)
   assert.equal(result.metadata.skillsPrompt.truncated, true)
   assert.equal(result.metadata.skillsSummary.truncated, true)
   assert.equal(result.metadata.personaPrompt.truncated, true)
   assert.doesNotMatch(result.request.agentMode.systemPrompt, /\uFFFD/)
+  assert.equal(result.request.contextPrompt, undefined)
+  assert.ok(result.metadata.context.aggregateBytes <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 })
 
-test('daemon memory bounding reserves an appended higher-precedence room context', () => {
+test('daemon composes room context once as bounded untrusted user data', () => {
   const roomContext = 'ROOM-CONTEXT-MUST-SURVIVE'
-  const baseMemory = `MEMORY-START\n${'m'.repeat(MAX_AGGREGATE_INSTRUCTION_BYTES)}\nMEMORY-END`
+  const baseMemory = `MEMORY-START\n${'m'.repeat(20_000)}\nMEMORY-END`
   const result = revalidateDaemonContextRequest({
-    memoryPrompt: `${baseMemory}\n\n${roomContext}`,
+    memoryPrompt: baseMemory,
     roomContext,
+    messages: [{ role: 'user', content: 'hello' }],
   })
 
-  assert.ok(Buffer.byteLength(result.request.memoryPrompt, 'utf8') <= MAX_AGGREGATE_INSTRUCTION_BYTES)
-  assert.equal(result.request.roomContext, roomContext)
-  assert.match(result.request.memoryPrompt, /maximum aggregate instruction bytes/)
-  assert.ok(result.request.memoryPrompt.endsWith(roomContext))
-  assert.equal(result.request.memoryPrompt.match(/ROOM-CONTEXT-MUST-SURVIVE/g)?.length, 1)
+  assert.ok(Buffer.byteLength(result.request.memoryPrompt, 'utf8') <= 1_000)
+  assert.equal(result.request.roomContext, undefined)
+  assert.match(result.request.memoryPrompt, /Context truncated: memory/)
+  assert.match(result.request.messages[0].content, /trust="untrusted"[\s\S]*ROOM-CONTEXT-MUST-SURVIVE/)
+  assert.equal(result.request.messages[0].content.match(/ROOM-CONTEXT-MUST-SURVIVE/g)?.length, 1)
   assert.equal(result.metadata.memoryPrompt.truncated, true)
+  assert.equal(result.metadata.roomContext.truncated, false)
 })
 
 test('daemon revalidates peer context before Claude and Codex provider prompt construction', async t => {
@@ -130,14 +133,14 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
   })
   assert.ok(claudePrompt)
   assert.match(claudePrompt, /Peer prompt truncated:/)
-  assert.ok(Buffer.byteLength(claudePrompt, 'utf8') < PEER_CONTEXT_LIMITS.promptRenderedBytes + 8 * 1024)
+  assert.ok(Buffer.byteLength(claudePrompt, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 
-  let harnessPeerPrompt = null
+  let harnessContextPrompt = null
   const harnessManager = createChatJobManager({
     homeDir,
     harnessRunnerFactory: () => ({
       runHarnessJob: async (harnessJob, _request, _workspaceDir, _instructionPrompt, options) => {
-        harnessPeerPrompt = options.peerPrompt
+        harnessContextPrompt = options.contextPrompt
         await options.appendEvent(harnessJob.id, { type: 'text', text: 'bounded' })
         await options.appendEvent(harnessJob.id, { type: 'done' })
       },
@@ -151,6 +154,16 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
     mode: 'bypassPermissions',
     runMode: 'background',
     useHarness: true,
+    skillsPrompt: 'HARNESS-SKILLS-CONTEXT',
+    asyncExecution: {
+      requestedRunMode: 'background',
+      backend: 'daemon',
+      hostType: 'local-daemon',
+      hostLabel: 'Test daemon',
+      providerNativeBackground: true,
+      detachedDaemonAvailable: true,
+      detachedDaemonPreferred: false,
+    },
     workspaceDir,
     messages: [{ role: 'user', content: 'use peers in the background' }],
     peers,
@@ -159,22 +172,25 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
     const state = await harnessManager.getJobState(harnessJob.id)
     return state && state.status !== 'running' && state.status !== 'queued' ? state : null
   })
-  assert.match(harnessPeerPrompt, /## Connected peer blocks/)
-  assert.match(harnessPeerPrompt, /Peer prompt truncated:/)
-  assert.ok(Buffer.byteLength(harnessPeerPrompt, 'utf8') <= PEER_CONTEXT_LIMITS.promptRenderedBytes)
+  assert.match(harnessContextPrompt, /## Async Execution/)
+  assert.match(harnessContextPrompt, /HARNESS-SKILLS-CONTEXT/)
+  assert.match(harnessContextPrompt, /## Connected peer blocks/)
+  assert.match(harnessContextPrompt, /Peer prompt truncated:/)
+  assert.ok(Buffer.byteLength(harnessContextPrompt, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 
-  const codexArgs = buildCodexExecArgs({
+  const codexRequest = revalidateDaemonContextRequest({
     model: 'gpt-test',
     messages: [{ role: 'user', content: 'use peers' }],
     peers,
-  }, workspaceDir)
+  }).request
+  const codexArgs = buildCodexExecArgs(codexRequest, workspaceDir)
   const codexPrompt = codexArgs.at(-1)
   assert.match(codexPrompt, /## Agent room/)
   assert.match(codexPrompt, /Peer prompt truncated:/)
-  assert.ok(Buffer.byteLength(codexPrompt, 'utf8') < PEER_CONTEXT_LIMITS.promptRenderedBytes + 8 * 1024)
+  assert.ok(Buffer.byteLength(codexPrompt, 'utf8') < CHAT_CONTEXT_LIMITS.aggregateBytes + 1024)
 })
 
-test('context transcript inputs stay at 8 KiB while Claude receives the larger bounded prompts', async t => {
+test('provider and transcript context honor independent model-visible and preview ceilings', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-context-preview-'))
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
@@ -218,9 +234,10 @@ test('context transcript inputs stay at 8 KiB while Claude receives the larger b
 
   const providerPrompt = capturedOptions?.agents?.codesurf?.prompt
   assert.ok(providerPrompt)
-  assert.ok(Buffer.byteLength(providerPrompt, 'utf8') > MAX_TRANSCRIPT_CONTEXT_PREVIEW_BYTES)
-  assert.match(providerPrompt, /MEMORY-END/)
-  assert.match(providerPrompt, /SKILLS-END/)
+  assert.ok(Buffer.byteLength(providerPrompt, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
+  assert.match(providerPrompt, /Context truncated: memory/)
+  assert.match(providerPrompt, /Context truncated: skills/)
+  assert.doesNotMatch(providerPrompt, /MEMORY-END|SKILLS-END/)
 
   const timeline = (await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8'))
     .split('\n')
@@ -233,6 +250,5 @@ test('context transcript inputs stay at 8 KiB while Claude receives the larger b
   assert.equal(contextInputs.length, 2)
   for (const event of contextInputs) {
     assert.ok(Buffer.byteLength(event.text, 'utf8') <= MAX_TRANSCRIPT_CONTEXT_PREVIEW_BYTES)
-    assert.match(event.text, /maximum transcript context preview bytes/)
   }
 })

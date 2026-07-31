@@ -9,16 +9,18 @@ import { promisify } from 'node:util'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
 import {
-  MAX_AGGREGATE_INSTRUCTION_BYTES,
-  MAX_PERSONA_PROMPT_BYTES,
-  MAX_SKILLS_PROMPT_BYTES,
   MAX_SKILLS_SUMMARY_BYTES,
-  boundContextWithReservedSuffix,
   previewContextToolInput,
   truncateUtf8,
 } from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
 import { buildPeerContextPrompt } from './peer-context-policy.mjs'
+import { composeChatContext } from './context-composer.mjs'
+import {
+  buildCodeSurfActivityConvention,
+  buildCodeSurfInsightConvention,
+  buildCodeSurfOutputConvention,
+} from './prompt-conventions.mjs'
 import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,
@@ -605,13 +607,13 @@ async function ensureProvisionedWorkspace(homeDir, projectContext) {
   return workspaceDir
 }
 
-const validatedPeerPrompt = Symbol('validatedPeerPrompt')
+const validatedContextPrompt = Symbol('validatedContextPrompt')
 
-function peerPromptForRequest(request) {
-  if (request && Object.prototype.hasOwnProperty.call(request, validatedPeerPrompt)) {
-    return request[validatedPeerPrompt]
+function contextPromptForRequest(request) {
+  if (request && Object.prototype.hasOwnProperty.call(request, validatedContextPrompt)) {
+    return request[validatedContextPrompt]
   }
-  return buildPeerContextPrompt(request?.peers).fragment?.text
+  return undefined
 }
 
 function buildAsyncExecutionPrompt(asyncExecution) {
@@ -639,48 +641,6 @@ function buildAsyncExecutionPrompt(asyncExecution) {
   return lines.join('\n')
 }
 
-function joinPromptSections(...sections) {
-  const normalized = sections
-    .map(section => String(section ?? '').trim())
-    .filter(Boolean)
-  return normalized.length > 0 ? normalized.join('\n\n') : undefined
-}
-
-const CODESURF_INSIGHT_CONVENTION = [
-  '## CodeSurf Insight Convention',
-  '',
-  'Use an Insight block when you notice a non-obvious constraint, risk, hidden dependency, or design implication that the user should understand before trusting the answer.',
-  'Do not emit an Insight block for routine summaries, obvious statements, or tiny mechanical edits.',
-  '',
-  'When you emit one, use this exact wrapper:',
-  '`★ Insight ─────────────────────────────────────`',
-  '- [point 1]',
-  '- [point 2]',
-  '`─────────────────────────────────────────────────`',
-  '',
-  'Keep it to 1–2 bullets. It must explain non-obvious reasoning, not summarize the work.',
-].join('\n')
-
-function buildCodeSurfInsightConvention() {
-  return CODESURF_INSIGHT_CONVENTION
-}
-
-const CODESURF_ACTIVITY_CONVENTION = [
-  '## CodeSurf Activity Convention',
-  '',
-  'Keep your native agent instructions, tools, and strengths. This convention only standardizes what CodeSurf can show to the user.',
-  '',
-  'For non-trivial multi-step work, keep a visible task plan current using your native todo/plan tool when one is available.',
-  'If the native environment does not expose a todo/plan tool, use concise natural-language progress updates instead of inventing unavailable tools.',
-  '',
-  'Use neutral tool/action language. Avoid provider-specific status phrasing when a plain action name is enough.',
-  'Prefer short completion wording unless the task needs a structured handoff.',
-].join('\n')
-
-function buildCodeSurfActivityConvention() {
-  return CODESURF_ACTIVITY_CONVENTION
-}
-
 function summarizeMemoryContext(contextBuckets, instructionPrompt) {
   return String(contextBuckets?.inspect?.summary ?? '').trim()
     || describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
@@ -688,18 +648,6 @@ function summarizeMemoryContext(contextBuckets, instructionPrompt) {
 
 function buildMemoryContextInput(contextBuckets, instructionPrompt) {
   return describeContextBucketsForTool(contextBuckets, instructionPrompt).input
-}
-
-// The selected agent definition's persona prompt (AgentMode.systemPrompt). Sits
-// at the front of the assembled system prompt — ahead of memory/skills/async —
-// so the persona frames the turn the same way for every provider. Empty/missing
-// systemPrompt contributes nothing (joinPromptSections drops blank sections).
-function agentPersonaPrompt(request) {
-  const value = String(request?.agentMode?.systemPrompt ?? '').trim()
-  if (!value) return undefined
-  return truncateUtf8(value, MAX_PERSONA_PROMPT_BYTES, {
-    reason: `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
-  }).text
 }
 
 function boundOptionalContext(value, maxBytes, reason) {
@@ -727,77 +675,143 @@ function boundOptionalContext(value, maxBytes, reason) {
   }
 }
 
+function fragmentFor(context, kind) {
+  return context.fragments.find(fragment => fragment.kind === kind)
+}
+
+function fragmentMetadata(context, kind) {
+  const fragment = fragmentFor(context, kind)
+  return fragment
+    ? {
+        originalBytes: fragment.originalBytes,
+        includedBytes: fragment.includedBytes,
+        truncated: fragment.truncated,
+        truncationReason: fragment.truncated ? `maximum ${kind} context bytes (${fragment.maxUtf8Bytes})` : null,
+      }
+    : {
+        originalBytes: 0,
+        includedBytes: 0,
+        truncated: false,
+        truncationReason: null,
+      }
+}
+
+function appendComposedUserContext(messages, userSuffix) {
+  const suffix = String(userSuffix ?? '').trim()
+  if (!suffix || !Array.isArray(messages)) return messages
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) return messages
+  return messages.map((message, index) => index === lastUserIndex
+    ? { ...message, content: `${String(message?.content ?? '')}\n\n${suffix}` }
+    : message)
+}
+
+function extractTaggedUserContext(messages, openTag, closeTag) {
+  if (!Array.isArray(messages)) return { messages, text: undefined }
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) return { messages, text: undefined }
+  const content = String(messages[lastUserIndex]?.content ?? '')
+  const marker = `\n\n${openTag}\n`
+  const start = content.lastIndexOf(marker)
+  if (start < 0 || !content.endsWith(`\n${closeTag}`)) {
+    return { messages, text: undefined }
+  }
+  const valueStart = start + marker.length
+  const valueEnd = content.length - closeTag.length - 1
+  const text = content.slice(valueStart, valueEnd).trim() || undefined
+  const nextMessages = messages.map((message, index) => index === lastUserIndex
+    ? { ...message, content: content.slice(0, start).trimEnd() }
+    : message)
+  return { messages: nextMessages, text }
+}
+
 export function revalidateDaemonContextRequest(request = {}) {
   const peerContext = buildPeerContextPrompt(request.peers)
-  const memory = boundContextWithReservedSuffix(
-    request.memoryPrompt,
-    request.roomContext,
-    MAX_AGGREGATE_INSTRUCTION_BYTES,
-    {
-      reason: `maximum aggregate instruction bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
-      suffixReason: `maximum higher-precedence room context bytes (${MAX_AGGREGATE_INSTRUCTION_BYTES})`,
-    },
+  const extractedFiles = extractTaggedUserContext(
+    request.messages,
+    '<codesurf_file_context trust="untrusted" source="workspace-files">',
+    '</codesurf_file_context>',
   )
-  const skills = boundOptionalContext(
-    request.skillsPrompt,
-    MAX_SKILLS_PROMPT_BYTES,
-    `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
+  const extractedRoom = extractTaggedUserContext(
+    extractedFiles.messages,
+    '<codesurf_peer_context trust="untrusted" source="agent-room">',
+    '</codesurf_peer_context>',
   )
   const skillsSummary = boundOptionalContext(
     request.skillsSummary,
     MAX_SKILLS_SUMMARY_BYTES,
     `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
   )
-  const persona = boundOptionalContext(
-    request?.agentMode?.systemPrompt,
-    MAX_PERSONA_PROMPT_BYTES,
-    `maximum persona prompt bytes (${MAX_PERSONA_PROMPT_BYTES})`,
-  )
+  const context = composeChatContext({
+    persona: request?.agentMode?.systemPrompt,
+    memory: request.memoryPrompt,
+    skills: request.skillsPrompt,
+    outputConvention: buildCodeSurfOutputConvention(),
+    insightConvention: buildCodeSurfInsightConvention(),
+    activityConvention: buildCodeSurfActivityConvention(),
+    async: buildAsyncExecutionPrompt(request.asyncExecution),
+    peer: peerContext.fragment?.text,
+    room: request.roomContext ?? extractedRoom.text,
+    fileReferences: request.fileReferencePrompt ?? extractedFiles.text,
+  })
+  const persona = fragmentFor(context, 'persona')
+  const memory = fragmentFor(context, 'memory')
+  const skills = fragmentFor(context, 'skills')
   return {
     request: {
       ...request,
       peers: peerContext.peers,
-      [validatedPeerPrompt]: peerContext.fragment?.text,
-      memoryPrompt: memory.text,
-      roomContext: memory.suffix,
-      skillsPrompt: skills.value,
+      [validatedContextPrompt]: context.systemPrompt,
+      contextPrompt: undefined,
+      messages: appendComposedUserContext(extractedRoom.messages, context.userSuffix),
+      ...(Array.isArray(request.expandedMessages)
+        ? { expandedMessages: appendComposedUserContext(request.expandedMessages, context.userSuffix) }
+        : {}),
+      memoryPrompt: memory?.text,
+      roomContext: undefined,
+      fileReferencePrompt: undefined,
+      skillsPrompt: skills?.text,
       skillsSummary: skillsSummary.value,
       ...(request?.agentMode && typeof request.agentMode === 'object'
         ? {
             agentMode: {
               ...request.agentMode,
-              systemPrompt: persona.value ?? '',
+              systemPrompt: persona?.text ?? '',
             },
           }
         : {}),
     },
     metadata: {
-      memoryPrompt: {
-        originalBytes: memory.originalBytes,
-        includedBytes: memory.includedBytes,
-        truncated: memory.truncated,
-        truncationReason: memory.truncationReason,
-      },
-      skillsPrompt: skills.metadata,
+      context: context.metadata,
+      memoryPrompt: fragmentMetadata(context, 'memory'),
+      skillsPrompt: fragmentMetadata(context, 'skills'),
       skillsSummary: skillsSummary.metadata,
-      personaPrompt: persona.metadata,
+      personaPrompt: fragmentMetadata(context, 'persona'),
+      roomContext: fragmentMetadata(context, 'room'),
+      fileReferencePrompt: fragmentMetadata(context, 'file-reference'),
       peerContext: peerContext.metadata,
     },
   }
 }
 
-function buildClaudeAgentPrompt(peerPrompt, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  return joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention, peerPrompt)
+function buildClaudeAgentPrompt(contextPrompt) {
+  return String(contextPrompt ?? '').trim() || undefined
 }
 
-function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt, peerPrompt) {
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention, peerPrompt)
+function buildCodexPrompt(userText, contextPrompt) {
+  const preamble = String(contextPrompt ?? '').trim() || undefined
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
@@ -943,11 +957,7 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
   ]
   codexArgs.push(buildCodexPrompt(
     lastUserMsg?.content ?? '',
-    request.asyncExecution,
-    instructionPrompt,
-    request.skillsPrompt,
-    agentPersonaPrompt(request),
-    peerPromptForRequest(request),
+    contextPromptForRequest(request),
   ))
   return codexArgs
 }
@@ -2404,7 +2414,7 @@ export function createChatJobManager({
       options.tools = agentToolAllowList
     }
 
-    const systemPrompt = buildClaudeAgentPrompt(peerPromptForRequest(request), request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const systemPrompt = buildClaudeAgentPrompt(contextPromptForRequest(request))
     if (systemPrompt) {
       options.agent = 'codesurf'
       options.agents = {
@@ -2590,11 +2600,7 @@ export function createChatJobManager({
 
     const prompt = buildCodexPrompt(
       lastUserMsg.content ?? '',
-      request.asyncExecution,
-      instructionPrompt,
-      request.skillsPrompt,
-      agentPersonaPrompt(request),
-      peerPromptForRequest(request),
+      contextPromptForRequest(request),
     )
 
     const pendingSnapshots = new Map()
@@ -2988,14 +2994,14 @@ export function createChatJobManager({
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request), peerPromptForRequest(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, contextPromptForRequest(request))
     const proc = spawn('hermes', buildHermesChatArgs({
       prompt,
       model: request.model,
       provider: request.providerId ?? request.modelProvider ?? request.providerName,
       toolsets: hermesToolsetsForRequest(request),
       resumeSessionId: request.sessionId,
-      ignoreRules: Boolean(instructionPrompt || request.skillsPrompt || request.contextBuckets || request.memoryPrompt || agentPersonaPrompt(request)),
+      ignoreRules: Boolean(contextPromptForRequest(request) || request.contextBuckets),
       bypassPermissions: request.mode === 'bypassPermissions',
     }), {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3054,7 +3060,7 @@ export function createChatJobManager({
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request), peerPromptForRequest(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, contextPromptForRequest(request))
     const agent = typeof request.agent === 'string'
       ? request.agent
       : typeof request.agentName === 'string'
@@ -3175,11 +3181,7 @@ export function createChatJobManager({
 
     const prompt = buildCodexPrompt(
       lastUserMsg.content ?? '',
-      request.asyncExecution,
-      instructionPrompt,
-      request.skillsPrompt,
-      agentPersonaPrompt(request),
-      peerPromptForRequest(request),
+      contextPromptForRequest(request),
     )
 
     const abortController = new AbortController()
@@ -3574,7 +3576,7 @@ export function createChatJobManager({
           appendEvent,
           createCheckpoint: (toolName, filePaths) => createDaemonCheckpoint(job, request, toolName, filePaths),
           awaitToolPermission: (toolUseID, permissionRequest) => awaitToolPermissionAnswer(job, toolUseID, permissionRequest),
-          peerPrompt: peerPromptForRequest(request),
+          contextPrompt: contextPromptForRequest(request),
         })
       } else if (request.provider === 'claude') {
         await runClaudeJob(job, request, workspaceDir, instructionPrompt)

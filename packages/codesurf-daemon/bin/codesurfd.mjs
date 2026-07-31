@@ -2335,9 +2335,61 @@ async function canonicalizeDaemonChatRequest(input) {
     throw new ChatPolicyError('CHAT_PERSONA_DENIED', authoritative.error)
   }
   assertProviderPersonaEnforceable(request.provider, authoritative.agentMode)
+  const providerNativeBackground = request.provider === 'claude' || request.provider === 'codex'
   return {
     ...request,
     agentMode: authoritative.agentMode,
+    asyncExecution: {
+      requestedRunMode: request.runMode === 'background' ? 'background' : 'foreground',
+      backend: 'daemon',
+      hostType: 'local-daemon',
+      hostLabel: 'CodeSurf daemon',
+      providerNativeBackground,
+      detachedDaemonAvailable: true,
+      detachedDaemonPreferred: !providerNativeBackground,
+    },
+  }
+}
+
+async function attachDaemonFileReferenceContext(request) {
+  const messages = Array.isArray(request?.messages)
+    ? request.messages.map(message => ({ ...message }))
+    : []
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) return request
+
+  const expansion = await expandFileReferences({
+    message: messages[lastUserIndex]?.content,
+    workspaceDir: request.workspaceDir,
+    executionTarget: request.executionTarget === 'cloud' ? 'cloud' : 'local',
+  })
+  if (!expansion.changed) return request
+
+  messages[lastUserIndex] = {
+    ...messages[lastUserIndex],
+    content: expansion.bodyText,
+  }
+  const imageAttachments = expansion.references
+    .filter(reference => reference.binary
+      && typeof reference.resolvedPath === 'string'
+      && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(String(reference.mediaType ?? '').toLowerCase()))
+    .map(reference => ({
+      path: reference.resolvedPath,
+      mediaType: reference.mediaType,
+      displayPath: reference.displayPath,
+      byteCount: reference.byteCount,
+    }))
+  return {
+    ...request,
+    messages,
+    fileReferencePrompt: expansion.contextText,
+    ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
   }
 }
 
@@ -3339,6 +3391,7 @@ const server = createServer(async (req, res) => {
       let request
       try {
         request = await canonicalizeDaemonChatRequest(body.request)
+        request = await attachDaemonFileReferenceContext(request)
       } catch (error) {
         if (error instanceof ChatPolicyError) {
           sendJson(res, 400, { error: error.message, code: error.code })
