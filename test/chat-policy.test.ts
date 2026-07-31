@@ -144,8 +144,10 @@ test('workspace binding resolves aliases once and overwrites untrusted request f
   const canonicalRoot = join(temp, 'workspace')
   const replacementRoot = join(temp, 'replacement')
   const alias = join(temp, 'workspace-alias')
+  const fileRoot = join(temp, 'not-a-directory')
   await mkdir(canonicalRoot)
   await mkdir(replacementRoot)
+  await writeFile(fileRoot, 'not a directory')
   await symlink(canonicalRoot, alias)
 
   const bound = await bindChatRequestToWorkspace({
@@ -176,6 +178,13 @@ test('workspace binding resolves aliases once and overwrites untrusted request f
     ),
     /does not match the registered workspace root/,
   )
+  await assert.rejects(
+    bindChatRequestToWorkspace(
+      { workspaceId: 'ws-file', workspaceDir: fileRoot },
+      { id: 'ws-file', path: fileRoot },
+    ),
+    error => error instanceof ChatPolicyError && error.code === 'CHAT_WORKSPACE_UNKNOWN',
+  )
 })
 
 test('Electron request policy uses the trusted lookup and rejects unknown workspaces', async t => {
@@ -189,10 +198,18 @@ test('Electron request policy uses the trusted lookup and rejects unknown worksp
     model: 'configured-model',
     messages: [{ role: 'user', content: 'hello' }],
     agentMode: DEFAULT_PERSONAS.find(entry => entry.id === 'agent') as never,
+    memoryPrompt: 'renderer memory injection',
+    contextBuckets: { version: 1, includedBuckets: [], buckets: [] },
+    skillsPrompt: 'renderer skills injection',
+    skillsSummary: 'renderer skills summary',
   }
   const canonical = await canonicalizeElectronChatRequest(request, id => id === 'ws-1' ? root : null)
   assert.equal(canonical.workspaceDir, await realpath(root))
   assert.equal(canonical.agentMode, null)
+  assert.equal(canonical.memoryPrompt, undefined)
+  assert.equal(canonical.contextBuckets, undefined)
+  assert.equal(canonical.skillsPrompt, undefined)
+  assert.equal(canonical.skillsSummary, undefined)
 
   await assert.rejects(
     canonicalizeElectronChatRequest({ ...request, workspaceId: 'missing' }, () => null),

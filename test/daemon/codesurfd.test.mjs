@@ -45,6 +45,15 @@ async function startDaemon(options = {}) {
   })
 }
 
+async function registerChatWorkspace(daemon, projectPath = daemon.homeDir, name = 'Chat Test') {
+  const response = await daemon.request('/workspace/create-with-path', {
+    body: { name, projectPath },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(typeof response.payload?.id, 'string')
+  return response.payload
+}
+
 function makeJsonBodyAtSize(name, size) {
   const empty = JSON.stringify({ name, padding: '' })
   const paddingBytes = size - Buffer.byteLength(empty)
@@ -876,10 +885,12 @@ test('daemon chat jobs persist detached background mode in job metadata', async 
     await daemon.stop()
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const response = await daemon.request('/chat/job/start', {
     body: {
       request: {
         cardId: 'chat-1',
+        workspaceId: workspace.id,
         provider: 'unsupported-provider',
         model: 'test-model',
         runMode: 'background',
@@ -1099,9 +1110,11 @@ test('daemon runs a persisted chat job timeline and replays events for completed
     await daemon.stop()
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'unsupported-provider',
         model: 'test-model',
         workspaceDir: daemon.homeDir,
@@ -1187,9 +1200,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: daemon.homeDir,
@@ -1306,9 +1321,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'hermes',
         model: 'openai-codex/gpt-5.5',
         mode: 'terminal',
@@ -1365,9 +1382,11 @@ exit 7
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'hermes',
         model: 'openai-codex/gpt-5.5',
         mode: 'terminal',
@@ -1435,9 +1454,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'opencode',
         model: 'anthropic/claude-sonnet-4-6',
         cardId: 'chat-opencode-daemon',
@@ -1514,7 +1535,11 @@ exit 0
   await writeFile(targetFile, 'before daemon codex\n', 'utf8')
 
   let response = null
-  const workspaceId = 'remote-checkpoint-workspace'
+  const workspaceId = (await registerChatWorkspace(
+    daemon,
+    projectDir,
+    'Remote checkpoint workspace',
+  )).id
   const cardId = 'chat-codex-checkpoint'
   const sessionEntryId = `codesurf-runtime:${cardId}`
 
@@ -1616,11 +1641,16 @@ exit 0
   await mkdir(projectDir, { recursive: true })
   await writeFile(targetFile, 'before missing path\n', 'utf8')
 
+  const workspaceId = (await registerChatWorkspace(
+    daemon,
+    projectDir,
+    'Remote missing-path workspace',
+  )).id
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
         cardId: 'chat-codex-missing-path',
-        workspaceId: 'remote-missing-path-workspace',
+        workspaceId,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: projectDir,
@@ -1670,9 +1700,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: daemon.homeDir,
