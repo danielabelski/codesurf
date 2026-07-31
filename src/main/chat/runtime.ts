@@ -19,6 +19,7 @@ import {
   createChatStreamScope,
   type ChatStreamScope,
 } from './room-stream-scope.ts'
+import { RoomContextAcknowledgements } from './room-context-acknowledgements.ts'
 
 export type { RuntimeChatSessionState } from './types'
 export {
@@ -59,11 +60,16 @@ export function chatRequestScope(
   return createChatStreamScope(req.workspaceId, req.cardId)
 }
 
-const pendingRoomAcknowledgements = new Map<string, {
-  workspaceId: string
-  cardId: string
-  sequence: number
-}>()
+const pendingRoomAcknowledgements = new RoomContextAcknowledgements()
+
+function settleRoomContextAcknowledgement(
+  scope: ChatStreamScope,
+  outcome: 'delivered' | 'failed' | 'stopped',
+): void {
+  const pending = pendingRoomAcknowledgements.settle(scope, outcome)
+  if (!pending) return
+  acknowledgeThrough(pending.workspaceId, pending.cardId, pending.sequence)
+}
 
 export function registerRoomContextAcknowledgement(req: ChatRequest): void {
   const workspaceId = String(req.workspaceId ?? '').trim()
@@ -73,32 +79,24 @@ export function registerRoomContextAcknowledgement(req: ChatRequest): void {
     return
   }
   const scope = createChatStreamScope(workspaceId, cardId)
-  pendingRoomAcknowledgements.set(chatStreamScopeKey(scope), {
-    workspaceId,
-    cardId,
-    sequence: Number(sequence),
-  })
+  pendingRoomAcknowledgements.register(scope, Number(sequence))
 }
 
 export function acknowledgeRoomContext(req: ChatRequest): void {
-  const scope = chatRequestScope(req)
-  const key = chatStreamScopeKey(scope)
-  const pending = pendingRoomAcknowledgements.get(key)
-  if (!pending) return
-  pendingRoomAcknowledgements.delete(key)
-  acknowledgeThrough(pending.workspaceId, pending.cardId, pending.sequence)
+  settleRoomContextAcknowledgement(chatRequestScope(req), 'delivered')
+}
+
+export function discardRoomContextAcknowledgement(scope: ChatStreamScope): void {
+  settleRoomContextAcknowledgement(scope, 'stopped')
 }
 
 export function sendStream(scope: ChatStreamScope, event: Record<string, unknown>): void {
   log('sendStream', event.type, event.text ? `"${String(event.text).slice(0, 50)}"` : '', event.error ?? '')
 
-  const acknowledgementKey = chatStreamScopeKey(scope)
   if (event.type === 'error') {
-    pendingRoomAcknowledgements.delete(acknowledgementKey)
-  } else if (pendingRoomAcknowledgements.has(acknowledgementKey)) {
-    const pending = pendingRoomAcknowledgements.get(acknowledgementKey)!
-    pendingRoomAcknowledgements.delete(acknowledgementKey)
-    acknowledgeThrough(pending.workspaceId, pending.cardId, pending.sequence)
+    settleRoomContextAcknowledgement(scope, 'failed')
+  } else {
+    settleRoomContextAcknowledgement(scope, 'delivered')
   }
 
   roomStreamAccumulator.record(scope, event)
