@@ -335,9 +335,17 @@ export function installAppQuitBarrier(
     const registry = getRegistry()
     void (registry?.closeAll() ?? Promise.resolve())
       .catch(onError)
-      .then(runCleanup)
-      .catch(onError)
-      .then(() => {
+      .then(async () => {
+        try {
+          await runCleanup()
+        } catch (error) {
+          // Persistence challenges may fail open after reporting because the
+          // renderer cannot keep external processes alive. Cleanup is
+          // different: an unconfirmed provider process tree must keep app
+          // shutdown fail-closed instead of orphaning descendants.
+          onError(error)
+          return
+        }
         if (resumeQuit) return
         resumeQuit = true
         app.quit()

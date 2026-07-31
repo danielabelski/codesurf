@@ -475,4 +475,27 @@ describe('window persistence barrier', () => {
     assert.equal(app.acceptedQuitCount, 1)
     disposeQuitBarrier()
   })
+
+  test('does not resume app quit when asynchronous cleanup fails', async () => {
+    const app = new FakeApp()
+    const cleanupError = new Error('provider tree exit was not confirmed')
+    const errors: unknown[] = []
+    const disposeQuitBarrier = installAppQuitBarrier(
+      app,
+      () => null,
+      async () => {
+        throw cleanupError
+      },
+      error => {
+        errors.push(error)
+      },
+    )
+
+    app.quit()
+    await settle()
+    assert.equal(app.quitCalls, 1)
+    assert.equal(app.acceptedQuitCount, 0)
+    assert.deepEqual(errors, [cleanupError])
+    disposeQuitBarrier()
+  })
 })

@@ -294,6 +294,51 @@ describe('runtime', () => {
       )
     })
 
+    it('propagates an unconfirmed provider-tree termination from destroy', async () => {
+      let markTurnEntered!: () => void
+      const turnEntered = new Promise<void>(resolve => {
+        markTurnEntered = resolve
+      })
+      const terminationError = Object.assign(
+        new Error('process tree exit could not be confirmed'),
+        { reason: 'termination' },
+      )
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async (
+          _input: RelayTurnInput,
+          signal?: AbortSignal,
+        ) => {
+          markTurnEntered()
+          await new Promise<void>(resolve => {
+            signal?.addEventListener('abort', resolve, { once: true })
+          })
+          throw terminationError
+        }),
+      }
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+      })
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-unconfirmed',
+        name: 'Unconfirmed Agent',
+        kind: 'agent',
+        status: 'spawning',
+        channels: [],
+      })
+
+      const spawning = runtime.spawn({
+        id: 'agent-unconfirmed',
+        name: 'Unconfirmed Agent',
+        task: 'Expose an unconfirmed process-tree termination',
+      })
+      await turnEntered
+      const spawningOutcome = expect(spawning).rejects.toBeInstanceOf(
+        RelayRuntimeDisposedError,
+      )
+      await expect(runtime.destroy()).rejects.toBe(terminationError)
+      await spawningOutcome
+    })
+
     it('stop aborts and awaits provider teardown without emitting a generic error', async () => {
       let markTurnEntered!: () => void
       const turnEntered = new Promise<void>(resolve => {
@@ -411,6 +456,56 @@ describe('runtime', () => {
       releaseProvider()
       await destroying
       expect(destroySettled).toBe(true)
+    })
+
+    it('supersedes a concurrent same-id spawn before it can create an executor', async () => {
+      let markFirstUpsertEntered!: () => void
+      const firstUpsertEntered = new Promise<void>(resolve => {
+        markFirstUpsertEntered = resolve
+      })
+      let releaseFirstUpsert!: () => void
+      const firstUpsertReleased = new Promise<void>(resolve => {
+        releaseFirstUpsert = resolve
+      })
+      let upsertCount = 0
+      vi.mocked(mockRelay.upsertParticipant).mockImplementation(async (
+        participant,
+        context?: RelayOperationContext,
+      ) => {
+        upsertCount += 1
+        if (upsertCount === 1) {
+          markFirstUpsertEntered()
+          await firstUpsertReleased
+        }
+        context?.assertActive()
+        return participant as RelayParticipant
+      })
+      const executorFactory = vi.fn(() => mockExecutor)
+      const runtime = new RelayRuntime(mockRelay, { executorFactory })
+
+      const firstSpawn = runtime.spawn({
+        id: 'shared-agent',
+        name: 'First Agent',
+        task: 'First task must be superseded',
+      })
+      await firstUpsertEntered
+      const secondParticipant = await runtime.spawn({
+        id: 'shared-agent',
+        name: 'Second Agent',
+        task: 'Second task owns the participant',
+      })
+      releaseFirstUpsert()
+
+      await expect(firstSpawn).rejects.toBeInstanceOf(
+        RelayTurnCancelledError,
+      )
+      expect(secondParticipant.name).toBe('Second Agent')
+      expect(executorFactory).toHaveBeenCalledTimes(1)
+      expect(executorFactory).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'Second Agent' }),
+        expect.objectContaining({ task: 'Second task owns the participant' }),
+      )
+      await runtime.destroy()
     })
 
     it('revalidates the participant epoch at every post-turn mutation boundary', async () => {
@@ -645,6 +740,43 @@ describe('runtime', () => {
       expect(firstSignal?.aborted).toBe(true)
       expect(secondSignal).not.toBe(firstSignal)
       expect(secondSignal?.aborted).toBe(false)
+      await runtime.destroy()
+    })
+
+    it('restart reruns an already-ready agent and leaves stopped status behind', async () => {
+      let turnCount = 0
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async () => {
+          turnCount += 1
+          return '{"ready":true,"status":"ready"}'
+        }),
+      }
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-ready-restart',
+        name: 'Ready Restart Agent',
+        kind: 'agent',
+        status: 'ready',
+        channels: [],
+      })
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+      })
+
+      await runtime.spawn({
+        id: 'agent-ready-restart',
+        name: 'Ready Restart Agent',
+        task: 'Run again after a successful ready turn',
+      })
+      expect(turnCount).toBe(1)
+      await runtime.stop('agent-ready-restart')
+      await runtime.start('agent-ready-restart')
+
+      expect(turnCount).toBe(2)
+      const statuses = vi.mocked(mockRelay.setParticipantStatus).mock.calls
+        .map(call => call[1])
+      expect(statuses).toContain('stopped')
+      expect(statuses.slice(statuses.lastIndexOf('stopped') + 1))
+        .toContain('ready')
       await runtime.destroy()
     })
 

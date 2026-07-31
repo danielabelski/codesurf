@@ -64,6 +64,7 @@ interface RuntimeAgentState {
   activeTurn: ActiveRuntimeTurn | null
   activeTick: ActiveRuntimeTick | null
   providerTeardowns: Set<Promise<void>>
+  providerTeardownFailures: unknown[]
 }
 
 function extractJsonBlock(raw: string): string {
@@ -96,6 +97,21 @@ function parseTurnOutput(raw: string): RelayAgentTurnOutput {
   return JSON.parse(json) as RelayAgentTurnOutput
 }
 
+function isUnconfirmedProviderTermination(error: unknown): boolean {
+  return (
+    error instanceof Error
+    && (error as Error & { reason?: unknown }).reason === 'termination'
+  )
+}
+
+function throwTeardownFailures(
+  failures: readonly unknown[],
+  message: string,
+): void {
+  if (failures.length === 1) throw failures[0]
+  if (failures.length > 1) throw new AggregateError(failures, message)
+}
+
 function buildPrompt(input: RelayTurnInput, task: string): string {
   const relationships = input.relationships.map(item => ({
     with: item.participants.find(id => id !== input.participant.id),
@@ -107,7 +123,7 @@ function buildPrompt(input: RelayTurnInput, task: string): string {
 
   return [
     `You are ${input.participant.name} in the CodeSurf relay runtime.`,
-    `Your persistent task: ${task}`,
+    `Your persistent task: ${sanitizeForPrompt(task, 32_000)}`,
     '',
     'You are coordinating work, surfacing dependencies, and telling others when your work could affect them.',
     'Messaging priority is NOT tied to spatial/canvas connections.',
@@ -163,6 +179,7 @@ export class RelayRuntime {
   private readonly options: RelayRuntimeOptions
   private readonly operationContext: RelayOperationContext
   private readonly agents = new Map<string, RuntimeAgentState>()
+  private readonly spawnRevisions = new Map<string, number>()
   private readonly unsubscribe: () => void
   private readonly cancelled: Promise<never>
   private cancel!: (error: Error) => void
@@ -213,8 +230,22 @@ export class RelayRuntime {
     }
     this.cancel(error)
     this.unsubscribe()
-    this.destroyPromise = Promise.allSettled([...pending]).then(() => {
+    const priorFailures = [...this.agents.values()].flatMap(
+      state => state.providerTeardownFailures,
+    )
+    this.destroyPromise = Promise.allSettled([...pending]).then(results => {
+      const failures = [...new Set([
+        ...priorFailures,
+        ...results.flatMap(result => (
+          result.status === 'rejected' ? [result.reason] : []
+        )),
+      ])]
       this.agents.clear()
+      this.spawnRevisions.clear()
+      throwTeardownFailures(
+        failures,
+        'Relay provider teardown failed during runtime disposal',
+      )
     })
     return this.destroyPromise
   }
@@ -222,6 +253,9 @@ export class RelayRuntime {
   async spawn(request: RelaySpawnRequest): Promise<RelayParticipant> {
     this.assertActive()
     const id = request.id ?? request.tileId ?? request.name
+    const spawnRevision = (this.spawnRevisions.get(id) ?? 0) + 1
+    this.spawnRevisions.set(id, spawnRevision)
+    const spawnContext = this.createSpawnOperationContext(id, spawnRevision)
     const previous = this.agents.get(id)
     if (previous) {
       previous.running = false
@@ -233,10 +267,10 @@ export class RelayRuntime {
       )
       previous.activeTurn?.controller.abort(cancellation)
       await this.awaitAgentTeardown(previous)
-      this.assertActive()
+      this.assertSpawnActive(id, spawnRevision)
       if (this.agents.get(id) === previous) this.agents.delete(id)
     }
-    const participant = await this.awaitActive(
+    const participant = await this.awaitSpawnActive(
       () => this.relay.upsertParticipant({
         id,
         name: request.name,
@@ -252,12 +286,14 @@ export class RelayRuntime {
           relayMode: request.mode,
           relayThinking: request.thinking,
         },
-      }, this.operationContext),
+      }, spawnContext),
+      id,
+      spawnRevision,
     )
 
-    this.assertActive()
+    this.assertSpawnActive(id, spawnRevision)
     const executor = this.options.executorFactory(participant, { ...request, id })
-    this.assertActive()
+    this.assertSpawnActive(id, spawnRevision)
     const state: RuntimeAgentState = {
       spawn: { ...request, id },
       running: true,
@@ -267,6 +303,7 @@ export class RelayRuntime {
       activeTurn: null,
       activeTick: null,
       providerTeardowns: new Set(),
+      providerTeardownFailures: [],
     }
     this.agents.set(id, state)
     const epoch = state.epoch
@@ -318,6 +355,10 @@ export class RelayRuntime {
 
   async stop(participantId: string): Promise<void> {
     this.assertActive()
+    this.spawnRevisions.set(
+      participantId,
+      (this.spawnRevisions.get(participantId) ?? 0) + 1,
+    )
     const state = this.agents.get(participantId)
     if (!state) return
     state.running = false
@@ -361,6 +402,7 @@ export class RelayRuntime {
     ))
     await this.awaitAgentTeardown(state)
     if (!this.isParticipantCurrent(participantId, state, epoch, false)) return
+    state.ready = false
     state.running = true
     await this.awaitActive(() => this.schedule(participantId))
   }
@@ -652,13 +694,23 @@ export class RelayRuntime {
     }
     const providerTeardown = providerTurn.then(
       () => undefined,
-      () => undefined,
+      error => {
+        if (isUnconfirmedProviderTermination(error)) {
+          state.providerTeardownFailures.push(error)
+          throw error
+        }
+      },
     )
     activeTurn.providerTeardown = providerTeardown
     state.providerTeardowns.add(providerTeardown)
-    void providerTeardown.then(() => {
-      state.providerTeardowns.delete(providerTeardown)
-    })
+    void providerTeardown.then(
+      () => {
+        state.providerTeardowns.delete(providerTeardown)
+      },
+      () => {
+        state.providerTeardowns.delete(providerTeardown)
+      },
+    )
 
     return new Promise((resolve, reject) => {
       let settled = false
@@ -816,6 +868,48 @@ export class RelayRuntime {
     }
     if (state.activeTick) pending.add(state.activeTick.promise)
     await Promise.allSettled([...pending])
+    const failures = [...new Set(state.providerTeardownFailures)]
+    throwTeardownFailures(
+      failures,
+      'Relay provider teardown failed while stopping an agent',
+    )
+  }
+
+  private assertSpawnActive(participantId: string, revision: number): void {
+    this.assertActive()
+    if (this.spawnRevisions.get(participantId) !== revision) {
+      throw new RelayTurnCancelledError(
+        participantId,
+        revision,
+        'spawn request was superseded',
+      )
+    }
+  }
+
+  private createSpawnOperationContext(
+    participantId: string,
+    revision: number,
+  ): RelayOperationContext {
+    return {
+      assertActive: () => this.assertSpawnActive(participantId, revision),
+    }
+  }
+
+  private async awaitSpawnActive<T>(
+    operation: () => Promise<T>,
+    participantId: string,
+    revision: number,
+  ): Promise<T> {
+    this.assertSpawnActive(participantId, revision)
+    const pending = operation()
+    try {
+      const result = await Promise.race([pending, this.cancelled])
+      this.assertSpawnActive(participantId, revision)
+      return result
+    } catch (error) {
+      this.assertSpawnActive(participantId, revision)
+      throw error
+    }
   }
 
   private async awaitParticipantActive<T>(

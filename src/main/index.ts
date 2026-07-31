@@ -987,6 +987,7 @@ async function runAppShutdownCleanup(): Promise<void> {
       '[Relay] Failed to stop relay providers during shutdown:',
       relayResult.reason,
     )
+    throw relayResult.reason
   }
 }
 
