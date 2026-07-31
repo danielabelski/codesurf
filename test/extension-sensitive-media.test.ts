@@ -71,6 +71,34 @@ describe('extension sensitive media consent', () => {
     })
   })
 
+  test('rejects ambiguous duplicate identity records fail-closed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-duplicates-'))
+    const filePath = join(directory, 'consent.json')
+    await fs.writeFile(filePath, JSON.stringify({
+      version: 2,
+      decisions: [
+        {
+          extensionId: 'media-extension',
+          extensionIdentity: identityA,
+          grants: { camera: 'allow' },
+        },
+        {
+          extensionId: 'media-extension',
+          extensionIdentity: identityA,
+          grants: { camera: 'deny' },
+        },
+      ],
+    }))
+
+    const store = new ExtensionMediaConsentStore({ filePath })
+    await store.ready
+    assert.equal(store.getDecision('media-extension', identityA, 'camera'), undefined)
+    assert.deepEqual(JSON.parse(await fs.readFile(filePath, 'utf8')), {
+      version: 2,
+      decisions: [],
+    })
+  })
+
   test('deduplicates identical prompts, serializes distinct prompts, and persists denial on failure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-prompts-'))
     const store = new ExtensionMediaConsentStore({

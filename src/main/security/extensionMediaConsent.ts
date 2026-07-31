@@ -54,6 +54,7 @@ function parseConsent(raw: string): { consent: PersistedConsent; rewrite: boolea
 
     const decisions: PersistedExtensionConsent[] = []
     const seen = new Set<string>()
+    const rejected = new Set<string>()
     let rewrite = false
     for (const value of parsed.decisions) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -90,7 +91,15 @@ function parseConsent(raw: string): { consent: PersistedConsent; rewrite: boolea
         }
       }
       const key = `${record.extensionId}\u0000${record.extensionIdentity}`
-      if (Object.keys(grants).length > 0 && !seen.has(key)) {
+      if (seen.has(key)) {
+        const existingIndex = decisions.findIndex(decision => {
+          return decision.extensionId === record.extensionId
+            && decision.extensionIdentity === record.extensionIdentity
+        })
+        if (existingIndex >= 0) decisions.splice(existingIndex, 1)
+        rejected.add(key)
+        rewrite = true
+      } else if (Object.keys(grants).length > 0 && !rejected.has(key)) {
         seen.add(key)
         decisions.push({
           extensionId: record.extensionId,

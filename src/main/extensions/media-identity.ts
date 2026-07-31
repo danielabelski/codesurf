@@ -34,6 +34,10 @@ async function hashDirectory(
     updateRecord(hash, ['directory-cycle', relativeDirectory, canonicalDirectory])
     return
   }
+  const directoryBefore = await fs.stat(canonicalDirectory)
+  if (!directoryBefore.isDirectory()) {
+    throw new Error(`Extension directory changed while computing media identity: ${directory}`)
+  }
   activeDirectories.add(canonicalDirectory)
   const entries = await fs.readdir(directory, { withFileTypes: true })
   entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
@@ -93,6 +97,15 @@ async function hashDirectory(
 
       await hashFile(hash, absolutePath, relativePath, before)
     }
+    const directoryAfter = await fs.stat(canonicalDirectory)
+    if (
+      !directoryAfter.isDirectory()
+      || directoryAfter.dev !== directoryBefore.dev
+      || directoryAfter.ino !== directoryBefore.ino
+      || directoryAfter.mtimeMs !== directoryBefore.mtimeMs
+    ) {
+      throw new Error(`Extension directory changed while computing media identity: ${directory}`)
+    }
   } finally {
     activeDirectories.delete(canonicalDirectory)
   }
@@ -120,6 +133,7 @@ async function hashFile(
     !after.isFile()
     || after.dev !== before.dev
     || after.ino !== before.ino
+    || after.mode !== before.mode
     || after.size !== before.size
     || after.mtimeMs !== before.mtimeMs
   ) {

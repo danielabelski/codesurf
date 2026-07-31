@@ -272,8 +272,6 @@ export function createPermissionBoundary<DisplaySource>(
       || (details.embeddingOrigin !== undefined
         && !isAllowedOrigin(details.embeddingOrigin)
         && !isAllowedUrl(details.embeddingOrigin))
-      || !webContents
-      || !webContents
     ) return
     const childFrame = runtime.getDirectChildFrame(
         webContents,

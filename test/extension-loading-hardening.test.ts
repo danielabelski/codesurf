@@ -538,8 +538,8 @@ test('media identity follows effective precedence and changes on update or reins
   assert.notEqual(updatedIdentity, bundledIdentityV1)
   assert.deepEqual(revoked, ['media-extension', 'media-extension', 'media-extension'])
 
-  await rm(bundledExtensionDir, { recursive: true })
-  await mkdir(bundledExtensionDir, { recursive: true })
+  await rm(join(bundledExtensionDir, 'extension.json'))
+  await rm(join(bundledExtensionDir, 'index.html'))
   await writeFile(join(bundledExtensionDir, 'extension.json'), manifest('1.1.0', 'Bundled'))
   await writeFile(join(bundledExtensionDir, 'index.html'), 'bundled-v1.1')
   await registry.rescan()
