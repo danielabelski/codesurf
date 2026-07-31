@@ -326,8 +326,9 @@ constrain power extensions.
 
 The workspace default-off is the critical protection: any project a user clones can
 ship `.contex/extensions/` but none of those power scripts will execute unless the
-user explicitly enables each one.  Opt-ins are persisted to
-`~/.codesurf/enabled-catalog-extensions.json`.
+user explicitly enables each one. Opt-ins, disabled extension IDs, and capability
+grants are committed together in the versioned
+`~/.codesurf/extension-security-state.json` document.
 
 A `[Security]` warning is emitted to the main-process log at `require()` time naming
 the extension, its scope, and the full entry path.  A separate `[Security]` warning is
