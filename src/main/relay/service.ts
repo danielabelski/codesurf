@@ -20,6 +20,32 @@ interface WorkspaceRelayInstance {
 }
 
 const instances = new Map<string, WorkspaceRelayInstance>()
+let relayServiceGeneration = 0
+let relayServicesActive = false
+
+export type RelayOperationGuard = {
+  isActive: () => boolean
+}
+
+class RelayOperationCancelledError extends Error {
+  constructor() {
+    super('Relay operation was cancelled during lifecycle transition')
+    this.name = 'RelayOperationCancelledError'
+  }
+}
+
+export function startRelayServices(): void {
+  relayServicesActive = true
+  relayServiceGeneration += 1
+}
+
+export function captureRelayServiceGeneration(): number | null {
+  return relayServicesActive ? relayServiceGeneration : null
+}
+
+export function isRelayServiceGenerationActive(generation: number): boolean {
+  return relayServicesActive && relayServiceGeneration === generation
+}
 
 function broadcast(event: RelayEvent, workspacePath: string): void {
   const channel = event.type === 'channel_message' && 'channel' in event.payload
@@ -42,28 +68,56 @@ async function readTileState(workspaceId: string, tileId: string): Promise<any |
   return loadWorkspaceTileState(workspaceId, tileId, null)
 }
 
-export async function getWorkspaceRelay(workspacePath: string): Promise<WorkspaceRelayInstance> {
+export async function getWorkspaceRelay(
+  workspacePath: string,
+  guard?: RelayOperationGuard,
+): Promise<WorkspaceRelayInstance> {
+  if (guard && !guard.isActive()) throw new RelayOperationCancelledError()
   const existing = instances.get(workspacePath)
   if (existing) return existing
 
   const relay = new RelayCore({ workspacePath })
   await relay.init()
+  if (guard && !guard.isActive()) throw new RelayOperationCancelledError()
+
+  const raced = instances.get(workspacePath)
+  if (raced) return raced
   const runtime = new RelayRuntime(relay, {
     executorFactory: (participant, spawn) => createMainProcessRelayExecutor(participant.id, spawn),
   })
   const unsubscribe = relay.on(event => broadcast(event, workspacePath))
+  if (guard && !guard.isActive()) {
+    unsubscribe()
+    runtime.destroy()
+    throw new RelayOperationCancelledError()
+  }
   const instance = { relay, runtime, unsubscribe }
   instances.set(workspacePath, instance)
   return instance
 }
 
-export async function syncWorkspaceRelayParticipants(workspaceId: string, workspacePath: string, tiles: TileState[]): Promise<RelayParticipant[]> {
-  const { relay } = await getWorkspaceRelay(workspacePath)
+export async function syncWorkspaceRelayParticipants(
+  workspaceId: string,
+  workspacePath: string,
+  tiles: TileState[],
+  guard?: RelayOperationGuard,
+): Promise<RelayParticipant[]> {
+  const isActive = (): boolean => guard?.isActive() ?? true
+  if (!isActive()) return []
+  let relay: CodesurfRelay
+  try {
+    ({ relay } = await getWorkspaceRelay(workspacePath, guard))
+  } catch (error) {
+    if (error instanceof RelayOperationCancelledError) return []
+    throw error
+  }
+  if (!isActive()) return []
   const seen = new Set<string>()
 
   for (const tile of tiles) {
     if (tile.type !== 'chat') continue
     const tileState = await readTileState(workspaceId, tile.id)
+    if (!isActive()) return []
     const provider = tileState?.provider ?? 'claude'
     const model = tileState?.model ?? undefined
     const agentMode = Boolean(tileState?.agentMode)
@@ -88,14 +142,18 @@ export async function syncWorkspaceRelayParticipants(workspaceId: string, worksp
         agentMode,
       },
     })
+    if (!isActive()) return []
   }
 
   const existing = await relay.listParticipants()
+  if (!isActive()) return []
   const stale = existing.filter(participant => participant.kind === 'agent' && participant.tileId && !seen.has(participant.tileId))
   for (const participant of stale) {
     await relay.setParticipantStatus(participant.id, 'stopped')
+    if (!isActive()) return []
   }
 
+  if (!isActive()) return []
   return relay.listParticipants()
 }
 
@@ -176,6 +234,8 @@ export async function waitForWorkspaceRelayAny(workspacePath: string, ids: strin
 }
 
 export function stopAllRelayServices(): void {
+  relayServicesActive = false
+  relayServiceGeneration += 1
   for (const instance of instances.values()) {
     instance.unsubscribe()
     instance.runtime.destroy()

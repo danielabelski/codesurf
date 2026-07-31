@@ -12,6 +12,7 @@ import {
   sendWorkspaceDirectRelayMessage,
   setWorkspaceRelayWorkContext,
   spawnWorkspaceRelayAgent,
+  startRelayServices,
   stopWorkspaceRelayAgent,
   syncWorkspaceRelayParticipants,
   updateWorkspaceRelayMessageStatus,
@@ -20,6 +21,10 @@ import {
 } from '../relay/service'
 import type { TileState } from '../../shared/types'
 import { setRelayHostActive } from '../relay/registration'
+import {
+  activateCanvasRelayProjectionSync,
+  deactivateCanvasRelayProjectionSync,
+} from '../relay/canvasProjection'
 
 const RELAY_CHANNELS = [
   'relay:init',
@@ -43,7 +48,9 @@ const RELAY_CHANNELS = [
 
 export function registerRelayIPC(): void {
   unregisterRelayIPC()
+  startRelayServices()
   setRelayHostActive(true)
+  activateCanvasRelayProjectionSync()
 
   ipcMain.handle('relay:init', async (_, workspacePath: string) => {
     await getWorkspaceRelay(workspacePath)
@@ -129,6 +136,7 @@ export function registerRelayIPC(): void {
 }
 
 export function unregisterRelayIPC(): void {
+  deactivateCanvasRelayProjectionSync()
   for (const ch of RELAY_CHANNELS) {
     try {
       ipcMain.removeHandler(ch)
