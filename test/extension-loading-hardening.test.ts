@@ -893,10 +893,21 @@ test('attested media surfaces revoke changed content and stale requests cannot r
   const tileType = registry.get('attested-surface')
     ?.manifest.contributes?.tiles?.[0]?.type
   assert.ok(tileType)
-  assert.equal(
-    await registry.getSurfaceHtml('attested-surface', 'tile', tileType),
-    'trusted',
+  const protectedSurface = await registry.getSurfaceHtml(
+    'attested-surface',
+    'tile',
+    tileType,
   )
+  assert.ok(protectedSurface)
+  assert.match(
+    protectedSurface,
+    /^<meta http-equiv="Content-Security-Policy"/,
+  )
+  assert.match(protectedSurface, /script-src 'self'/)
+  assert.match(protectedSurface, /worker-src 'self'/)
+  assert.match(protectedSurface, /object-src 'none'/)
+  assert.match(protectedSurface, /base-uri 'none'/)
+  assert.match(protectedSurface, /trusted$/)
   const staleAttestation = registry.get('attested-surface')?.mediaAttestation
   assert.ok(staleAttestation)
 
@@ -1369,29 +1380,29 @@ test('enable rolls back when the install changes during permission persistence',
     },
   })
   await registry.rescan(workspace)
-  const originalWriteFile = fsPromises.writeFile
+  const originalRename = fsPromises.rename
   let swapped = false
-  fsPromises.writeFile = (async (...args: Parameters<typeof fsPromises.writeFile>) => {
-    const result = await originalWriteFile(...args)
-    if (!swapped && String(args[0]).endsWith('disabled-extensions.json')) {
+  fsPromises.rename = (async (...args: Parameters<typeof fsPromises.rename>) => {
+    const result = await originalRename(...args)
+    if (!swapped && String(args[1]).endsWith('/extension-security-state.json')) {
       swapped = true
       await fsPromises.rename(extensionDir, originalDir)
       await fsPromises.mkdir(extensionDir, { recursive: true })
-      await originalWriteFile(join(extensionDir, 'extension.json'), manifest)
-      await originalWriteFile(
+      await fsPromises.writeFile(join(extensionDir, 'extension.json'), manifest)
+      await fsPromises.writeFile(
         join(extensionDir, 'main.cjs'),
         `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'activated')`,
       )
     }
     return result
-  }) as typeof fsPromises.writeFile
+  }) as typeof fsPromises.rename
   try {
     await assert.rejects(
       registry.enable('persist-swap'),
       /Extension root changed while enabling; rescan required/,
     )
   } finally {
-    fsPromises.writeFile = originalWriteFile
+    fsPromises.rename = originalRename
   }
 
   const extension = registry.get('persist-swap')
@@ -1407,18 +1418,16 @@ test('enable rolls back when the install changes during permission persistence',
   await assert.rejects(fsPromises.stat(marker), { code: 'ENOENT' })
   assert.equal(revoked.filter(id => id === 'persist-swap').length >= 2, true)
 
-  const disabled = JSON.parse(
-    await fsPromises.readFile(join(home, 'disabled-extensions.json'), 'utf8'),
-  ) as string[]
-  assert.equal(disabled.includes('persist-swap'), false)
-  const enabledCatalog = JSON.parse(
-    await fsPromises.readFile(join(home, 'enabled-catalog-extensions.json'), 'utf8'),
-  ) as string[]
-  assert.equal(enabledCatalog.includes('persist-swap'), false)
-  const grants = JSON.parse(
-    await fsPromises.readFile(join(home, 'plugin-capability-grants.json'), 'utf8'),
-  ) as Record<string, string[]>
-  assert.equal(Object.hasOwn(grants, 'persist-swap'), false)
+  const securityState = JSON.parse(
+    await fsPromises.readFile(join(home, 'extension-security-state.json'), 'utf8'),
+  ) as {
+    disabledExtensionIds: string[]
+    enabledCatalogExtensionIds: string[]
+    grants: Record<string, string[]>
+  }
+  assert.equal(securityState.disabledExtensionIds.includes('persist-swap'), false)
+  assert.equal(securityState.enabledCatalogExtensionIds.includes('persist-swap'), false)
+  assert.equal(Object.hasOwn(securityState.grants, 'persist-swap'), false)
 })
 
 test('failed power activation removes partial tools and restores disabled state', { concurrency: false }, async () => {
@@ -1508,25 +1517,87 @@ test('idempotent enable persistence failure preserves existing media consent ide
   assert.ok(identity)
   assert.ok(attestation)
 
-  const originalWriteFile = fsPromises.writeFile
-  fsPromises.writeFile = (async (...args: Parameters<typeof fsPromises.writeFile>) => {
-    if (String(args[0]).endsWith('plugin-capability-grants.json')) {
+  const originalRename = fsPromises.rename
+  fsPromises.rename = (async (...args: Parameters<typeof fsPromises.rename>) => {
+    if (String(args[1]).endsWith('/extension-security-state.json')) {
       throw new Error('simulated persistence failure')
     }
-    return originalWriteFile(...args)
-  }) as typeof fsPromises.writeFile
+    return originalRename(...args)
+  }) as typeof fsPromises.rename
   try {
     await assert.rejects(
       registry.enable('enabled-media'),
-      /simulated persistence failure/,
+      /rollback was not durable/,
     )
   } finally {
-    fsPromises.writeFile = originalWriteFile
+    fsPromises.rename = originalRename
   }
   assert.deepEqual(revoked, [])
   assert.equal(registry.get('enabled-media')?.manifest._enabled, true)
   assert.equal(registry.get('enabled-media')?.mediaIdentity, identity)
   assert.equal(registry.get('enabled-media')?.mediaAttestation, attestation)
+})
+
+test('disable reports durable-state failure while keeping runtime authority revoked', {
+  concurrency: false,
+}, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-disable-failure-'))
+  const home = join(temp, 'home')
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'disable-failure')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'disable-failure',
+    name: 'Disable Failure',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+  }))
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await registry.rescan()
+  assert.equal(registry.get('disable-failure')?.manifest._enabled, true)
+
+  const originalRename = fsPromises.rename
+  fsPromises.rename = (async (...args: Parameters<typeof fsPromises.rename>) => {
+    if (String(args[1]).endsWith('/extension-security-state.json')) {
+      throw new Error('simulated disable persistence failure')
+    }
+    return originalRename(...args)
+  }) as typeof fsPromises.rename
+  try {
+    assert.equal(await registry.disable('disable-failure'), false)
+  } finally {
+    fsPromises.rename = originalRename
+  }
+  assert.equal(registry.get('disable-failure')?.manifest._enabled, false)
+  assert.equal(registry.get('disable-failure')?.mediaIdentity, null)
+  assert.equal(registry.get('disable-failure')?.mediaAttestation, null)
+
+  assert.equal(await registry.disable('disable-failure'), true)
+  const restarted = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await restarted.rescan()
+  assert.equal(restarted.get('disable-failure')?.manifest._enabled, false)
+})
+
+test('malformed extension security state stops a rescan fail closed', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-state-corrupt-'))
+  const home = join(temp, 'home')
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'must-not-load')
+  await mkdir(extensionDir, { recursive: true })
+  await mkdir(home)
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'must-not-load',
+    name: 'Must Not Load',
+    version: '1.0.0',
+    tier: 'safe',
+  }))
+  await writeFile(join(home, 'extension-security-state.json'), '{"version":1')
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await assert.rejects(registry.rescan(), /JSON|Unexpected/)
+  assert.equal(registry.get('must-not-load'), undefined)
 })
 
 test('a losing catalog collision is rejected before recursive identity hashing', async () => {
