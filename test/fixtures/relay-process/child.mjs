@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const mode = process.argv[2] ?? 'normal'
@@ -38,7 +39,15 @@ if (mode === 'normal') {
   const child = spawn(process.execPath, [selfPath, 'linger'], {
     stdio: 'ignore',
   })
-  process.stdout.write(`grandchild:${child.pid}\n`)
+  process.stdout.write(`grandchild:${child.pid}\n`, () => {
+    const readyPath = process.argv[3]
+    if (readyPath) {
+      writeFileSync(readyPath, `${child.pid}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      })
+    }
+  })
   process.on('SIGTERM', () => {})
   setInterval(() => {}, 1_000)
 } else if (mode === 'grandchild-parent-exits') {

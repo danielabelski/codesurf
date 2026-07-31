@@ -379,11 +379,17 @@ export async function runBoundedSubprocess(
     streamName: 'stdout' | 'stderr',
     rawChunk: Buffer | string,
   ): void => {
-    if (collectionStopped || failure) return
+    if (collectionStopped) return
     const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk)
     const currentBytes = streamName === 'stdout' ? stdoutBytes : stderrBytes
     const maxBytes = streamName === 'stdout' ? stdoutMaxBytes : stderrMaxBytes
     if (currentBytes + chunk.byteLength > maxBytes) {
+      if (failure) {
+        // Abort/timeout teardown may still produce useful diagnostics. Keep
+        // collecting only while the original byte caps remain intact.
+        stopCollecting()
+        return
+      }
       startFailure(
         streamName === 'stdout' ? 'stdout-limit' : 'stderr-limit',
         `${label} ${streamName} exceeded ${maxBytes} byte limit`,
@@ -444,7 +450,9 @@ export async function runBoundedSubprocess(
     if (failure || outcomeSettled) return
     failure = { reason, message, cause }
     clearTimeout(timeoutHandle)
-    stopCollecting()
+    if (reason === 'stdout-limit' || reason === 'stderr-limit') {
+      stopCollecting()
+    }
     void (async () => {
       const termination = await terminateProcessTree({
         proc,

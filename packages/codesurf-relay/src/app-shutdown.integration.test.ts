@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { test } from 'vitest'
@@ -62,18 +63,14 @@ posixTest(
   async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'codesurf-relay-app-quit-'))
     try {
-      let markProviderStarted!: () => void
-      const providerStarted = new Promise<void>(resolveStarted => {
-        markProviderStarted = resolveStarted
-      })
+      const providerReadyPath = join(workspace, 'provider-ready')
       let providerError: BoundedSubprocessError | null = null
       const executor: RelayAgentExecutor = {
         async runTurn(_input, signal) {
-          markProviderStarted()
           try {
             const result = await runBoundedSubprocess({
               command: process.execPath,
-              args: [fixture, 'grandchild'],
+              args: [fixture, 'grandchild', providerReadyPath],
               label: 'app-shutdown process tree',
               timeoutMs: 10_000,
               stdoutMaxBytes: 1_024,
@@ -108,9 +105,14 @@ posixTest(
         () => 'resolved' as const,
         () => 'rejected' as const,
       )
-      await providerStarted
-      // Let the fixture print its grandchild PID before shutdown begins.
-      await new Promise(resolveWait => setTimeout(resolveWait, 100))
+      await waitFor(() => existsSync(providerReadyPath))
+      const announcedGrandchildPid = Number(
+        (await readFile(providerReadyPath, 'utf8')).trim(),
+      )
+      assert.ok(
+        Number.isSafeInteger(announcedGrandchildPid)
+          && announcedGrandchildPid > 0,
+      )
 
       const app = new FakeApp()
       const shutdownErrors: unknown[] = []
@@ -138,6 +140,7 @@ posixTest(
         `missing grandchild pid in ${JSON.stringify(providerError.stdout)}`,
       )
       const grandchildPid = Number(grandchildMatch[1])
+      assert.equal(grandchildPid, announcedGrandchildPid)
       assert.equal(isPidAlive(providerError.pid), false)
       assert.equal(isPidAlive(grandchildPid), false)
       await spawningOutcome

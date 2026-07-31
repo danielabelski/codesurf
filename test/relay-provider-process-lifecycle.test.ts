@@ -177,8 +177,8 @@ describe('bounded relay subprocess lifecycle', () => {
 
     assert.equal(error.reason, 'timeout')
     assert.match(error.message, new RegExp(`timed out after ${timeoutMs}ms`))
-    // Captured output freezes when the timeout begins, so this proves the
-    // grandchild was announced before process-tree termination started.
+    // Bounded capture remains active through teardown, preserving diagnostics
+    // without allowing either stream to exceed its configured byte cap.
     const match = error.stdout.match(/grandchild:(\d+)/)
     assert.ok(match, `missing grandchild pid in ${JSON.stringify(error.stdout)}`)
     const grandchildPid = Number(match[1])
