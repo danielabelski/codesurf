@@ -3,6 +3,7 @@ import {
   createPermissionBoundary,
   type BrowserWindowLike,
   type DisplayMediaRequest,
+  type ExtensionPermissionDescriptor,
   type FrameLike,
   type PermissionBoundaryRuntime,
   type PermissionRequestDetails,
@@ -138,6 +139,11 @@ export function createHarness(options?: {
   const sessionListeners: Array<(session: PermissionSession<DisplaySource>) => void> = []
   const contentsListeners: Array<(contents: WebContentsLike) => void> = []
   const owners = new Map<WebContentsLike, BrowserWindowLike>()
+  const frameOwners = new Map<FrameLike, WebContentsLike>()
+  const navigationListeners = new Map<WebContentsLike, Set<() => void>>()
+  const extensions = new Map<string, ExtensionPermissionDescriptor>()
+  const extensionConsents = new Map<string, Set<string>>()
+  const extensionConsentPrompts: string[] = []
   const sources: DisplaySource[] = [
     { id: 'screen:1', name: 'Entire Screen' },
     { id: 'window:2', name: 'Editor' },
@@ -156,13 +162,43 @@ export function createHarness(options?: {
     getDefaultSession: () => defaultSession,
     onSessionCreated: listener => sessionListeners.push(listener),
     onWebContentsCreated: listener => contentsListeners.push(listener),
+    onWebContentsNavigation: (contents, listener) => {
+      let listeners = navigationListeners.get(contents)
+      if (!listeners) {
+        listeners = new Set()
+        navigationListeners.set(contents, listeners)
+      }
+      listeners.add(listener)
+    },
     getOwnerWindow: contents => owners.get(contents),
     getSession: contents => (contents as FakeWebContents).session,
-    getWebContentsForFrame: frame => {
-      for (const owner of owners.values()) {
-        if (owner.webContents.mainFrame === frame) return owner.webContents
+    getWebContentsForFrame: frame => frameOwners.get(frame),
+    getExtensionPermission: extensionId => extensions.get(extensionId),
+    hasDirectChildFrame: (contents, url, origin) => {
+      for (const [frame, owner] of frameOwners) {
+        if (
+          owner === contents
+          && frame !== contents.mainFrame
+          && frame.url === url
+          && frame.origin === origin
+          && frame.parent === contents.mainFrame
+          && frame.top === contents.mainFrame
+        ) return true
       }
-      return undefined
+      return false
+    },
+    hasExtensionConsent: (extensionId, kind) => {
+      return extensionConsents.get(extensionId)?.has(kind) === true
+    },
+    requestExtensionConsent: async (extension, kind) => {
+      extensionConsentPrompts.push(`${extension.id}:${kind}`)
+      let consent = extensionConsents.get(extension.id)
+      if (!consent) {
+        consent = new Set()
+        extensionConsents.set(extension.id, consent)
+      }
+      consent.add(kind)
+      return true
     },
     requestMediaAccess: async kind => {
       mediaPrompts.push(kind)
@@ -194,21 +230,48 @@ export function createHarness(options?: {
     )
     const window = new FakeWindow(contents)
     owners.set(contents, window)
+    frameOwners.set(contents.mainFrame, contents)
     return { session, contents, window }
   }
 
   return {
     appUrl,
+    attachFrame: (contents: WebContentsLike, frame: FrameLike) => {
+      frameOwners.set(frame, contents)
+    },
     boundary,
     contentsListeners,
     defaultSession,
+    extensionConsentPrompts,
+    extensionConsents,
+    extensions,
     makeWindow,
     mediaPrompts,
     owners,
     productionUrl,
     runtime,
+    navigate: (contents: WebContentsLike) => {
+      for (const listener of navigationListeners.get(contents) ?? []) listener()
+    },
     sessionListeners,
     setMediaResults: (results: typeof mediaResults) => { mediaResults = results },
+    setExtension: (
+      id: string,
+      config?: Partial<Omit<ExtensionPermissionDescriptor, 'id'>>,
+    ) => {
+      extensions.set(id, {
+        id,
+        name: config?.name ?? id,
+        enabled: config?.enabled ?? true,
+        declaredMedia: config?.declaredMedia ?? [],
+      })
+    },
+    setExtensionConsent: (
+      id: string,
+      kinds: readonly ('microphone' | 'camera' | 'display-capture')[],
+    ) => {
+      extensionConsents.set(id, new Set(kinds))
+    },
     setSelectedSource: (source: DisplaySource | undefined) => { selectedSource = source },
     selectionCount: () => selectionCount,
     sources,

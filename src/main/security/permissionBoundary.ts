@@ -15,12 +15,18 @@ import { pathToFileURL } from 'node:url'
 import {
   createPermissionBoundary,
   type BrowserWindowLike,
+  type ExtensionPermissionDescriptor,
   type FrameLike,
   type PermissionBoundary,
   type PermissionBoundaryRuntime,
   type PermissionSession,
   type WebContentsLike,
 } from './permissionBoundaryCore'
+import {
+  ExtensionMediaConsentManager,
+  ExtensionMediaConsentStore,
+} from './extensionMediaConsent'
+import type { SensitiveMediaCapability } from '../../shared/extension-sensitive-media'
 
 export interface ElectronPermissionBoundaryOptions {
   readonly developmentRendererUrl?: string
@@ -29,7 +35,13 @@ export interface ElectronPermissionBoundaryOptions {
 
 export interface ElectronPermissionBoundary {
   readonly ready: Promise<void>
+  revokeExtensionMedia(extensionId: string): Promise<void>
   registerAppWindow(window: BrowserWindow): void
+  setExtensionAuthorizer(authorizer: ElectronExtensionMediaAuthorizer): void
+}
+
+export interface ElectronExtensionMediaAuthorizer {
+  getExtensionMediaPermission(extensionId: string): ExtensionPermissionDescriptor | undefined
 }
 
 const MAX_DISPLAY_SOURCE_CHOICES = 20
@@ -47,11 +59,45 @@ function asBrowserWindow(window: BrowserWindow): BrowserWindowLike {
   return window as unknown as BrowserWindowLike
 }
 
+function sameElectronFrame(
+  left: WebFrameMain | null | undefined,
+  right: WebFrameMain | null | undefined,
+): boolean {
+  return Boolean(left && right
+    && left.frameTreeNodeId === right.frameTreeNodeId
+    && left.processId === right.processId
+    && left.routingId === right.routingId)
+}
+
 export function installElectronPermissionBoundary(
   options: ElectronPermissionBoundaryOptions,
 ): ElectronPermissionBoundary {
   if (installedBoundary) return installedBoundary
 
+  let extensionAuthorizer: ElectronExtensionMediaAuthorizer | undefined
+  const consentManager = new ExtensionMediaConsentManager(
+    new ExtensionMediaConsentStore(),
+    async request => {
+      const owner = request.owner as BrowserWindow | undefined
+      if (!owner || owner.isDestroyed()) return false
+      const kindLabel: Record<SensitiveMediaCapability, string> = {
+        microphone: 'microphone',
+        camera: 'camera',
+        'display-capture': 'screen or window',
+      }
+      const result = await dialog.showMessageBox(owner, {
+        type: 'question',
+        title: 'Extension media permission',
+        message: `${request.extensionName} wants to use your ${kindLabel[request.kind]}`,
+        detail: `Allow extension "${request.extensionId}" to use this capability? You can revoke access by disabling the extension.`,
+        buttons: ['Allow', 'Deny'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      })
+      return result.response === 0
+    },
+  )
   const sessionAdapters = new WeakMap<Session, PermissionSession<DesktopCapturerSource>>()
   const adaptSession = (electronSession: Session): PermissionSession<DesktopCapturerSource> => {
     const cached = sessionAdapters.get(electronSession)
@@ -113,6 +159,24 @@ export function installElectronPermissionBoundary(
     getSession: contents => {
       return adaptSession((contents as unknown as WebContents).session)
     },
+    getExtensionPermission: extensionId => {
+      return extensionAuthorizer?.getExtensionMediaPermission(extensionId)
+    },
+    hasDirectChildFrame: (contents, url, origin) => {
+      const electronContents = contents as unknown as WebContents
+      const mainFrame = electronContents.mainFrame
+      return mainFrame.framesInSubtree.some(frame => {
+        return !frame.isDestroyed()
+          && !frame.detached
+          && frame.url === url
+          && frame.origin === origin
+          && sameElectronFrame(frame.parent, mainFrame)
+          && sameElectronFrame(frame.top, mainFrame)
+      })
+    },
+    hasExtensionConsent: (extensionId, kind) => {
+      return consentManager.hasConsent(extensionId, kind)
+    },
     getWebContentsForFrame: frame => {
       const contents = electronWebContents.fromFrame(frame as unknown as WebFrameMain)
       return contents ? asWebContents(contents) : undefined
@@ -125,6 +189,19 @@ export function installElectronPermissionBoundary(
     onWebContentsCreated: listener => {
       app.on('web-contents-created', (_event, contents) => {
         listener(asWebContents(contents))
+      })
+    },
+    onWebContentsNavigation: (contents, listener) => {
+      const electronContents = contents as unknown as WebContents
+      electronContents.on('did-frame-navigate', listener)
+      electronContents.on('did-navigate-in-page', listener)
+    },
+    requestExtensionConsent: (extension, kind, owner) => {
+      return consentManager.requestConsent({
+        extensionId: extension.id,
+        extensionName: extension.name,
+        kind,
+        owner: owner as unknown as BrowserWindow,
       })
     },
     requestMediaAccess: async kind => {
@@ -176,8 +253,15 @@ export function installElectronPermissionBoundary(
   )
 
   installedBoundary = {
-    ready: boundary.ready,
+    ready: Promise.all([boundary.ready, consentManager.ready]).then(() => undefined),
+    revokeExtensionMedia: async extensionId => {
+      boundary.clearExtensionGrants(extensionId)
+      await consentManager.revokeExtension(extensionId)
+    },
     registerAppWindow: window => boundary.registerAppWindow(asBrowserWindow(window)),
+    setExtensionAuthorizer: authorizer => {
+      extensionAuthorizer = authorizer
+    },
   }
   return installedBoundary
 }
