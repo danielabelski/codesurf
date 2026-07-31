@@ -15,6 +15,7 @@ import {
   type ChatStreamScope,
 } from '../runtime'
 import type { ChatRequest } from '../types'
+import { buildPeerSystemPrompt } from '../prompt-builders'
 
 // Store hermes session IDs for multi-turn resume
 const hermesSessionIds = new Map<string, string>()
@@ -78,6 +79,7 @@ export function chatHermes(req: ChatRequest): void {
       model: req.model,
       userContent: lastUserMsg.content,
       existingSessionId,
+      peerPrompt: buildPeerSystemPrompt(req.peers),
     })
   } catch (err) {
     sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })

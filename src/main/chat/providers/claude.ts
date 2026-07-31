@@ -305,7 +305,7 @@ function buildClaudeAgentPrompt(
   const activityConvention = buildCodeSurfActivityConvention()
   // Persona (AgentMode.systemPrompt) leads ahead of memory/skills, matching the
   // daemon Claude path so the agent definition frames the turn the same way.
-  return joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention)
+  return joinPromptSections(agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention, basePrompt)
 }
 
 // --- Anthropic file-change summaries -----------------------------------------

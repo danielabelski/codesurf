@@ -13,6 +13,7 @@ import { errorMessage } from '../../../shared/errors.ts'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import { buildPeerAwareTurnPrompt, buildPeerSystemPrompt } from '../prompt-builders'
 import type { ChatRequest } from '../types'
 import {
   chatRequestScope,
@@ -453,9 +454,11 @@ export function chatOpencode(req: ChatRequest): void {
       // convention in its running history.
       const isFirstTurn = !existingSessionId
       const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
-      const promptText = isFirstTurn
-        ? `${promptConvention}\n\n---\n\n${lastUserMsg.content}`
-        : lastUserMsg.content
+      const promptText = buildPeerAwareTurnPrompt(
+        lastUserMsg.content,
+        buildPeerSystemPrompt(req.peers),
+        isFirstTurn ? promptConvention : undefined,
+      )
       const promptPromise = client.session.prompt({
         sessionID,
         model: { providerID, modelID },

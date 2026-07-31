@@ -54,6 +54,7 @@ export interface HermesSpawnInput extends AgentModeSelection {
   model: string
   userContent: string
   existingSessionId?: string | null
+  peerPrompt?: string
 }
 
 // Build the `hermes chat` argv chatHermes spawns. AgentMode.tools maps onto
@@ -67,6 +68,7 @@ export function buildHermesSpawnArgs(input: HermesSpawnInput): string[] {
   const prompt = buildHermesTurnPrompt({
     userContent: input.userContent,
     agentPersona,
+    peerPrompt: input.peerPrompt,
     isFirstTurn: !input.existingSessionId,
     outputConvention: joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention()),
   })
@@ -95,7 +97,7 @@ function buildCodexPrompt(
   const activityConvention = buildCodeSurfActivityConvention()
   // Persona leads the preamble — Codex has no system-prompt flag, so it rides
   // along ahead of memory/skills in the prompt.
-  const preamble = joinPromptSections(basePrompt, agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention)
+  const preamble = joinPromptSections(agentPersona, memoryPrompt, skillsPrompt, asyncPrompt, outputConvention, insightConvention, activityConvention, basePrompt)
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 

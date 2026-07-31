@@ -20,6 +20,7 @@
 export interface HermesTurnPromptOpts {
   userContent: string
   agentPersona?: string
+  peerPrompt?: string
   isFirstTurn: boolean
   /** CodeSurf output convention, injected on the first turn only. Caller-supplied
    *  (from prompt-conventions) so this module stays dependency-free. */
@@ -27,19 +28,19 @@ export interface HermesTurnPromptOpts {
 }
 
 export function buildHermesTurnPrompt(opts: HermesTurnPromptOpts): string {
-  const { userContent, agentPersona, isFirstTurn, outputConvention } = opts
+  const { userContent, agentPersona, peerPrompt, isFirstTurn, outputConvention } = opts
   const persona = agentPersona?.trim() || undefined
+  const peers = peerPrompt?.trim() || undefined
 
   if (isFirstTurn) {
     // Mirror joinPromptSections: trim, drop empties, join with a blank line.
-    const sections = [persona, outputConvention?.trim() || undefined].filter(Boolean) as string[]
+    const sections = [persona, outputConvention?.trim() || undefined, peers].filter(Boolean) as string[]
     const preamble = sections.length > 0 ? sections.join('\n\n') : undefined
     return preamble ? `${preamble}\n\n---\n\n${userContent}` : userContent
   }
 
   // Resumed turn: re-assert the persona so the agent definition stays in force.
-  if (persona) {
-    return `${persona}\n\n---\n\n${userContent}`
-  }
-  return userContent
+  const sections = [persona, peers].filter(Boolean) as string[]
+  const preamble = sections.length > 0 ? sections.join('\n\n') : undefined
+  return preamble ? `${preamble}\n\n---\n\n${userContent}` : userContent
 }
