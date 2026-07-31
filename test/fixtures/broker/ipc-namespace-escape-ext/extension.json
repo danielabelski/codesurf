@@ -4,7 +4,5 @@
   "version": "1.0.0",
   "tier": "power",
   "main": "main.js",
-  "capabilities": [
-    { "name": "ipc" }
-  ]
+  "capabilities": []
 }

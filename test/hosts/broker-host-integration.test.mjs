@@ -286,7 +286,7 @@ test('Broker host: IPC handler cleanup on deactivate (re-activate does not throw
       id: 'ipc-ext',
       name: 'IPC Extension',
       extDir: join(fixtureBase, 'ipc-ext'),
-      capabilities: [{ name: 'ipc' }],
+      capabilities: [],
     }, 30_000)
     assert.equal(result.activated, true, 'first activate returned true')
   })
@@ -303,7 +303,7 @@ test('Broker host: IPC handler cleanup on deactivate (re-activate does not throw
       id: 'ipc-ext',
       name: 'IPC Extension',
       extDir: join(fixtureBase, 'ipc-ext'),
-      capabilities: [{ name: 'ipc' }],
+      capabilities: [],
     }, 30_000)
     assert.equal(result.activated, true, 'second activate returned true — no duplicate handler error')
   })
@@ -424,7 +424,7 @@ test('Broker host: IPC namespace enforcement — out-of-namespace channel is rej
       id: 'ipc-namespace-escape-ext',
       name: 'IPC Namespace Escape Extension',
       extDir: join(fixtureBase, 'ipc-namespace-escape-ext'),
-      capabilities: [{ name: 'ipc' }],
+      capabilities: [],
     }, 30_000)
     assert.equal(result.activated, true, 'fixture activated')
   })
