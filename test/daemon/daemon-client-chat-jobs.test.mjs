@@ -258,7 +258,7 @@ test('streamJobEvents never acknowledges or delivers done across a persistent se
         events.push(event)
       },
     }),
-    /sequence gap|terminal replay/i,
+    /sequence gap for job job-1: expected 2, received 3/i,
   )
 
   assert.deepEqual(events.map(event => event.sequence), [1])

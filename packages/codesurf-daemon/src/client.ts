@@ -373,6 +373,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
 
       if (terminalEventSeen) return
       if (isTerminalCatchupAttempt) {
+        if (disconnectError instanceof DaemonStreamSequenceGapError) {
+          throw disconnectError
+        }
         throw new Error(
           `Daemon terminal replay ended before delivering the terminal event for job ${jobId}`,
           { cause: disconnectError ?? undefined },
