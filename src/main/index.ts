@@ -96,7 +96,7 @@ if (!isOwlHost) {
 // Single-instance lock so a second `open foo.skill` invocation reuses the
 // existing window instead of launching a new one. Argv inspection finds
 // `.skill` paths from Windows/Linux file associations (macOS uses open-file).
-const gotSingleInstanceLock = isOwlHost || app.requestSingleInstanceLock()
+const gotSingleInstanceLock = isOwlHost || isBrokerTestProcess() || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else if (!isOwlHost) {

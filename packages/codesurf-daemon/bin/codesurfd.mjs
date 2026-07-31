@@ -28,6 +28,9 @@ const STARTED_AT = new Date().toISOString()
 const TEST_SHUTDOWN_DELAY_MS = process.env.NODE_ENV === 'test'
   ? Math.min(10_000, Math.max(0, Number(process.env.CODESURF_TEST_SHUTDOWN_DELAY_MS) || 0))
   : 0
+const SERVER_CLOSE_TIMEOUT_MS = process.env.NODE_ENV === 'test'
+  ? Math.min(5_000, Math.max(25, Number(process.env.CODESURF_TEST_SERVER_CLOSE_TIMEOUT_MS) || 2_000))
+  : 2_000
 const LEGACY_CONFIG_PATH = join(HOME, 'config.json')
 const WORKSPACES_FILE = join(HOME, 'workspaces', 'workspaces.json')
 const PROJECTS_FILE = join(HOME, 'projects', 'projects.json')
@@ -3391,7 +3394,6 @@ const server = createServer(async (req, res) => {
         'X-Accel-Buffering': 'no',
       })
       res.flushHeaders?.()
-      res.write(': connected\n\n')
 
       const keepOpen = await chatJobs.streamJob(jobId, sinceSequence, res)
       if (!keepOpen) {
@@ -4043,7 +4045,23 @@ async function shutdown() {
   try {
     await chatJobs.shutdown()
   } catch {}
-  await new Promise(resolve => server.close(() => resolve()))
+  server.closeIdleConnections?.()
+  let closeTimer
+  const closed = new Promise(resolve => server.close(() => resolve(true)))
+  const closedGracefully = await Promise.race([
+    closed,
+    new Promise(resolve => {
+      closeTimer = setTimeout(() => resolve(false), SERVER_CLOSE_TIMEOUT_MS)
+      closeTimer.unref?.()
+    }),
+  ])
+  if (closeTimer) clearTimeout(closeTimer)
+  if (!closedGracefully) {
+    // A client that stops reading an SSE response can otherwise hold shutdown
+    // open indefinitely. The job manager has already ended/destroyed its
+    // subscribers; this is the final bound for any unrelated lingering socket.
+    server.closeAllConnections?.()
+  }
 }
 
 process.on('SIGTERM', () => {
