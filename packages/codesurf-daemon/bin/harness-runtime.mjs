@@ -379,7 +379,7 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
   // sandbox/bridge/model. Defaults to the real HarnessAgent.
   const makeAgent = createAgent || (opts => new HarnessAgent(opts))
 
-  async function runHarnessJob(job, request, workspaceDir, instructionPrompt, { appendEvent, createCheckpoint, awaitToolPermission } = {}) {
+  async function runHarnessJob(job, request, workspaceDir, instructionPrompt, { appendEvent, createCheckpoint, awaitToolPermission, peerPrompt } = {}) {
     if (request.provider === 'pi') {
       await appendEvent(job.id, { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR })
       await appendEvent(job.id, { type: 'done' })
@@ -501,9 +501,9 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
     const baseInstructions = bindTarget
       ? `${workdirInstruction(bindTarget)}${instructionPrompt ? `\n\n${instructionPrompt}` : ''}`
       : (instructionPrompt || '')
-    const instructions = agentPrompt
-      ? `${agentPrompt}${baseInstructions ? `\n\n${baseInstructions}` : ''}`
-      : baseInstructions
+    const instructions = [agentPrompt, baseInstructions, String(peerPrompt ?? '').trim()]
+      .filter(Boolean)
+      .join('\n\n')
     const agent = makeAgent({
       harness,
       sandbox: new LocalHostSandboxProvider({ baseDir: sandboxBaseDir }),

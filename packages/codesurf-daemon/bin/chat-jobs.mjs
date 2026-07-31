@@ -18,6 +18,7 @@ import {
   truncateUtf8,
 } from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
+import { buildPeerContextPrompt } from './peer-context-policy.mjs'
 import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,
@@ -604,30 +605,13 @@ async function ensureProvisionedWorkspace(homeDir, projectContext) {
   return workspaceDir
 }
 
-function buildClaudeSystemPrompt(peers) {
-  if (!Array.isArray(peers) || peers.length === 0) return undefined
-  const peerLines = peers.map(peer => {
-    const lines = []
-    if (Array.isArray(peer.tools) && peer.tools.length > 0) {
-      lines.push(`  Tools: ${peer.tools.join(', ')}`)
-    }
-    if (peer.context && typeof peer.context === 'object') {
-      lines.push('  Context:')
-      for (const [key, value] of Object.entries(peer.context)) {
-        const display = value === null ? 'null' : typeof value === 'object' ? JSON.stringify(value) : String(value)
-        lines.push(`    ${key}: ${display}`)
-      }
-    }
-    if (lines.length === 0) lines.push('  (no additional peer context)')
-    return `- Block "${peer.peerId}" (${peer.peerType}):\n${lines.join('\n')}`
-  }).join('\n')
+const validatedPeerPrompt = Symbol('validatedPeerPrompt')
 
-  return [
-    'You are an AI agent running inside CodeSurf.',
-    '',
-    'The following peer blocks are directly connected to you on the canvas:',
-    peerLines,
-  ].join('\n')
+function peerPromptForRequest(request) {
+  if (request && Object.prototype.hasOwnProperty.call(request, validatedPeerPrompt)) {
+    return request[validatedPeerPrompt]
+  }
+  return buildPeerContextPrompt(request?.peers).fragment?.text
 }
 
 function buildAsyncExecutionPrompt(asyncExecution) {
@@ -744,6 +728,7 @@ function boundOptionalContext(value, maxBytes, reason) {
 }
 
 export function revalidateDaemonContextRequest(request = {}) {
+  const peerContext = buildPeerContextPrompt(request.peers)
   const memory = boundContextWithReservedSuffix(
     request.memoryPrompt,
     request.roomContext,
@@ -771,6 +756,8 @@ export function revalidateDaemonContextRequest(request = {}) {
   return {
     request: {
       ...request,
+      peers: peerContext.peers,
+      [validatedPeerPrompt]: peerContext.fragment?.text,
       memoryPrompt: memory.text,
       roomContext: memory.suffix,
       skillsPrompt: skills.value,
@@ -794,23 +781,23 @@ export function revalidateDaemonContextRequest(request = {}) {
       skillsPrompt: skills.metadata,
       skillsSummary: skillsSummary.metadata,
       personaPrompt: persona.metadata,
+      peerContext: peerContext.metadata,
     },
   }
 }
 
-function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
-  const peerPrompt = buildClaudeSystemPrompt(peers)
+function buildClaudeAgentPrompt(peerPrompt, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const insightConvention = buildCodeSurfInsightConvention()
   const activityConvention = buildCodeSurfActivityConvention()
-  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
+  return joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention, peerPrompt)
 }
 
-function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
+function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt, peerPrompt) {
   const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
   const insightConvention = buildCodeSurfInsightConvention()
   const activityConvention = buildCodeSurfActivityConvention()
-  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
+  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention, peerPrompt)
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
@@ -960,6 +947,7 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
     instructionPrompt,
     request.skillsPrompt,
     agentPersonaPrompt(request),
+    peerPromptForRequest(request),
   ))
   return codexArgs
 }
@@ -1484,6 +1472,7 @@ export function createChatJobManager({
   checkpointStore = null,
   claudeQuery = query,
   codexSdkFactory = null,
+  harnessRunnerFactory = null,
   maxConcurrentJobs = 4,
   subscriberMaxQueuedEvents = 256,
   subscriberMaxQueuedBytes = 1024 * 1024,
@@ -1520,7 +1509,9 @@ export function createChatJobManager({
   let harnessRunnerPromise = null
   function getHarnessRunner() {
     if (!harnessRunnerPromise) {
-      harnessRunnerPromise = import('./harness-runtime.mjs').then(m => m.createHarnessRunner({ homeDir }))
+      harnessRunnerPromise = harnessRunnerFactory
+        ? Promise.resolve(harnessRunnerFactory({ homeDir }))
+        : import('./harness-runtime.mjs').then(m => m.createHarnessRunner({ homeDir }))
     }
     return harnessRunnerPromise
   }
@@ -2413,7 +2404,7 @@ export function createChatJobManager({
       options.tools = agentToolAllowList
     }
 
-    const systemPrompt = buildClaudeAgentPrompt(request.peers, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const systemPrompt = buildClaudeAgentPrompt(peerPromptForRequest(request), request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
     if (systemPrompt) {
       options.agent = 'codesurf'
       options.agents = {
@@ -2603,6 +2594,7 @@ export function createChatJobManager({
       instructionPrompt,
       request.skillsPrompt,
       agentPersonaPrompt(request),
+      peerPromptForRequest(request),
     )
 
     const pendingSnapshots = new Map()
@@ -2996,7 +2988,7 @@ export function createChatJobManager({
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request), peerPromptForRequest(request))
     const proc = spawn('hermes', buildHermesChatArgs({
       prompt,
       model: request.model,
@@ -3062,7 +3054,7 @@ export function createChatJobManager({
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request), peerPromptForRequest(request))
     const agent = typeof request.agent === 'string'
       ? request.agent
       : typeof request.agentName === 'string'
@@ -3187,6 +3179,7 @@ export function createChatJobManager({
       instructionPrompt,
       request.skillsPrompt,
       agentPersonaPrompt(request),
+      peerPromptForRequest(request),
     )
 
     const abortController = new AbortController()
@@ -3581,6 +3574,7 @@ export function createChatJobManager({
           appendEvent,
           createCheckpoint: (toolName, filePaths) => createDaemonCheckpoint(job, request, toolName, filePaths),
           awaitToolPermission: (toolUseID, permissionRequest) => awaitToolPermissionAnswer(job, toolUseID, permissionRequest),
+          peerPrompt: peerPromptForRequest(request),
         })
       } else if (request.provider === 'claude') {
         await runClaudeJob(job, request, workspaceDir, instructionPrompt)

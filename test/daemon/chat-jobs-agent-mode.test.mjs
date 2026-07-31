@@ -148,12 +148,14 @@ test('harness: AgentMode.systemPrompt is injected into makeAgent instructions', 
     },
     '', // no workspace → bind path is the raw instructionPrompt + persona
     'MEMORY-PROMPT-CONTEXT',
-    { appendEvent: async () => {} },
+    { appendEvent: async () => {}, peerPrompt: 'BOUNDED-PEER-CONTEXT' },
   )
   assert.ok(captured.opts.instructions.includes('ZEBRA-PERSONA-9921'), 'persona systemPrompt must reach instructions')
   assert.ok(captured.opts.instructions.includes('MEMORY-PROMPT-CONTEXT'), 'memory prompt must still be present')
+  assert.ok(captured.opts.instructions.includes('BOUNDED-PEER-CONTEXT'), 'bounded peer prompt must reach harness instructions')
   // persona leads the instructions
   assert.ok(captured.opts.instructions.indexOf('ZEBRA-PERSONA-9921') < captured.opts.instructions.indexOf('MEMORY-PROMPT-CONTEXT'))
+  assert.ok(captured.opts.instructions.indexOf('MEMORY-PROMPT-CONTEXT') < captured.opts.instructions.indexOf('BOUNDED-PEER-CONTEXT'))
 })
 
 test('harness: tools allow-list denies a disallowed tool without prompting, allows a listed one', async () => {
@@ -936,13 +938,15 @@ test('runtime Hermes: buildHermesSpawnArgs (the chatHermes call path) reflects A
   // and the persona rides inside the --query prompt.
   const args = buildHermesSpawnArgs({
     agentMode: { id: 'ask', name: 'Ask', systemPrompt: 'PERSONA-RT-HERMES.', tools: ['Read', 'Glob'] },
-    mode: 'full', model: 'm', userContent: 'go',
+    mode: 'full', model: 'm', userContent: 'go', peerPrompt: 'BOUNDED-PEER-RT-HERMES',
   })
   const tsIdx = args.indexOf('--toolsets')
   assert.ok(tsIdx >= 0, '--toolsets must be present for a non-empty allow-list')
   assert.equal(args[tsIdx + 1], 'file', 'file-only allow-list → --toolsets file in the real argv')
   const queryIdx = args.indexOf('--query')
   assert.ok(args[queryIdx + 1].includes('PERSONA-RT-HERMES'), 'persona must be in the real --query prompt')
+  assert.ok(args[queryIdx + 1].includes('BOUNDED-PEER-RT-HERMES'), 'bounded peers must be in the real --query prompt')
+  assert.ok(args[queryIdx + 1].indexOf('PERSONA-RT-HERMES') < args[queryIdx + 1].indexOf('BOUNDED-PEER-RT-HERMES'), 'stable persona must precede volatile peer context')
   assert.ok(args.includes('--stream-json'), 'chatHermes requests NDJSON streaming')
 
   // deny-all [] → query-only: empty toolset is dropped (no --toolsets flag).
