@@ -42,7 +42,16 @@ describe('BrowserTile browser evidence integration', () => {
     expect(BROWSER_TILE_SOURCE).toContain('dispatchOpenChatSurface')
   })
 
-  test('answers read-only browser evidence requests over the existing tile bus', () => {
+  test('answers read-only browser evidence requests over the workspace-scoped tile bus', () => {
+    expect(BROWSER_TILE_SOURCE).toContain('if (!workspaceId || !window.electron?.bus) return')
+    expect(BROWSER_TILE_SOURCE).toContain('`tile:${workspaceId}:${tileId}`')
+    expect(BROWSER_TILE_SOURCE).toContain('`browser:${workspaceId}:${tileId}:mcp`')
+    expect(BROWSER_TILE_SOURCE).toContain(
+      '[workspaceId, tileId, navigate, reload, goBack, goForward, switchMode, publishEvidenceSnapshot]',
+    )
+    expect(BROWSER_TILE_SOURCE).not.toContain(
+      'window.electron.bus.subscribe(`tile:${tileId}`, `browser:${tileId}:mcp`',
+    )
     expect(BROWSER_TILE_SOURCE).toContain("browser_get_evidence")
     expect(BROWSER_TILE_SOURCE).toContain('browser.evidence.snapshot')
     expect(BROWSER_TILE_SOURCE).toContain('browser.page_health')
