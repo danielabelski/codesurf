@@ -568,7 +568,7 @@ function symbolicLinkAccessError(targetPath: string): Error {
   return new Error(`Access denied: path "${targetPath}" is a symbolic link`)
 }
 
-async function assertAuthorizedParentUnchanged(
+export async function assertAuthorizedParentUnchanged(
   authorization: FsPathAuthorization,
 ): Promise<void> {
   if (!authorization.parentIdentity) return
