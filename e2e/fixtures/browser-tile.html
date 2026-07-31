@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CodeSurf Browser Fixture</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 32px;
+        font-family: system-ui, sans-serif;
+        background: #101418;
+        color: #f4f7fa;
+      }
+
+      a {
+        color: #79b8ff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="fixture-title">Loading fixture</h1>
+      <p id="fixture-path"></p>
+      <a id="fixture-next" href="/next">Open next fixture page</a>
+    </main>
+    <script>
+      const pageName = location.pathname === '/next' ? 'Next' : 'Start'
+      document.title = `CodeSurf Browser Fixture ${pageName}`
+      document.querySelector('#fixture-title').textContent = `${pageName} page`
+      document.querySelector('#fixture-path').textContent = location.pathname
+      console.warn(`codesurf-browser-fixture-warning:${pageName.toLowerCase()}`)
+    </script>
+  </body>
+</html>
