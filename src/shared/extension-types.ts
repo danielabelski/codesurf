@@ -101,6 +101,7 @@ export type PluginRenderMode = 'iframe' | 'component' | 'mcp-ui'
 /** Named host capabilities a plugin can request (consented at enable time). */
 export type PluginCapabilityName =
   | 'fs' | 'network' | 'shell' | 'chat' | 'daemon' | 'chrome' | 'secrets' | 'relay' | 'canvas'
+  | 'microphone' | 'camera' | 'display-capture'
 
 export interface ExtensionCapabilityRequest {
   name: PluginCapabilityName | string
@@ -193,6 +194,8 @@ export interface ExtensionTileEntry {
 export interface ExtensionTileContrib extends ExtensionTileEntry {
   extId: string
   uiMode?: 'native' | 'custom'
+  /** Sensitive browser media permissions declared by the owning extension. */
+  sensitiveMedia?: import('./extension-sensitive-media.ts').SensitiveMediaCapability[]
   /** v2 render mode (iframe|component|mcp-ui); resolved from tier/ui.mode when absent. */
   render?: PluginRenderMode
 }

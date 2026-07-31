@@ -19,6 +19,10 @@ import { AppRenderer } from '@mcp-ui/client'
 import type { AppRendererProps, McpUiHostContext, McpUiHostCapabilities } from '@mcp-ui/client'
 import { useTheme } from '../ThemeContext'
 import { MCP_UI_SANDBOX_PROXY_URL } from '../../../shared/mcpUiProxy'
+import {
+  getExtensionIframeAllow,
+  type SensitiveMediaCapability,
+} from '../../../shared/extension-sensitive-media'
 
 export type PluginSurfaceRenderMode = 'iframe' | 'component' | 'mcp-ui'
 
@@ -39,6 +43,8 @@ export interface PluginSurfaceProps {
   toolInput?: Record<string, unknown>
   /** Wrapper style. The surface fills this container. */
   style?: React.CSSProperties
+  /** Sensitive media declared by an iframe plugin. Ignored by component and mcp-ui modes. */
+  sensitiveMedia?: readonly SensitiveMediaCapability[]
 }
 
 // Host capabilities advertised to the mcp-ui guest. With no MCP Client passed to
@@ -61,6 +67,7 @@ export function PluginSurface({
   surfaceId,
   toolInput,
   style,
+  sensitiveMedia,
 }: PluginSurfaceProps) {
   const theme = useTheme()
 
@@ -75,7 +82,7 @@ export function PluginSurface({
         <iframe
           src={entry}
           sandbox="allow-scripts allow-same-origin allow-modals"
-          allow="camera; microphone; display-capture; autoplay"
+          allow={getExtensionIframeAllow(sensitiveMedia)}
           style={{
             position: 'absolute',
             top: 0,
