@@ -42,6 +42,10 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT'
 }
 
+function isAlreadyExists(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'EEXIST'
+}
+
 function assertInsideRoot(root: string, path: string): string {
   const target = resolve(path)
   const rel = relative(root, target)
@@ -109,7 +113,14 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
       current = join(current, segment)
       let stat = await this.readStat(current)
       if (!stat) {
-        await this.io.mkdir(current, { recursive: false, mode: 0o700 })
+        try {
+          await this.io.mkdir(current, { recursive: false, mode: 0o700 })
+        } catch (error) {
+          // Sibling per-path queue drains can race while creating a shared
+          // workspace ancestor. Re-read and validate the winner; every other
+          // mkdir failure remains actionable.
+          if (!isAlreadyExists(error)) throw error
+        }
         stat = await this.io.lstat(current)
       }
       this.assertSafeStat(current, stat, 'directory')
