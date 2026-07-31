@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, test } from 'node:test'
@@ -190,5 +190,36 @@ describe('NodeAgentRoomFileAdapter', () => {
       /symbolic link/i,
     )
     assert.equal(await readFile(outsideFile, 'utf8'), 'sentinel')
+  })
+
+  test('rejects a symlinked ancestor when deleting and leaves outside data untouched', async () => {
+    const root = await makeTempRoot('delete-ancestor-root')
+    const outside = await makeTempRoot('delete-ancestor-outside')
+    await mkdir(join(root, 'room-inboxes'), { recursive: true })
+    await writeFile(join(outside, 'ROOM.md'), 'sentinel')
+    await symlink(outside, join(root, 'room-inboxes', 'tile-a'))
+
+    const adapter = new NodeAgentRoomFileAdapter(root)
+    await assert.rejects(
+      adapter.removeOwnedFile(join(root, 'room-inboxes', 'tile-a', 'ROOM.md')),
+      /symbolic link/i,
+    )
+    assert.equal(await readFile(join(outside, 'ROOM.md'), 'utf8'), 'sentinel')
+  })
+
+  test('rejects a symlinked final delete target without unlinking it or its referent', async () => {
+    const root = await makeTempRoot('delete-target-root')
+    const outside = await makeTempRoot('delete-target-outside')
+    const rooms = join(root, 'rooms')
+    const outsideFile = join(outside, 'outside.json')
+    const target = join(rooms, 'room-a.json')
+    await mkdir(rooms, { recursive: true })
+    await writeFile(outsideFile, 'sentinel')
+    await symlink(outsideFile, target)
+
+    const adapter = new NodeAgentRoomFileAdapter(root)
+    await assert.rejects(adapter.removeOwnedFile(target), /symbolic link/i)
+    assert.equal(await readFile(outsideFile, 'utf8'), 'sentinel')
+    assert.equal((await lstat(target)).isSymbolicLink(), true)
   })
 })

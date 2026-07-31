@@ -111,6 +111,29 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     assertInsideRoot(realRoot, realDirectory)
   }
 
+  private async validateExistingSafeDirectory(targetDirectory: string): Promise<boolean> {
+    const directory = assertInsideRoot(this.root, targetDirectory)
+    const rootStat = await this.readStat(this.root)
+    if (!rootStat) return false
+    this.assertSafeStat(this.root, rootStat, 'directory')
+
+    const rel = relative(this.root, directory)
+    let current = this.root
+    for (const segment of rel.split(/[\\/]+/).filter(Boolean)) {
+      current = join(current, segment)
+      const stat = await this.readStat(current)
+      if (!stat) return false
+      this.assertSafeStat(current, stat, 'directory')
+    }
+
+    const [realRoot, realDirectory] = await Promise.all([
+      this.io.realpath(this.root),
+      this.io.realpath(directory),
+    ])
+    assertInsideRoot(realRoot, realDirectory)
+    return true
+  }
+
   private async assertSafeTarget(path: string): Promise<void> {
     const target = assertInsideRoot(this.root, path)
     const stat = await this.readStat(target)
@@ -164,9 +187,9 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
   ): Promise<void> {
     const target = assertInsideRoot(this.root, path)
     const directory = dirname(target)
-    const directoryStat = await this.readStat(directory)
-    if (!directoryStat) return
-    this.assertSafeStat(directory, directoryStat, 'directory')
+    if (!await this.validateExistingSafeDirectory(directory)) return
+    // Node does not expose openat/unlinkat here, so a same-user directory swap can
+    // still race this final check. CODESURF_HOME remains the user-owned trust anchor.
     const targetStat = await this.readStat(target)
     if (!targetStat) return
     this.assertSafeStat(target, targetStat, 'file')
