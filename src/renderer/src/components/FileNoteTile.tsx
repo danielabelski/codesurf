@@ -7,7 +7,18 @@ import { dispatchOpenLink, findAnchorFromEventTarget } from '../utils/links'
 import { renderMarkdown } from './noteMarkdown'
 
 ensureMonacoConfigured()
-export function FileNote({ tileId, filePath, initialContent }: { tileId?: string; filePath?: string; initialContent: string }): JSX.Element {
+
+type FileNoteTileProps = {
+  tileId?: string
+  filePath?: string
+  initialContent: string
+}
+
+export function FileNoteTile({
+  tileId,
+  filePath,
+  initialContent,
+}: FileNoteTileProps): JSX.Element {
   const [content, setContent] = useState<string | undefined>(undefined)
   const [mode, setMode] = useState<'edit' | 'preview'>('edit')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -47,7 +58,9 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
     persistContent(value)
   }, [persistContent])
 
-  useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current) }, [])
+  useEffect(() => () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+  }, [])
 
   useEffect(() => {
     if (!tileId) return
@@ -55,8 +68,8 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
     const subscriberId = `note-${tileId}`
     const unsub = window.electron?.bus?.subscribe(channel, subscriberId, (event: { payload?: { command?: string; content?: string } }) => {
       if (event.payload?.command === 'note_append_context' && event.payload.content) {
-        setContent(prev => {
-          const next = prev ? `${prev}\n${event.payload!.content}` : event.payload!.content!
+        setContent(previous => {
+          const next = previous ? `${previous}\n${event.payload!.content}` : event.payload!.content!
           persistContent(next)
           return next
         })
@@ -69,7 +82,8 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
     return () => unsub?.()
   }, [persistContent, tileId])
 
-  // Safe preview: render user-authored markdown (HTML-escaped first in renderMarkdown)
+  // Safe preview: render user-authored markdown (HTML-escaped first in
+  // renderMarkdown).
   useEffect(() => {
     if (mode !== 'preview' || !previewRef.current) return
     const rendered = renderMarkdown(content ?? '')
@@ -110,8 +124,18 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
             background: mode === 'edit' ? theme.accent.soft : theme.surface.panelMuted,
             color: mode === 'edit' ? theme.accent.base : theme.text.disabled,
           }}
-          onMouseEnter={e => { if (mode !== 'edit') { e.currentTarget.style.background = theme.surface.hover; e.currentTarget.style.color = theme.text.muted } }}
-          onMouseLeave={e => { if (mode !== 'edit') { e.currentTarget.style.background = theme.surface.panelMuted; e.currentTarget.style.color = theme.text.disabled } }}
+          onMouseEnter={event => {
+            if (mode !== 'edit') {
+              event.currentTarget.style.background = theme.surface.hover
+              event.currentTarget.style.color = theme.text.muted
+            }
+          }}
+          onMouseLeave={event => {
+            if (mode !== 'edit') {
+              event.currentTarget.style.background = theme.surface.panelMuted
+              event.currentTarget.style.color = theme.text.disabled
+            }
+          }}
         >
           <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
             <path d="M9 1.5L11.5 4L4.5 11H2V8.5L9 1.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
@@ -126,8 +150,18 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
             background: mode === 'preview' ? theme.accent.soft : theme.surface.panelMuted,
             color: mode === 'preview' ? theme.accent.base : theme.text.disabled,
           }}
-          onMouseEnter={e => { if (mode !== 'preview') { e.currentTarget.style.background = theme.surface.hover; e.currentTarget.style.color = theme.text.muted } }}
-          onMouseLeave={e => { if (mode !== 'preview') { e.currentTarget.style.background = theme.surface.panelMuted; e.currentTarget.style.color = theme.text.disabled } }}
+          onMouseEnter={event => {
+            if (mode !== 'preview') {
+              event.currentTarget.style.background = theme.surface.hover
+              event.currentTarget.style.color = theme.text.muted
+            }
+          }}
+          onMouseLeave={event => {
+            if (mode !== 'preview') {
+              event.currentTarget.style.background = theme.surface.panelMuted
+              event.currentTarget.style.color = theme.text.disabled
+            }
+          }}
         >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
             <path d="M1 7C1 7 3 3 7 3C11 3 13 7 13 7C13 7 11 11 7 11C3 11 1 7 1 7Z" stroke="currentColor" strokeWidth="1.3"/>
@@ -162,7 +196,7 @@ export function FileNote({ tileId, filePath, initialContent }: { tileId?: string
                 vertical: 'auto',
                 horizontal: 'auto',
                 verticalScrollbarSize: 4,
-              }
+              },
             }}
           />
         ) : (

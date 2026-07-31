@@ -14,17 +14,17 @@ export function renderMarkdown(md: string): string {
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label: string, url: string) => {
       // Only allow http/https links — strip javascript:, file://, data: etc.
       let safe = ''
       try {
-        const p = new URL(url)
-        if (p.protocol === 'http:' || p.protocol === 'https:') safe = url
+        const parsed = new URL(url)
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') safe = url
       } catch {
-        // relative paths are fine for intra-note anchors
+        // Relative paths are fine for intra-note anchors.
         if (!url.includes(':')) safe = url
       }
-      if (!safe) return label // render label as plain text when scheme is disallowed
+      if (!safe) return label
       return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`
     })
     .replace(/^---+$/gm, '<hr/>')
@@ -34,6 +34,6 @@ export function renderMarkdown(md: string): string {
     .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
     .replace(/\n\n([^<])/g, '\n\n<p>$1')
     .replace(/\n/g, '<br/>')
-  html = html.replace(/(<li>.*?<\/li>)(\s*<br\/>)*/g, (m) => `<ul>${m.replace(/<br\/>/g, '')}</ul>`)
+  html = html.replace(/(<li>.*?<\/li>)(\s*<br\/>)*/g, match => `<ul>${match.replace(/<br\/>/g, '')}</ul>`)
   return html
 }
