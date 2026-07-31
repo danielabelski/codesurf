@@ -44,7 +44,7 @@ Ordered by leverage. Ask `/improve plan <slug>` to turn any into a full plan.
 - **PERF-03** `hooks/useCanvasDragSync.ts` — resize/group-move/connection drags bypass the RAF coalescing used by tile drag (direct `setTiles` per mousemove). Route all branches through the RAF path. (S, MED-HIGH)
 - **PERF-04** `ipc/workspace.ts:135-140` — `readSettingsSync` re-reads + re-parses settings on every call across hot IPC paths. Memoize, invalidate on write. (S, MED)
 - **DOC-01** `CLAUDE.md` + `AGENTS.md` are stale twins — "17 tools" (actual: 34), "App.tsx ~1700 LOC" (actual: 1941), "Electron 40.8.2" (actual: ^41.3), stale branch note; daemon/extensions/pets/owl/relay subsystems absent. Regenerate one canonical doc. (S, HIGH)
-- **DEP-01** `package-lock.json` (electron 41.3.0) vs `bun.lock` (electron 41.7.1) disagree — npm and bun installs produce different runtimes. Pick one source of truth. (S, HIGH)
+- **DEP-01** ~~competing npm/Bun lockfiles~~ **DONE (2026-07-31)** — `package-lock.json` is the sole install authority; the root setup/build paths use npm, while Bun remains limited to explicit Electrobun runtime tooling.
 - **DX-01** Root clutter: BUILD_LOG.md, TASKS.md, SOUL.md, HEARTBEAT.md, MEMORY.md (50 KB), CODE_REVIEW*.md, autoresearch.*, test-indexer.mjs read as project docs. Relocate/ignore. (S, HIGH)
 - **DX-02** Typecheck baseline is dirty — `tsgo` can't be a pass/fail gate. Snapshot + ratchet to zero, then gate. (M-L, MED)
 - **TEST-02** `ipc/chat.ts` (1453 LOC, highest-churn main-process file) and chat providers have no dedicated tests. Characterization tests from recorded NDJSON fixtures before further refactors. (L, HIGH)

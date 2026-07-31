@@ -136,11 +136,15 @@ describe('bounded relay subprocess lifecycle', () => {
   test('kills a timeout child process group including its grandchild', {
     skip: process.platform === 'win32' ? 'POSIX process-group assertion' : false,
   }, async () => {
+    const timeoutMs = 1_000
     const error = await runBoundedSubprocess({
       command: process.execPath,
       args: [fixture, 'grandchild-parent-exits'],
       label: 'process-tree fixture',
-      timeoutMs: 150,
+      // This fixture starts two Node processes before announcing readiness.
+      // Keep startup scheduling outside the assertion's timing margin so the
+      // timeout exercises process-tree teardown, not fixture boot contention.
+      timeoutMs,
       stdoutMaxBytes: 1_024,
       stderrMaxBytes: 1_024,
       termGraceMs: 100,
@@ -150,11 +154,16 @@ describe('bounded relay subprocess lifecycle', () => {
       expectBoundedError,
     )
 
+    assert.equal(error.reason, 'timeout')
+    assert.match(error.message, new RegExp(`timed out after ${timeoutMs}ms`))
+    // Captured output freezes when the timeout begins, so this proves the
+    // grandchild was announced before process-tree termination started.
     const match = error.stdout.match(/grandchild:(\d+)/)
     assert.ok(match, `missing grandchild pid in ${JSON.stringify(error.stdout)}`)
     const grandchildPid = Number(match[1])
     assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0)
-    if (error.pid) await waitForPidExit(error.pid)
+    assert.ok(error.pid && Number.isSafeInteger(error.pid) && error.pid > 0)
+    await waitForPidExit(error.pid)
     await waitForPidExit(grandchildPid)
   })
 

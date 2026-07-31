@@ -25,7 +25,11 @@ CodeSurf's current state is genuinely strong in places and should be *kept*, not
 - Per-decision tool permissions (deny/never/once/session/today/forever) are **richer**
   than omnigent's binary ALLOW/ASK — `src/renderer/src/components/chat/ToolPermission.tsx:109-150`.
 - Git-worktree isolation per harness turn already exists — `packages/codesurf-daemon/bin/harness-worktree.mjs:1-74`.
-- Multi-vendor harness routing (claude/codex/pi) already works — `packages/codesurf-daemon/bin/harness-runtime.mjs:21-80`.
+- Harness execution currently routes only single-shot/background Claude jobs.
+  Foreground Claude and all Codex jobs use their native paths to preserve session
+  continuity and permission semantics; Pi fails closed with a stable remediation
+  until its published adapter dependency chain is safe —
+  `packages/codesurf-daemon/bin/chat-jobs.mjs:991-996,2808-2819`.
 
 **Do NOT copy:** omnigent's `timer` subsystem is a `NotImplementedError` stub — use CodeSurf's own cron/loop tooling for scheduling instead.
 
@@ -47,7 +51,7 @@ CodeSurf's current state is genuinely strong in places and should be *kept*, not
 
 ### F3. Pluggable harness registry (kill hard-coded vendor branches)  ·  Effort: **M/L**
 - **omnigent:** canonicalized harness names + generic module-loaded runner + shared executor adapter — `omnigent/harness_aliases.py:9-23`, `omnigent/runtime/harnesses/_runner.py:1-37,112-157`, `_executor_adapter.py:1-23`.
-- **CodeSurf now:** `claude/codex/pi` hard-coded in `HARNESS_SUPPORTED_PROVIDERS`/`resolveHarness` — `packages/codesurf-daemon/bin/harness-runtime.mjs:21-33,76-80`; non-harness providers branch in `runJob` — `chat-jobs.mjs:1719-1736`.
+- **CodeSurf now:** adapter metadata and `resolveHarness` know Claude/Codex, but production routing admits only background Claude; Codex uses native `codex exec`, and Pi is explicitly fail-closed until its adapter is safe — `packages/codesurf-daemon/bin/harness-runtime.mjs:43-45,88-90,403-419`; routing lives in `packages/codesurf-daemon/bin/chat-jobs.mjs:991-996,2808-2822`.
 - **Slots into:** replace `resolveHarness()` with a registry consumed by daemon chat jobs + relay executors.
 - **Risk:** keep existing Claude/Codex/OpenCode/Hermes behavior stable while introducing registry metadata.
 
