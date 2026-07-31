@@ -54,13 +54,29 @@ async function boundedClose(closePromise, timeoutMs) {
   return Promise.race([closePromise, timeout]).finally(() => clearTimeout(timer))
 }
 
-function signalChild(child, signal, killProcessGroup) {
+export function signalTestChild(
+  child,
+  signal,
+  killProcessGroup,
+  signalProcess = process.kill,
+) {
   if (killProcessGroup && process.platform !== 'win32' && child.pid) {
     try {
-      process.kill(-child.pid, signal)
+      signalProcess(-child.pid, signal)
       return true
     } catch (error) {
       if (error?.code === 'ESRCH') return false
+      // The group id can become temporarily unsignalable while the exact
+      // ChildProcess is still ours. Fall back only to that owned child; never
+      // retry another group id that may already have been reused.
+      if (error?.code === 'EPERM') {
+        try {
+          return child.kill(signal)
+        } catch (childError) {
+          if (childError?.code === 'ESRCH') return false
+          throw childError
+        }
+      }
       throw error
     }
   }
@@ -80,13 +96,21 @@ function destroyStdio(child) {
   }
 }
 
-function sweepRemainingProcessGroup(child, killProcessGroup) {
+export function sweepRemainingTestProcessGroup(
+  child,
+  killProcessGroup,
+  signalProcess = process.kill,
+) {
   if (!killProcessGroup || process.platform === 'win32' || !child.pid) return false
   try {
-    process.kill(-child.pid, 'SIGKILL')
+    signalProcess(-child.pid, 'SIGKILL')
     return true
   } catch (error) {
     if (error?.code === 'ESRCH') return false
+    // The owned leader has already closed. EPERM can mean its numeric process
+    // group id was reused by an unrelated process, so do not retry or fall back
+    // to a stale ChildProcess handle.
+    if (error?.code === 'EPERM') return false
     throw error
   }
 }
@@ -104,35 +128,36 @@ async function stopTestChildOnce(
     graceMs = 5_000,
     killMs = 5_000,
     killProcessGroup = false,
+    signalProcess = process.kill,
   } = {},
 ) {
   const closePromise = trackTestChild(child)
   const state = childCloseStates.get(child)
   if (state.closed) {
     destroyStdio(child)
-    const groupSwept = sweepRemainingProcessGroup(child, killProcessGroup)
+    const groupSwept = sweepRemainingTestProcessGroup(child, killProcessGroup, signalProcess)
     return { ...state.result, escalated: false, groupSwept }
   }
 
   try {
     child.stdin?.end()
   } catch {}
-  signalChild(child, 'SIGTERM', killProcessGroup)
+  signalTestChild(child, 'SIGTERM', killProcessGroup, signalProcess)
 
   const gracefulClose = await boundedClose(closePromise, graceMs)
   if (gracefulClose) {
     destroyStdio(child)
-    const groupSwept = sweepRemainingProcessGroup(child, killProcessGroup)
+    const groupSwept = sweepRemainingTestProcessGroup(child, killProcessGroup, signalProcess)
     return { ...gracefulClose, escalated: false, groupSwept }
   }
 
-  signalChild(child, 'SIGKILL', killProcessGroup)
+  signalTestChild(child, 'SIGKILL', killProcessGroup, signalProcess)
   const forcedClose = await boundedClose(closePromise, killMs)
   if (!forcedClose) {
     throw new Error(`child process ${child.pid ?? 'unknown'} did not close after SIGKILL`)
   }
   destroyStdio(child)
-  const groupSwept = sweepRemainingProcessGroup(child, killProcessGroup)
+  const groupSwept = sweepRemainingTestProcessGroup(child, killProcessGroup, signalProcess)
   return { ...forcedClose, escalated: true, groupSwept }
 }
 
