@@ -877,14 +877,17 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
 
   // ---- MCP/peer command bridge -----------------------------------------
   useEffect(() => {
-    if (!window.electron?.bus) return
+    if (!workspaceId || !window.electron?.bus) return
 
     if (mcpCommandUnsubscribeRef.current) {
       mcpCommandUnsubscribeRef.current()
       mcpCommandUnsubscribeRef.current = null
     }
 
-    const unsubscribe = window.electron.bus.subscribe(`tile:${tileId}`, `browser:${tileId}:mcp`, (evt) => {
+    const unsubscribe = window.electron.bus.subscribe(
+      `tile:${workspaceId}:${tileId}`,
+      `browser:${workspaceId}:${tileId}:mcp`,
+      (evt) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
       const command = typeof payload.command === 'string' ? payload.command : ''
@@ -912,7 +915,8 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
       if (command === 'browser_get_evidence' || command === 'browser_capture_snapshot') {
         publishEvidenceSnapshot(command)
       }
-    })
+      },
+    )
 
     mcpCommandUnsubscribeRef.current = unsubscribe
 
@@ -922,7 +926,7 @@ export function BrowserTile({ tileId, workspaceId, initialUrl, width, height, zI
         mcpCommandUnsubscribeRef.current = null
       }
     }
-  }, [tileId, navigate, reload, goBack, goForward, switchMode, publishEvidenceSnapshot])
+  }, [workspaceId, tileId, navigate, reload, goBack, goForward, switchMode, publishEvidenceSnapshot])
 
   // Toggle cluso element selector.
   // Uses a retry loop outside the webview (via setTimeout) so that:

@@ -6,10 +6,11 @@ import { useAppFonts } from '../FontContext'
 import { useTheme } from '../ThemeContext'
 import { isDaemonBackedHost } from '../platform/detect'
 import { getDroppedPaths, shellEscapePath } from '../utils/dnd'
+import { resolveTerminalPeerWrite } from './terminalPeerCommands'
 
 interface Props {
   tileId: string
-  workspaceId?: string
+  workspaceId: string
   workspaceDir: string
   width: number
   height: number
@@ -21,10 +22,11 @@ interface Props {
 
 type RemoteTerminalCreate = (
   tileId: string,
+  workspaceId: string,
   workspaceDir: string,
   launchBin?: string,
   launchArgs?: string[],
-  options?: { workspaceId?: string, cols?: number, rows?: number },
+  options?: { cols?: number, rows?: number },
 ) => Promise<{ cols: number, rows: number, buffer?: string }>
 
 function terminalErrorMessage(error: unknown): string {
@@ -192,8 +194,15 @@ export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height,
 
         const create = window.electron.terminal.create as unknown as RemoteTerminalCreate
         const request = isDaemonBackedHost()
-          ? create(tileId, workspaceDir, launchBin, launchArgs, { workspaceId, ...initialDimensions })
-          : create(tileId, workspaceDir, launchBin, launchArgs)
+          ? create(
+              tileId,
+              workspaceId,
+              workspaceDir,
+              launchBin,
+              launchArgs,
+              initialDimensions,
+            )
+          : create(tileId, workspaceId, workspaceDir, launchBin, launchArgs)
 
         request.then(({ buffer }) => {
           if (cancelled) {
@@ -304,6 +313,36 @@ export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height,
       overviewRulerBorder: theme.terminal.background,
     }
   }, [theme])
+
+  useEffect(() => {
+    if (!workspaceId || !tileId) return
+
+    const unsubscribeBus = window.electron?.bus?.subscribe(
+      `tile:${workspaceId}:${tileId}`,
+      `terminal:${workspaceId}:${tileId}:mcp`,
+      (event) => {
+        const payload = event?.payload && typeof event.payload === 'object'
+          ? event.payload as Record<string, unknown>
+          : {}
+        const data = resolveTerminalPeerWrite(workspaceId, tileId, payload)
+        if (data === null) return
+        void window.electron.terminal.write(tileId, data).catch(terminalFailureRef.current)
+      },
+    )
+
+    const unsubscribeInject = window.electron?.mcp?.onInject?.(
+      (eventWorkspaceId, cardId, message, appendNewline) => {
+        if (eventWorkspaceId !== workspaceId || cardId !== tileId) return
+        const data = `${message}${appendNewline ? '\r' : ''}`
+        void window.electron.terminal.write(tileId, data).catch(terminalFailureRef.current)
+      },
+    )
+
+    return () => {
+      unsubscribeBus?.()
+      unsubscribeInject?.()
+    }
+  }, [workspaceId, tileId])
 
   const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     // During dragover, getData() is restricted — check types instead

@@ -67,6 +67,7 @@ export type UseNegotiatedDiscoveryParams = {
   dragState: CanvasDragState
   selectedTileId: string | null
   viewportZoom: number
+  workspaceId: string | undefined
   workspacePath: string | undefined
   activeChatTileId: string | null
   tileByIdMap: Map<string, TileState>
@@ -87,6 +88,7 @@ export function useNegotiatedDiscovery(params: UseNegotiatedDiscoveryParams) {
     dragState,
     selectedTileId,
     viewportZoom,
+    workspaceId,
     workspacePath,
     activeChatTileId,
     tileByIdMap,
@@ -269,7 +271,7 @@ export function useNegotiatedDiscovery(params: UseNegotiatedDiscoveryParams) {
 
   const prevPeerLinksRef = useRef<Map<string, string>>(new Map())
   useEffect(() => {
-    if (!workspacePath) return
+    if (!workspaceId || !workspacePath) return
     const validTools = new Set(getAllNodeTools().map(t => t.name))
     const newMap = new Map<string, string>()
 
@@ -290,18 +292,28 @@ export function useNegotiatedDiscovery(params: UseNegotiatedDiscoveryParams) {
       newMap.set(tile.id, key)
 
       if (previousKey !== key) {
-        void window.electron?.terminal?.updatePeers?.(tile.id, workspacePath, peers)
+        void window.electron?.terminal?.updatePeers?.(
+          tile.id,
+          workspaceId,
+          workspacePath,
+          peers,
+        )
       }
     }
 
     for (const [tileId] of prevPeerLinksRef.current) {
       if (!newMap.has(tileId)) {
-        void window.electron?.terminal?.updatePeers?.(tileId, workspacePath, [])
+        void window.electron?.terminal?.updatePeers?.(
+          tileId,
+          workspaceId,
+          workspacePath,
+          [],
+        )
       }
     }
 
     prevPeerLinksRef.current = newMap
-  }, [negotiatedDiscoveryState.byTileConnections, tiles, workspacePath])
+  }, [negotiatedDiscoveryState.byTileConnections, tiles, workspaceId, workspacePath])
 
   const lockedConnectionKeys = useMemo(() => {
     return new Set(lockedConnections.map(lc => [lc.sourceTileId, lc.targetTileId].sort().join('::')))

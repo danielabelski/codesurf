@@ -863,6 +863,7 @@ function App(): JSX.Element {
     const el = (window as any).electron?.mcp
     if (!el?.onKanban) return
     const cleanup = el.onKanban((event: string, data: any) => {
+      if (data?.workspaceId && data.workspaceId !== workspace?.id) return
       if (event === 'canvas_create_tile') {
         addTile((data.type ?? 'note') as TileState['type'], data.filePath, data.x !== undefined ? { x: data.x, y: data.y } : undefined)
       }
@@ -888,6 +889,7 @@ function App(): JSX.Element {
           if (!port) return
           const { postMcpEndpoint } = await import('./utils/mcpHttp')
           await postMcpEndpoint(port, '/push', {
+            workspace_id: workspace?.id,
             card_id: 'global',
             event: 'canvas_tiles_response',
             data: { tiles: tileList },
@@ -896,7 +898,7 @@ function App(): JSX.Element {
       }
     })
     return cleanup
-  }, [tiles, addTile])
+  }, [tiles, addTile, workspace?.id])
 
   const {
     clipboardRef,
@@ -1323,6 +1325,7 @@ function App(): JSX.Element {
     dragState,
     selectedTileId,
     viewportZoom: viewport.zoom,
+    workspaceId: workspace?.id,
     workspacePath: workspace?.path,
     activeChatTileId,
     tileByIdMap,

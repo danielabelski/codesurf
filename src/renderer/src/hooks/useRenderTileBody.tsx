@@ -133,7 +133,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
         return (
           <LazyTerminalTile
             tileId={tile.id}
-            workspaceId={workspace?.id}
+            workspaceId={workspace?.id ?? ''}
             workspaceDir={workspace?.path ?? ''}
             width={tile.width}
             height={tile.height}
@@ -146,7 +146,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
       case 'code':
         return <LazyCodeTile filePath={tile.filePath} />
       case 'note':
-        return <LazyNoteTile tileId={tile.id} filePath={tile.filePath} workspacePath={workspace?.path} />
+        return <LazyNoteTile tileId={tile.id} workspaceId={workspace?.id} filePath={tile.filePath} workspacePath={workspace?.path} />
       case 'image':
         return tile.filePath ? (
           <LazyImageTile
