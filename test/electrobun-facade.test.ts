@@ -5,6 +5,7 @@ import {
   createElectrobunElectronFacade,
   createElectrobunEventHub,
   getDefaultElectrobunInvokeResponse,
+  invokeElectrobunWithFallback,
   type ElectrobunInvokeCall,
 } from '../src/electrobun/browser/electron-facade.ts'
 
@@ -16,7 +17,7 @@ describe('Electrobun window.electron facade', () => {
       homedir: '/Users/tester',
       invoke: async (channel, args) => {
         calls.push({ channel, args })
-        return getDefaultElectrobunInvokeResponse(channel)
+        return true
       },
     })
     expect(facade.__codesurfHostKind).toBe('electrobun')
@@ -29,6 +30,7 @@ describe('Electrobun window.electron facade', () => {
     await facade.terminal.updatePeers('tile-1', 'workspace-1', '/tmp/project', [])
     await facade.fs.readFile('/tmp/project/README.md', 'ws-1')
     await facade.fs.watch('/tmp/project', () => {}, 'ws-1')()
+    await new Promise(resolve => setImmediate(resolve))
 
     expect(calls).toEqual([
       { channel: 'workspace:list', args: [] },
@@ -58,21 +60,65 @@ describe('Electrobun window.electron facade', () => {
     expect(seen).toEqual([{ channel: 'themes', payload: { mode: 'dark' } }])
   })
 
-  test('returns startup-safe defaults if the Electrobun runtime is temporarily unavailable', () => {
-    expect(getDefaultElectrobunInvokeResponse('workspace:list')).toEqual([])
-    expect(getDefaultElectrobunInvokeResponse('settings:get')).toMatchObject({
-      appearance: 'light',
-      security: { restrictFsToWorkspaceRoots: true, fsScopingMigrated: true },
+  test('filesystem calls without a renderer scope use the host-owned active workspace id', async () => {
+    const calls: ElectrobunInvokeCall[] = []
+    const facade = createElectrobunElectronFacade({
+      platform: 'darwin',
+      homedir: '/Users/tester',
+      invoke: async (channel, args) => {
+        calls.push({ channel, args })
+        return channel === 'workspace:getActive'
+          ? { id: 'host-workspace', path: '/trusted/workspace' }
+          : true
+      },
     })
+
+    await facade.fs.writeFile('/trusted/workspace/note.md', 'content')
+    expect(calls).toEqual([
+      { channel: 'workspace:getActive', args: [] },
+      { channel: 'fs:writeFile', args: ['/trusted/workspace/note.md', 'content', 'host-workspace'] },
+    ])
+  })
+
+  test('only returns defaults for optional reads when the runtime is unavailable', () => {
     expect(getDefaultElectrobunInvokeResponse('window:isFresh')).toBe(false)
-    expect(getDefaultElectrobunInvokeResponse('canvas:load')).toBe(null)
-    expect(getDefaultElectrobunInvokeResponse('bus:publish')).toBe(true)
     expect(getDefaultElectrobunInvokeResponse('pets:list')).toEqual([])
-    expect(getDefaultElectrobunInvokeResponse('webview:setFrameRate')).toMatchObject({ ok: true })
     expect(getDefaultElectrobunInvokeResponse('activity:health')).toEqual({
       available: false,
       status: 'unavailable',
     })
+    assert.throws(() => getDefaultElectrobunInvokeResponse('workspace:list'))
+    assert.throws(() => getDefaultElectrobunInvokeResponse('settings:get'))
+    assert.throws(() => getDefaultElectrobunInvokeResponse('canvas:load'))
+    assert.throws(() => getDefaultElectrobunInvokeResponse('bus:publish'))
     assert.throws(() => getDefaultElectrobunInvokeResponse('activity:upsert'))
+  })
+
+  test('preserves an authoritative null host response', async () => {
+    expect(await invokeElectrobunWithFallback('canvas:load', async () => null)).toBe(null)
+  })
+
+  test('unavailable secrets are explicit failures, never fake successful writes', () => {
+    expect(getDefaultElectrobunInvokeResponse('secrets:set')).toMatchObject({ ok: false })
+    expect(getDefaultElectrobunInvokeResponse('secrets:delete')).toMatchObject({ ok: false })
+    expect(getDefaultElectrobunInvokeResponse('secrets:list')).toMatchObject({ ok: false, names: [] })
+    expect(getDefaultElectrobunInvokeResponse('secrets:has')).toMatchObject({ ok: false, has: false })
+  })
+
+  test('RPC faults propagate for secrets, filesystem writes, workspace mutations, and permission replies', async () => {
+    const channels = [
+      'secrets:set',
+      'fs:writeFile',
+      'workspace:create',
+      'chat:answerToolPermission',
+    ]
+    for (const channel of channels) {
+      await assert.rejects(
+        invokeElectrobunWithFallback(channel, async () => {
+          throw new Error(`fault:${channel}`)
+        }),
+        new RegExp(`fault:${channel}`),
+      )
+    }
   })
 })

@@ -4,7 +4,7 @@ import {
   createElectrobunElectronFacade,
   createElectrobunEventHub,
   detectPlatformFromUserAgent,
-  getDefaultElectrobunInvokeResponse,
+  invokeElectrobunWithFallback,
 } from '../../src/electrobun/browser/electron-facade.ts'
 
 const eventHub = createElectrobunEventHub()
@@ -25,13 +25,10 @@ const rpc = Electroview.defineRPC<CodeSurfElectrobunRPC>({
 const electroview = new Electroview({ rpc })
 
 const invoke = async (channel: string, args: unknown[]): Promise<unknown> => {
-  try {
-    const result = await electroview.rpc?.request.invoke({ channel, args })
-    return result ?? getDefaultElectrobunInvokeResponse(channel)
-  } catch (error) {
-    console.warn(`[Electrobun] Falling back for ${channel}:`, error)
-    return getDefaultElectrobunInvokeResponse(channel)
-  }
+  return await invokeElectrobunWithFallback(
+    channel,
+    async () => await electroview.rpc?.request.invoke({ channel, args }),
+  )
 }
 
 const platform = detectPlatformFromUserAgent(globalThis.navigator?.userAgent ?? '')

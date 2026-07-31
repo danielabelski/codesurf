@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -134,12 +135,8 @@ describe('Electrobun preload parity checklist', () => {
 })
 
 describe('Electrobun security defaults parity', () => {
-  test('fallback settings match fresh-install FS scoping defaults', () => {
-    const settings = getDefaultElectrobunInvokeResponse('settings:get') as {
-      security?: { restrictFsToWorkspaceRoots?: boolean, fsScopingMigrated?: boolean }
-    }
-    expect(settings.security?.restrictFsToWorkspaceRoots).toBe(true)
-    expect(settings.security?.fsScopingMigrated).toBe(true)
+  test('settings failure does not masquerade as a successful fresh install', () => {
+    assert.throws(() => getDefaultElectrobunInvokeResponse('settings:get'))
   })
 
   test('guest webview tag preferences align with main-process enforcement', () => {
