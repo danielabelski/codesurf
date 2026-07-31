@@ -1,6 +1,12 @@
 import { test, expect } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { dismissAgentSetupIfPresent } from './helpers/dismiss-setup'
-import { closeCodeSurfElectron, launchCodeSurfElectron } from './helpers/launch-electron'
+import {
+  closeCodeSurfElectron,
+  launchCodeSurfElectron,
+  quitCodeSurfElectron,
+} from './helpers/launch-electron'
 import { waitForElectronBridge } from './helpers/wait-bridge'
 
 test.describe('Canvas IPC surface', () => {
@@ -266,6 +272,86 @@ test.describe('Canvas IPC surface', () => {
       })
 
       expect(viewportRoundTrip.reloaded).toEqual(viewportRoundTrip.saved)
+    } finally {
+      await closeCodeSurfElectron(launch)
+    }
+  })
+
+  test('quitting the app inside the debounce window persists a rendered canvas mutation', async () => {
+    const launch = await launchCodeSurfElectron()
+
+    try {
+      const { page, homeDir } = launch
+      await waitForElectronBridge(page, 'window.onPersistenceRequest')
+
+      const workspaceId = await page.evaluate(async () => {
+        const workspaces = await window.electron.workspace.list()
+        const workspace = workspaces[0] ?? await window.electron.workspace.create('e2e-close-flush')
+        await window.electron.canvas.save(workspace.id, {
+          tiles: [],
+          groups: [],
+          viewport: { tx: 0, ty: 0, zoom: 1 },
+          nextZIndex: 1,
+        })
+        await window.electron.workspace.setActive(workspace.id)
+        return workspace.id
+      })
+
+      await page.reload()
+      await waitForElectronBridge(page, 'window.onPersistenceRequest')
+      await dismissAgentSetupIfPresent(page)
+      const canvas = page.locator('[data-canvas-surface="true"]')
+      await canvas.waitFor({ state: 'visible', timeout: 45_000 })
+      // Drain any initialization save that was scheduled before fake timers
+      // are installed, so it cannot consume the later mutation callback.
+      await page.waitForTimeout(750)
+      const canvasBounds = await canvas.boundingBox()
+      expect(canvasBounds).not.toBeNull()
+
+      const canvasPath = join(
+        homeDir,
+        '.codesurf',
+        'workspaces',
+        workspaceId,
+        '.codesurf',
+        'canvas-state.json',
+      )
+      const baseline = JSON.parse(await readFile(canvasPath, 'utf8')) as {
+        tiles?: Array<{ type?: string }>
+      }
+      expect(baseline.tiles?.some(tile => tile.type === 'terminal')).toBe(false)
+      expect(await page.evaluate(
+        () => document.body.innerText.includes('Loading block'),
+      )).toBe(false)
+
+      // Freeze the renderer clock before a real rendered-surface mutation.
+      // This makes it impossible for the 500 ms debounce timer to win a race
+      // with the assertion or the subsequent app.quit request.
+      const pausedAt = Date.now()
+      await page.clock.install({ time: pausedAt })
+      await page.clock.pauseAt(pausedAt)
+      await page.mouse.dblclick(
+        canvasBounds!.x + Math.min(620, canvasBounds!.width - 20),
+        canvasBounds!.y + Math.min(420, canvasBounds!.height - 20),
+      )
+      await expect.poll(async () => page.evaluate(
+        () => (
+          document.body.innerText.includes('TERMINAL')
+          || document.body.innerText.includes('Loading block')
+        ),
+      )).toBe(true)
+
+      const beforeQuit = JSON.parse(await readFile(canvasPath, 'utf8')) as {
+        tiles?: Array<{ type?: string }>
+      }
+      expect(beforeQuit.tiles?.some(tile => tile.type === 'terminal')).toBe(false)
+
+      await quitCodeSurfElectron(launch)
+
+      const saved = JSON.parse(await readFile(canvasPath, 'utf8')) as {
+        tiles?: Array<{ type?: string }>
+      }
+      expect(saved.tiles?.some(tile => tile.type === 'terminal')).toBe(true)
     } finally {
       await closeCodeSurfElectron(launch)
     }

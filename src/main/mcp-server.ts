@@ -563,11 +563,24 @@ export function stopMCPServer(): Promise<void> {
       resolve()
       return
     }
-    server.close(() => {
-      mcpHttpServer = null
-      serverPort = null
-      resolve()
-    })
+    mcpHttpServer = null
+    serverPort = null
+
+    // Long-lived SSE responses and keep-alive sockets otherwise keep the
+    // Electron main process alive after app.quit has already emitted.
+    for (const responses of sseClients.values()) {
+      for (const response of responses) {
+        try {
+          response.end()
+        } catch {
+          response.destroy()
+        }
+      }
+    }
+    sseClients.clear()
+
+    server.close(() => resolve())
+    server.closeAllConnections?.()
   })
 }
 

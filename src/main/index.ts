@@ -7,7 +7,7 @@ import { initWorkspaces, registerWorkspaceIPC, migrateFsScopingIfNeeded, migrate
 import { registerFsIPC } from './ipc/fs'
 import { registerCanvasIPC } from './ipc/canvas'
 import { registerTerminalIPC } from './ipc/terminal'
-import { startMCPServer, setExtensionRegistryProvider } from './mcp-server'
+import { startMCPServer, stopMCPServer, setExtensionRegistryProvider } from './mcp-server'
 import { registerAgentsIPC } from './ipc/agents'
 import { registerStreamIPC } from './ipc/stream'
 import { registerGitIPC } from './ipc/git'
@@ -966,6 +966,9 @@ app.whenReady().then(async () => {
 
 function runAppShutdownCleanup(): void {
   flushActivityStore()
+  void stopMCPServer().catch(error => {
+    console.warn('[MCP] Failed to stop local server during shutdown:', error)
+  })
   stopAllCollabWatchers()
   deactivateCanvasRelayProjectionSync()
   extensionRegistry?.deactivateAll()
