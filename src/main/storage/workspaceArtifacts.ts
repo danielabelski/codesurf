@@ -2,6 +2,13 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { CODESURF_HOME } from '../paths.ts'
 import { readJsonArtifact, writeJsonArtifactAtomic } from './jsonArtifacts.ts'
+import { TileStateSaveCoordinator } from './tileStateSaveCoordinator.ts'
+
+// Tile state and context entries share one artifact. Renderer effects can save
+// both concurrently, so serialize each artifact's read/merge/write sequence or
+// a stale merge can erase a navigation field (or a freshly written context key).
+const tileStateSaveCoordinator = new TileStateSaveCoordinator()
+export const SKIP_WORKSPACE_TILE_STATE_WRITE = Symbol('skip-workspace-tile-state-write')
 
 export function assertSafeWorkspaceArtifactId(id: string): void {
   if (/[\/\\]|\.\./.test(id)) throw new Error(`Unsafe ID: ${id}`)
@@ -130,14 +137,34 @@ export async function loadWorkspaceTileState<T>(workspaceId: string, tileId: str
   return fallback
 }
 
-export async function saveWorkspaceTileState(workspaceId: string, tileId: string, state: unknown): Promise<{ storageId: string; path: string }> {
+export async function updateWorkspaceTileState(
+  workspaceId: string,
+  tileId: string,
+  update: (
+    existing: unknown | undefined,
+  ) => unknown | typeof SKIP_WORKSPACE_TILE_STATE_WRITE | Promise<unknown | typeof SKIP_WORKSPACE_TILE_STATE_WRITE>,
+): Promise<{ storageId: string; path: string; state: unknown | undefined; changed: boolean }> {
   const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
   const storageId = storageIds[0] ?? workspaceId
-  const dir = join(CODESURF_HOME, 'workspaces', storageId, '.codesurf')
-  const path = tileStatePath(storageId, tileId)
-  await fs.mkdir(dir, { recursive: true })
-  const existing = await readJsonArtifact(path)
-  const merged = existing ? mergeTileState(existing.value, state) : state
-  await writeJsonArtifactAtomic(path, merged)
-  return { storageId, path }
+  return tileStateSaveCoordinator.run(storageId, tileId, async () => {
+    const dir = join(CODESURF_HOME, 'workspaces', storageId, '.codesurf')
+    const path = tileStatePath(storageId, tileId)
+    const existing = await readJsonArtifact(path)
+    const nextState = await update(existing?.value)
+    if (nextState === SKIP_WORKSPACE_TILE_STATE_WRITE) {
+      return { storageId, path, state: existing?.value, changed: false }
+    }
+    await fs.mkdir(dir, { recursive: true })
+    await writeJsonArtifactAtomic(path, nextState)
+    return { storageId, path, state: nextState, changed: true }
+  })
+}
+
+export async function saveWorkspaceTileState(workspaceId: string, tileId: string, state: unknown): Promise<{ storageId: string; path: string }> {
+  const result = await updateWorkspaceTileState(
+    workspaceId,
+    tileId,
+    existing => mergeTileState(existing, state),
+  )
+  return { storageId: result.storageId, path: result.path }
 }

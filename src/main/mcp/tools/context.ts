@@ -2,7 +2,11 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { bus } from '../../event-bus'
 import { CODESURF_HOME } from '../../paths'
-import { loadWorkspaceTileState, saveWorkspaceTileState } from '../../storage/workspaceArtifacts'
+import {
+  loadWorkspaceTileState,
+  SKIP_WORKSPACE_TILE_STATE_WRITE,
+  updateWorkspaceTileState,
+} from '../../storage/workspaceArtifacts'
 import * as peerState from '../../peer-state'
 import * as agentRoom from '../../agent-room/index.ts'
 import { broadcastToRenderer } from '../../utils/broadcast'
@@ -16,6 +20,7 @@ import {
   estimateTokenCount,
   truncateUtf8,
 } from '../../agent-room/validation.ts'
+import { tileContextChannel } from '../../../shared/tileContextScope.ts'
 
 type UserConfigWorkspaceRef = {
   id: string
@@ -581,24 +586,30 @@ async function handleContextToolUnbounded(
 
       if (!workspace) return 'Workspace not found'
 
-      const state = await loadWorkspaceTileState<{
-        _context?: Record<string, TileContextEntry>
-        [key: string]: unknown
-      }>(workspace.id, tileId, {})
-
-      const validated = validateTileContextWrite(
-        state._context ?? {},
-        key,
-        value,
-        tileId,
-      )
-      if (!validated.ok) return validated.error
-      state._context = validated.next
-
-      await saveWorkspaceTileState(workspace.id, tileId, state)
+      let validationError: string | null = null
+      await updateWorkspaceTileState(workspace.id, tileId, existing => {
+        const state = existing && typeof existing === 'object' && !Array.isArray(existing)
+          ? existing as {
+              _context?: Record<string, TileContextEntry>
+              [stateKey: string]: unknown
+            }
+          : {}
+        const validated = validateTileContextWrite(
+          state._context ?? {},
+          key,
+          value,
+          tileId,
+        )
+        if (!validated.ok) {
+          validationError = validated.error
+          return SKIP_WORKSPACE_TILE_STATE_WRITE
+        }
+        return { ...state, _context: validated.next }
+      })
+      if (validationError) return validationError
 
       bus.publish({
-        channel: `ctx:${workspaceId}:${tileId}`,
+        channel: tileContextChannel(workspaceId, tileId),
         type: 'data',
         source: 'mcp:context',
         payload: { action: 'context_changed', key, value, workspaceId, tileId },

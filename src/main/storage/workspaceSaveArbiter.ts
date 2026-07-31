@@ -6,6 +6,10 @@
 export class WorkspaceSaveArbiter {
   private readonly tails = new Map<string, Promise<void>>()
 
+  get activeLaneCount(): number {
+    return this.tails.size
+  }
+
   run<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.tails.get(workspaceId) ?? Promise.resolve()
     const result = previous

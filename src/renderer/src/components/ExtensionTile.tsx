@@ -16,6 +16,11 @@ import {
   isSensitiveMediaCapability,
   type SensitiveMediaCapability,
 } from '../../../shared/extension-sensitive-media'
+import {
+  isTileContextChangeForScope,
+  tileContextChannel,
+  type TileContextChangedPayload,
+} from '../../../shared/tileContextScope'
 
 const el = (window as any).electron
 
@@ -720,14 +725,15 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   useEffect(() => {
     const peerContextUnsubs = new Map<string, () => void>()
+    if (!workspaceId) return
 
     for (const peerId of connectedPeerIds) {
-      const channel = `ctx:${peerId}`
-      const subscriberId = `exttile:${tileId}:peer-ctx:${peerId}`
+      const channel = tileContextChannel(workspaceId, peerId)
+      const subscriberId = `exttile:${workspaceId}:${tileId}:peer-ctx:${peerId}`
 
       const unsubscribe = el.bus?.subscribe?.(channel, subscriberId, (event: any) => {
         const p = event?.payload ?? event
-        if (p?.action === 'context_changed') {
+        if (isTileContextChangeForScope(p, workspaceId, peerId) && p.action === 'context_changed') {
           forwardContextEvent(peerId, {
             key: p.key,
             value: p.value,
@@ -745,12 +751,14 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         unsubscribe()
       }
     }
-  }, [connectedPeerIds, forwardContextEvent, tileId])
+  }, [connectedPeerIds, forwardContextEvent, tileId, workspaceId])
 
   // Listen for action invocations via tileContext:changed (proven IPC path)
   useEffect(() => {
     let actionReqId = 0
-    const unsub = el.tileContext?.onChanged?.(tileId, (data: { tileId: string; key: string; value: unknown }) => {
+    if (!workspaceId) return
+    const unsub = el.tileContext?.onChanged?.(tileId, (data: TileContextChangedPayload) => {
+      if (!isTileContextChangeForScope(data, workspaceId, tileId)) return
       if (data.key !== '_action') return
       const cmd = data.value as { action: string; params: Record<string, unknown>; ts: number } | null
       if (!cmd?.action) return
@@ -764,7 +772,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       })
     })
     return () => { if (typeof unsub === 'function') unsub() }
-  }, [tileId, postToIframe])
+  }, [tileId, postToIframe, workspaceId])
 
   useEffect(() => {
     return () => {

@@ -81,7 +81,7 @@ interface ElectronAPI {
     getAll(workspaceId: string, tileId: string, tagPrefix?: string): Promise<Array<{ key: string; value: unknown; updatedAt?: number; source?: string }>>
     set(workspaceId: string, tileId: string, key: string, value: unknown): Promise<boolean>
     delete(workspaceId: string, tileId: string, key: string): Promise<boolean>
-    onChanged?(tileId: string, cb: (data: { tileId: string; key: string; value: unknown }) => void): () => void
+    onChanged?(tileId: string, cb: (data: { workspaceId: string; tileId: string; key: string; value: unknown }) => void): () => void
   }
   image?: {
     edit(req: { workspaceId: string; tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>

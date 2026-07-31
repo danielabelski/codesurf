@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../shared/session-types'
 import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
 import type { ActivityQuery, ActivityUpsertInput } from '../shared/activity-types'
+import type { TileContextChangedPayload } from '../shared/tileContextScope'
 
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true
@@ -131,8 +132,8 @@ const electronApi = {
     getAll: (workspaceId: string, tileId: string, tagPrefix?: string) => ipcRenderer.invoke('tileContext:getAll', workspaceId, tileId, tagPrefix),
     set: (workspaceId: string, tileId: string, key: string, value: unknown) => ipcRenderer.invoke('tileContext:set', workspaceId, tileId, key, value),
     delete: (workspaceId: string, tileId: string, key: string) => ipcRenderer.invoke('tileContext:delete', workspaceId, tileId, key),
-    onChanged: (tileId: string, callback: (data: { tileId: string; key: string; value: unknown }) => void) => {
-      const handler = (_: unknown, data: { tileId: string; key: string; value: unknown }) => { if (data.tileId === tileId) callback(data) }
+    onChanged: (tileId: string, callback: (data: TileContextChangedPayload) => void) => {
+      const handler = (_: unknown, data: TileContextChangedPayload) => { if (data.tileId === tileId) callback(data) }
       ipcRenderer.on('tileContext:changed', handler)
       return () => ipcRenderer.removeListener('tileContext:changed', handler)
     },

@@ -79,4 +79,14 @@ describe('workspace save arbiter', () => {
     assert.equal(await recovered, 42)
     assert.deepEqual(events, ['failed', 'recovered'])
   })
+
+  test('drops a settled lane instead of retaining workspace keys', async () => {
+    const arbiter = new WorkspaceSaveArbiter()
+    const running = arbiter.run('workspace-a', async () => 'saved')
+
+    assert.equal(arbiter.activeLaneCount, 1)
+    assert.equal(await running, 'saved')
+    await settle()
+    assert.equal(arbiter.activeLaneCount, 0)
+  })
 })

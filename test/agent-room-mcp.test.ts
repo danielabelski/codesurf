@@ -1,6 +1,6 @@
 import { register } from 'node:module'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, beforeEach, describe, test } from 'node:test'
@@ -11,6 +11,14 @@ import type { McpToolContext } from '../src/main/mcp/types.ts'
 // modules under plain node:test.
 const loader = `
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === '../ipc/workspace.ts') {
+    return {
+      shortCircuit: true,
+      url: 'data:text/javascript,' + encodeURIComponent(
+        'export async function getWorkspaceStorageIds(workspaceId) { return [workspaceId] }'
+      ),
+    }
+  }
   if (specifier === 'electron') {
     return {
       shortCircuit: true,
@@ -45,6 +53,7 @@ const {
   MAX_TILE_CONTEXT_VALUE_BYTES,
   MAX_TILE_CONTEXT_TOTAL_BYTES,
 } = await import('../src/main/mcp/tools/context.ts')
+const { loadWorkspaceTileState, saveWorkspaceTileState } = await import('../src/main/storage/workspaceArtifacts.ts')
 
 function toolContext(workspaceId: string, tileId: string): McpToolContext {
   return {
@@ -57,6 +66,12 @@ function toolContext(workspaceId: string, tileId: string): McpToolContext {
 
 beforeEach(async () => {
   await room.resetAgentRoomsForTests()
+  await writeFile(join(testHome, 'config.json'), JSON.stringify({
+    workspaces: [
+      { id: 'workspace-a', path: testHome },
+      { id: 'workspace-b', path: testHome },
+    ],
+  }))
 })
 
 after(async () => {
@@ -65,6 +80,56 @@ after(async () => {
 })
 
 describe('workspace-scoped agent-room MCP tools', () => {
+  test('serializes concurrent context writes and isolates identical tile IDs by workspace', async () => {
+    const tileId = 'shared-context-tile'
+    await saveWorkspaceTileState('workspace-a', tileId, {
+      currentUrl: 'https://example.test/preserved',
+    })
+
+    const responses = await Promise.all([
+      handleContextTool('tile_context_set', {
+        tile_id: tileId,
+        key: 'ctx:first',
+        value: { order: 1 },
+      }, toolContext('workspace-a', tileId)),
+      handleContextTool('tile_context_set', {
+        tile_id: tileId,
+        key: 'ctx:second',
+        value: { order: 2 },
+      }, toolContext('workspace-a', tileId)),
+      handleContextTool('tile_context_set', {
+        tile_id: tileId,
+        key: 'ctx:other-workspace',
+        value: { workspace: 'b' },
+      }, toolContext('workspace-b', tileId)),
+    ])
+    for (const response of responses) {
+      assert.deepEqual(JSON.parse(response ?? 'null'), { ok: true })
+    }
+
+    const [workspaceAResponse, workspaceBResponse] = await Promise.all([
+      handleContextTool('tile_context_get', { tile_id: tileId }, toolContext('workspace-a', tileId)),
+      handleContextTool('tile_context_get', { tile_id: tileId }, toolContext('workspace-b', tileId)),
+    ])
+    const workspaceAEntries = JSON.parse(workspaceAResponse ?? '[]') as Array<{ key: string; value: unknown }>
+    const workspaceBEntries = JSON.parse(workspaceBResponse ?? '[]') as Array<{ key: string; value: unknown }>
+    assert.deepEqual(
+      workspaceAEntries.map(entry => entry.key).sort(),
+      ['ctx:first', 'ctx:second'],
+    )
+    assert.deepEqual(
+      workspaceBEntries.map(entry => entry.key),
+      ['ctx:other-workspace'],
+    )
+
+    const workspaceAState = await loadWorkspaceTileState<{
+      currentUrl?: string
+      _context?: Record<string, unknown>
+    }>('workspace-a', tileId, {})
+    assert.equal(workspaceAState.currentUrl, 'https://example.test/preserved')
+    assert.deepEqual(Object.keys(workspaceAState._context ?? {}).sort(), ['ctx:first', 'ctx:second'])
+  })
+
   test('tile context writes reject oversized and non-serializable values', () => {
     const source = 'tile-a'
     assert.equal(
