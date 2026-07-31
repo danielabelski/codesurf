@@ -16,6 +16,10 @@ import { activatePowerExtension, type ExtensionScope } from './loader'
 import { bus } from '../event-bus'
 import { adapters, assertValidAdaptedManifest, tryAdaptExtension } from './adapters'
 import type { ExtensionManifest, ExtensionTileContrib, ExtensionChatSurfaceContrib, ExtensionMCPToolContrib, ExtensionContextMenuContrib, ExtensionCommandContrib, ExtensionFooterContrib, ExtensionPanelContrib, ExtensionSettingsSectionContrib, ExtensionLayoutPresetContrib } from '../../shared/types'
+import {
+  isPluginCapabilityName,
+  isValidExtensionCapabilityRequests,
+} from '../../shared/extension-types.ts'
 import { resolveExtensionEnabled } from './activation-policy'
 import { assertValidExtensionId, isValidExtensionId } from './identity'
 import {
@@ -302,7 +306,16 @@ function normalizeTileTypes(manifest: ExtensionManifest): void {
   }
 }
 
+function assertValidManifestCapabilities(manifest: ExtensionManifest): void {
+  const raw = (manifest as { capabilities?: unknown }).capabilities
+  if (raw === undefined) return
+  if (!isValidExtensionCapabilityRequests(raw)) {
+    throw new Error(`Extension ${manifest.id} has an invalid capability request`)
+  }
+}
+
 function normalizeManifestUi(manifest: ExtensionManifest): void {
+  assertValidManifestCapabilities(manifest)
   manifest.ui = manifest.ui ?? {}
   if (!manifest.ui.mode) {
     manifest.ui.mode = manifest.tier === 'safe' ? 'native' : 'custom'
@@ -933,8 +946,9 @@ export class ExtensionRegistry {
    * P1 capability gate for the iframe bridge (least privilege). A plugin that
    * declares NO capabilities is ungated (full SDK surface — no regression). A
    * plugin that declares capabilities only receives the namespaces matching its
-   * GRANTED set (recorded at enable time); a plugin enabled before grants existed
-   * is grandfathered to its declared set so it keeps working.
+   * GRANTED set recorded at enable time. Missing entries retain the legacy
+   * declared-set fallback, while explicit empty, unknown, and no-longer-declared
+   * grants cannot provide authority.
    */
   getCapabilityGate(id: string): { enforced: boolean; granted: string[] } {
     const manifest = this.extensions.get(id)?.manifest
@@ -942,7 +956,17 @@ export class ExtensionRegistry {
     if (!Array.isArray(declared) || declared.length === 0) {
       return { enforced: false, granted: [] }
     }
-    const granted = this.grants[id] ?? declared.map(c => c.name)
+    const declaredAllowed = new Set(
+      declared
+        .map(capability => capability.name)
+        .filter(isPluginCapabilityName),
+    )
+    const storedGrants = Object.hasOwn(this.grants, id)
+      ? this.grants[id] ?? []
+      : [...declaredAllowed]
+    const granted = storedGrants.filter(capability => {
+      return isPluginCapabilityName(capability) && declaredAllowed.has(capability)
+    })
     return { enforced: true, granted }
   }
 

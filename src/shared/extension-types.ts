@@ -99,16 +99,68 @@ export type PluginExecutionMode = 'iframe' | 'node' | 'worker'
 export type PluginRenderMode = 'iframe' | 'component' | 'mcp-ui'
 
 /** Named host capabilities a plugin can request (consented at enable time). */
-export type PluginCapabilityName =
-  | 'fs' | 'network' | 'shell' | 'chat' | 'daemon' | 'chrome' | 'secrets' | 'relay' | 'canvas'
-  | 'microphone' | 'camera' | 'display-capture'
+export const PLUGIN_CAPABILITY_NAMES = [
+  'fs',
+  'network',
+  'shell',
+  'chat',
+  'daemon',
+  'chrome',
+  'secrets',
+  'relay',
+  'canvas',
+  'microphone',
+  'camera',
+  'display-capture',
+] as const
+
+export type PluginCapabilityName = typeof PLUGIN_CAPABILITY_NAMES[number]
+
+const PLUGIN_CAPABILITY_NAME_SET = new Set<string>(PLUGIN_CAPABILITY_NAMES)
+
+export function isPluginCapabilityName(value: unknown): value is PluginCapabilityName {
+  return typeof value === 'string' && PLUGIN_CAPABILITY_NAME_SET.has(value)
+}
 
 export interface ExtensionCapabilityRequest {
-  name: PluginCapabilityName | string
+  name: PluginCapabilityName
   /** Shown to the user at the consent step. */
   reason?: string
   /** Optional scoping hint (e.g. fs path globs). Interpretation is capability-specific. */
   scope?: string[]
+}
+
+export function isValidExtensionCapabilityRequests(
+  value: unknown,
+): value is ExtensionCapabilityRequest[] {
+  if (!Array.isArray(value) || value.length > PLUGIN_CAPABILITY_NAMES.length) {
+    return false
+  }
+  const seen = new Set<PluginCapabilityName>()
+  for (const request of value) {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) return false
+    const candidate = request as {
+      name?: unknown
+      reason?: unknown
+      scope?: unknown
+    }
+    if (
+      !isPluginCapabilityName(candidate.name)
+      || seen.has(candidate.name)
+      || (candidate.reason !== undefined
+        && (typeof candidate.reason !== 'string' || candidate.reason.length > 4096))
+      || (candidate.scope !== undefined
+        && (
+          !Array.isArray(candidate.scope)
+          || candidate.scope.length > 128
+          || candidate.scope.some(scope => {
+            return typeof scope !== 'string' || scope.length > 4096
+          })
+        ))
+    ) return false
+    seen.add(candidate.name)
+  }
+  return true
 }
 
 /** A named action: appears in the Command Palette and optionally as a /slash command. */
