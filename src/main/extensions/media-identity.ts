@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { createReadStream, promises as fs } from 'node:fs'
-import { join } from 'node:path'
+import { constants, promises as fs } from 'node:fs'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ExtensionManifest } from '../../shared/types.ts'
 
 export const MAX_EXTENSION_IDENTITY_DEPTH = 32
@@ -11,11 +11,40 @@ export const MAX_EXTENSION_IDENTITY_TOTAL_BYTES = 64 * 1024 * 1024
 export const MAX_EXTENSION_IDENTITY_MANIFEST_BYTES = 1024 * 1024
 export const MAX_EXTENSION_IDENTITY_SYMLINK_BYTES = 8 * 1024
 
+const READ_CHUNK_BYTES = 64 * 1024
 const MAX_MANIFEST_DEPTH = 32
 const MAX_MANIFEST_NODES = 8192
+// O_NOFOLLOW is POSIX-only. On platforms where Node exposes no numeric flag,
+// the retained-handle inode check plus post-open lstat/realpath containment
+// remains the equivalent fail-closed guard before any bytes are read.
+export function extensionIdentityOpenFlags(
+  noFollow: number | null | undefined = constants.O_NOFOLLOW,
+): number {
+  return constants.O_RDONLY | (typeof noFollow === 'number' ? noFollow : 0)
+}
+
+type FileInfo = Awaited<ReturnType<typeof fs.lstat>>
+
+interface IdentityBudget {
+  entries: number
+  files: number
+  totalBytes: number
+}
 
 interface ManifestBudget {
   nodes: number
+}
+
+export interface ExtensionMediaRootBinding {
+  readonly lexicalRoot: string
+  readonly canonicalRoot: string
+  readonly dev: number | bigint
+  readonly ino: number | bigint
+  readonly mode: number | bigint
+  readonly size: number | bigint
+  readonly mtimeMs: number | bigint
+  readonly ctimeMs: number | bigint
+  readonly birthtimeMs: number | bigint
 }
 
 export class ExtensionMediaIdentityError extends Error {
@@ -59,139 +88,346 @@ function stableManifestValue(
   )
 }
 
-async function hashDirectory(
-  hash: ReturnType<typeof createHash>,
-  directory: string,
-  relativeDirectory = '',
-  activeDirectories = new Set<string>(),
+function isContained(canonicalRoot: string, canonicalCandidate: string): boolean {
+  const rel = relative(canonicalRoot, canonicalCandidate)
+  return rel === '' || Boolean(
+    rel
+    && rel !== '..'
+    && !rel.startsWith(`..${sep}`)
+    && !isAbsolute(rel),
+  )
+}
+
+function sameObject(left: FileInfo, right: FileInfo): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+function rootBindingFromStat(
+  lexicalRoot: string,
+  canonicalRoot: string,
+  info: FileInfo,
+): ExtensionMediaRootBinding {
+  return Object.freeze({
+    lexicalRoot,
+    canonicalRoot,
+    dev: info.dev,
+    ino: info.ino,
+    mode: info.mode,
+    size: info.size,
+    mtimeMs: info.mtimeMs,
+    ctimeMs: info.ctimeMs,
+    birthtimeMs: info.birthtimeMs,
+  })
+}
+
+function statMatchesRootBinding(
+  info: FileInfo,
+  binding: ExtensionMediaRootBinding,
+): boolean {
+  return info.dev === binding.dev
+    && info.ino === binding.ino
+    && info.mode === binding.mode
+    && info.size === binding.size
+    && info.mtimeMs === binding.mtimeMs
+    && info.ctimeMs === binding.ctimeMs
+    && info.birthtimeMs === binding.birthtimeMs
+}
+
+function sameRootBinding(
+  left: ExtensionMediaRootBinding,
+  right: ExtensionMediaRootBinding,
+): boolean {
+  return left.lexicalRoot === right.lexicalRoot
+    && left.canonicalRoot === right.canonicalRoot
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+export async function captureExtensionMediaRoot(
+  extensionRoot: string,
+): Promise<ExtensionMediaRootBinding> {
+  const lexicalRoot = resolve(extensionRoot)
+  const lexicalStat = await fs.lstat(lexicalRoot)
+  if (!lexicalStat.isDirectory() || lexicalStat.isSymbolicLink()) {
+    fail(`Extension root must be a regular directory: ${lexicalRoot}`)
+  }
+  const canonicalRoot = await fs.realpath(lexicalRoot)
+  const canonicalStat = await fs.lstat(canonicalRoot)
+  if (
+    !canonicalStat.isDirectory()
+    || canonicalStat.isSymbolicLink()
+    || !sameObject(lexicalStat, canonicalStat)
+  ) {
+    fail(`Extension root changed while binding media identity: ${lexicalRoot}`)
+  }
+  return rootBindingFromStat(lexicalRoot, canonicalRoot, lexicalStat)
+}
+
+async function assertRootBindingCurrent(
+  binding: ExtensionMediaRootBinding,
 ): Promise<void> {
-  const canonicalDirectory = await fs.realpath(directory)
-  if (activeDirectories.has(canonicalDirectory)) {
-    updateRecord(hash, ['directory-cycle', relativeDirectory, canonicalDirectory])
-    return
+  const current = await captureExtensionMediaRoot(binding.lexicalRoot)
+  if (!sameRootBinding(current, binding)) {
+    fail(`Extension root changed while computing media identity: ${binding.lexicalRoot}`)
   }
-  const directoryBefore = await fs.stat(canonicalDirectory)
-  if (!directoryBefore.isDirectory()) {
-    throw new Error(`Extension directory changed while computing media identity: ${directory}`)
-  }
-  activeDirectories.add(canonicalDirectory)
-  const entries = await fs.readdir(directory, { withFileTypes: true })
-  entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+}
 
+function safeFileSize(info: FileInfo, relativePath: string): number {
+  const size = Number(info.size)
+  if (!Number.isSafeInteger(size) || size < 0) {
+    fail(`Extension file has invalid size for media identity: ${relativePath}`)
+  }
+  return size
+}
+
+async function assertContainedPath(
+  canonicalRoot: string,
+  absolutePath: string,
+): Promise<string> {
+  const canonicalPath = await fs.realpath(absolutePath).catch(() => {
+    fail(`Extension path changed while computing media identity: ${absolutePath}`)
+  })
+  if (!isContained(canonicalRoot, canonicalPath)) {
+    fail(`Extension path escapes media identity root: ${absolutePath}`)
+  }
+  return canonicalPath
+}
+
+async function assertStablePath(
+  canonicalRoot: string,
+  absolutePath: string,
+  expected: FileInfo,
+): Promise<void> {
+  await assertContainedPath(canonicalRoot, absolutePath)
+  const current = await fs.lstat(absolutePath).catch(() => {
+    fail(`Extension path changed while computing media identity: ${absolutePath}`)
+  })
+  if (!sameObject(expected, current)) {
+    fail(`Extension path changed while computing media identity: ${absolutePath}`)
+  }
+}
+
+async function readDirectoryNames(
+  canonicalRoot: string,
+  directory: string,
+  before: FileInfo,
+  budget: IdentityBudget,
+): Promise<string[]> {
+  await assertStablePath(canonicalRoot, directory, before)
+  const names: string[] = []
+  const handle = await fs.opendir(directory)
   try {
-    for (const entry of entries) {
-      const relativePath = relativeDirectory
-        ? `${relativeDirectory}/${entry.name}`
-        : entry.name
-      const absolutePath = join(directory, entry.name)
-      const before = await fs.lstat(absolutePath)
-
-      if (before.isSymbolicLink()) {
-        const linkTarget = await fs.readlink(absolutePath)
-        const canonicalTarget = await fs.realpath(absolutePath).catch(() => undefined)
-        updateRecord(hash, [
-          'symlink',
-          relativePath,
-          linkTarget,
-          canonicalTarget,
-          before.dev,
-          before.ino,
-          before.birthtimeMs,
-        ])
-        if (!canonicalTarget) continue
-        const targetStat = await fs.stat(canonicalTarget)
-        if (targetStat.isDirectory()) {
-          await hashDirectory(hash, canonicalTarget, relativePath, activeDirectories)
-        } else if (targetStat.isFile()) {
-          await hashFile(hash, canonicalTarget, relativePath, targetStat)
-        }
-        continue
+    for await (const entry of handle) {
+      budget.entries += 1
+      if (budget.entries > MAX_EXTENSION_IDENTITY_ENTRIES) {
+        fail(`Extension exceeds media identity entry budget (${MAX_EXTENSION_IDENTITY_ENTRIES})`)
       }
-      if (before.isDirectory()) {
-        updateRecord(hash, [
-          'directory',
-          relativePath,
-          before.dev,
-          before.ino,
-          before.birthtimeMs,
-        ])
-        await hashDirectory(hash, absolutePath, relativePath, activeDirectories)
-        continue
-      }
-      if (!before.isFile()) {
-        updateRecord(hash, [
-          'other',
-          relativePath,
-          before.mode,
-          before.size,
-          before.dev,
-          before.ino,
-          before.birthtimeMs,
-        ])
-        continue
-      }
-
-      await hashFile(hash, absolutePath, relativePath, before)
-    }
-    const directoryAfter = await fs.stat(canonicalDirectory)
-    if (
-      !directoryAfter.isDirectory()
-      || directoryAfter.dev !== directoryBefore.dev
-      || directoryAfter.ino !== directoryBefore.ino
-      || directoryAfter.mtimeMs !== directoryBefore.mtimeMs
-    ) {
-      throw new Error(`Extension directory changed while computing media identity: ${directory}`)
+      names.push(entry.name)
     }
   } finally {
-    activeDirectories.delete(canonicalDirectory)
+    await handle.close().catch(() => undefined)
   }
+  await assertStablePath(canonicalRoot, directory, before)
+  names.sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+  return names
+}
+
+async function hashDirectory(
+  hash: ReturnType<typeof createHash>,
+  canonicalRoot: string,
+  directory: string,
+  relativeDirectory: string,
+  depth: number,
+  budget: IdentityBudget,
+): Promise<void> {
+  if (depth > MAX_EXTENSION_IDENTITY_DEPTH) {
+    fail(`Extension exceeds media identity depth budget (${MAX_EXTENSION_IDENTITY_DEPTH})`)
+  }
+  const before = await fs.lstat(directory)
+  if (!before.isDirectory() || before.isSymbolicLink()) {
+    fail(`Extension directory changed while computing media identity: ${directory}`)
+  }
+  await assertContainedPath(canonicalRoot, directory)
+  const names = await readDirectoryNames(canonicalRoot, directory, before, budget)
+
+  for (const name of names) {
+    const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name
+    const absolutePath = join(directory, name)
+    const entryBefore = await fs.lstat(absolutePath)
+
+    if (entryBefore.isSymbolicLink()) {
+      const linkTarget = await fs.readlink(absolutePath)
+      if (Buffer.byteLength(linkTarget, 'utf8') > MAX_EXTENSION_IDENTITY_SYMLINK_BYTES) {
+        fail(`Extension symlink exceeds media identity budget: ${relativePath}`)
+      }
+      const linkAfter = await fs.lstat(absolutePath)
+      if (!linkAfter.isSymbolicLink() || !sameObject(entryBefore, linkAfter)) {
+        fail(`Extension symlink changed while computing media identity: ${absolutePath}`)
+      }
+      // Never realpath, stat, traverse, or read the target. Internal target
+      // content is independently hashed at its actual path inside the root.
+      updateRecord(hash, [
+        'symlink',
+        relativePath,
+        linkTarget,
+        entryBefore.mode,
+        entryBefore.dev,
+        entryBefore.ino,
+        entryBefore.birthtimeMs,
+      ])
+      continue
+    }
+
+    await assertContainedPath(canonicalRoot, absolutePath)
+    if (entryBefore.isDirectory()) {
+      updateRecord(hash, [
+        'directory',
+        relativePath,
+        entryBefore.mode,
+        entryBefore.dev,
+        entryBefore.ino,
+        entryBefore.birthtimeMs,
+      ])
+      await hashDirectory(
+        hash,
+        canonicalRoot,
+        absolutePath,
+        relativePath,
+        depth + 1,
+        budget,
+      )
+      continue
+    }
+    if (entryBefore.isFile()) {
+      await hashFile(
+        hash,
+        canonicalRoot,
+        absolutePath,
+        relativePath,
+        entryBefore,
+        budget,
+      )
+      continue
+    }
+
+    updateRecord(hash, [
+      'other',
+      relativePath,
+      entryBefore.mode,
+      entryBefore.size,
+      entryBefore.dev,
+      entryBefore.ino,
+      entryBefore.birthtimeMs,
+    ])
+  }
+  await assertStablePath(canonicalRoot, directory, before)
 }
 
 async function hashFile(
   hash: ReturnType<typeof createHash>,
+  canonicalRoot: string,
   absolutePath: string,
   relativePath: string,
-  before: Awaited<ReturnType<typeof fs.stat>>,
+  before: FileInfo,
+  budget: IdentityBudget,
 ): Promise<void> {
-  updateRecord(hash, [
-    'file',
-    relativePath,
-    before.mode,
-    before.size,
-    before.dev,
-    before.ino,
-    before.birthtimeMs,
-  ])
-  const stream = createReadStream(absolutePath)
-  for await (const chunk of stream) hash.update(chunk)
-  const after = await fs.stat(absolutePath)
-  if (
-    !after.isFile()
-    || after.dev !== before.dev
-    || after.ino !== before.ino
-    || after.mode !== before.mode
-    || after.size !== before.size
-    || after.mtimeMs !== before.mtimeMs
-  ) {
-    throw new Error(`Extension changed while computing media identity: ${absolutePath}`)
+  const fileSize = safeFileSize(before, relativePath)
+  budget.files += 1
+  if (budget.files > MAX_EXTENSION_IDENTITY_FILES) {
+    fail(`Extension exceeds media identity file budget (${MAX_EXTENSION_IDENTITY_FILES})`)
+  }
+  if (fileSize > MAX_EXTENSION_IDENTITY_FILE_BYTES) {
+    fail(`Extension file exceeds media identity byte budget: ${relativePath}`)
+  }
+  if (budget.totalBytes + fileSize > MAX_EXTENSION_IDENTITY_TOTAL_BYTES) {
+    fail(`Extension exceeds aggregate media identity byte budget (${MAX_EXTENSION_IDENTITY_TOTAL_BYTES})`)
+  }
+  budget.totalBytes += fileSize
+
+  await assertStablePath(canonicalRoot, absolutePath, before)
+  const handle = await fs.open(
+    absolutePath,
+    extensionIdentityOpenFlags(),
+  ).catch(() => {
+    fail(`Unable to safely open extension file for media identity: ${absolutePath}`)
+  })
+
+  try {
+    const opened = await handle.stat()
+    const openedSize = safeFileSize(opened, relativePath)
+    if (!opened.isFile() || openedSize !== fileSize || !sameObject(before, opened)) {
+      fail(`Extension file changed before media identity read: ${absolutePath}`)
+    }
+    // Bind containment to the exact inode opened before reading any bytes.
+    await assertStablePath(canonicalRoot, absolutePath, opened)
+    updateRecord(hash, [
+      'file',
+      relativePath,
+      opened.mode,
+      openedSize,
+      opened.dev,
+      opened.ino,
+      opened.birthtimeMs,
+    ])
+
+    const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES)
+    let offset = 0
+    while (offset < openedSize) {
+      const length = Math.min(buffer.byteLength, openedSize - offset)
+      const { bytesRead } = await handle.read(buffer, 0, length, offset)
+      if (bytesRead <= 0) {
+        fail(`Extension file changed during media identity read: ${absolutePath}`)
+      }
+      hash.update(buffer.subarray(0, bytesRead))
+      offset += bytesRead
+    }
+
+    const after = await handle.stat()
+    if (!sameObject(opened, after)) {
+      fail(`Extension file changed during media identity read: ${absolutePath}`)
+    }
+    await assertStablePath(canonicalRoot, absolutePath, opened)
+  } finally {
+    await handle.close().catch(() => undefined)
   }
 }
 
 /**
  * Binds sensitive-media consent to the effective extension installation.
  *
- * The canonical root prevents same-id workspace/global substitutions, the
- * filesystem installation tuple detects a same-path reinstall, and the
- * manifest plus recursive content digest detects updates between rescans.
+ * The canonical root and filesystem installation tuple detect replacement.
+ * Recursive content is bounded and regular files are read only through stable,
+ * no-follow handles. Symlinks contribute their link text and metadata but their
+ * targets are never traversed or read.
  */
 export async function computeExtensionMediaIdentity(
   extensionRoot: string,
   manifest: ExtensionManifest,
+  expectedRoot?: ExtensionMediaRootBinding,
 ): Promise<string> {
-  const canonicalRoot = await fs.realpath(extensionRoot)
+  const rootBinding = await captureExtensionMediaRoot(extensionRoot)
+  if (expectedRoot && !sameRootBinding(rootBinding, expectedRoot)) {
+    fail(`Extension root changed before computing media identity: ${rootBinding.lexicalRoot}`)
+  }
+  const { canonicalRoot } = rootBinding
   const rootStat = await fs.lstat(canonicalRoot)
-  if (!rootStat.isDirectory()) {
-    throw new Error(`Extension root is not a directory: ${canonicalRoot}`)
+  if (
+    !rootStat.isDirectory()
+    || rootStat.isSymbolicLink()
+    || !statMatchesRootBinding(rootStat, rootBinding)
+  ) {
+    fail(`Extension root changed before computing media identity: ${rootBinding.lexicalRoot}`)
   }
 
   const stableManifest = stableManifestValue(manifest)
@@ -205,13 +441,22 @@ export async function computeExtensionMediaIdentity(
 
   const hash = createHash('sha256')
   updateRecord(hash, [
-    'codesurf-extension-media-identity-v1',
+    'codesurf-extension-media-identity-v2',
     canonicalRoot,
     rootStat.dev,
     rootStat.ino,
     rootStat.birthtimeMs,
   ])
   updateRecord(hash, ['manifest', stableManifest])
-  await hashDirectory(hash, canonicalRoot)
+  await hashDirectory(
+    hash,
+    canonicalRoot,
+    canonicalRoot,
+    '',
+    0,
+    { entries: 0, files: 0, totalBytes: 0 },
+  )
+  await assertStablePath(canonicalRoot, canonicalRoot, rootStat)
+  await assertRootBindingCurrent(rootBinding)
   return `sha256:${hash.digest('hex')}`
 }
