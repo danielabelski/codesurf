@@ -18,6 +18,7 @@ import { assertValidExtensionId, resolveExtensionSettingsPath } from '../extensi
 import { inspectAdaptedExtension } from '../extensions/adapters'
 import { assertSafePathSegment, resolveInside } from '../security/pathSegments'
 import { log } from '../utils/logger.ts'
+import { getDeclaredSensitiveMediaCapabilities } from '../../shared/extension-sensitive-media.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -442,6 +443,8 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
           defaultSize: tile.defaultSize ?? { w: 400, h: 300 },
           minSize: tile.minSize ?? { w: 200, h: 150 },
           uiMode: m.ui?.mode,
+          render: m.render,
+          sensitiveMedia: getDeclaredSensitiveMediaCapabilities(m.capabilities),
           actions: getManifestActions(m),
         }))),
     }
@@ -461,6 +464,8 @@ export function registerExtensionIPC(registry: ExtensionRegistry): void {
         defaultSize: t.defaultSize ?? { w: 400, h: 300 },
         minSize: t.minSize ?? { w: 200, h: 150 },
         uiMode: t.uiMode,
+        render: t.render,
+        sensitiveMedia: t.sensitiveMedia ?? [],
         actions,
       }
     })

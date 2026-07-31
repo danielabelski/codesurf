@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -401,4 +401,72 @@ test('registry transition queue preserves request order and recovers after rejec
   registry.scan = async () => {}
   await registry.rescan(workspaceB)
   assert.equal(registry.getActiveWorkspacePath(), resolve(workspaceB))
+})
+
+test('registry exposes declared media and revokes sensitive consent on disable or removal', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-sensitive-registry-'))
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'media-extension')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'media-extension',
+    name: 'Media Extension',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [
+      { name: 'network' },
+      { name: 'microphone' },
+      { name: 'display-capture' },
+    ],
+    contributes: {
+      tiles: [{ type: 'media', label: 'Media', entry: 'index.html' }],
+    },
+  }))
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const revoked: string[] = []
+  const registry = new ExtensionRegistry({
+    bundledDirs: [bundledDir],
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+  await registry.rescan()
+  assert.deepEqual(registry.getExtensionMediaPermission('media-extension'), {
+    id: 'media-extension',
+    name: 'Media Extension',
+    enabled: true,
+    declaredMedia: ['microphone', 'display-capture'],
+  })
+  assert.deepEqual(
+    registry.getTileTypes()[0]?.sensitiveMedia,
+    ['microphone', 'display-capture'],
+  )
+
+  assert.equal(await registry.disable('media-extension'), true)
+  assert.deepEqual(revoked, ['media-extension'])
+  assert.equal(await registry.enable('media-extension'), true)
+  assert.deepEqual(
+    revoked,
+    ['media-extension', 'media-extension'],
+    're-enable retries revocation before the extension becomes active',
+  )
+
+  const { ExtensionRegistry: RemovalRegistry } = await loadRegistryModule(
+    join(temp, 'removal-home'),
+  )
+  const removalRegistry = new RemovalRegistry({
+    bundledDirs: [bundledDir],
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(`removed:${extensionId}`)
+    },
+  })
+  await removalRegistry.rescan()
+  await rm(extensionDir, { recursive: true })
+  await removalRegistry.rescan()
+  assert.equal(
+    revoked.includes('removed:media-extension'),
+    true,
+    'a disappeared extension must revoke persisted sensitive consent',
+  )
 })

@@ -20,6 +20,9 @@ import { resolveExtensionEnabled } from './activation-policy'
 import { assertValidExtensionId, isValidExtensionId } from './identity'
 import { openCanonicalResource, readOpenedCanonicalResourceText } from './resource-path'
 import { log } from '../utils/logger.ts'
+import {
+  getDeclaredSensitiveMediaCapabilities,
+} from '../../shared/extension-sensitive-media.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -106,6 +109,13 @@ export interface LoadedExtension {
   deactivate?: () => void
 }
 
+export interface ExtensionMediaPermission {
+  readonly id: string
+  readonly name: string
+  readonly enabled: boolean
+  readonly declaredMedia: ReturnType<typeof getDeclaredSensitiveMediaCapabilities>
+}
+
 const EXTENSIONS_DIRNAME = 'extensions'
 
 function normalizeTileTypes(manifest: ExtensionManifest): void {
@@ -154,10 +164,16 @@ export class ExtensionRegistry {
    *  gallery as available-to-install entries. */
   private catalogDirs: string[]
   private rescanQueue: Promise<void> = Promise.resolve()
+  private readonly onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
 
-  constructor(opts?: { bundledDirs?: string[]; catalogDirs?: string[] }) {
+  constructor(opts?: {
+    bundledDirs?: string[]
+    catalogDirs?: string[]
+    onSensitiveMediaRevoked?: (extensionId: string) => Promise<void>
+  }) {
     this.bundledDirs = (opts?.bundledDirs ?? []).filter(Boolean)
     this.catalogDirs = (opts?.catalogDirs ?? []).filter(Boolean)
+    this.onSensitiveMediaRevoked = opts?.onSensitiveMediaRevoked
   }
 
   async scan(): Promise<void> {
@@ -187,6 +203,7 @@ export class ExtensionRegistry {
   async rescan(workspacePath?: string | null): Promise<void> {
     const normalizedWorkspacePath = workspacePath == null ? null : resolve(workspacePath)
     const run = async (): Promise<void> => {
+      const previousIds = new Set(this.extensions.keys())
       this.deactivateAll()
       this.extensions.clear()
       this.extraMCPTools = []
@@ -195,6 +212,15 @@ export class ExtensionRegistry {
       if (normalizedWorkspacePath) {
         await this.scanWorkspace(normalizedWorkspacePath)
       }
+      const revokedIds = [
+        ...[...previousIds].filter(id => !this.extensions.has(id)),
+        ...[...this.extensions.values()]
+          .filter(extension => !extension.manifest._enabled)
+          .map(extension => extension.manifest.id),
+      ]
+      await Promise.allSettled(
+        [...new Set(revokedIds)].map(id => this.revokeSensitiveMedia(id)),
+      )
     }
 
     return this.enqueueTransition(run)
@@ -519,6 +545,17 @@ export class ExtensionRegistry {
     return this.extensions.get(id)
   }
 
+  getExtensionMediaPermission(id: string): ExtensionMediaPermission | undefined {
+    const manifest = this.get(id)?.manifest
+    if (!manifest) return undefined
+    return {
+      id: manifest.id,
+      name: manifest.name,
+      enabled: manifest._enabled === true,
+      declaredMedia: getDeclaredSensitiveMediaCapabilities(manifest.capabilities),
+    }
+  }
+
   /**
    * P1 capability gate for the iframe bridge (least privilege). A plugin that
    * declares NO capabilities is ungated (full SDK surface — no regression). A
@@ -542,7 +579,13 @@ export class ExtensionRegistry {
       if (!ext.manifest._enabled) continue
       if (ext.manifest.contributes?.tiles) {
         for (const tile of ext.manifest.contributes.tiles) {
-          tiles.push({ ...tile, extId: ext.manifest.id, uiMode: ext.manifest.ui?.mode, render: ext.manifest.render })
+          tiles.push({
+            ...tile,
+            extId: ext.manifest.id,
+            uiMode: ext.manifest.ui?.mode,
+            render: ext.manifest.render,
+            sensitiveMedia: getDeclaredSensitiveMediaCapabilities(ext.manifest.capabilities),
+          })
         }
       }
     }
@@ -733,6 +776,11 @@ export class ExtensionRegistry {
   async enable(id: string): Promise<boolean> {
     const ext = this.extensions.get(id)
     if (!ext) return false
+    if (ext.manifest._enabled !== true) {
+      // A disabled extension must always start from a fresh sensitive-media
+      // consent state, even if an earlier disk revoke was interrupted.
+      await this.revokeSensitiveMedia(id)
+    }
     ext.manifest._enabled = true
     this.disabledIds.delete(id)
     // If this was installed from a catalog dir, persist that the user has
@@ -805,6 +853,7 @@ export class ExtensionRegistry {
     await Promise.allSettled([
       saveDisabledSet(this.disabledIds),
       persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
+      this.revokeSensitiveMedia(id),
     ])
     if (ext.deactivate) {
       ext.deactivate()
@@ -813,6 +862,10 @@ export class ExtensionRegistry {
     // Drop any MCP tools the extension programmatically registered.
     this.extraMCPTools = this.extraMCPTools.filter(t => t.extId !== id)
     return true
+  }
+
+  private async revokeSensitiveMedia(id: string): Promise<void> {
+    await this.onSensitiveMediaRevoked?.(id)
   }
 
   deactivateAll(): void {

@@ -708,6 +708,14 @@ app.whenReady().then(async () => {
   extensionRegistry = new ExtensionRegistry({
     bundledDirs: resolveBundledExtensionDirs(),
     catalogDirs: resolveCatalogExtensionDirs(),
+    onSensitiveMediaRevoked: extensionId => {
+      return permissionBoundary.revokeExtensionMedia(extensionId)
+    },
+  })
+  permissionBoundary.setExtensionAuthorizer({
+    getExtensionMediaPermission: extensionId => {
+      return extensionRegistry?.getExtensionMediaPermission(extensionId)
+    },
   })
   registerExtensionProtocol(extensionRegistry)
   registerExtensionIPC(extensionRegistry)
