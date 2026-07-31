@@ -75,6 +75,10 @@ describe('activity input validation', () => {
     ]) {
       assert.throws(() => validateActivityWorkspaceId(workspaceId))
     }
+    assert.equal(validateActivityWorkspaceId('release.2026'), 'release.2026')
+    assert.equal(validateActivityWorkspaceId('release.candidate'), 'release.candidate')
+    assert.throws(() => validateActivityWorkspaceId('release..candidate'))
+    assert.throws(() => validateActivityWorkspaceId('a/../b'))
   })
 
   test('rejects unknown fields, invalid enums, and oversized strings', () => {

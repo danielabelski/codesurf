@@ -5,6 +5,8 @@ import type {
   ActivityType,
   ActivityUpsertInput,
 } from '../shared/activity-types.ts'
+import { MAX_ACTIVITY_RECORDS } from './activity-cap.ts'
+import { assertSafeWorkspaceArtifactId } from './storage/workspaceArtifacts.ts'
 
 export const ACTIVITY_DOCUMENT_VERSION = 1
 export const MAX_ACTIVITY_FILE_BYTES = 32 * 1024 * 1024
@@ -16,10 +18,10 @@ export const MAX_ACTIVITY_DETAIL_LENGTH = 4096
 export const MAX_ACTIVITY_AGENT_LENGTH = 256
 export const MAX_ACTIVITY_METADATA_BYTES = 4096
 export const MAX_ACTIVITY_QUERY_LIMIT = 500
+export const MAX_ACTIVITY_QUERY_RESPONSE_BYTES = 1024 * 1024
 
 const ACTIVITY_TYPES = new Set<ActivityType>(['task', 'tool', 'skill', 'context'])
 const ACTIVITY_STATUSES = new Set<ActivityStatus>(['pending', 'running', 'done', 'error', 'paused'])
-const SAFE_WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const MAX_METADATA_DEPTH = 8
 const MAX_METADATA_NODES = 1024
@@ -96,8 +98,10 @@ export function validateActivityWorkspaceId(value: unknown): string {
     MAX_ACTIVITY_WORKSPACE_ID_LENGTH,
     { identifier: true },
   )
-  if (!SAFE_WORKSPACE_ID.test(workspaceId)) {
-    fail('invalid_workspace_id', 'workspaceId must use only letters, numbers, dots, underscores, or hyphens')
+  try {
+    assertSafeWorkspaceArtifactId(workspaceId)
+  } catch {
+    fail('invalid_workspace_id', 'workspaceId is not a canonical workspace artifact identifier')
   }
   return workspaceId
 }
@@ -315,6 +319,9 @@ export function parseActivityDocument(value: unknown, workspaceIdValue: unknown)
     rawRecords = document.records
   }
 
+  if (rawRecords.length > MAX_ACTIVITY_RECORDS) {
+    fail('too_many_records', `activity document exceeds ${MAX_ACTIVITY_RECORDS} records`)
+  }
   const records = rawRecords.map(record => validateActivityRecord(record, workspaceId))
   const identities = new Set<string>()
   for (const record of records) {
