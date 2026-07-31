@@ -12,6 +12,7 @@ import {
   RelayRuntime,
   RelayRuntimeDisposedError,
   RelayTimeoutError,
+  RelayTurnCancelledError,
 } from './runtime'
 
 // Mock relay that properly handles events
@@ -291,6 +292,312 @@ describe('runtime', () => {
       expect(receivedSignal?.reason).toBeInstanceOf(
         RelayRuntimeDisposedError,
       )
+    })
+
+    it('stop aborts and awaits provider teardown without emitting a generic error', async () => {
+      let markTurnEntered!: () => void
+      const turnEntered = new Promise<void>(resolve => {
+        markTurnEntered = resolve
+      })
+      let releaseProvider!: () => void
+      const providerReleased = new Promise<void>(resolve => {
+        releaseProvider = resolve
+      })
+      let observedSignal: AbortSignal | undefined
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async (
+          _input: RelayTurnInput,
+          signal?: AbortSignal,
+        ) => {
+          observedSignal = signal
+          markTurnEntered()
+          await providerReleased
+          return JSON.stringify({
+            ready: true,
+            status: 'ready',
+            work: { summary: 'stale work' },
+            memory: [{ subject: 'stale', body: 'must not persist' }],
+          })
+        }),
+      }
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+      })
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-stop',
+        name: 'Stopped Agent',
+        kind: 'agent',
+        status: 'spawning',
+        channels: [],
+      })
+
+      const spawning = runtime.spawn({
+        id: 'agent-stop',
+        name: 'Stopped Agent',
+        task: 'Stop this turn',
+      })
+      await turnEntered
+
+      let stopSettled = false
+      const stopping = runtime.stop('agent-stop').then(() => {
+        stopSettled = true
+      })
+      await Promise.resolve()
+      expect(observedSignal?.aborted).toBe(true)
+      expect(stopSettled).toBe(false)
+
+      releaseProvider()
+      await stopping
+      await expect(spawning).rejects.toBeInstanceOf(
+        RelayTurnCancelledError,
+      )
+
+      expect(mockRelay.updateWorkContext).not.toHaveBeenCalled()
+      expect(mockRelay.storeMemory).not.toHaveBeenCalled()
+      expect(mockRelay.events.emit).not.toHaveBeenCalledWith(
+        'event',
+        expect.objectContaining({ type: 'error' }),
+      )
+      expect(vi.mocked(mockRelay.setParticipantStatus).mock.calls
+        .map(call => call[1])).not.toContain('error')
+      expect(vi.mocked(mockRelay.setParticipantStatus).mock.calls
+        .map(call => call[1])).toContain('stopped')
+      await runtime.destroy()
+    })
+
+    it('revalidates the participant epoch at every post-turn mutation boundary', async () => {
+      const boundaries = [
+        'work',
+        'status',
+        'direct',
+        'channel',
+        'memory',
+        'direct-read',
+        'cursor',
+      ] as const
+      const directMessage: RelayMessage = {
+        mailbox: 'inbox',
+        filename: 'direct.md',
+        meta: {
+          protocol: 'codesurf-relay/v1',
+          id: 'direct',
+          threadId: 'direct',
+          scope: 'direct',
+          kind: 'request',
+          priority: 'normal',
+          from: 'agent-peer',
+          to: 'agent-fenced',
+          subject: 'Direct',
+          status: 'unread',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          createdTs: 1,
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          updatedTs: 1,
+          bcc: 'central',
+        },
+        body: 'Direct body',
+      }
+      const channelMessage: RelayMessage = {
+        ...directMessage,
+        mailbox: 'channel',
+        filename: 'channel.md',
+        meta: {
+          ...directMessage.meta,
+          id: 'channel',
+          threadId: 'channel',
+          scope: 'channel',
+          from: 'agent-peer',
+          to: undefined,
+          channel: 'review',
+          subject: 'Channel',
+          createdTs: 2,
+          updatedTs: 2,
+        },
+      }
+
+      for (const boundary of boundaries) {
+        const relay = createMockRelay()
+        const invoked: string[] = []
+        const committed: string[] = []
+        let markEntered!: () => void
+        const entered = new Promise<void>(resolve => {
+          markEntered = resolve
+        })
+        let release!: () => void
+        const released = new Promise<void>(resolve => {
+          release = resolve
+        })
+        const mutate = async (
+          name: typeof boundaries[number],
+          context?: RelayOperationContext,
+        ): Promise<void> => {
+          invoked.push(name)
+          if (name === boundary) {
+            markEntered()
+            await released
+          }
+          context?.assertActive()
+          committed.push(name)
+        }
+
+        vi.mocked(relay.getParticipant).mockResolvedValue({
+          id: 'agent-fenced',
+          name: 'Fenced Agent',
+          kind: 'agent',
+          status: 'spawning',
+          channels: ['review'],
+        })
+        vi.mocked(relay.listUnreadDirectMessages)
+          .mockResolvedValue([directMessage])
+        vi.mocked(relay.listUnreadChannelMessages)
+          .mockResolvedValue([channelMessage])
+        vi.mocked(relay.updateWorkContext).mockImplementation(
+          async (_id, _work, context) => {
+            await mutate('work', context)
+            return {} as RelayParticipant
+          },
+        )
+        vi.mocked(relay.setParticipantStatus).mockImplementation(
+          async (id, status, context) => {
+            if (status === 'ready') await mutate('status', context)
+            return { id, status } as RelayParticipant
+          },
+        )
+        vi.mocked(relay.sendDirectMessage).mockImplementation(
+          async (from, _draft, context) => {
+            if (from !== 'system') await mutate('direct', context)
+            return {} as RelayMessage
+          },
+        )
+        vi.mocked(relay.sendChannelMessage).mockImplementation(
+          async (_from, _draft, context) => {
+            await mutate('channel', context)
+            return {} as RelayMessage
+          },
+        )
+        vi.mocked(relay.storeMemory).mockImplementation(
+          async (_id, _subject, _body, _data, context) => {
+            await mutate('memory', context)
+            return {} as RelayMessage
+          },
+        )
+        vi.mocked(relay.markDirectMessagesRead).mockImplementation(
+          async (_id, _messages, context) => {
+            await mutate('direct-read', context)
+          },
+        )
+        vi.mocked(relay.advanceChannelCursor).mockImplementation(
+          async (_id, _channel, _timestamp, context) => {
+            await mutate('cursor', context)
+          },
+        )
+        const runtime = new RelayRuntime(relay, {
+          executorFactory: () => ({
+            runTurn: vi.fn().mockResolvedValue(JSON.stringify({
+              ready: true,
+              status: 'ready',
+              work: { summary: 'Post-turn work' },
+              messages: [{
+                mode: 'direct',
+                to: 'agent-peer',
+                subject: 'Direct output',
+                body: 'Direct output body',
+              }, {
+                mode: 'channel',
+                channel: 'review',
+                subject: 'Channel output',
+                body: 'Channel output body',
+              }],
+              memory: [{
+                subject: 'Memory output',
+                body: 'Memory output body',
+              }],
+            })),
+          }),
+        })
+
+        const spawning = runtime.spawn({
+          id: 'agent-fenced',
+          name: 'Fenced Agent',
+          task: 'Fence every mutation',
+        })
+        await entered
+        await runtime.stop('agent-fenced')
+        release()
+        await expect(spawning).rejects.toBeInstanceOf(
+          RelayTurnCancelledError,
+        )
+        await Promise.resolve()
+
+        expect(invoked).toContain(boundary)
+        expect(committed).not.toContain(boundary)
+        expect(invoked.slice(invoked.indexOf(boundary) + 1)).toEqual([])
+        expect(relay.events.emit).not.toHaveBeenCalledWith(
+          'event',
+          expect.objectContaining({ type: 'error' }),
+        )
+        await runtime.destroy()
+      }
+    })
+
+    it('restart allocates a fresh participant epoch and executor turn', async () => {
+      let firstSignal: AbortSignal | undefined
+      let secondSignal: AbortSignal | undefined
+      let releaseFirst!: () => void
+      const firstReleased = new Promise<void>(resolve => {
+        releaseFirst = resolve
+      })
+      let markFirstEntered!: () => void
+      const firstEntered = new Promise<void>(resolve => {
+        markFirstEntered = resolve
+      })
+      let turnCount = 0
+      const executor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation(async (
+          _input: RelayTurnInput,
+          signal?: AbortSignal,
+        ) => {
+          turnCount += 1
+          if (turnCount === 1) {
+            firstSignal = signal
+            markFirstEntered()
+            await firstReleased
+            return '{"ready":true,"status":"ready"}'
+          }
+          secondSignal = signal
+          return '{"ready":true,"status":"ready"}'
+        }),
+      }
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-restart',
+        name: 'Restarted Agent',
+        kind: 'agent',
+        status: 'spawning',
+        channels: [],
+      })
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => executor,
+      })
+      const spawning = runtime.spawn({
+        id: 'agent-restart',
+        name: 'Restarted Agent',
+        task: 'Restart cleanly',
+      })
+      await firstEntered
+      const stopping = runtime.stop('agent-restart')
+      releaseFirst()
+      await stopping
+      await expect(spawning).rejects.toBeInstanceOf(
+        RelayTurnCancelledError,
+      )
+
+      await runtime.start('agent-restart')
+
+      expect(turnCount).toBe(2)
+      expect(firstSignal?.aborted).toBe(true)
+      expect(secondSignal).not.toBe(firstSignal)
+      expect(secondSignal?.aborted).toBe(false)
+      await runtime.destroy()
     })
 
     it('should timeout long-running agent turns', async () => {

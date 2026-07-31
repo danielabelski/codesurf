@@ -32,12 +32,37 @@ export class RelayRuntimeDisposedError extends Error {
   }
 }
 
+export class RelayTurnCancelledError extends Error {
+  readonly participantId: string
+  readonly epoch: number
+
+  constructor(participantId: string, epoch: number, reason: string) {
+    super(`Agent ${participantId} turn ${epoch} was cancelled: ${reason}`)
+    this.name = 'RelayTurnCancelledError'
+    this.participantId = participantId
+    this.epoch = epoch
+  }
+}
+
+interface ActiveRuntimeTurn {
+  epoch: number
+  controller: AbortController
+  providerTeardown: Promise<void>
+}
+
+interface ActiveRuntimeTick {
+  epoch: number
+  promise: Promise<void>
+}
+
 interface RuntimeAgentState {
   spawn: RelaySpawnRequest
   running: boolean
-  busy: boolean
   ready: boolean
   executor: RelayAgentExecutor
+  epoch: number
+  activeTurn: ActiveRuntimeTurn | null
+  activeTick: ActiveRuntimeTick | null
 }
 
 function extractJsonBlock(raw: string): string {
@@ -137,11 +162,11 @@ export class RelayRuntime {
   private readonly options: RelayRuntimeOptions
   private readonly operationContext: RelayOperationContext
   private readonly agents = new Map<string, RuntimeAgentState>()
-  private readonly activeTurnControllers = new Set<AbortController>()
   private readonly unsubscribe: () => void
   private readonly cancelled: Promise<never>
   private cancel!: (error: Error) => void
   private destroyed = false
+  private destroyPromise: Promise<void> | null = null
 
   constructor(relay: CodesurfRelay, options: RelayRuntimeOptions) {
     this.relay = relay
@@ -167,22 +192,47 @@ export class RelayRuntime {
     })
   }
 
-  destroy(): void {
-    if (this.destroyed) return
+  destroy(): Promise<void> {
+    if (this.destroyPromise) return this.destroyPromise
     const error = new RelayRuntimeDisposedError()
     this.destroyed = true
-    for (const controller of this.activeTurnControllers) {
-      controller.abort(error)
+    const pending = new Set<Promise<void>>()
+    for (const state of this.agents.values()) {
+      state.running = false
+      state.epoch += 1
+      if (state.activeTurn) {
+        state.activeTurn.controller.abort(error)
+        pending.add(state.activeTurn.providerTeardown)
+      }
+      if (state.activeTick) {
+        pending.add(state.activeTick.promise)
+      }
     }
-    this.activeTurnControllers.clear()
     this.cancel(error)
     this.unsubscribe()
-    this.agents.clear()
+    this.destroyPromise = Promise.allSettled([...pending]).then(() => {
+      this.agents.clear()
+    })
+    return this.destroyPromise
   }
 
   async spawn(request: RelaySpawnRequest): Promise<RelayParticipant> {
     this.assertActive()
     const id = request.id ?? request.tileId ?? request.name
+    const previous = this.agents.get(id)
+    if (previous) {
+      previous.running = false
+      previous.epoch += 1
+      const cancellation = new RelayTurnCancelledError(
+        id,
+        previous.epoch,
+        'agent was replaced',
+      )
+      previous.activeTurn?.controller.abort(cancellation)
+      await this.awaitAgentTeardown(previous)
+      this.assertActive()
+      if (this.agents.get(id) === previous) this.agents.delete(id)
+    }
     const participant = await this.awaitActive(
       () => this.relay.upsertParticipant({
         id,
@@ -208,13 +258,21 @@ export class RelayRuntime {
     const state: RuntimeAgentState = {
       spawn: { ...request, id },
       running: true,
-      busy: false,
       ready: false,
       executor,
+      epoch: 1,
+      activeTurn: null,
+      activeTick: null,
     }
     this.agents.set(id, state)
+    const epoch = state.epoch
+    const participantContext = this.createParticipantOperationContext(
+      id,
+      state,
+      epoch,
+    )
     try {
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.sendDirectMessage('system', {
           to: id,
           subject: 'Initial task',
@@ -227,15 +285,30 @@ export class RelayRuntime {
             provider: request.provider,
             model: request.model,
           },
-        }, this.operationContext),
+        }, participantContext),
+        id,
+        state,
+        epoch,
       )
 
-      await this.awaitActive(() => this.schedule(id))
+      await this.awaitParticipantActive(
+        () => this.schedule(id),
+        id,
+        state,
+        epoch,
+        false,
+      )
     } catch (error) {
-      if (this.agents.get(id) === state) this.agents.delete(id)
+      if (
+        this.agents.get(id) === state
+        && state.epoch === epoch
+        && state.running
+      ) {
+        this.agents.delete(id)
+      }
       throw error
     }
-    this.assertActive()
+    this.assertParticipantActive(id, state, epoch, false)
     return participant
   }
 
@@ -244,19 +317,46 @@ export class RelayRuntime {
     const state = this.agents.get(participantId)
     if (!state) return
     state.running = false
-    await this.awaitActive(
-      () => this.relay.setParticipantStatus(
+    const epoch = ++state.epoch
+    state.activeTurn?.controller.abort(new RelayTurnCancelledError(
+      participantId,
+      epoch,
+      'agent stopped',
+    ))
+    await this.awaitAgentTeardown(state)
+    if (!this.isParticipantCurrent(participantId, state, epoch, false)) return
+    const context = this.createParticipantOperationContext(
+      participantId,
+      state,
+      epoch,
+      false,
+    )
+    try {
+      await this.relay.setParticipantStatus(
         participantId,
         'stopped',
-        this.operationContext,
-      ),
-    )
+        context,
+      )
+      this.assertParticipantActive(participantId, state, epoch, false)
+    } catch (error) {
+      if (!this.isParticipantCurrent(participantId, state, epoch, false)) return
+      throw error
+    }
   }
 
   async start(participantId: string): Promise<void> {
     this.assertActive()
     const state = this.agents.get(participantId)
     if (!state) return
+    state.running = false
+    const epoch = ++state.epoch
+    state.activeTurn?.controller.abort(new RelayTurnCancelledError(
+      participantId,
+      epoch,
+      'agent restarted',
+    ))
+    await this.awaitAgentTeardown(state)
+    if (!this.isParticipantCurrent(participantId, state, epoch, false)) return
     state.running = true
     await this.awaitActive(() => this.schedule(participantId))
   }
@@ -264,33 +364,70 @@ export class RelayRuntime {
   async schedule(participantId: string): Promise<void> {
     this.assertActive()
     const state = this.agents.get(participantId)
-    if (!state || !state.running || state.busy) return
-    state.busy = true
+    if (!state || !state.running || state.activeTick) return
+    const epoch = state.epoch
+    const controller = new AbortController()
+    const activeTurn: ActiveRuntimeTurn = {
+      epoch,
+      controller,
+      providerTeardown: Promise.resolve(),
+    }
+    state.activeTurn = activeTurn
+    let tickPromise!: Promise<void>
+    tickPromise = this.runAgentTickWithErrorHandling(
+      participantId,
+      state,
+      epoch,
+      activeTurn,
+    )
+    const activeTick: ActiveRuntimeTick = { epoch, promise: tickPromise }
+    state.activeTick = activeTick
     try {
-      await this.awaitActive(
-        () => this.runAgentTickWithErrorHandling(participantId, state),
-      )
+      await tickPromise
     } finally {
-      state.busy = false
+      if (state.activeTick === activeTick) state.activeTick = null
+      if (state.activeTurn === activeTurn) state.activeTurn = null
     }
   }
 
-  private async tick(participantId: string, state: RuntimeAgentState): Promise<void> {
-    const participant = await this.awaitActive(
+  private async tick(
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    activeTurn: ActiveRuntimeTurn,
+  ): Promise<void> {
+    const participantContext = this.createParticipantOperationContext(
+      participantId,
+      state,
+      epoch,
+    )
+    const participant = await this.awaitParticipantActive(
       () => this.relay.getParticipant(participantId, this.operationContext),
+      participantId,
+      state,
+      epoch,
     )
     if (!participant) return
 
-    const unreadDirectMessages = await this.awaitActive(
+    const unreadDirectMessages = await this.awaitParticipantActive(
       () => this.relay.listUnreadDirectMessages(participantId),
+      participantId,
+      state,
+      epoch,
     )
-    const unreadChannelMessages = await this.awaitActive(
+    const unreadChannelMessages = await this.awaitParticipantActive(
       () => this.relay.listUnreadChannelMessages(participantId),
+      participantId,
+      state,
+      epoch,
     )
     if (unreadDirectMessages.length === 0 && unreadChannelMessages.length === 0 && state.ready) return
 
-    const relationships = (await this.awaitActive(
+    const relationships = (await this.awaitParticipantActive(
       () => this.relay.analyzeRelationships(),
+      participantId,
+      state,
+      epoch,
     )).filter(hint => hint.participants.includes(participantId))
     const prompt = buildPrompt({
       participant,
@@ -307,50 +444,74 @@ export class RelayRuntime {
       unreadChannelMessages,
       relationships,
     }
-    await this.awaitActive(
+    await this.awaitParticipantActive(
       () => this.relay.setParticipantStatus(
         participantId,
         state.ready ? 'running' : 'spawning',
-        this.operationContext,
+        participantContext,
       ),
+      participantId,
+      state,
+      epoch,
     )
 
     const turnTimeoutMs = this.options.turnTimeoutMs ?? 300_000 // 5 minutes default
-    const raw = await this.awaitActive(
-      () => this.runTurnWithTimeout(participantId, state, input, turnTimeoutMs),
+    const raw = await this.awaitParticipantActive(
+      () => this.runTurnWithTimeout(
+        participantId,
+        state,
+        input,
+        turnTimeoutMs,
+        activeTurn,
+      ),
+      participantId,
+      state,
+      epoch,
     )
+    this.assertParticipantActive(participantId, state, epoch)
     const output = parseTurnOutput(raw)
 
     if (output.work) {
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.updateWorkContext(
           participantId,
           output.work!,
-          this.operationContext,
+          participantContext,
         ),
+        participantId,
+        state,
+        epoch,
       )
     }
 
     if (!state.ready && (output.ready ?? true)) {
+      this.assertParticipantActive(participantId, state, epoch)
       state.ready = true
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.setParticipantStatus(
           participantId,
           output.status ?? 'ready',
-          this.operationContext,
+          participantContext,
         ),
+        participantId,
+        state,
+        epoch,
       )
     } else if (output.status) {
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.setParticipantStatus(
           participantId,
           output.status!,
-          this.operationContext,
+          participantContext,
         ),
+        participantId,
+        state,
+        epoch,
       )
     }
 
     for (const message of output.messages ?? []) {
+      this.assertParticipantActive(participantId, state, epoch)
       if (message.mode === 'direct') {
         const draft: RelayDirectMessageDraft = {
           to: message.to,
@@ -362,12 +523,15 @@ export class RelayRuntime {
           replyToId: message.replyToId,
           data: message.data,
         }
-        await this.awaitActive(
+        await this.awaitParticipantActive(
           () => this.relay.sendDirectMessage(
             participantId,
             draft,
-            this.operationContext,
+            participantContext,
           ),
+          participantId,
+          state,
+          epoch,
         )
       } else {
         const draft: RelayChannelMessageDraft = {
@@ -380,35 +544,44 @@ export class RelayRuntime {
           replyToId: message.replyToId,
           data: message.data,
         }
-        await this.awaitActive(
+        await this.awaitParticipantActive(
           () => this.relay.sendChannelMessage(
             participantId,
             draft,
-            this.operationContext,
+            participantContext,
           ),
+          participantId,
+          state,
+          epoch,
         )
       }
     }
 
     for (const memory of output.memory ?? []) {
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.storeMemory(
           participantId,
           memory.subject,
           memory.body,
           memory.data,
-          this.operationContext,
+          participantContext,
         ),
+        participantId,
+        state,
+        epoch,
       )
     }
 
     if (unreadDirectMessages.length > 0) {
-      await this.awaitActive(
+      await this.awaitParticipantActive(
         () => this.relay.markDirectMessagesRead(
           participantId,
           unreadDirectMessages,
-          this.operationContext,
+          participantContext,
         ),
+        participantId,
+        state,
+        epoch,
       )
     }
     if (unreadChannelMessages.length > 0) {
@@ -418,13 +591,16 @@ export class RelayRuntime {
         latestByChannel.set(message.meta.channel, Math.max(latestByChannel.get(message.meta.channel) ?? 0, message.meta.createdTs))
       }
       for (const [channel, timestamp] of latestByChannel) {
-        await this.awaitActive(
+        await this.awaitParticipantActive(
           () => this.relay.advanceChannelCursor(
             participantId,
             channel,
             timestamp,
-            this.operationContext,
+            participantContext,
           ),
+          participantId,
+          state,
+          epoch,
         )
       }
     }
@@ -458,9 +634,23 @@ export class RelayRuntime {
     state: RuntimeAgentState,
     input: RelayTurnInput,
     timeoutMs: number,
+    activeTurn: ActiveRuntimeTurn,
   ): Promise<string> {
-    const controller = new AbortController()
-    this.activeTurnControllers.add(controller)
+    this.assertParticipantActive(participantId, state, activeTurn.epoch)
+    const { controller } = activeTurn
+    let providerTurn: Promise<string>
+    try {
+      providerTurn = Promise.resolve(
+        state.executor.runTurn(input, controller.signal),
+      )
+    } catch (error) {
+      providerTurn = Promise.reject(error)
+    }
+    activeTurn.providerTeardown = providerTurn.then(
+      () => undefined,
+      () => undefined,
+    )
+
     return new Promise((resolve, reject) => {
       let settled = false
       const finish = (
@@ -470,7 +660,6 @@ export class RelayRuntime {
         settled = true
         clearTimeout(timer)
         controller.signal.removeEventListener('abort', onAbort)
-        this.activeTurnControllers.delete(controller)
         if ('result' in outcome) {
           resolve(outcome.result)
         } else {
@@ -489,25 +678,36 @@ export class RelayRuntime {
       }, timeoutMs)
 
       controller.signal.addEventListener('abort', onAbort, { once: true })
-      try {
-        const turn = state.executor.runTurn(input, controller.signal)
-        void turn.then(
-          result => finish({ result }),
-          error => finish({ error }),
-        )
-      } catch (error) {
-        finish({ error })
-      }
+      if (controller.signal.aborted) onAbort()
+      void providerTurn.then(
+        result => finish({ result }),
+        error => finish({ error }),
+      )
     })
   }
 
-  private async runAgentTickWithErrorHandling(participantId: string, state: RuntimeAgentState): Promise<void> {
+  private async runAgentTickWithErrorHandling(
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    activeTurn: ActiveRuntimeTurn,
+  ): Promise<void> {
     try {
-      await this.awaitActive(() => this.tick(participantId, state))
+      await this.awaitParticipantActive(
+        () => this.tick(participantId, state, epoch, activeTurn),
+        participantId,
+        state,
+        epoch,
+      )
     } catch (error) {
-      if (!this.isActive()) return
+      if (
+        this.isExpectedTurnCancellation(error)
+        || !this.isParticipantCurrent(participantId, state, epoch)
+      ) {
+        return
+      }
       const errorMessage = error instanceof Error ? error.message : String(error)
-      this.assertActive()
+      this.assertParticipantActive(participantId, state, epoch)
       this.relay.events.emit('event', {
         type: 'error',
         timestamp: Date.now(),
@@ -518,18 +718,153 @@ export class RelayRuntime {
       // from schedule() (not awaited), so a throw here becomes an unhandled
       // rejection — guard it so error recovery can never itself reject.
       try {
-        await this.awaitActive(
+        const context = this.createParticipantOperationContext(
+          participantId,
+          state,
+          epoch,
+        )
+        await this.awaitParticipantActive(
           () => this.relay.setParticipantStatus(
             participantId,
             'error',
-            this.operationContext,
+            context,
           ),
+          participantId,
+          state,
+          epoch,
         )
       } catch {
-        if (!this.isActive()) return
+        if (!this.isParticipantCurrent(participantId, state, epoch)) return
         // Participant gone — nothing left to mark.
       }
-      state.running = false
+      if (this.isParticipantCurrent(participantId, state, epoch)) {
+        state.running = false
+      }
+    }
+  }
+
+  private isExpectedTurnCancellation(error: unknown): boolean {
+    return (
+      error instanceof RelayTurnCancelledError
+      || error instanceof RelayRuntimeDisposedError
+    )
+  }
+
+  private isParticipantCurrent(
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    requireRunning = true,
+  ): boolean {
+    if (!this.isActive()) return false
+    return (
+      this.agents.get(participantId) === state
+      && state.epoch === epoch
+      && (!requireRunning || state.running)
+    )
+  }
+
+  private assertParticipantActive(
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    requireRunning = true,
+  ): void {
+    this.assertActive()
+    if (
+      this.agents.get(participantId) !== state
+      || state.epoch !== epoch
+      || (requireRunning && !state.running)
+    ) {
+      throw new RelayTurnCancelledError(
+        participantId,
+        epoch,
+        'participant generation is no longer current',
+      )
+    }
+  }
+
+  private createParticipantOperationContext(
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    requireRunning = true,
+  ): RelayOperationContext {
+    return {
+      assertActive: () => this.assertParticipantActive(
+        participantId,
+        state,
+        epoch,
+        requireRunning,
+      ),
+    }
+  }
+
+  private async awaitAgentTeardown(state: RuntimeAgentState): Promise<void> {
+    const pending = new Set<Promise<void>>()
+    if (state.activeTurn) pending.add(state.activeTurn.providerTeardown)
+    if (state.activeTick) pending.add(state.activeTick.promise)
+    await Promise.allSettled([...pending])
+  }
+
+  private async awaitParticipantActive<T>(
+    operation: () => Promise<T>,
+    participantId: string,
+    state: RuntimeAgentState,
+    epoch: number,
+    requireRunning = true,
+  ): Promise<T> {
+    this.assertParticipantActive(
+      participantId,
+      state,
+      epoch,
+      requireRunning,
+    )
+    const controller = state.activeTurn?.epoch === epoch
+      ? state.activeTurn.controller
+      : null
+    let onAbort: (() => void) | null = null
+    const participantCancelled = controller
+      ? new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(
+            controller.signal.reason instanceof Error
+              ? controller.signal.reason
+              : new RelayTurnCancelledError(
+                  participantId,
+                  epoch,
+                  'participant turn aborted',
+                ),
+          )
+          controller.signal.addEventListener('abort', onAbort, { once: true })
+          if (controller.signal.aborted) onAbort()
+        })
+      : null
+    try {
+      const pending = operation()
+      const result = await Promise.race([
+        pending,
+        this.cancelled,
+        ...(participantCancelled ? [participantCancelled] : []),
+      ])
+      this.assertParticipantActive(
+        participantId,
+        state,
+        epoch,
+        requireRunning,
+      )
+      return result
+    } catch (error) {
+      this.assertParticipantActive(
+        participantId,
+        state,
+        epoch,
+        requireRunning,
+      )
+      throw error
+    } finally {
+      if (controller && onAbort) {
+        controller.signal.removeEventListener('abort', onAbort)
+      }
     }
   }
 
