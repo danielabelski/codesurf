@@ -810,7 +810,10 @@ app.whenReady().then(async () => {
 
   // Prime cached agent paths from disk only. Full binary detection is deferred
   // until setup/manual refresh so startup does not shell out across all agents.
-  initializeAgentPathsCache().catch(err => console.error('[AgentPaths] Cache init failed:', err))
+  await initializeAgentPathsCache().catch(err => {
+    console.error('[AgentPaths] Cache init failed:', err)
+    return null
+  })
 
   // Start local MCP server for agent→kanban callbacks
   startMCPServer().then(port => {

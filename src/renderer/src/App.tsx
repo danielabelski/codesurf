@@ -615,14 +615,27 @@ function App(): JSX.Element {
     // Check if agent setup is needed (first run or paths not confirmed)
     // Force with: CODESURF_SHOW_SETUP=1 npm run dev
     const forceSetup = import.meta.env.VITE_SHOW_SETUP === '1'
+    let cancelled = false
     if (!miniChatOptions) {
       if (forceSetup) {
         setShowAgentSetup(true)
       } else {
-        window.electron?.agentPaths?.needsSetup?.().then((needs: boolean) => {
-          if (needs) setShowAgentSetup(true)
-        }).catch(() => {})
+        const needsSetup = window.electron?.agentPaths?.needsSetup
+        if (needsSetup) {
+          void (async () => {
+            // Confirmation can land while the first IPC request is in flight.
+            // Revalidate before publishing UI state so an obsolete `true`
+            // response cannot reopen a modal that was already dismissed.
+            if (!(await needsSetup()) || cancelled) return
+            if ((await needsSetup()) && !cancelled) {
+              setShowAgentSetup(true)
+            }
+          })().catch(() => {})
+        }
       }
+    }
+    return () => {
+      cancelled = true
     }
   }, [showEmptyLayoutPage, miniChatOptions?.workspaceId])
 
