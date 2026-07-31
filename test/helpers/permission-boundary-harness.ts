@@ -5,6 +5,7 @@ import {
   type DisplayMediaRequest,
   type ExtensionPermissionDescriptor,
   type FrameLike,
+  type FrameNavigationIdentity,
   type PermissionBoundaryRuntime,
   type PermissionRequestDetails,
   type PermissionSession,
@@ -140,7 +141,10 @@ export function createHarness(options?: {
   const contentsListeners: Array<(contents: WebContentsLike) => void> = []
   const owners = new Map<WebContentsLike, BrowserWindowLike>()
   const frameOwners = new Map<FrameLike, WebContentsLike>()
-  const navigationListeners = new Map<WebContentsLike, Set<() => void>>()
+  const navigationListeners = new Map<
+    WebContentsLike,
+    Set<(frame: FrameNavigationIdentity | undefined) => void>
+  >()
   const extensions = new Map<string, ExtensionPermissionDescriptor>()
   const extensionConsents = new Map<string, Set<string>>()
   const extensionConsentPrompts: string[] = []
@@ -152,6 +156,13 @@ export function createHarness(options?: {
   let mediaResults: Partial<Record<'microphone' | 'camera', boolean>> = {
     microphone: true,
     camera: true,
+  }
+  let extensionConsentRequester: (
+    extension: ExtensionPermissionDescriptor,
+    kind: 'microphone' | 'camera' | 'display-capture',
+  ) => Promise<boolean> = async () => true
+  let mediaRequester: (kind: 'microphone' | 'camera') => Promise<boolean> = async kind => {
+    return mediaResults[kind] ?? false
   }
   let selectedSource: DisplaySource | undefined = sources[1]
   let selectionCount = 0
@@ -174,7 +185,8 @@ export function createHarness(options?: {
     getSession: contents => (contents as FakeWebContents).session,
     getWebContentsForFrame: frame => frameOwners.get(frame),
     getExtensionPermission: extensionId => extensions.get(extensionId),
-    hasDirectChildFrame: (contents, url, origin) => {
+    getDirectChildFrame: (contents, url, origin) => {
+      let match: FrameLike | undefined
       for (const [frame, owner] of frameOwners) {
         if (
           owner === contents
@@ -183,15 +195,20 @@ export function createHarness(options?: {
           && frame.origin === origin
           && frame.parent === contents.mainFrame
           && frame.top === contents.mainFrame
-        ) return true
+        ) {
+          if (match) return undefined
+          match = frame
+        }
       }
-      return false
+      return match
     },
     hasExtensionConsent: (extensionId, kind) => {
       return extensionConsents.get(extensionId)?.has(kind) === true
     },
     requestExtensionConsent: async (extension, kind) => {
       extensionConsentPrompts.push(`${extension.id}:${kind}`)
+      const allowed = await extensionConsentRequester(extension, kind)
+      if (!allowed) return false
       let consent = extensionConsents.get(extension.id)
       if (!consent) {
         consent = new Set()
@@ -202,7 +219,7 @@ export function createHarness(options?: {
     },
     requestMediaAccess: async kind => {
       mediaPrompts.push(kind)
-      return mediaResults[kind] ?? false
+      return await mediaRequester(kind)
     },
     getDisplaySources: async () => sources,
     selectDisplaySource: async () => {
@@ -250,11 +267,23 @@ export function createHarness(options?: {
     owners,
     productionUrl,
     runtime,
-    navigate: (contents: WebContentsLike) => {
-      for (const listener of navigationListeners.get(contents) ?? []) listener()
+    navigate: (contents: WebContentsLike, frame?: FrameLike) => {
+      const identity = frame
+        ? { processId: frame.processId, routingId: frame.routingId }
+        : undefined
+      for (const listener of navigationListeners.get(contents) ?? []) listener(identity)
     },
     sessionListeners,
     setMediaResults: (results: typeof mediaResults) => { mediaResults = results },
+    setMediaRequester: (
+      requester: (kind: 'microphone' | 'camera') => Promise<boolean>,
+    ) => { mediaRequester = requester },
+    setExtensionConsentRequester: (
+      requester: (
+        extension: ExtensionPermissionDescriptor,
+        kind: 'microphone' | 'camera' | 'display-capture',
+      ) => Promise<boolean>,
+    ) => { extensionConsentRequester = requester },
     setExtension: (
       id: string,
       config?: Partial<Omit<ExtensionPermissionDescriptor, 'id'>>,

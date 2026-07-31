@@ -15,6 +15,11 @@ export interface FrameLike {
   isDestroyed(): boolean
 }
 
+export interface FrameNavigationIdentity {
+  readonly processId: number
+  readonly routingId: number
+}
+
 export interface WebContentsLike {
   readonly id: number
   readonly mainFrame: FrameLike
@@ -101,18 +106,21 @@ export interface PermissionBoundaryRuntime<DisplaySource> {
   getDefaultSession(): PermissionSession<DisplaySource> | undefined
   getDisplaySources(): Promise<DisplaySource[]>
   getExtensionPermission(extensionId: string): ExtensionPermissionDescriptor | undefined
-  hasDirectChildFrame(
+  getDirectChildFrame(
     webContents: WebContentsLike,
     url: string,
     origin: string,
-  ): boolean
+  ): FrameLike | undefined
   getOwnerWindow(webContents: WebContentsLike): BrowserWindowLike | undefined
   getSession(webContents: WebContentsLike): PermissionSession<DisplaySource>
   getWebContentsForFrame(frame: FrameLike): WebContentsLike | undefined
   hasExtensionConsent(extensionId: string, kind: SensitiveMediaCapability): boolean
   onSessionCreated(listener: (session: PermissionSession<DisplaySource>) => void): void
   onWebContentsCreated(listener: (webContents: WebContentsLike) => void): void
-  onWebContentsNavigation(webContents: WebContentsLike, listener: () => void): void
+  onWebContentsNavigation(
+    webContents: WebContentsLike,
+    listener: (frame: FrameNavigationIdentity | undefined) => void,
+  ): void
   requestExtensionConsent(
     extension: ExtensionPermissionDescriptor,
     kind: SensitiveMediaCapability,

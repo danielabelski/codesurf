@@ -203,6 +203,95 @@ describe('permission boundary', () => {
     assert.equal(check(), false)
   })
 
+  test('same-URL reload invalidates a pending extension consent prompt', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('media-extension', { declaredMedia: ['microphone'] })
+    const extensionUrl = 'codesurf-ext://media-extension'
+    const details = {
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `${extensionUrl}/index.html`,
+      securityOrigin: `${extensionUrl}/`,
+    }
+    const child = new FakeFrame(details.requestingUrl, extensionUrl, 121)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+
+    let releaseConsent: ((allowed: boolean) => void) | undefined
+    let markPromptStarted: (() => void) | undefined
+    const promptStarted = new Promise<void>(resolve => { markPromptStarted = resolve })
+    harness.setExtensionConsentRequester(async () => {
+      markPromptStarted?.()
+      return await new Promise<boolean>(resolve => { releaseConsent = resolve })
+    })
+
+    const pending = requestPermission(trusted.session, trusted.contents, 'media', details)
+    await promptStarted
+    harness.navigate(trusted.contents, child)
+    releaseConsent?.(true)
+
+    assert.equal(await pending, false)
+    assert.deepEqual(harness.mediaPrompts, [])
+    assert.equal(
+      trusted.session.checkHandler?.(
+        trusted.contents,
+        'media',
+        details.securityOrigin,
+        { ...details, mediaType: 'audio' },
+      ),
+      false,
+      'the completed prompt must not recreate a runtime grant after reload',
+    )
+  })
+
+  test('same-URL reload invalidates a pending OS media prompt', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('media-extension', { declaredMedia: ['microphone'] })
+    harness.setExtensionConsent('media-extension', ['microphone'])
+    const extensionUrl = 'codesurf-ext://media-extension'
+    const details = {
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `${extensionUrl}/index.html`,
+      securityOrigin: `${extensionUrl}/`,
+    }
+    const child = new FakeFrame(details.requestingUrl, extensionUrl, 122)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+
+    let releasePrompt: ((allowed: boolean) => void) | undefined
+    let markPromptStarted: (() => void) | undefined
+    const promptStarted = new Promise<void>(resolve => { markPromptStarted = resolve })
+    harness.setMediaRequester(async () => {
+      markPromptStarted?.()
+      return await new Promise<boolean>(resolve => { releasePrompt = resolve })
+    })
+
+    const pending = requestPermission(trusted.session, trusted.contents, 'media', details)
+    await promptStarted
+    harness.navigate(trusted.contents, child)
+    releasePrompt?.(true)
+
+    assert.equal(await pending, false)
+    assert.deepEqual(harness.mediaPrompts, ['microphone'])
+    assert.equal(
+      trusted.session.checkHandler?.(
+        trusted.contents,
+        'media',
+        details.securityOrigin,
+        { ...details, mediaType: 'audio' },
+      ),
+      false,
+      'the completed OS prompt must not recreate a runtime grant after reload',
+    )
+  })
+
   test('denies null, destroyed, unregistered, and every non-window content type', () => {
     const harness = createHarness()
     const unregistered = harness.makeWindow()

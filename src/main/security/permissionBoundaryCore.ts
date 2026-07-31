@@ -5,6 +5,7 @@ import type {
   DisplayMediaRequest,
   ExtensionPermissionDescriptor,
   FrameLike,
+  FrameNavigationIdentity,
   MediaAccessKind,
   PermissionBoundary,
   PermissionBoundaryOptions,
@@ -23,6 +24,7 @@ export type {
   DisplayStreams,
   ExtensionPermissionDescriptor,
   FrameLike,
+  FrameNavigationIdentity,
   MediaAccessKind,
   PermissionBoundary,
   PermissionBoundaryOptions,
@@ -41,10 +43,22 @@ type AllowedRenderer = {
 }
 
 type Principal = {
+  readonly frameKey: string
   readonly key: string
   readonly kind: 'app' | 'extension'
   readonly owner: BrowserWindowLike
   readonly extension?: ExtensionPermissionDescriptor
+}
+
+type NavigationEpoch = {
+  readonly contents: number
+  readonly frame: number
+  readonly frameKey: string
+}
+
+type NavigationEpochState = {
+  contents: number
+  readonly frames: Map<string, number>
 }
 
 const boundariesByRuntime = new WeakMap<object, PermissionBoundary<unknown>>()
@@ -62,6 +76,10 @@ function sameFrame(left: FrameLike | null | undefined, right: FrameLike | null |
     && left.frameTreeNodeId === right.frameTreeNodeId
     && left.processId === right.processId
     && left.routingId === right.routingId)
+}
+
+function frameKey(frame: Pick<FrameLike, 'processId' | 'routingId'>): string {
+  return `${frame.processId}:${frame.routingId}`
 }
 
 function once<T>(callback: (value: T) => void): (value: T) => void {
@@ -118,6 +136,39 @@ export function createPermissionBoundary<DisplaySource>(
   const registeredContents = new Set<WebContentsLike>()
   const trustedOwners = new WeakMap<object, BrowserWindowLike>()
   const grants = new WeakMap<object, Map<string, Set<SensitiveMediaCapability>>>()
+  const navigationEpochs = new WeakMap<object, NavigationEpochState>()
+
+  const getNavigationState = (webContents: WebContentsLike): NavigationEpochState => {
+    let state = navigationEpochs.get(webContents as object)
+    if (!state) {
+      state = { contents: 0, frames: new Map() }
+      navigationEpochs.set(webContents as object, state)
+    }
+    return state
+  }
+
+  const captureNavigationEpoch = (
+    webContents: WebContentsLike,
+    principal: Principal,
+  ): NavigationEpoch => {
+    const state = getNavigationState(webContents)
+    return {
+      contents: state.contents,
+      frame: state.frames.get(principal.frameKey) ?? 0,
+      frameKey: principal.frameKey,
+    }
+  }
+
+  const isNavigationEpochCurrent = (
+    webContents: WebContentsLike,
+    principal: Principal,
+    epoch: NavigationEpoch,
+  ): boolean => {
+    const state = getNavigationState(webContents)
+    return principal.frameKey === epoch.frameKey
+      && state.contents === epoch.contents
+      && (state.frames.get(epoch.frameKey) ?? 0) === epoch.frame
+  }
 
   const isAllowedUrl = (rawUrl: string | undefined): boolean => {
     if (!rawUrl) return false
@@ -180,6 +231,7 @@ export function createPermissionBoundary<DisplaySource>(
     details: PermissionCheckDetails | PermissionRequestDetails,
     requestingOrigin?: string,
   ): Principal | undefined => {
+    if (!webContents) return
     const owner = getTrustedOwner(session, webContents)
     if (!owner) return
     if (details.isMainFrame === true) {
@@ -196,7 +248,13 @@ export function createPermissionBoundary<DisplaySource>(
         || (details.securityOrigin !== undefined
           && !isAllowedOrigin(details.securityOrigin))
       ) return
-      return { key: `app:${allowedRenderer.url.href}`, kind: 'app', owner }
+      const mainFrameKey = frameKey(webContents.mainFrame)
+      return {
+        frameKey: mainFrameKey,
+        key: `app:${allowedRenderer.url.href}:${mainFrameKey}`,
+        kind: 'app',
+        owner,
+      }
     }
 
     const location = getExtensionLocation(details.requestingUrl)
@@ -212,16 +270,20 @@ export function createPermissionBoundary<DisplaySource>(
         && !isAllowedOrigin(details.embeddingOrigin)
         && !isAllowedUrl(details.embeddingOrigin))
       || !webContents
-      || !runtime.hasDirectChildFrame(
+      || !webContents
+    ) return
+    const childFrame = runtime.getDirectChildFrame(
         webContents,
         details.requestingUrl ?? '',
         location.frameOrigin,
       )
-    ) return
+    if (!childFrame) return
     const extension = runtime.getExtensionPermission(location.id)
     if (!extension || extension.id !== location.id || !extension.enabled) return
+    const childFrameKey = frameKey(childFrame)
     return {
-      key: `extension:${extension.id}:${location.frameOrigin}`,
+      frameKey: childFrameKey,
+      key: `extension:${extension.id}:${location.frameOrigin}:${childFrameKey}`,
       kind: 'extension',
       owner,
       extension,
@@ -272,18 +334,19 @@ export function createPermissionBoundary<DisplaySource>(
   const authorizeExtension = async (
     principal: Principal,
     kinds: readonly SensitiveMediaCapability[],
+    isCurrent: () => boolean,
   ): Promise<boolean> => {
-    if (principal.kind === 'app') return true
+    if (principal.kind === 'app') return isCurrent()
     const extension = principal.extension
     if (!extension || kinds.some(kind => !extension.declaredMedia.includes(kind))) return false
     for (const kind of kinds) {
       if (!runtime.hasExtensionConsent(extension.id, kind)) {
         const allowed = await runtime.requestExtensionConsent(extension, kind, principal.owner)
-        if (!allowed) return false
+        if (!isCurrent() || !allowed) return false
       }
-      if (!isAuthorized(principal, kind)) return false
+      if (!isCurrent() || !isAuthorized(principal, kind)) return false
     }
-    return true
+    return isCurrent()
   }
 
   const getDisplayPrincipal = (
@@ -304,7 +367,12 @@ export function createPermissionBoundary<DisplaySource>(
       && isAllowedOrigin(request.securityOrigin)
     ) {
       return {
-        principal: { key: `app:${allowedRenderer.url.href}`, kind: 'app', owner },
+        principal: {
+          frameKey: frameKey(frame),
+          key: `app:${allowedRenderer.url.href}:${frameKey(frame)}`,
+          kind: 'app',
+          owner,
+        },
         webContents,
       }
     }
@@ -318,9 +386,11 @@ export function createPermissionBoundary<DisplaySource>(
     ) return
     const extension = runtime.getExtensionPermission(location.id)
     if (!extension || extension.id !== location.id || !extension.enabled) return
+    const extensionFrameKey = frameKey(frame)
     return {
       principal: {
-        key: `extension:${extension.id}:${location.frameOrigin}`,
+        frameKey: extensionFrameKey,
+        key: `extension:${extension.id}:${location.frameOrigin}:${extensionFrameKey}`,
         kind: 'extension',
         owner,
         extension,
@@ -354,6 +424,14 @@ export function createPermissionBoundary<DisplaySource>(
       const finish = once(callback)
       const principal = getPrincipal(session, webContents, details)
       if (!principal) return finish(false)
+      const navigationEpoch = captureNavigationEpoch(webContents, principal)
+      const getCurrentPrincipal = (): Principal | undefined => {
+        const current = getPrincipal(session, webContents, details)
+        return current?.key === principal.key
+          && isNavigationEpochCurrent(webContents, current, navigationEpoch)
+          ? current
+          : undefined
+      }
       if (permission === 'clipboard-sanitized-write') {
         return finish(principal.kind === 'app')
       }
@@ -363,10 +441,14 @@ export function createPermissionBoundary<DisplaySource>(
           && Array.isArray(details.mediaTypes)
           && details.mediaTypes.length === 0)
       if (displayPreflight) {
-        void authorizeExtension(principal, ['display-capture']).then(allowed => {
-          const current = getPrincipal(session, webContents, details)
+        void authorizeExtension(
+          principal,
+          ['display-capture'],
+          () => getCurrentPrincipal() !== undefined,
+        ).then(allowed => {
+          const current = getCurrentPrincipal()
           const granted = allowed
-            && current?.key === principal.key
+            && current !== undefined
             && isAuthorized(current, 'display-capture')
           if (granted) addGrants(webContents, current, ['display-capture'])
           finish(granted)
@@ -384,16 +466,20 @@ export function createPermissionBoundary<DisplaySource>(
       ) return finish(false)
       const requestedKinds = requestedTypes.map(mediaKind)
 
-      void authorizeExtension(principal, requestedKinds).then(async consented => {
-        if (!consented) return false
+      void authorizeExtension(
+        principal,
+        requestedKinds,
+        () => getCurrentPrincipal() !== undefined,
+      ).then(async consented => {
+        if (!consented || !getCurrentPrincipal()) return false
         const osResults = await Promise.all(
           requestedKinds.map(kind => runtime.requestMediaAccess(kind)),
         )
-        return osResults.every(Boolean)
+        return Boolean(getCurrentPrincipal()) && osResults.every(Boolean)
       }).then(allowed => {
-        const current = getPrincipal(session, webContents, details)
+        const current = getCurrentPrincipal()
         const granted = allowed
-          && current?.key === principal.key
+          && current !== undefined
           && requestedKinds.every(kind => isAuthorized(current, kind))
         if (granted) addGrants(webContents, current, requestedKinds)
         finish(granted)
@@ -414,21 +500,39 @@ export function createPermissionBoundary<DisplaySource>(
         || !isAuthorized(initial.principal, 'display-capture')
         || !hasGrant(initial.webContents, initial.principal, 'display-capture')
       ) return finish({})
+      const navigationEpoch = captureNavigationEpoch(
+        initial.webContents,
+        initial.principal,
+      )
+      const getCurrentPrincipal = (): Principal | undefined => {
+        const current = getDisplayPrincipal(session, request)
+        return current
+          && current.webContents === initial.webContents
+          && current.principal.key === initial.principal.key
+          && isNavigationEpochCurrent(
+            current.webContents,
+            current.principal,
+            navigationEpoch,
+          )
+          ? current.principal
+          : undefined
+      }
 
       void runtime.getDisplaySources().then(async sources => {
+        if (!getCurrentPrincipal()) return
         if (sources.length === 0) return
         const selected = await runtime.selectDisplaySource({
           owner: initial.principal.owner,
           sources,
         })
-        return selected && sources.includes(selected) ? selected : undefined
+        return getCurrentPrincipal() && selected && sources.includes(selected)
+          ? selected
+          : undefined
       }).then(selected => {
-        const current = getDisplayPrincipal(session, request)
+        const current = getCurrentPrincipal()
         const stillAuthorized = current
-          && current.webContents === initial.webContents
-          && current.principal.key === initial.principal.key
-          && isAuthorized(current.principal, 'display-capture')
-          && hasGrant(current.webContents, current.principal, 'display-capture')
+          && isAuthorized(current, 'display-capture')
+          && hasGrant(initial.webContents, current, 'display-capture')
         if (!selected || !stillAuthorized) return finish({})
         finish({
           video: selected,
@@ -455,13 +559,20 @@ export function createPermissionBoundary<DisplaySource>(
     trustedOwners.set(webContents as object, window)
     if (registeredContents.has(webContents)) return
     registeredContents.add(webContents)
-    runtime.onWebContentsNavigation(webContents, () => {
+    runtime.onWebContentsNavigation(webContents, (frame: FrameNavigationIdentity | undefined) => {
+      const state = getNavigationState(webContents)
+      state.contents += 1
+      if (frame) {
+        const key = frameKey(frame)
+        state.frames.set(key, (state.frames.get(key) ?? 0) + 1)
+      }
       grants.delete(webContents as object)
     })
     webContents.once('destroyed', () => {
       registeredContents.delete(webContents)
       trustedOwners.delete(webContents as object)
       grants.delete(webContents as object)
+      navigationEpochs.delete(webContents as object)
     })
   }
 

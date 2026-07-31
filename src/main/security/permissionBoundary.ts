@@ -162,17 +162,22 @@ export function installElectronPermissionBoundary(
     getExtensionPermission: extensionId => {
       return extensionAuthorizer?.getExtensionMediaPermission(extensionId)
     },
-    hasDirectChildFrame: (contents, url, origin) => {
+    getDirectChildFrame: (contents, url, origin) => {
       const electronContents = contents as unknown as WebContents
       const mainFrame = electronContents.mainFrame
-      return mainFrame.framesInSubtree.some(frame => {
-        return !frame.isDestroyed()
+      let match: WebFrameMain | undefined
+      for (const frame of mainFrame.framesInSubtree) {
+        const matches = !frame.isDestroyed()
           && !frame.detached
           && frame.url === url
           && frame.origin === origin
           && sameElectronFrame(frame.parent, mainFrame)
           && sameElectronFrame(frame.top, mainFrame)
-      })
+        if (!matches) continue
+        if (match) return undefined
+        match = frame
+      }
+      return match ? asFrame(match) : undefined
     },
     hasExtensionConsent: (extensionId, kind) => {
       return consentManager.hasConsent(extensionId, kind)
@@ -193,8 +198,18 @@ export function installElectronPermissionBoundary(
     },
     onWebContentsNavigation: (contents, listener) => {
       const electronContents = contents as unknown as WebContents
-      electronContents.on('did-frame-navigate', listener)
-      electronContents.on('did-navigate-in-page', listener)
+      electronContents.on(
+        'did-frame-navigate',
+        (_event, _url, _responseCode, _statusText, _isMainFrame, processId, routingId) => {
+          listener({ processId, routingId })
+        },
+      )
+      electronContents.on(
+        'did-navigate-in-page',
+        (_event, _url, _isMainFrame, processId, routingId) => {
+          listener({ processId, routingId })
+        },
+      )
     },
     requestExtensionConsent: (extension, kind, owner) => {
       return consentManager.requestConsent({
