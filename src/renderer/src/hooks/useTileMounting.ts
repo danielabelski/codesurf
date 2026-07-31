@@ -86,7 +86,9 @@ export function useTileMounting({
       window.electron.terminal.destroy(tileId)
     }
     if (tile?.type === 'chat') {
-      disposeChatTileRuntimeState(tileId)
+      if (workspace?.id) {
+        disposeChatTileRuntimeState(workspace.id, tileId)
+      }
       void window.electron.chat?.disposeCard?.(tileId)
       // The chat tile can embed a terminal under a deterministic derived id
       // (`${tileId}-terminal`). Tear down its PTY too, since that backend is

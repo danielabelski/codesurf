@@ -491,6 +491,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         minWidth: 0,
       }}>
       <ChatTileTranscriptColumn
+        workspaceId={workspaceId}
         tileId={tileId}
         isStartScreen={isStartScreen}
         messagesRef={messagesRef}

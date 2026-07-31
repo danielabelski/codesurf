@@ -718,16 +718,19 @@ function App(): JSX.Element {
     })
   }, [])
   const activeChatSessionMatch = useMemo(() => {
-    if (!activeChatTileId) return { entryId: null, sessionId: null }
+    if (!activeChatTileId || !workspace?.id) return { entryId: null, sessionId: null }
     const remembered = chatTileSessionMatches[activeChatTileId] ?? { entryId: null, sessionId: null }
-    const runtimeState = getChatTileRuntimeState<{ sessionId?: string | null; linkedSessionEntryId?: string | null }>(activeChatTileId)
+    const runtimeState = getChatTileRuntimeState<{
+      sessionId?: string | null
+      linkedSessionEntryId?: string | null
+    }>(workspace.id, activeChatTileId)
     const runtimeEntryId = typeof runtimeState?.linkedSessionEntryId === 'string' ? runtimeState.linkedSessionEntryId : null
     const runtimeSessionId = typeof runtimeState?.sessionId === 'string' ? runtimeState.sessionId : null
     return {
       entryId: runtimeEntryId ?? remembered.entryId,
       sessionId: runtimeSessionId ?? remembered.sessionId,
     }
-  }, [activeChatTileId, chatTileSessionMatches])
+  }, [activeChatTileId, chatTileSessionMatches, workspace?.id])
   const preferredBrowserOpenTargetRef = useRef<string | null>(null)
 
   const {
@@ -777,11 +780,13 @@ function App(): JSX.Element {
     if (!tile) return false
     if (tile.type === 'terminal') return false
     if (tile.type === 'chat') {
-      const runtimeState = getChatTileRuntimeState<{ isStreaming?: boolean }>(tileId)
+      const runtimeState = workspace?.id
+        ? getChatTileRuntimeState<{ isStreaming?: boolean }>(workspace.id, tileId)
+        : null
       return runtimeState?.isStreaming !== true
     }
     return true
-  }, [])
+  }, [workspace?.id])
 
   const findPanelFileOpenLeaf = useCallback((sourceTileId: string | undefined, fileType: TileState['type']): PanelLeaf | null => {
     const layout = panelLayoutRef.current

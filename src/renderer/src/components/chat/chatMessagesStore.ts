@@ -1,13 +1,15 @@
 /**
- * Per-tile chat message store with stream isolation.
+ * Per-workspace, per-tile chat message store with stream isolation.
  *
  * Transcript subscribers observe the messages snapshot (new reference whenever
  * messages change). Non-transcript "chrome" subscribers observe a chrome
  * snapshot that stays referentially stable across pure assistant-text stream
  * flushes (content / contentBlocks text growth on the last streaming message).
  *
- * One source of truth for live messages per tile — React tiles subscribe via
- * useSyncExternalStore; stream buffer and stream handler write here.
+ * One source of truth for live messages per workspace tile — React tiles
+ * subscribe via useSyncExternalStore; stream buffer and stream handler write
+ * here. Tile ids are only unique inside a workspace, so every store path must
+ * include both ids.
  */
 
 import type { ChatMessage } from '../../../../shared/chat-types'
@@ -44,8 +46,13 @@ function emptyChromeSnapshot(): ChatChromeSnapshot {
   return { revision: 0 }
 }
 
-function ensureTile(tileId: string): TileEntry {
-  let entry = tiles.get(tileId)
+function getWorkspaceTileKey(workspaceId: string, tileId: string): string {
+  return JSON.stringify([workspaceId, tileId])
+}
+
+function ensureTile(workspaceId: string, tileId: string): TileEntry {
+  const key = getWorkspaceTileKey(workspaceId, tileId)
+  let entry = tiles.get(key)
   if (entry) return entry
   entry = {
     messages: [],
@@ -55,7 +62,7 @@ function ensureTile(tileId: string): TileEntry {
     chromeSnapshot: emptyChromeSnapshot(),
     listeners: new Set(),
   }
-  tiles.set(tileId, entry)
+  tiles.set(key, entry)
   return entry
 }
 
@@ -107,33 +114,41 @@ function publish(
   }
 }
 
-export function getTileMessages(tileId: string): ChatMessage[] {
-  return ensureTile(tileId).messages
+export function getTileMessages(workspaceId: string, tileId: string): ChatMessage[] {
+  return ensureTile(workspaceId, tileId).messages
 }
 
-export function getTileMessagesSnapshot(tileId: string): ChatMessagesSnapshot {
-  return ensureTile(tileId).messagesSnapshot
+export function getTileMessagesSnapshot(
+  workspaceId: string,
+  tileId: string,
+): ChatMessagesSnapshot {
+  return ensureTile(workspaceId, tileId).messagesSnapshot
 }
 
-export function getTileChromeSnapshot(tileId: string): ChatChromeSnapshot {
-  return ensureTile(tileId).chromeSnapshot
+export function getTileChromeSnapshot(
+  workspaceId: string,
+  tileId: string,
+): ChatChromeSnapshot {
+  return ensureTile(workspaceId, tileId).chromeSnapshot
 }
 
 export function subscribeTileMessages(
+  workspaceId: string,
   tileId: string,
   listener: () => void,
 ): () => void {
-  const entry = ensureTile(tileId)
+  const entry = ensureTile(workspaceId, tileId)
   entry.listeners.add(listener)
   return () => { entry.listeners.delete(listener) }
 }
 
 /** Replace or update messages for a tile. Detects pure text stream updates. */
 export function updateTileMessages(
+  workspaceId: string,
   tileId: string,
   updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[]),
 ): ChatMessage[] {
-  const entry = ensureTile(tileId)
+  const entry = ensureTile(workspaceId, tileId)
   const prev = entry.messages
   const next = typeof updater === 'function' ? updater(prev) : updater
   if (next === prev) return prev
@@ -150,8 +165,12 @@ export function updateTileMessages(
 }
 
 /** Seed or hard-replace messages (e.g. session load). Always bumps chrome. */
-export function replaceTileMessages(tileId: string, messages: ChatMessage[]): void {
-  const entry = ensureTile(tileId)
+export function replaceTileMessages(
+  workspaceId: string,
+  tileId: string,
+  messages: ChatMessage[],
+): void {
+  const entry = ensureTile(workspaceId, tileId)
   publish(entry, messages, false)
 }
 
@@ -160,11 +179,12 @@ export function replaceTileMessages(tileId: string, messages: ChatMessage[]): vo
  * Pure-text path — chrome snapshot stays stable.
  */
 export function appendStreamingAssistantText(
+  workspaceId: string,
   tileId: string,
   text: string,
 ): ChatMessage[] {
-  if (!text) return getTileMessages(tileId)
-  return updateTileMessages(tileId, prev => {
+  if (!text) return getTileMessages(workspaceId, tileId)
+  return updateTileMessages(workspaceId, tileId, prev => {
     const last = prev[prev.length - 1]
     if (!last?.isStreaming || last.role !== 'assistant') return prev
     const blocks = [...(last.contentBlocks ?? [])]
@@ -182,8 +202,8 @@ export function appendStreamingAssistantText(
 }
 
 /** Test / session teardown helper. */
-export function clearTileMessages(tileId: string): void {
-  tiles.delete(tileId)
+export function clearTileMessages(workspaceId: string, tileId: string): void {
+  tiles.delete(getWorkspaceTileKey(workspaceId, tileId))
 }
 
 /** Test helper: clear all tiles. */

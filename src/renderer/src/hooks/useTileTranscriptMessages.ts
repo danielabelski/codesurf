@@ -22,16 +22,23 @@ export function mergeLiveTranscriptMessages(
 }
 
 export function useTileTranscriptMessages(options: {
+  workspaceId: string
   tileId: string
   renderedMessages: ChatMessage[]
   messagesRef: RefObject<HTMLDivElement | null>
   stickToBottomRef: RefObject<boolean>
 }): ChatMessage[] {
-  const { tileId, renderedMessages, messagesRef, stickToBottomRef } = options
+  const {
+    workspaceId,
+    tileId,
+    renderedMessages,
+    messagesRef,
+    stickToBottomRef,
+  } = options
   const snapshot = useSyncExternalStore(
-    listener => subscribeTileMessages(tileId, listener),
-    () => getTileMessagesSnapshot(tileId),
-    () => getTileMessagesSnapshot(tileId),
+    listener => subscribeTileMessages(workspaceId, tileId, listener),
+    () => getTileMessagesSnapshot(workspaceId, tileId),
+    () => getTileMessagesSnapshot(workspaceId, tileId),
   )
   const merged = useMemo(
     () => mergeLiveTranscriptMessages(renderedMessages, snapshot.messages),

@@ -42,6 +42,7 @@ import {
 
 export interface UseChatTileCoreStateOptions {
   tileId: string
+  workspaceId: string
   settings?: AppSettings
 }
 
@@ -127,11 +128,21 @@ export interface UseChatTileCoreStateResult {
 
 export function useChatTileCoreState({
   tileId,
+  workspaceId,
   settings,
 }: UseChatTileCoreStateOptions): UseChatTileCoreStateResult {
+  const workspaceTileKey = JSON.stringify([workspaceId, tileId])
+  const initialRuntimeScopeKeyRef = useRef(workspaceTileKey)
   const initialRuntimeStateRef = useRef<ChatTilePersistedState | null>(
-    getChatTileRuntimeState<ChatTilePersistedState>(tileId),
+    getChatTileRuntimeState<ChatTilePersistedState>(workspaceId, tileId),
   )
+  if (initialRuntimeScopeKeyRef.current !== workspaceTileKey) {
+    initialRuntimeScopeKeyRef.current = workspaceTileKey
+    initialRuntimeStateRef.current = getChatTileRuntimeState<ChatTilePersistedState>(
+      workspaceId,
+      tileId,
+    )
+  }
   const initialProvider = initialRuntimeStateRef.current?.provider ?? DEFAULT_PROVIDER_ID
   const initialModel = initialRuntimeStateRef.current?.model
     ?? (isBuiltinProvider(initialProvider)
@@ -149,25 +160,25 @@ export function useChatTileCoreState({
 
   // Synchronous seed so the first render already sees restored runtime messages.
   const seededTileRef = useRef<string | null>(null)
-  if (seededTileRef.current !== tileId) {
-    seededTileRef.current = tileId
+  if (seededTileRef.current !== workspaceTileKey) {
+    seededTileRef.current = workspaceTileKey
     const restored = initialRuntimeStateRef.current?.messages ?? []
-    if (getTileMessages(tileId).length === 0 && restored.length > 0) {
-      replaceTileMessages(tileId, restored)
+    if (getTileMessages(workspaceId, tileId).length === 0 && restored.length > 0) {
+      replaceTileMessages(workspaceId, tileId, restored)
     }
   }
 
   useSyncExternalStore(
-    (listener) => subscribeTileMessages(tileId, listener),
-    () => getTileChromeSnapshot(tileId),
-    () => getTileChromeSnapshot(tileId),
+    (listener) => subscribeTileMessages(workspaceId, tileId, listener),
+    () => getTileChromeSnapshot(workspaceId, tileId),
+    () => getTileChromeSnapshot(workspaceId, tileId),
   )
   // Structural/chrome updates rerender ChatTile. Pure text growth is consumed
   // directly by ChatTileTranscriptColumn so shell/send-path hooks stay still.
-  const messages = getTileMessages(tileId)
+  const messages = getTileMessages(workspaceId, tileId)
   const setMessages = useCallback<Dispatch<SetStateAction<ChatMessage[]>>>((updater) => {
-    updateTileMessages(tileId, updater)
-  }, [tileId])
+    updateTileMessages(workspaceId, tileId, updater)
+  }, [workspaceId, tileId])
   const [input, setInput] = useState(() => initialRuntimeStateRef.current?.input ?? '')
   const [isStreaming, setIsStreaming] = useState(
     () => (initialRuntimeStateRef.current?.isStreaming && initialJobId) ? true : false,
