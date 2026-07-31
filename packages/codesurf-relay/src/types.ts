@@ -7,6 +7,11 @@ export type RelayMessageKind = 'request' | 'reply' | 'update' | 'handoff' | 'ale
 export type RelayMessageStatus = 'unread' | 'read' | 'sent' | 'archived'
 export type RelayImpactSeverity = 'low' | 'medium' | 'high'
 
+export interface RelayOperationContext {
+  assertActive(): void
+  signal?: AbortSignal
+}
+
 export interface RelayImpact {
   targetType: 'agent' | 'human' | 'system'
   targetId?: string
