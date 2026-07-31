@@ -175,11 +175,24 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     let current = assertInsideRoot(this.root, path)
     while (true) {
       if (await this.validateExistingSafeDirectory(current)) {
-        await this.syncDirectory(current)
-        return
+        try {
+          await this.syncDirectory(current)
+          return
+        } catch (error) {
+          if (!isMissing(error)) throw error
+        }
       }
       if (current === this.root) return
       current = dirname(current)
+    }
+  }
+
+  private async syncDirectoryAfterDelete(path: string): Promise<void> {
+    try {
+      await this.syncDirectory(path)
+    } catch (error) {
+      if (!isMissing(error)) throw error
+      await this.syncNearestExistingDirectory(dirname(path))
     }
   }
 
@@ -232,14 +245,14 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     // Always replay the containing-directory sync when the target is already
     // absent. A previous attempt may have unlinked successfully and then lost
     // the durability sync before the queue retried.
-    await this.syncDirectory(directory)
+    await this.syncDirectoryAfterDelete(directory)
 
     if (options.pruneEmptyParent) {
       let current = directory
       while (current !== this.root) {
         try {
           await this.io.rmdir(current)
-          await this.syncDirectory(dirname(current))
+          await this.syncDirectoryAfterDelete(dirname(current))
         } catch (error) {
           const code = (error as NodeJS.ErrnoException | null)?.code
           if (code === 'ENOENT') {
