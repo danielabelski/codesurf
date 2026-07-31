@@ -137,6 +137,7 @@ export class RelayRuntime {
   private readonly options: RelayRuntimeOptions
   private readonly operationContext: RelayOperationContext
   private readonly agents = new Map<string, RuntimeAgentState>()
+  private readonly activeTurnControllers = new Set<AbortController>()
   private readonly unsubscribe: () => void
   private readonly cancelled: Promise<never>
   private cancel!: (error: Error) => void
@@ -168,8 +169,13 @@ export class RelayRuntime {
 
   destroy(): void {
     if (this.destroyed) return
+    const error = new RelayRuntimeDisposedError()
     this.destroyed = true
-    this.cancel(new RelayRuntimeDisposedError())
+    for (const controller of this.activeTurnControllers) {
+      controller.abort(error)
+    }
+    this.activeTurnControllers.clear()
+    this.cancel(error)
     this.unsubscribe()
     this.agents.clear()
   }
@@ -453,21 +459,45 @@ export class RelayRuntime {
     input: RelayTurnInput,
     timeoutMs: number,
   ): Promise<string> {
+    const controller = new AbortController()
+    this.activeTurnControllers.add(controller)
     return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (
+        outcome: { result: string } | { error: unknown },
+      ): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        controller.signal.removeEventListener('abort', onAbort)
+        this.activeTurnControllers.delete(controller)
+        if ('result' in outcome) {
+          resolve(outcome.result)
+        } else {
+          reject(outcome.error)
+        }
+      }
+      const onAbort = (): void => {
+        finish({
+          error: controller.signal.reason instanceof Error
+            ? controller.signal.reason
+            : new RelayRuntimeDisposedError(),
+        })
+      }
       const timer = setTimeout(() => {
-        reject(new RelayTimeoutError(participantId, timeoutMs))
+        controller.abort(new RelayTimeoutError(participantId, timeoutMs))
       }, timeoutMs)
 
-      state.executor.runTurn(input).then(
-        (result) => {
-          clearTimeout(timer)
-          resolve(result)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error)
-        },
-      )
+      controller.signal.addEventListener('abort', onAbort, { once: true })
+      try {
+        const turn = state.executor.runTurn(input, controller.signal)
+        void turn.then(
+          result => finish({ result }),
+          error => finish({ error }),
+        )
+      } catch (error) {
+        finish({ error })
+      }
     })
   }
 

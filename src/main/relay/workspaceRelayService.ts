@@ -454,9 +454,12 @@ export class WorkspaceRelayService {
     const executor = this.dependencies.createExecutor(participant, request)
     this.assertActive(guard)
     return {
-      runTurn: async (input: RelayTurnInput): Promise<string> => {
+      runTurn: async (
+        input: RelayTurnInput,
+        signal?: AbortSignal,
+      ): Promise<string> => {
         return this.awaitGuarded(
-          () => executor.runTurn(input),
+          () => executor.runTurn(input, signal),
           guard,
         )
       },

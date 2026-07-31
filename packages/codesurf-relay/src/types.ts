@@ -193,5 +193,5 @@ export interface RelayAgentTurnOutput {
 }
 
 export interface RelayAgentExecutor {
-  runTurn(input: RelayTurnInput): Promise<string>
+  runTurn(input: RelayTurnInput, signal?: AbortSignal): Promise<string>
 }

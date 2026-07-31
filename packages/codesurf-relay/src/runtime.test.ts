@@ -241,6 +241,58 @@ describe('runtime', () => {
       runtime.destroy()
     })
 
+    it('aborts an active executor turn when the runtime is destroyed', async () => {
+      let markTurnEntered!: () => void
+      const turnEntered = new Promise<void>(resolve => {
+        markTurnEntered = resolve
+      })
+      let receivedSignal: AbortSignal | undefined
+      const blockingExecutor: RelayAgentExecutor = {
+        runTurn: vi.fn().mockImplementation((
+          _input: RelayTurnInput,
+          signal?: AbortSignal,
+        ) => {
+          receivedSignal = signal
+          markTurnEntered()
+          return new Promise<string>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              reject(signal.reason)
+            }, { once: true })
+          })
+        }),
+      }
+      const runtime = new RelayRuntime(mockRelay, {
+        executorFactory: () => blockingExecutor,
+      })
+
+      vi.mocked(mockRelay.getParticipant).mockResolvedValue({
+        id: 'agent-active',
+        name: 'Active Agent',
+        kind: 'agent',
+        status: 'spawning',
+        channels: [],
+      })
+      vi.mocked(mockRelay.listUnreadDirectMessages).mockResolvedValue([])
+      vi.mocked(mockRelay.listUnreadChannelMessages).mockResolvedValue([])
+      vi.mocked(mockRelay.analyzeRelationships).mockResolvedValue([])
+
+      const spawning = runtime.spawn({
+        id: 'agent-active',
+        name: 'Active Agent',
+        task: 'Keep working until cancelled',
+      })
+      await turnEntered
+      runtime.destroy()
+
+      await expect(spawning).rejects.toBeInstanceOf(
+        RelayRuntimeDisposedError,
+      )
+      expect(receivedSignal?.aborted).toBe(true)
+      expect(receivedSignal?.reason).toBeInstanceOf(
+        RelayRuntimeDisposedError,
+      )
+    })
+
     it('should timeout long-running agent turns', async () => {
       const slowExecutor: RelayAgentExecutor = {
         runTurn: vi.fn().mockImplementation(() => 
