@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createDaemonClient } from '../../packages/codesurf-daemon/src/client.ts'
+import { createDaemonClient } from '@codesurf/daemon/client'
 
 function makeClient(calls) {
   return createDaemonClient({

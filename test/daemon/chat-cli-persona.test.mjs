@@ -13,11 +13,11 @@ import {
   parseChatArgs,
   resolveChatArgs,
   buildStartRequest,
-} from '../../packages/codesurf-daemon/src/chat-cli.ts'
+} from '@codesurf/daemon/chat-cli'
 import {
   upsertChatCliSession,
   chatCliSessionKey,
-} from '../../packages/codesurf-daemon/src/chat-session-store.ts'
+} from '@codesurf/daemon/chat-session-store'
 
 async function makeHomeDir() {
   return await mkdtempP(join(tmpdir(), 'chat-cli-persona-'))

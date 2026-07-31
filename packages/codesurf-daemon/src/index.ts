@@ -4,7 +4,7 @@ export {
   type DaemonManager,
   type DaemonManagerConfig,
   type DaemonStatusInfo,
-} from './manager'
+} from './manager.js'
 
 export {
   createDaemonClient,
@@ -12,12 +12,12 @@ export {
   type DaemonClientHooks,
   type RequestOptions,
   type StreamJobEventsOptions,
-} from './client'
+} from './client.js'
 
 export {
   parseSseJsonBuffer,
   type ParsedSseJsonBuffer,
-} from './sse'
+} from './sse.js'
 
 export {
   chatCliSessionKey,
@@ -31,14 +31,14 @@ export {
   type ChatCliSession,
   type ChatCliSessionIdentity,
   type ChatCliSessionStore,
-} from './chat-session-store'
+} from './chat-session-store.js'
 
 export {
   CODESURF_HOME,
   CODESURF_HOME_DIRNAME,
   DAEMON_PACKAGE_VERSION,
   defaultCodesurfHome,
-} from './paths'
+} from './paths.js'
 
 export type {
   AggregatedSessionEntry,
@@ -69,4 +69,4 @@ export type {
   SessionScope,
   SessionSource,
   Workspace,
-} from './types'
+} from './types.js'

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseSseJsonBuffer } from '../../packages/codesurf-daemon/src/sse.ts'
+import { parseSseJsonBuffer } from '@codesurf/daemon/sse'
 
 test('SSE parser preserves existing daemon chat data-line behavior', () => {
   const input = [

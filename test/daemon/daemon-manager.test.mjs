@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { createDaemonManager } from '../../packages/codesurf-daemon/src/manager.ts'
+import { createDaemonManager } from '@codesurf/daemon/manager'
 
 async function makeManagerFixture(options = {}) {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-daemon-manager-'))

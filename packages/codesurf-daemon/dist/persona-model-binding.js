@@ -12,42 +12,29 @@
 // `defaultBinding`; the user's explicit pick always overrides it. model is NOT a
 // security boundary — this never touches the authoritative tools/permission
 // resolver, which stays fail-closed and model-free.
-
-export interface PersonaModelSeed {
-  /** Provider id to seed, if the binding specifies one. */
-  provider?: string
-  /** Model id to seed, if the binding specifies one. */
-  model?: string
+function cleanField(value) {
+    if (typeof value !== 'string')
+        return undefined;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
 }
-
-/** Minimal persona shape this resolver needs (a soft, optional binding). */
-export interface PersonaBindingLike {
-  provider?: string
-  model?: string
-}
-export interface PersonaLike {
-  defaultBinding?: PersonaBindingLike
-}
-
-function cleanField(value: string | undefined): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const trimmed = value.trim()
-  return trimmed.length > 0 ? trimmed : undefined
-}
-
 /**
  * Resolve the SOFT model seed for a persona (precedence layer 2). Returns null
  * when the persona carries no usable soft default, so the caller leaves the
  * composer/provider untouched (preserving the user's current/saved selection).
  */
-export function resolvePersonaModelSeed(persona: PersonaLike | null | undefined): PersonaModelSeed | null {
-  const binding = persona?.defaultBinding
-  if (!binding) return null
-  const provider = cleanField(binding.provider)
-  const model = cleanField(binding.model)
-  if (!provider && !model) return null
-  const seed: PersonaModelSeed = {}
-  if (provider) seed.provider = provider
-  if (model) seed.model = model
-  return seed
+export function resolvePersonaModelSeed(persona) {
+    const binding = persona?.defaultBinding;
+    if (!binding)
+        return null;
+    const provider = cleanField(binding.provider);
+    const model = cleanField(binding.model);
+    if (!provider && !model)
+        return null;
+    const seed = {};
+    if (provider)
+        seed.provider = provider;
+    if (model)
+        seed.model = model;
+    return seed;
 }

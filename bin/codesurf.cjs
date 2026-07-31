@@ -495,7 +495,7 @@ function getDaemonPackageVersion() {
 }
 
 async function handleChatCommand(argv) {
-  const cliPath = path.join(APP_DIR, 'packages', 'codesurf-daemon', 'src', 'chat-cli.ts')
+  const cliPath = path.join(APP_DIR, 'packages', 'codesurf-daemon', 'dist', 'chat-cli.js')
   const { runCodesurfChatCli } = await import(pathToFileURL(cliPath).href)
   return await runCodesurfChatCli(argv, {
     appDir: APP_DIR,

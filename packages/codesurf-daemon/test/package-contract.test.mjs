@@ -28,7 +28,7 @@ test('daemon declares the Node 22 runtime floor required by its harness dependen
   const daemonPackage = await readJson(resolve(DAEMON_DIR, 'package.json'))
   const daemonLock = await readJson(resolve(DAEMON_DIR, 'package-lock.json'))
 
-  assert.equal(daemonPackage.engines?.node, '>=22')
+  assert.equal(daemonPackage.engines?.node, '>=22.12.0')
   assert.equal(daemonLock.packages?.['']?.engines?.node, daemonPackage.engines.node)
 
   for (const dependency of Object.keys(daemonPackage.dependencies).filter(name => name.startsWith('@ai-sdk/harness'))) {

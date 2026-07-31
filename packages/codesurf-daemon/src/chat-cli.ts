@@ -5,22 +5,22 @@ import { fileURLToPath } from 'node:url'
 import {
   createDaemonClient,
   type DaemonClient,
-} from './client.ts'
+} from './client.js'
 import {
   createDaemonManager,
   resolveDaemonScriptFromCandidates,
-} from './manager.ts'
+} from './manager.js'
 import {
   DAEMON_PACKAGE_VERSION,
   defaultCodesurfHome,
-} from './paths.ts'
+} from './paths.js'
 import type {
   DaemonChatJobEvent,
   DaemonChatJobRequest,
   DaemonChatJobState,
   DaemonPersona,
   DaemonToolPermissionDecision,
-} from './types.ts'
+} from './types.js'
 import {
   clearChatCliSession,
   readChatCliSession,
@@ -28,11 +28,11 @@ import {
   upsertChatCliSession,
   type ChatCliSession,
   type ChatCliSessionIdentity,
-} from './chat-session-store.ts'
+} from './chat-session-store.js'
 import {
   resolvePersonaModelSeed,
   type PersonaModelSeed,
-} from './persona-model-binding.ts'
+} from './persona-model-binding.js'
 
 interface ChatCliRunOptions {
   appDir?: string

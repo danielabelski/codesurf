@@ -1,4 +1,4 @@
-import type { DaemonStatusInfo } from './manager'
+import type { DaemonStatusInfo } from './manager.js'
 import type {
   AggregatedSessionEntry,
   DaemonChatJobEvent,
@@ -18,8 +18,8 @@ import type {
   ExecutionHostRecord,
   ProjectRecord,
   Workspace,
-} from './types'
-import { parseSseJsonBuffer } from './sse.ts'
+} from './types.js'
+import { parseSseJsonBuffer } from './sse.js'
 
 export interface DaemonClientHooks {
   /**
