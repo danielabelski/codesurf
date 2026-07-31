@@ -16,6 +16,17 @@ export interface ActivityRecord {
   updatedAt: number
 }
 
+export interface ActivityUpsertInput {
+  id?: string
+  tileId: string
+  type: ActivityType
+  status?: ActivityStatus
+  title: string
+  detail?: string
+  metadata?: Record<string, unknown>
+  agent?: string
+}
+
 /** Query filter for activity:query IPC */
 export interface ActivityQuery {
   workspaceId: string
