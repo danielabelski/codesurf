@@ -21,6 +21,7 @@ import {
   ChatPolicyError,
   assertProviderPersonaEnforceable,
   bindChatRequestToWorkspace,
+  stripUntrustedPrivilegedChatContext,
 } from '../dist/chat-policy.js'
 
 const HOME = process.env.CODESURF_HOME || join(homedir(), '.codesurf')
@@ -2305,38 +2306,26 @@ function getMaterializedWorkspace(workspaceId) {
 }
 
 async function canonicalizeDaemonChatRequest(input) {
-  let request = { ...input, agentMode: null }
+  // These fields become higher-precedence provider prompts or select the
+  // execution root. The browser-facing route must never accept preassembled
+  // copies from its caller; rebuild them below from the registered workspace.
+  const requestInput = stripUntrustedPrivilegedChatContext(input)
+  let request = { ...requestInput, agentMode: null }
   const workspaceId = typeof request.workspaceId === 'string' ? request.workspaceId.trim() : ''
-  if (request.workspaceId != null && !workspaceId) {
+  if (!workspaceId) {
     throw new ChatPolicyError('CHAT_WORKSPACE_REQUIRED', 'workspaceId must be a non-empty string')
   }
 
-  if (workspaceId) {
-    const state = readWorkspaceState()
-    const workspace = state.workspaces.find(entry => entry.id === workspaceId)
-    if (!workspace) {
-      throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${workspaceId}`)
-    }
-    const materialized = materializeWorkspace(workspace, state.projects)
-    request = await bindChatRequestToWorkspace(request, {
-      id: workspaceId,
-      path: materialized.path,
-    })
-  } else {
-    const workspaceDir = normalizePath(request.workspaceDir)
-    const projectContext = request.projectContext && typeof request.projectContext === 'object' && !Array.isArray(request.projectContext)
-      ? request.projectContext
-      : {}
-    request = {
-      ...request,
-      workspaceDir: workspaceDir || null,
-      projectContext: {
-        ...projectContext,
-        ...(workspaceDir ? { workspaceDir } : {}),
-      },
-      agentMode: null,
-    }
+  const state = readWorkspaceState()
+  const workspace = state.workspaces.find(entry => entry.id === workspaceId)
+  if (!workspace) {
+    throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${workspaceId}`)
   }
+  const materialized = materializeWorkspace(workspace, state.projects)
+  request = await bindChatRequestToWorkspace(request, {
+    id: workspaceId,
+    path: materialized.path,
+  })
 
   const authoritative = await resolveAuthoritativeAgentMode({
     agentId: request.agentId,

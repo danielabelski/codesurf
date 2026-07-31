@@ -51,3 +51,4 @@ export declare function bindChatRequestToWorkspace<T extends Record<string, unkn
 }>;
 export declare function assertProviderPersonaEnforceable(providerValue: unknown, persona: PolicyPersona | null): void;
 export declare function codexExecPermissionArgs(modeValue: unknown): string[];
+export declare function stripUntrustedPrivilegedChatContext<T extends Record<string, unknown>>(request: T): T;

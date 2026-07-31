@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, open, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 export const MAX_PERSONA_DOCUMENT_BYTES = 256 * 1024;
 export const MAX_PERSONA_COUNT = 128;
@@ -365,9 +365,16 @@ export async function bindChatRequestToWorkspace(request, workspace) {
     if (requestedId !== workspace.id) {
         throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${requestedId}`);
     }
+    const registeredPath = String(workspace.path ?? '').trim();
+    if (!registeredPath) {
+        throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace ${requestedId} has no registered root`);
+    }
     let canonicalRoot;
     try {
-        canonicalRoot = await realpath(resolve(String(workspace.path ?? '').trim()));
+        canonicalRoot = await realpath(resolve(registeredPath));
+        if (!(await stat(canonicalRoot)).isDirectory()) {
+            throw new Error('registered workspace root is not a directory');
+        }
     }
     catch {
         throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace ${requestedId} has no registered root`);
@@ -419,4 +426,18 @@ export function codexExecPermissionArgs(modeValue) {
     if (mode === 'read-only')
         return ['--sandbox', 'read-only', '-c', 'approval_policy=on-request'];
     return ['--sandbox', 'workspace-write', '-c', 'approval_policy=on-request'];
+}
+const PRIVILEGED_CHAT_CONTEXT_FIELDS = [
+    'agentMode',
+    'projectContext',
+    'memoryPrompt',
+    'contextBuckets',
+    'skillsPrompt',
+    'skillsSummary',
+];
+export function stripUntrustedPrivilegedChatContext(request) {
+    const stripped = { ...request };
+    for (const field of PRIVILEGED_CHAT_CONTEXT_FIELDS)
+        delete stripped[field];
+    return stripped;
 }

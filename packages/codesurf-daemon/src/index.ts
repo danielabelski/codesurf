@@ -56,6 +56,7 @@ export {
   listAuthoritativePersonas,
   overlayAuthoritativePersonas,
   resolveAuthoritativePersona,
+  stripUntrustedPrivilegedChatContext,
   type ChatPolicyErrorCode,
   type PolicyPersona,
   type PolicyPersonaBinding,

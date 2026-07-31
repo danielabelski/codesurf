@@ -2,6 +2,7 @@ import {
   ChatPolicyError,
   assertProviderPersonaEnforceable,
   bindChatRequestToWorkspace,
+  stripUntrustedPrivilegedChatContext,
 } from '@codesurf/daemon/chat-policy'
 import type { Persona } from '../../shared/types'
 import type { ChatRequest } from './types'
@@ -23,8 +24,11 @@ export async function canonicalizeElectronChatRequest(
   if (!workspaceRoot) {
     throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${workspaceId}`)
   }
-  return await bindChatRequestToWorkspace(
+  const stripped = stripUntrustedPrivilegedChatContext(
     request as unknown as Record<string, unknown>,
+  )
+  return await bindChatRequestToWorkspace(
+    stripped,
     { id: workspaceId, path: workspaceRoot },
   ) as unknown as ChatRequest
 }

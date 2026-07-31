@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { lstat, open, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export const MAX_PERSONA_DOCUMENT_BYTES = 256 * 1024
@@ -405,9 +405,16 @@ export async function bindChatRequestToWorkspace<T extends Record<string, unknow
   if (requestedId !== workspace.id) {
     throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace not found: ${requestedId}`)
   }
+  const registeredPath = String(workspace.path ?? '').trim()
+  if (!registeredPath) {
+    throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace ${requestedId} has no registered root`)
+  }
   let canonicalRoot: string
   try {
-    canonicalRoot = await realpath(resolve(String(workspace.path ?? '').trim()))
+    canonicalRoot = await realpath(resolve(registeredPath))
+    if (!(await stat(canonicalRoot)).isDirectory()) {
+      throw new Error('registered workspace root is not a directory')
+    }
   } catch {
     throw new ChatPolicyError('CHAT_WORKSPACE_UNKNOWN', `Workspace ${requestedId} has no registered root`)
   }
@@ -456,4 +463,19 @@ export function codexExecPermissionArgs(modeValue: unknown): string[] {
   if (mode === 'auto') return ['--sandbox', 'workspace-write', '-c', 'approval_policy=on-failure']
   if (mode === 'read-only') return ['--sandbox', 'read-only', '-c', 'approval_policy=on-request']
   return ['--sandbox', 'workspace-write', '-c', 'approval_policy=on-request']
+}
+
+const PRIVILEGED_CHAT_CONTEXT_FIELDS = [
+  'agentMode',
+  'projectContext',
+  'memoryPrompt',
+  'contextBuckets',
+  'skillsPrompt',
+  'skillsSummary',
+] as const
+
+export function stripUntrustedPrivilegedChatContext<T extends Record<string, unknown>>(request: T): T {
+  const stripped = { ...request }
+  for (const field of PRIVILEGED_CHAT_CONTEXT_FIELDS) delete stripped[field]
+  return stripped
 }
