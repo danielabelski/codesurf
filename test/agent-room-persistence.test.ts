@@ -239,6 +239,22 @@ describe('NodeAgentRoomFileAdapter', () => {
     assert.equal(await readFile(outsideFile, 'utf8'), 'sentinel')
   })
 
+  test('rejects a symlinked final write target without modifying its referent', async () => {
+    const root = await makeTempRoot('write-target-root')
+    const outside = await makeTempRoot('write-target-outside')
+    const rooms = join(root, 'rooms')
+    const outsideFile = join(outside, 'outside.json')
+    const target = join(rooms, 'room-a.json')
+    await mkdir(rooms, { recursive: true })
+    await writeFile(outsideFile, 'sentinel')
+    await symlink(outsideFile, target)
+
+    const adapter = new NodeAgentRoomFileAdapter(root)
+    await assert.rejects(adapter.writeFileAtomic(target, 'replacement'), /symbolic link/i)
+    assert.equal(await readFile(outsideFile, 'utf8'), 'sentinel')
+    assert.equal((await lstat(target)).isSymbolicLink(), true)
+  })
+
   test('rejects a symlinked ancestor when deleting and leaves outside data untouched', async () => {
     const root = await makeTempRoot('delete-ancestor-root')
     const outside = await makeTempRoot('delete-ancestor-outside')

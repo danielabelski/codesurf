@@ -56,6 +56,11 @@ export interface AgentRoomFileAdapter {
   removeOwnedFile(path: string, options?: { pruneEmptyParent?: boolean }): Promise<void>
 }
 
+/**
+ * Rejects symlinks before and after filesystem mutations. Node does not expose
+ * openat/unlinkat, so same-user directory swaps remain a narrow TOCTOU window;
+ * the user-owned CODESURF_HOME is therefore the trust anchor.
+ */
 export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
   readonly root: string
   readonly io: AgentRoomFileIO
@@ -188,8 +193,6 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     const target = assertInsideRoot(this.root, path)
     const directory = dirname(target)
     if (!await this.validateExistingSafeDirectory(directory)) return
-    // Node does not expose openat/unlinkat here, so a same-user directory swap can
-    // still race this final check. CODESURF_HOME remains the user-owned trust anchor.
     const targetStat = await this.readStat(target)
     if (!targetStat) return
     this.assertSafeStat(target, targetStat, 'file')

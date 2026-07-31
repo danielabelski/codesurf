@@ -102,7 +102,7 @@ export function boundMemberFiles(value: unknown): string[] {
   const limit = value.length > MAX_MEMBER_FILES
     ? MAX_MEMBER_FILES - 1
     : MAX_MEMBER_FILES
-  for (const item of value) {
+  for (const item of value.slice(0, MAX_MEMBER_FILES)) {
     if (typeof item !== 'string') continue
     result.push(truncateUtf8(item, MAX_MEMBER_FILE_BYTES))
     if (result.length >= limit) break
@@ -119,7 +119,7 @@ export function boundTargetTileIds(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   const result: string[] = []
   const seen = new Set<string>()
-  for (const item of value) {
+  for (const item of value.slice(0, MAX_EVENT_TARGETS)) {
     if (!isValidAgentRoomId(item) || seen.has(item)) continue
     seen.add(item)
     result.push(item)

@@ -2,13 +2,17 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
   MAX_EVENT_TEXT_BYTES,
+  MAX_EVENT_TARGETS,
+  MAX_MEMBER_FILES,
   MAX_METADATA_ARRAY_ITEMS,
   MAX_METADATA_BYTES,
   MAX_RETAINED_EVENT_BYTES,
   MAX_TILE_ID_BYTES,
   assertValidAgentRoomId,
   boundEventText,
+  boundMemberFiles,
   boundMetadata,
+  boundTargetTileIds,
   capRetainedEvents,
   isValidAgentRoomId,
   retainedEventBytes,
@@ -68,6 +72,17 @@ describe('agent-room validation primitives', () => {
       },
     })
     assert.match(JSON.stringify(boundMetadata(hostile)), /metadata access failed/i)
+  })
+
+  test('bounds target and file array inspection to the retained prefix', () => {
+    assert.deepEqual(boundTargetTileIds([
+      ...Array.from({ length: MAX_EVENT_TARGETS }, () => '../invalid'),
+      'valid-beyond-limit',
+    ]), [])
+    assert.deepEqual(boundMemberFiles([
+      ...Array.from({ length: MAX_MEMBER_FILES }, () => null),
+      'valid-beyond-limit',
+    ]), ['[truncated]'])
   })
 
   test('caps retained room bytes using newest events', () => {
