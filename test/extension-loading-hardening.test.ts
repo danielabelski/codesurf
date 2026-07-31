@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build, type Plugin } from 'esbuild'
+import { MAX_EXTENSION_TEXT_RESOURCE_BYTES } from '../src/main/extensions/resource-path.ts'
 
 const projectRoot = resolve(process.cwd())
 const projectRequire = createRequire(join(projectRoot, 'package.json'))
@@ -415,7 +416,7 @@ test('registry exposes declared media and revokes sensitive consent on disable o
     tier: 'safe',
     capabilities: [
       { name: 'network' },
-      { name: 'microphone' },
+      { name: 'microphone', reason: 'Join room audio' },
       { name: 'display-capture' },
     ],
     contributes: {
@@ -438,6 +439,9 @@ test('registry exposes declared media and revokes sensitive consent on disable o
     name: 'Media Extension',
     enabled: true,
     declaredMedia: ['microphone', 'display-capture'],
+    declaredMediaReasons: {
+      microphone: 'Join room audio',
+    },
   })
   assert.match(
     registry.getExtensionMediaPermission('media-extension')?.identity ?? '',
@@ -474,6 +478,89 @@ test('registry exposes declared media and revokes sensitive consent on disable o
     true,
     'a disappeared extension must revoke persisted sensitive consent',
   )
+})
+
+test('attested media surfaces revoke changed content and stale requests cannot revoke a rescan', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-sensitive-surface-'))
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'attested-surface')
+  const entryPath = join(extensionDir, 'surface.html')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'attested-surface',
+    name: 'Attested Surface',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+    contributes: {
+      tiles: [{ type: 'surface', label: 'Surface', entry: 'surface.html' }],
+    },
+  }))
+  await writeFile(entryPath, 'trusted')
+
+  const revoked: string[] = []
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({
+    bundledDirs: [bundledDir],
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+  await registry.rescan()
+  const tileType = registry.get('attested-surface')
+    ?.manifest.contributes?.tiles?.[0]?.type
+  assert.ok(tileType)
+  assert.equal(
+    await registry.getSurfaceHtml('attested-surface', 'tile', tileType),
+    'trusted',
+  )
+  const staleAttestation = registry.get('attested-surface')?.mediaAttestation
+  assert.ok(staleAttestation)
+
+  await writeFile(entryPath, 'changed')
+  assert.equal(
+    await registry.getSurfaceHtml('attested-surface', 'tile', tileType),
+    null,
+  )
+  assert.deepEqual(revoked, ['attested-surface'])
+  assert.equal(registry.getExtensionMediaPermission('attested-surface'), undefined)
+  assert.equal(registry.get('attested-surface')?.mediaAttestation, null)
+
+  await registry.rescan()
+  const currentAttestation = registry.get('attested-surface')?.mediaAttestation
+  assert.ok(currentAttestation)
+  assert.notEqual(currentAttestation, staleAttestation)
+  revoked.length = 0
+  assert.equal(
+    await registry.invalidateExtensionMediaAttestation(
+      'attested-surface',
+      staleAttestation,
+    ),
+    false,
+  )
+  assert.deepEqual(revoked, [])
+  assert.equal(
+    registry.getExtensionMediaPermission('attested-surface')?.identity,
+    currentAttestation.identity,
+  )
+
+  await writeFile(
+    entryPath,
+    Buffer.alloc(MAX_EXTENSION_TEXT_RESOURCE_BYTES + 1),
+  )
+  await registry.rescan()
+  revoked.length = 0
+  const oversizedAttestation = registry.get('attested-surface')?.mediaAttestation
+  assert.ok(oversizedAttestation)
+  assert.equal(
+    await registry.getSurfaceHtml('attested-surface', 'tile', tileType),
+    null,
+  )
+  assert.equal(
+    registry.get('attested-surface')?.mediaAttestation,
+    oversizedAttestation,
+  )
+  assert.deepEqual(revoked, [])
 })
 
 test('media identity follows effective precedence and changes on update or reinstall', async () => {
@@ -870,6 +957,193 @@ test('enabling a disabled extension fails closed when its install root was repla
     'stale enable must fail before consent/grant mutation',
   )
   await assert.rejects(fsPromises.stat(marker), { code: 'ENOENT' })
+})
+
+test('enable rolls back when the install changes during permission persistence', { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-enable-persist-swap-'))
+  const home = join(temp, 'home')
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'persist-swap')
+  const originalDir = `${extensionDir}-original`
+  const marker = join(temp, 'replacement-activated')
+  const manifest = JSON.stringify({
+    id: 'persist-swap',
+    name: 'Persist Swap',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+    capabilities: [{ name: 'microphone' }],
+  })
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), manifest)
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+
+  const revoked: string[] = []
+  const { ExtensionRegistry } = await loadRegistryModule(home)
+  const registry = new ExtensionRegistry({
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+  await registry.rescan(workspace)
+  const originalWriteFile = fsPromises.writeFile
+  let swapped = false
+  fsPromises.writeFile = (async (...args: Parameters<typeof fsPromises.writeFile>) => {
+    const result = await originalWriteFile(...args)
+    if (!swapped && String(args[0]).endsWith('disabled-extensions.json')) {
+      swapped = true
+      await fsPromises.rename(extensionDir, originalDir)
+      await fsPromises.mkdir(extensionDir, { recursive: true })
+      await originalWriteFile(join(extensionDir, 'extension.json'), manifest)
+      await originalWriteFile(
+        join(extensionDir, 'main.cjs'),
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'activated')`,
+      )
+    }
+    return result
+  }) as typeof fsPromises.writeFile
+  try {
+    await assert.rejects(
+      registry.enable('persist-swap'),
+      /Extension root changed while enabling; rescan required/,
+    )
+  } finally {
+    fsPromises.writeFile = originalWriteFile
+  }
+
+  const extension = registry.get('persist-swap')
+  assert.equal(swapped, true)
+  assert.equal(extension?.manifest._enabled, false)
+  assert.equal(extension?.mediaIdentity, null)
+  assert.equal(extension?.mediaAttestation, null)
+  assert.equal(extension?.deactivate, undefined)
+  assert.deepEqual(
+    registry.getMCPTools().filter((tool: { extId: string }) => tool.extId === 'persist-swap'),
+    [],
+  )
+  await assert.rejects(fsPromises.stat(marker), { code: 'ENOENT' })
+  assert.equal(revoked.filter(id => id === 'persist-swap').length >= 2, true)
+
+  const disabled = JSON.parse(
+    await fsPromises.readFile(join(home, 'disabled-extensions.json'), 'utf8'),
+  ) as string[]
+  assert.equal(disabled.includes('persist-swap'), false)
+  const enabledCatalog = JSON.parse(
+    await fsPromises.readFile(join(home, 'enabled-catalog-extensions.json'), 'utf8'),
+  ) as string[]
+  assert.equal(enabledCatalog.includes('persist-swap'), false)
+  const grants = JSON.parse(
+    await fsPromises.readFile(join(home, 'plugin-capability-grants.json'), 'utf8'),
+  ) as Record<string, string[]>
+  assert.equal(Object.hasOwn(grants, 'persist-swap'), false)
+})
+
+test('failed power activation removes partial tools and restores disabled state', { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-enable-activation-fail-'))
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(workspace, '.codesurf', 'extensions', 'activation-fail')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'activation-fail',
+    name: 'Activation Fail',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+    capabilities: [{ name: 'microphone' }],
+  }))
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => () => {}')
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  let observedPartialTool = false
+  let registry: InstanceType<typeof ExtensionRegistry>
+  registry = new ExtensionRegistry({
+    activatePower: async (
+      _manifest: unknown,
+      ctx: {
+        mcp: {
+          registerTool(tool: {
+            name: string
+            description: string
+            inputSchema: Record<string, unknown>
+            handler: () => Promise<string>
+          }): void
+        }
+      },
+    ) => {
+      ctx.mcp.registerTool({
+        name: 'leaked',
+        description: 'must be rolled back',
+        inputSchema: {},
+        handler: async () => 'never',
+      })
+      observedPartialTool = registry.getMCPTools().some(
+        (tool: { extId: string }) => tool.extId === 'activation-fail',
+      )
+      throw new Error('activation failed after registering')
+    },
+  })
+  await registry.rescan(workspace)
+  await assert.rejects(
+    registry.enable('activation-fail'),
+    /activation failed after registering/,
+  )
+  const extension = registry.get('activation-fail')
+  assert.equal(observedPartialTool, true)
+  assert.equal(extension?.manifest._enabled, false)
+  assert.equal(extension?.mediaIdentity, null)
+  assert.equal(extension?.mediaAttestation, null)
+  assert.equal(extension?.deactivate, undefined)
+  assert.deepEqual(
+    registry.getMCPTools().filter((tool: { extId: string }) => tool.extId === 'activation-fail'),
+    [],
+  )
+})
+
+test('idempotent enable persistence failure preserves existing media consent identity', { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-enable-idempotent-'))
+  const bundledDir = join(temp, 'bundled')
+  const extensionDir = join(bundledDir, 'enabled-media')
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), JSON.stringify({
+    id: 'enabled-media',
+    name: 'Enabled Media',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+  }))
+  const revoked: string[] = []
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({
+    bundledDirs: [bundledDir],
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+  await registry.rescan()
+  const identity = registry.get('enabled-media')?.mediaIdentity
+  const attestation = registry.get('enabled-media')?.mediaAttestation
+  assert.ok(identity)
+  assert.ok(attestation)
+
+  const originalWriteFile = fsPromises.writeFile
+  fsPromises.writeFile = (async (...args: Parameters<typeof fsPromises.writeFile>) => {
+    if (String(args[0]).endsWith('plugin-capability-grants.json')) {
+      throw new Error('simulated persistence failure')
+    }
+    return originalWriteFile(...args)
+  }) as typeof fsPromises.writeFile
+  try {
+    await assert.rejects(
+      registry.enable('enabled-media'),
+      /simulated persistence failure/,
+    )
+  } finally {
+    fsPromises.writeFile = originalWriteFile
+  }
+  assert.deepEqual(revoked, [])
+  assert.equal(registry.get('enabled-media')?.manifest._enabled, true)
+  assert.equal(registry.get('enabled-media')?.mediaIdentity, identity)
+  assert.equal(registry.get('enabled-media')?.mediaAttestation, attestation)
 })
 
 test('a losing catalog collision is rejected before recursive identity hashing', async () => {
