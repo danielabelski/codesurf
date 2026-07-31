@@ -1,5 +1,5 @@
-import { readFileSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { promises as fsPromises, readFileSync, realpathSync } from 'node:fs'
+import { mkdir, mkdtemp, open, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
@@ -348,7 +348,7 @@ test('registered IPC keeps sidebar and executable collision precedence aligned',
     String(await tileEntry({}, 'collision-extension', 'ext:shared')),
     /^codesurf-ext:\/\/collision-extension\/workspace\.html/,
   )
-  assert.equal(registry.get('collision-extension')?.manifest._path, resolve(workspaceDir))
+  assert.equal(registry.get('collision-extension')?.manifest._path, realpathSync(workspaceDir))
 
   const globalSidebar = await listSidebar({}, null) as {
     entries: Array<{ name: string }>
@@ -365,7 +365,7 @@ test('registered IPC keeps sidebar and executable collision precedence aligned',
     String(await tileEntry({}, 'collision-extension', 'ext:shared')),
     /^codesurf-ext:\/\/collision-extension\/global\.html/,
   )
-  assert.equal(registry.get('collision-extension')?.manifest._path, resolve(globalDir))
+  assert.equal(registry.get('collision-extension')?.manifest._path, realpathSync(globalDir))
 })
 
 test('registry transition queue preserves request order and recovers after rejection', async () => {
@@ -551,5 +551,357 @@ test('media identity follows effective precedence and changes on update or reins
   assert.deepEqual(
     revoked,
     ['media-extension', 'media-extension', 'media-extension', 'media-extension'],
+  )
+})
+
+test('registry rejects native and adapted root or manifest symlinks', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-root-links-'))
+  const bundledDir = join(temp, 'bundled')
+  const externalRoot = join(temp, 'external-extension')
+  const nativeRootLink = join(bundledDir, 'native-root-link')
+  const manifestLinkRoot = join(bundledDir, 'manifest-link')
+  const externalManifest = join(temp, 'external-manifest.json')
+  await mkdir(externalRoot, { recursive: true })
+  await mkdir(manifestLinkRoot, { recursive: true })
+  const mediaManifest = JSON.stringify({
+    id: 'linked-media',
+    name: 'Linked Media',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+  })
+  await writeFile(join(externalRoot, 'extension.json'), mediaManifest)
+  await writeFile(externalManifest, mediaManifest)
+  await symlink(externalRoot, nativeRootLink)
+  await symlink(externalManifest, join(manifestLinkRoot, 'extension.json'))
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await registry.rescan()
+  assert.equal(registry.get('linked-media'), undefined)
+
+  const adaptedRootLink = join(temp, 'adapted-root-link')
+  await symlink(externalRoot, adaptedRootLink)
+  await assert.rejects(
+    registry.loadFromManifest({
+      id: 'adapted-linked-media',
+      name: 'Adapted Linked Media',
+      version: '1.0.0',
+      tier: 'safe',
+      capabilities: [{ name: 'microphone' }],
+      _path: adaptedRootLink,
+    }),
+    /Extension root must be a regular directory/,
+  )
+})
+
+test('workspace extension scan roots cannot escape through a symlinked ancestor', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-workspace-scan-root-'))
+  const workspace = join(temp, 'workspace')
+  const externalExtensions = join(temp, 'external-extensions')
+  const externalExtension = join(externalExtensions, 'outside-media')
+  await mkdir(join(workspace, '.codesurf'), { recursive: true })
+  await mkdir(externalExtension, { recursive: true })
+  await writeFile(join(externalExtension, 'extension.json'), JSON.stringify({
+    id: 'outside-media',
+    name: 'Outside Media',
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+  }))
+  await symlink(externalExtensions, join(workspace, '.codesurf', 'extensions'))
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry()
+  const canonicalExternal = await fsPromises.realpath(externalExtensions)
+  const originalReaddir = fsPromises.readdir
+  let enumeratedExternal = false
+  fsPromises.readdir = (async (...args: Parameters<typeof fsPromises.readdir>) => {
+    const path = String(args[0])
+    if (path === canonicalExternal || path.startsWith(`${canonicalExternal}${sep}`)) {
+      enumeratedExternal = true
+    }
+    return originalReaddir(...args)
+  }) as typeof fsPromises.readdir
+  try {
+    await registry.rescan(workspace)
+    const lightweight = await registry.scanLightweight(workspace)
+    assert.equal(
+      lightweight.some(manifest => manifest.id === 'outside-media'),
+      false,
+    )
+  } finally {
+    fsPromises.readdir = originalReaddir
+  }
+  assert.equal(enumeratedExternal, false)
+  assert.equal(registry.get('outside-media'), undefined)
+})
+
+test('full and lightweight scans reject a workspace scan-root swap before opening external files', async () => {
+  for (const mode of ['full', 'lightweight'] as const) {
+    const temp = await mkdtemp(join(tmpdir(), `codesurf-workspace-scan-swap-${mode}-`))
+    const workspace = join(temp, 'workspace')
+    const scanRoot = join(workspace, '.codesurf', 'extensions')
+    const originalScanRoot = `${scanRoot}-original`
+    const externalExtensions = join(temp, 'external-extensions')
+    const externalExtension = join(externalExtensions, 'outside-media')
+    await mkdir(scanRoot, { recursive: true })
+    await mkdir(externalExtension, { recursive: true })
+    await writeFile(join(externalExtension, 'extension.json'), JSON.stringify({
+      id: 'outside-media',
+      name: 'Outside Media',
+      version: '1.0.0',
+      tier: 'safe',
+      capabilities: [{ name: 'microphone' }],
+    }))
+
+    const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+    const registry = new ExtensionRegistry()
+    const canonicalScanRoot = await fsPromises.realpath(scanRoot)
+    const originalReaddir = fsPromises.readdir
+    const originalOpen = fsPromises.open
+    let releaseReaddir!: () => void
+    let readdirStarted!: () => void
+    let intercepted = false
+    let openedExternal = false
+    const started = new Promise<void>(resolveStarted => { readdirStarted = resolveStarted })
+    const release = new Promise<void>(resolveRelease => { releaseReaddir = resolveRelease })
+    fsPromises.readdir = (async (...args: Parameters<typeof fsPromises.readdir>) => {
+      if (!intercepted && String(args[0]) === canonicalScanRoot) {
+        intercepted = true
+        readdirStarted()
+        await release
+      }
+      return originalReaddir(...args)
+    }) as typeof fsPromises.readdir
+    fsPromises.open = (async (...args: Parameters<typeof fsPromises.open>) => {
+      const path = String(args[0])
+      const replacementCandidate = join(canonicalScanRoot, 'outside-media')
+      if (path === replacementCandidate || path.startsWith(`${replacementCandidate}${sep}`)) {
+        openedExternal = true
+      }
+      return originalOpen(...args)
+    }) as typeof fsPromises.open
+
+    try {
+      const scan = mode === 'full'
+        ? registry.rescan(workspace)
+        : registry.scanLightweight(workspace)
+      await started
+      await fsPromises.rename(scanRoot, originalScanRoot)
+      await fsPromises.rename(externalExtensions, scanRoot)
+      releaseReaddir()
+      await assert.rejects(scan, /scan root changed|Extension root changed/)
+    } finally {
+      fsPromises.readdir = originalReaddir
+      fsPromises.open = originalOpen
+      releaseReaddir?.()
+    }
+    assert.equal(openedExternal, false)
+    assert.equal(registry.get('outside-media'), undefined)
+  }
+})
+
+test('a regular scan-root replacement after the per-entry check cannot activate power code', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-scan-root-power-swap-'))
+  const scanRoot = join(temp, 'bundled')
+  const originalScanRoot = `${scanRoot}-original`
+  const replacementRoot = join(temp, 'replacement')
+  const originalExtension = join(scanRoot, 'power')
+  const replacementExtension = join(replacementRoot, 'power')
+  const marker = join(temp, 'replacement-activated')
+  const manifest = JSON.stringify({
+    id: 'swap-power',
+    name: 'Swap Power',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+  })
+  await mkdir(originalExtension, { recursive: true })
+  await mkdir(replacementExtension, { recursive: true })
+  await writeFile(join(originalExtension, 'extension.json'), manifest)
+  await writeFile(join(originalExtension, 'main.cjs'), 'module.exports.activate = () => {}')
+  await writeFile(join(replacementExtension, 'extension.json'), manifest)
+  await writeFile(
+    join(replacementExtension, 'main.cjs'),
+    `module.exports.activate = () => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'activated')`,
+  )
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({ bundledDirs: [scanRoot] })
+  const canonicalScanRoot = await fsPromises.realpath(scanRoot)
+  const candidatePath = join(canonicalScanRoot, 'power')
+  const originalLstat = fsPromises.lstat
+  let releaseCandidate!: () => void
+  let candidateStarted!: () => void
+  let intercepted = false
+  const started = new Promise<void>(resolveStarted => { candidateStarted = resolveStarted })
+  const release = new Promise<void>(resolveRelease => { releaseCandidate = resolveRelease })
+  fsPromises.lstat = (async (...args: Parameters<typeof fsPromises.lstat>) => {
+    if (!intercepted && String(args[0]) === candidatePath) {
+      intercepted = true
+      candidateStarted()
+      await release
+    }
+    return originalLstat(...args)
+  }) as typeof fsPromises.lstat
+  const priorBrokerMode = process.env.CODESURF_POWER_BROKER
+  process.env.CODESURF_POWER_BROKER = '0'
+  try {
+    const scan = registry.rescan()
+    await started
+    await fsPromises.rename(scanRoot, originalScanRoot)
+    await fsPromises.rename(replacementRoot, scanRoot)
+    releaseCandidate()
+    await assert.rejects(scan, /scan root changed|Extension root changed/)
+  } finally {
+    fsPromises.lstat = originalLstat
+    releaseCandidate?.()
+    if (priorBrokerMode === undefined) delete process.env.CODESURF_POWER_BROKER
+    else process.env.CODESURF_POWER_BROKER = priorBrokerMode
+  }
+  await assert.rejects(fsPromises.stat(marker), { code: 'ENOENT' })
+  assert.equal(registry.get('swap-power'), undefined)
+})
+
+test('non-media and disabled extensions skip recursive identity work until required', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-identity-skip-'))
+  const bundledDir = join(temp, 'bundled')
+  const nonMediaDir = join(bundledDir, 'non-media')
+  const workspace = join(temp, 'workspace')
+  const disabledMediaDir = join(
+    workspace,
+    '.codesurf',
+    'extensions',
+    'disabled-media',
+  )
+  await mkdir(nonMediaDir, { recursive: true })
+  await mkdir(disabledMediaDir, { recursive: true })
+  await writeFile(join(nonMediaDir, 'extension.json'), JSON.stringify({
+    id: 'non-media',
+    name: 'Non Media',
+    version: '1.0.0',
+    tier: 'safe',
+  }))
+  await writeFile(join(disabledMediaDir, 'extension.json'), JSON.stringify({
+    id: 'disabled-media',
+    name: 'Disabled Media',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.js',
+    capabilities: [{ name: 'microphone' }],
+  }))
+  await writeFile(join(disabledMediaDir, 'main.js'), 'export function activate() {}')
+  for (const path of [
+    join(nonMediaDir, 'oversized.bin'),
+    join(disabledMediaDir, 'oversized.bin'),
+  ]) {
+    const handle = await open(path, 'w')
+    await handle.truncate(17 * 1024 * 1024)
+    await handle.close()
+  }
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({ bundledDirs: [bundledDir] })
+  await registry.rescan(workspace)
+  assert.equal(registry.get('non-media')?.mediaIdentity, null)
+  assert.equal(registry.getExtensionMediaPermission('non-media'), undefined)
+  assert.equal(registry.get('disabled-media')?.manifest._enabled, false)
+  assert.equal(registry.get('disabled-media')?.mediaIdentity, null)
+  await assert.rejects(
+    registry.enable('disabled-media'),
+    /file exceeds media identity byte budget/,
+  )
+  assert.equal(registry.get('disabled-media')?.manifest._enabled, false)
+  assert.equal(registry.get('disabled-media')?.mediaIdentity, null)
+})
+
+test('enabling a disabled extension fails closed when its install root was replaced after scan', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-stale-enable-'))
+  const workspace = join(temp, 'workspace')
+  const extensionDir = join(
+    workspace,
+    '.codesurf',
+    'extensions',
+    'stale-media',
+  )
+  const originalDir = `${extensionDir}-original`
+  const marker = join(temp, 'replacement-activated')
+  const manifest = JSON.stringify({
+    id: 'stale-media',
+    name: 'Stale Media',
+    version: '1.0.0',
+    tier: 'power',
+    main: 'main.cjs',
+    capabilities: [{ name: 'microphone' }],
+  })
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), manifest)
+  await writeFile(join(extensionDir, 'main.cjs'), 'module.exports.activate = () => {}')
+
+  const revoked: string[] = []
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({
+    onSensitiveMediaRevoked: async (extensionId: string) => {
+      revoked.push(extensionId)
+    },
+  })
+  await registry.rescan(workspace)
+  assert.equal(registry.get('stale-media')?.manifest._enabled, false)
+  const revocationsBeforeEnable = revoked.length
+
+  await fsPromises.rename(extensionDir, originalDir)
+  await mkdir(extensionDir, { recursive: true })
+  await writeFile(join(extensionDir, 'extension.json'), manifest)
+  await writeFile(
+    join(extensionDir, 'main.cjs'),
+    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'activated')`,
+  )
+
+  await assert.rejects(
+    registry.enable('stale-media'),
+    /Extension root changed after scan; rescan before enabling/,
+  )
+  assert.equal(registry.get('stale-media')?.manifest._enabled, false)
+  assert.equal(registry.get('stale-media')?.mediaIdentity, null)
+  assert.equal(
+    revoked.length,
+    revocationsBeforeEnable,
+    'stale enable must fail before consent/grant mutation',
+  )
+  await assert.rejects(fsPromises.stat(marker), { code: 'ENOENT' })
+})
+
+test('a losing catalog collision is rejected before recursive identity hashing', async () => {
+  const temp = await mkdtemp(join(tmpdir(), 'codesurf-extension-collision-skip-'))
+  const bundledDir = join(temp, 'bundled')
+  const catalogDir = join(temp, 'catalog')
+  const bundledExtension = join(bundledDir, 'media')
+  const catalogExtension = join(catalogDir, 'media')
+  const manifestFor = (name: string) => JSON.stringify({
+    id: 'collision-media',
+    name,
+    version: '1.0.0',
+    tier: 'safe',
+    capabilities: [{ name: 'microphone' }],
+  })
+  await mkdir(bundledExtension, { recursive: true })
+  await mkdir(catalogExtension, { recursive: true })
+  await writeFile(join(bundledExtension, 'extension.json'), manifestFor('Bundled Winner'))
+  await writeFile(join(catalogExtension, 'extension.json'), manifestFor('Catalog Loser'))
+  const huge = await open(join(catalogExtension, 'oversized.bin'), 'w')
+  await huge.truncate(17 * 1024 * 1024)
+  await huge.close()
+
+  const { ExtensionRegistry } = await loadRegistryModule(join(temp, 'home'))
+  const registry = new ExtensionRegistry({
+    bundledDirs: [bundledDir],
+    catalogDirs: [catalogDir],
+  })
+  await registry.rescan()
+  assert.equal(registry.get('collision-media')?.manifest.name, 'Bundled Winner')
+  assert.match(
+    registry.getExtensionMediaPermission('collision-media')?.identity ?? '',
+    /^sha256:[a-f0-9]{64}$/,
   )
 })
