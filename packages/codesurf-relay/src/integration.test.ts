@@ -390,7 +390,6 @@ describe('integration', () => {
           },
         },
       )
-      await new Promise(resolve => setTimeout(resolve, 0))
       expect(relay.events.listenerCount('event')).toBe(
         listenerCountBeforeWait + 1,
       )
@@ -398,6 +397,30 @@ describe('integration', () => {
       active = false
       controller.abort()
       await expect(waiting).rejects.toBe(cancellation)
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait,
+      )
+
+      const anyController = new AbortController()
+      const anyCancellation = new Error('relay generation stopped again')
+      let anyActive = true
+      const waitingForAny = relay.waitForAny(
+        ['never-done'],
+        { timeoutMs: 60_000 },
+        {
+          signal: anyController.signal,
+          assertActive() {
+            if (!anyActive) throw anyCancellation
+          },
+        },
+      )
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait + 1,
+      )
+
+      anyActive = false
+      anyController.abort()
+      await expect(waitingForAny).rejects.toBe(anyCancellation)
       expect(relay.events.listenerCount('event')).toBe(
         listenerCountBeforeWait,
       )
