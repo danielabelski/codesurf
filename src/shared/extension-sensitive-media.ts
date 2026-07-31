@@ -6,6 +6,13 @@ export const SENSITIVE_MEDIA_CAPABILITIES = [
 
 export type SensitiveMediaCapability = typeof SENSITIVE_MEDIA_CAPABILITIES[number]
 
+export interface DeclaredSensitiveMedia {
+  readonly capabilities: SensitiveMediaCapability[]
+  readonly reasons: Readonly<
+    Partial<Record<SensitiveMediaCapability, string>>
+  >
+}
+
 export function isExtensionMediaIdentity(value: unknown): value is string {
   return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value)
 }
@@ -16,14 +23,37 @@ export function isSensitiveMediaCapability(value: unknown): value is SensitiveMe
 }
 
 export function getDeclaredSensitiveMediaCapabilities(
-  capabilities: readonly { readonly name: string }[] | undefined,
+  capabilities: readonly {
+    readonly name: string
+    readonly reason?: string
+  }[] | undefined,
 ): SensitiveMediaCapability[] {
-  const declared = new Set(
-    (capabilities ?? [])
-      .map(capability => capability.name)
-      .filter(isSensitiveMediaCapability),
-  )
-  return SENSITIVE_MEDIA_CAPABILITIES.filter(capability => declared.has(capability))
+  return getDeclaredSensitiveMediaDeclaration(capabilities).capabilities
+}
+
+export function getDeclaredSensitiveMediaDeclaration(
+  capabilities: readonly {
+    readonly name: string
+    readonly reason?: string
+  }[] | undefined,
+): DeclaredSensitiveMedia {
+  const declared = new Set<SensitiveMediaCapability>()
+  const reasons: Partial<Record<SensitiveMediaCapability, string>> = {}
+  for (const capability of capabilities ?? []) {
+    if (!isSensitiveMediaCapability(capability.name) || declared.has(capability.name)) {
+      continue
+    }
+    declared.add(capability.name)
+    if (typeof capability.reason === 'string') {
+      reasons[capability.name] = capability.reason
+    }
+  }
+  return {
+    capabilities: SENSITIVE_MEDIA_CAPABILITIES.filter(capability => {
+      return declared.has(capability)
+    }),
+    reasons: Object.freeze(reasons),
+  }
 }
 
 export function getExtensionIframeAllow(

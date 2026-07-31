@@ -30,6 +30,7 @@ export interface ExtensionMediaConsentPrompt {
   readonly extensionName: string
   readonly kind: SensitiveMediaCapability
   readonly owner?: unknown
+  readonly reason?: string
 }
 
 export interface ExtensionMediaConsentStoreOptions {

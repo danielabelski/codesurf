@@ -149,6 +149,7 @@ export function createHarness(options?: {
   const extensions = new Map<string, ExtensionPermissionDescriptor>()
   const extensionConsents = new Map<string, Set<string>>()
   const extensionConsentPrompts: string[] = []
+  const extensionConsentReasons: Array<string | undefined> = []
   const sources: DisplaySource[] = [
     { id: 'screen:1', name: 'Entire Screen' },
     { id: 'window:2', name: 'Editor' },
@@ -208,6 +209,7 @@ export function createHarness(options?: {
     },
     requestExtensionConsent: async (extension, kind) => {
       extensionConsentPrompts.push(`${extension.id}:${kind}`)
+      extensionConsentReasons.push(extension.declaredMediaReasons[kind])
       const allowed = await extensionConsentRequester(extension, kind)
       if (!allowed) return false
       const consentKey = `${extension.id}:${extension.identity}`
@@ -262,6 +264,7 @@ export function createHarness(options?: {
     contentsListeners,
     defaultSession,
     extensionConsentPrompts,
+    extensionConsentReasons,
     extensionConsents,
     extensions,
     makeWindow,
@@ -296,6 +299,7 @@ export function createHarness(options?: {
         name: config?.name ?? id,
         enabled: config?.enabled ?? true,
         declaredMedia: config?.declaredMedia ?? [],
+        declaredMediaReasons: config?.declaredMediaReasons ?? {},
       })
     },
     setExtensionConsent: (

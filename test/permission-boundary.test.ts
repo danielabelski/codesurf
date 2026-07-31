@@ -48,6 +48,10 @@ describe('permission boundary', () => {
     harness.setExtension('livekit-rooms', {
       name: 'LiveKit Rooms',
       declaredMedia: ['microphone', 'camera'],
+      declaredMediaReasons: {
+        microphone: 'Speak in the room',
+        camera: 'Share video in the room',
+      },
     })
     const extensionUrl = 'codesurf-ext://livekit-rooms'
     const origin = `${extensionUrl}/`
@@ -77,6 +81,7 @@ describe('permission boundary', () => {
       true,
     )
     assert.deepEqual(harness.extensionConsentPrompts, ['livekit-rooms:microphone'])
+    assert.deepEqual(harness.extensionConsentReasons, ['Speak in the room'])
     assert.deepEqual(harness.mediaPrompts, ['microphone'])
     assert.equal(
       trusted.session.checkHandler?.(
@@ -97,6 +102,36 @@ describe('permission boundary', () => {
       false,
       'a microphone grant must not grant camera',
     )
+  })
+
+  test('uses the reason declared for the exact requested capability kind', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('media-extension', {
+      declaredMedia: ['microphone', 'camera'],
+      declaredMediaReasons: {
+        microphone: 'Speak with teammates',
+        camera: 'Appear on video',
+      },
+    })
+    const extensionUrl = 'codesurf-ext://media-extension'
+    const child = new FakeFrame(`${extensionUrl}/index.html`, extensionUrl, 105)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+
+    assert.equal(
+      await requestPermission(trusted.session, trusted.contents, 'media', {
+        isMainFrame: false,
+        mediaTypes: ['video'],
+        requestingUrl: child.url,
+        securityOrigin: `${extensionUrl}/`,
+      }),
+      true,
+    )
+    assert.deepEqual(harness.extensionConsentPrompts, ['media-extension:camera'])
+    assert.deepEqual(harness.extensionConsentReasons, ['Appear on video'])
   })
 
   test('denies unknown, disabled, undeclared, cross-origin, internal, and generic child frames', async () => {

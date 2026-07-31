@@ -218,6 +218,7 @@ export function installElectronPermissionBoundary(
         extensionName: extension.name,
         kind,
         owner: owner as unknown as BrowserWindow,
+        reason: extension.declaredMediaReasons[kind],
       })
     },
     requestMediaAccess: async kind => {

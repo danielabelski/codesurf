@@ -69,6 +69,9 @@ export interface ExtensionPermissionDescriptor {
   readonly name: string
   readonly enabled: boolean
   readonly declaredMedia: readonly SensitiveMediaCapability[]
+  readonly declaredMediaReasons: Readonly<
+    Partial<Record<SensitiveMediaCapability, string>>
+  >
 }
 
 type PermissionCheckHandler = (
@@ -99,6 +102,12 @@ export interface PermissionSession<DisplaySource> {
 
 export interface DisplaySourceSelection<DisplaySource> {
   readonly owner: BrowserWindowLike
+  readonly requester:
+    | { readonly kind: 'host' }
+    | {
+      readonly kind: 'extension'
+      readonly extension: ExtensionPermissionDescriptor
+    }
   readonly sources: readonly DisplaySource[]
 }
 

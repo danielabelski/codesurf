@@ -536,6 +536,9 @@ export function createPermissionBoundary<DisplaySource>(
         if (sources.length === 0) return
         const selected = await runtime.selectDisplaySource({
           owner: initial.principal.owner,
+          requester: initial.principal.kind === 'extension' && initial.principal.extension
+            ? { kind: 'extension', extension: initial.principal.extension }
+            : { kind: 'host' },
           sources,
         })
         return getCurrentPrincipal() && selected && sources.includes(selected)
