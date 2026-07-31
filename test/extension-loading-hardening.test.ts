@@ -41,6 +41,23 @@ const hermeticDependencies: Plugin = {
   },
 }
 
+const nativeDependencyStub: Plugin = {
+  name: 'native-dependency-stub',
+  setup(builder) {
+    builder.onResolve({ filter: /^better-sqlite3$/ }, () => ({
+      path: 'better-sqlite3',
+      namespace: 'native-dependency-stub',
+    }))
+    builder.onLoad({ filter: /.*/, namespace: 'native-dependency-stub' }, () => ({
+      // The extension-loading surface never opens provider session databases.
+      // Stub the eager session-source import so these focused tests do not
+      // bundle a native CommonJS addon into an ESM fixture.
+      contents: 'export default class BetterSqlite3TestStub {}',
+      loader: 'js',
+    }))
+  },
+}
+
 async function loadRegistryModule(codesurfHome: string) {
   const bundleDir = await mkdtemp(join(tmpdir(), 'codesurf-registry-test-'))
   const outfile = join(bundleDir, 'registry.mjs')
@@ -76,7 +93,7 @@ async function loadRegistryModule(codesurfHome: string) {
     platform: 'node',
     format: 'esm',
     target: 'node24',
-    plugins: [hermeticDependencies, electronStub],
+    plugins: [nativeDependencyStub, hermeticDependencies, electronStub],
     logLevel: 'silent',
   })
 
@@ -134,7 +151,7 @@ async function loadExtensionIpcModule(
     platform: 'node',
     format: 'cjs',
     target: 'node24',
-    plugins: [hermeticDependencies, electronStub],
+    plugins: [nativeDependencyStub, hermeticDependencies, electronStub],
     logLevel: 'silent',
   })
 
