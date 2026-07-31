@@ -235,6 +235,7 @@ export class ExtensionMediaConsentStore {
 
 export class ExtensionMediaConsentManager {
   private readonly pendingByKey = new Map<string, Promise<boolean>>()
+  private readonly revocationsByExtension = new Map<string, Promise<void>>()
   private readonly extensionGenerations = new Map<string, number>()
   private promptQueue: Promise<void> = Promise.resolve()
   private readonly store: ExtensionMediaConsentStore
@@ -259,6 +260,7 @@ export class ExtensionMediaConsentManager {
     extensionIdentity: string,
     kind: SensitiveMediaCapability,
   ): boolean {
+    if (this.revocationsByExtension.has(extensionId)) return false
     return this.store.getDecision(extensionId, extensionIdentity, kind) === 'allow'
   }
 
@@ -267,7 +269,9 @@ export class ExtensionMediaConsentManager {
       !isValidExtensionId(request.extensionId)
       || !isExtensionMediaIdentity(request.extensionIdentity)
     ) return false
+    if (this.revocationsByExtension.has(request.extensionId)) return false
     await this.ready
+    if (this.revocationsByExtension.has(request.extensionId)) return false
     const stored = this.store.getDecision(
       request.extensionId,
       request.extensionIdentity,
@@ -326,10 +330,21 @@ export class ExtensionMediaConsentManager {
   }
 
   revokeExtension(extensionId: string): Promise<void> {
+    if (!isValidExtensionId(extensionId)) return Promise.resolve()
+    const pending = this.revocationsByExtension.get(extensionId)
+    if (pending) return pending
     this.extensionGenerations.set(
       extensionId,
       (this.extensionGenerations.get(extensionId) ?? 0) + 1,
     )
-    return this.store.revokeExtension(extensionId)
+    const revocation = this.store.revokeExtension(extensionId)
+    this.revocationsByExtension.set(extensionId, revocation)
+    const cleanUp = (): void => {
+      if (this.revocationsByExtension.get(extensionId) === revocation) {
+        this.revocationsByExtension.delete(extensionId)
+      }
+    }
+    void revocation.then(cleanUp, cleanUp)
+    return revocation
   }
 }

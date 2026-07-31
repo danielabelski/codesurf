@@ -221,6 +221,39 @@ describe('extension sensitive media consent', () => {
     assert.equal(manager.hasConsent('racy-extension', identityA, 'camera'), false)
   })
 
+  test('consent becomes unavailable synchronously while durable revocation is pending', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codesurf-media-revoke-pending-'))
+    const store = new ExtensionMediaConsentStore({
+      filePath: join(directory, 'consent.json'),
+    })
+    await store.setDecision('racy-extension', identityA, 'camera', 'allow')
+    const revokeFromStore = store.revokeExtension.bind(store)
+    let releaseRevocation: (() => void) | undefined
+    const revocationBlocked = new Promise<void>(resolve => {
+      releaseRevocation = resolve
+    })
+    store.revokeExtension = async extensionId => {
+      await revocationBlocked
+      await revokeFromStore(extensionId)
+    }
+    const manager = new ExtensionMediaConsentManager(store, async () => true)
+
+    const revocation = manager.revokeExtension('racy-extension')
+    assert.equal(manager.hasConsent('racy-extension', identityA, 'camera'), false)
+    assert.equal(
+      await manager.requestConsent({
+        extensionId: 'racy-extension',
+        extensionIdentity: identityA,
+        extensionName: 'Racy Extension',
+        kind: 'camera',
+      }),
+      false,
+    )
+    releaseRevocation?.()
+    await revocation
+    assert.equal(manager.hasConsent('racy-extension', identityA, 'camera'), false)
+  })
+
   test('derives iframe allow directives only from declared sensitive capabilities', () => {
     const declared = getDeclaredSensitiveMediaCapabilities([
       { name: 'network' },

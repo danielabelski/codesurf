@@ -335,11 +335,9 @@ export function installElectronPermissionBoundary(
     ready: Promise.all([boundary.ready, consentManager.ready]).then(() => undefined),
     revokeExtensionMedia: async extensionId => {
       boundary.clearExtensionGrants(extensionId)
-      try {
-        await consentManager.revokeExtension(extensionId)
-      } finally {
-        await boundary.terminateExtensionMediaFrames(extensionId)
-      }
+      const revokeConsent = consentManager.revokeExtension(extensionId)
+      const terminateFrames = boundary.terminateExtensionMediaFrames(extensionId)
+      await Promise.all([revokeConsent, terminateFrames])
     },
     registerAppWindow: window => boundary.registerAppWindow(asBrowserWindow(window)),
     setExtensionAuthorizer: authorizer => {

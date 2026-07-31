@@ -91,5 +91,12 @@ describe('extension sensitive-media declarations', () => {
       Buffer.byteLength(sourceLabel, 'utf8')
         <= EXTENSION_MEDIA_DIALOG_TEXT_BYTES.sourceLabel,
     )
+    assert.equal(sanitizeExtensionMediaDialogText('anything', '', 0), '')
+    assert.ok(
+      Buffer.byteLength(
+        sanitizeExtensionMediaDialogText('snow: 雪', '', 2),
+        'utf8',
+      ) <= 2,
+    )
   })
 })

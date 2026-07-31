@@ -33,9 +33,11 @@ const UNSAFE_CONTROL = /\p{Cc}/gu
 const UNSAFE_BIDI_FORMATTING = /\p{Bidi_Control}/gu
 
 function truncateUtf8(value: string, maxBytes: number): string {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) return ''
   if (textEncoder.encode(value).byteLength <= maxBytes) return value
   const ellipsis = '…'
-  const contentBudget = maxBytes - textEncoder.encode(ellipsis).byteLength
+  const ellipsisBytes = textEncoder.encode(ellipsis).byteLength
+  const contentBudget = Math.max(0, maxBytes - ellipsisBytes)
   let result = ''
   let used = 0
   for (const character of value) {
@@ -44,7 +46,7 @@ function truncateUtf8(value: string, maxBytes: number): string {
     result += character
     used += bytes
   }
-  return `${result.trimEnd()}${ellipsis}`
+  return maxBytes >= ellipsisBytes ? `${result.trimEnd()}${ellipsis}` : result
 }
 
 export function sanitizeExtensionMediaDialogText(
