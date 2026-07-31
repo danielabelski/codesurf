@@ -81,7 +81,7 @@ test('npm package build preserves the authoritative root Node engine', async t =
     await readFile(join(fixtureRoot, 'release', 'npm', 'package', 'package.json'), 'utf8'),
   )
   assert.deepEqual(publishManifest.engines, rootManifest.engines)
-  assert.equal(publishManifest.engines?.node, '>=22')
+  assert.equal(publishManifest.engines?.node, '>=22.12.0')
   assert.equal(
     await readFile(
       join(fixtureRoot, 'release', 'npm', 'package', 'packages', 'codesurf-daemon', 'dist', 'index.js'),

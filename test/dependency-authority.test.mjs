@@ -34,7 +34,7 @@ test('root and daemon manifests retain one Node and dependency authority', async
     readJson(resolve(DAEMON_DIR, 'package-lock.json')),
   ])
 
-  assert.equal(rootPackage.engines?.node, '>=22')
+  assert.equal(rootPackage.engines?.node, '>=22.12.0')
   assert.deepEqual(rootLock.packages?.['']?.engines, rootPackage.engines)
   assert.equal(daemonPackage.engines?.node, '>=22.12.0')
 
