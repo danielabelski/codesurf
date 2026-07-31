@@ -64,10 +64,16 @@ export interface AgentRoomFileAdapter {
 export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
   readonly root: string
   readonly io: AgentRoomFileIO
+  readonly platform: NodeJS.Platform
 
-  constructor(root: string, io: AgentRoomFileIO = nodeAgentRoomFileIO) {
+  constructor(
+    root: string,
+    io: AgentRoomFileIO = nodeAgentRoomFileIO,
+    options: { platform?: NodeJS.Platform } = {},
+  ) {
     this.root = resolve(root)
     this.io = io
+    this.platform = options.platform ?? process.platform
   }
 
   private async readStat(path: string): Promise<AgentRoomFileStat | null> {
@@ -150,8 +156,30 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
     try {
       handle = await this.io.open(path, 'r')
       await handle.sync()
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code
+      // Windows does not consistently expose directory handles that support
+      // fsync. Only tolerate the explicit "operation unsupported" family;
+      // permission, I/O, and media errors remain actionable and are retried.
+      if (
+        this.platform === 'win32'
+        && (code === 'EISDIR' || code === 'EINVAL' || code === 'ENOTSUP' || code === 'ENOSYS')
+      ) return
+      throw error
     } finally {
       await handle?.close().catch(() => {})
+    }
+  }
+
+  private async syncNearestExistingDirectory(path: string): Promise<void> {
+    let current = assertInsideRoot(this.root, path)
+    while (true) {
+      if (await this.validateExistingSafeDirectory(current)) {
+        await this.syncDirectory(current)
+        return
+      }
+      if (current === this.root) return
+      current = dirname(current)
     }
   }
 
@@ -192,11 +220,18 @@ export class NodeAgentRoomFileAdapter implements AgentRoomFileAdapter {
   ): Promise<void> {
     const target = assertInsideRoot(this.root, path)
     const directory = dirname(target)
-    if (!await this.validateExistingSafeDirectory(directory)) return
+    if (!await this.validateExistingSafeDirectory(directory)) {
+      await this.syncNearestExistingDirectory(dirname(directory))
+      return
+    }
     const targetStat = await this.readStat(target)
-    if (!targetStat) return
-    this.assertSafeStat(target, targetStat, 'file')
-    await this.io.unlink(target)
+    if (targetStat) {
+      this.assertSafeStat(target, targetStat, 'file')
+      await this.io.unlink(target)
+    }
+    // Always replay the containing-directory sync when the target is already
+    // absent. A previous attempt may have unlinked successfully and then lost
+    // the durability sync before the queue retried.
     await this.syncDirectory(directory)
 
     if (options.pruneEmptyParent) {

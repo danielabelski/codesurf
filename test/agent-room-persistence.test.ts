@@ -221,6 +221,46 @@ describe('AgentRoomPersistenceQueue', () => {
     await queue.flush()
     assert.deepEqual(JSON.parse(adapter.values.get(path)!), { revision: 'new' })
   })
+
+  test('retries directory durability after unlink succeeded but its fsync failed', async () => {
+    const root = await makeTempRoot('delete-durability-retry')
+    const directory = join(root, 'rooms')
+    const path = join(directory, 'room-a.json')
+    await mkdir(directory, { recursive: true })
+    await writeFile(path, 'old')
+
+    const firstDirectorySync = deferred()
+    let directorySyncAttempts = 0
+    const adapter = new NodeAgentRoomFileAdapter(root, {
+      ...nodeAgentRoomFileIO,
+      open: async (candidate, flags, mode) => {
+        if (candidate === directory && flags === 'r') {
+          directorySyncAttempts += 1
+          if (directorySyncAttempts === 1) {
+            const error = Object.assign(new Error('injected directory fsync failure'), {
+              code: 'EIO',
+            })
+            firstDirectorySync.resolve()
+            throw error
+          }
+        }
+        return nodeAgentRoomFileIO.open(candidate, flags, mode)
+      },
+    })
+    const scheduler = new ManualRetryScheduler()
+    const queue = new AgentRoomPersistenceQueue(adapter, { retryScheduler: scheduler })
+
+    queue.removeFile(path)
+    await firstDirectorySync.promise
+    await Promise.resolve()
+    await assert.rejects(lstat(path), /ENOENT/)
+    assert.equal(scheduler.tasks.length, 1)
+
+    scheduler.runNext()
+    await queue.flush()
+    assert.equal(directorySyncAttempts, 2)
+    assert.equal(queue.getStats().pendingPaths, 0)
+  })
 })
 
 describe('NodeAgentRoomFileAdapter', () => {
@@ -308,5 +348,45 @@ describe('NodeAgentRoomFileAdapter', () => {
     await assert.rejects(adapter.removeOwnedFile(target), /symbolic link/i)
     assert.equal(await readFile(outsideFile, 'utf8'), 'sentinel')
     assert.equal((await lstat(target)).isSymbolicLink(), true)
+  })
+
+  test('only tolerates documented unsupported directory-sync errors on Windows', async () => {
+    const root = await makeTempRoot('windows-directory-sync')
+    const path = join(root, 'rooms', 'room-a.json')
+    const unsupported = Object.assign(new Error('directory sync unsupported'), {
+      code: 'EINVAL',
+    })
+    const denied = Object.assign(new Error('directory sync denied'), {
+      code: 'EACCES',
+    })
+    const ioWithDirectorySyncError = (error: Error): typeof nodeAgentRoomFileIO => ({
+      ...nodeAgentRoomFileIO,
+      open: async (candidate, flags, mode) => {
+        if (candidate === dirname(path) && flags === 'r') throw error
+        return nodeAgentRoomFileIO.open(candidate, flags, mode)
+      },
+    })
+
+    const windowsAdapter = new NodeAgentRoomFileAdapter(
+      root,
+      ioWithDirectorySyncError(unsupported),
+      { platform: 'win32' },
+    )
+    await windowsAdapter.writeFileAtomic(path, 'committed')
+    assert.equal(await readFile(path, 'utf8'), 'committed')
+
+    const actionableAdapter = new NodeAgentRoomFileAdapter(
+      root,
+      ioWithDirectorySyncError(denied),
+      { platform: 'win32' },
+    )
+    await assert.rejects(actionableAdapter.writeFileAtomic(path, 'newer'), /denied/)
+
+    const posixAdapter = new NodeAgentRoomFileAdapter(
+      root,
+      ioWithDirectorySyncError(unsupported),
+      { platform: 'darwin' },
+    )
+    await assert.rejects(posixAdapter.writeFileAtomic(path, 'newest'), /unsupported/)
   })
 })
