@@ -4,7 +4,11 @@ import type { AddressInfo } from 'node:net'
 import { access, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { dismissAgentSetupIfPresent } from './helpers/dismiss-setup'
-import { closeCodeSurfElectron, launchCodeSurfElectron } from './helpers/launch-electron'
+import {
+  closeCodeSurfElectron,
+  launchCodeSurfElectron,
+  type LaunchedElectronApp,
+} from './helpers/launch-electron'
 import { waitForElectronBridge } from './helpers/wait-bridge'
 
 const FIXTURE_HTML_PATH = join(__dirname, 'fixtures/browser-tile.html')
@@ -50,10 +54,14 @@ test.describe('BrowserTile production Electron behavior', () => {
     const port = await listen(server)
     const startUrl = `http://127.0.0.1:${port}/start`
     const nextUrl = `http://127.0.0.1:${port}/next`
-    const launch = await launchCodeSurfElectron()
+    let launch: LaunchedElectronApp | null = null
+    let testError: unknown = null
+    const cleanupErrors: unknown[] = []
 
     try {
-      const { page } = launch
+      const launched = await launchCodeSurfElectron()
+      launch = launched
+      const { page } = launched
       await waitForElectronBridge(page, 'canvas.save')
 
       const workspaceId = await page.evaluate(
@@ -96,7 +104,7 @@ test.describe('BrowserTile production Electron behavior', () => {
         .toBeGreaterThan(0)
 
       const guest = async (): Promise<GuestSnapshot> =>
-        launch.app.evaluate(async ({ webContents }) => {
+        launched.app.evaluate(async ({ webContents }) => {
           const fixtureGuest = webContents
             .getAllWebContents()
             .find(
@@ -266,8 +274,18 @@ test.describe('BrowserTile production Electron behavior', () => {
             marker: 'secondary-preserved',
           })
           await Promise.all([
-            window.electron.tileContext?.set(primaryWorkspaceId, tileId, 'ctx:scope:e2e', 'primary'),
-            window.electron.tileContext?.set(secondaryWorkspace.id, tileId, 'ctx:scope:e2e', 'secondary'),
+            window.electron.tileContext?.set(
+              primaryWorkspaceId,
+              tileId,
+              'ctx:scope:e2e',
+              'primary',
+            ),
+            window.electron.tileContext?.set(
+              secondaryWorkspace.id,
+              tileId,
+              'ctx:scope:e2e',
+              'secondary',
+            ),
           ])
           const [primary, secondary, primaryHistory, secondaryHistory] = await Promise.all([
             window.electron.tileContext?.get(primaryWorkspaceId, tileId, 'ctx:scope:e2e'),
@@ -279,11 +297,15 @@ test.describe('BrowserTile production Electron behavior', () => {
             secondaryWorkspaceId: secondaryWorkspace.id,
             primaryValue: (primary as { value?: unknown } | null)?.value ?? null,
             secondaryValue: (secondary as { value?: unknown } | null)?.value ?? null,
-            primaryHistoryScoped: primaryHistory.some(event =>
-              event.payload?.workspaceId === primaryWorkspaceId && event.payload?.tileId === tileId,
+            primaryHistoryScoped: primaryHistory.some(
+              (event) =>
+                event.payload?.workspaceId === primaryWorkspaceId &&
+                event.payload?.tileId === tileId,
             ),
-            secondaryHistoryScoped: secondaryHistory.some(event =>
-              event.payload?.workspaceId === secondaryWorkspace.id && event.payload?.tileId === tileId,
+            secondaryHistoryScoped: secondaryHistory.some(
+              (event) =>
+                event.payload?.workspaceId === secondaryWorkspace.id &&
+                event.payload?.tileId === tileId,
             ),
           }
         },
@@ -297,7 +319,7 @@ test.describe('BrowserTile production Electron behavior', () => {
       })
 
       const secondaryStatePath = join(
-        launch.homeDir,
+        launched.homeDir,
         '.codesurf',
         'workspaces',
         contextScope.secondaryWorkspaceId,
@@ -327,7 +349,7 @@ test.describe('BrowserTile production Electron behavior', () => {
         return workspace.id
       })
       const absentStatePath = join(
-        launch.homeDir,
+        launched.homeDir,
         '.codesurf',
         'workspaces',
         emptyWorkspaceId,
@@ -342,9 +364,28 @@ test.describe('BrowserTile production Electron behavior', () => {
         { id: emptyWorkspaceId },
       )
       await expect(access(absentStatePath)).rejects.toThrow()
+    } catch (error) {
+      testError = error
     } finally {
-      await closeCodeSurfElectron(launch)
-      await closeServer(server)
+      if (launch) {
+        try {
+          await closeCodeSurfElectron(launch)
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      try {
+        await closeServer(server)
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
     }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        testError === null ? cleanupErrors : [testError, ...cleanupErrors],
+        'BrowserTile E2E execution and cleanup failed',
+      )
+    }
+    if (testError !== null) throw testError
   })
 })

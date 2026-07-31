@@ -15,6 +15,18 @@ test.describe('CodeSurf built-web smoke', () => {
   test('installs the runtime bridge and persists daemon-backed workspace canvas state', async ({
     page,
   }) => {
+    const pageErrors: string[] = []
+    const consoleErrors: string[] = []
+    page.on('pageerror', (error) => {
+      pageErrors.push(error.stack ?? error.message)
+    })
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
+    const onboarding = page.getByRole('dialog', { name: 'Welcome to CodeSurf' })
+    await page.addLocatorHandler(onboarding, async () => {
+      await onboarding.getByRole('button', { name: 'Get started' }).click()
+    })
     const runtimeConfigResponse = page.waitForResponse(
       (response) =>
         response.url() === `${preview.url}codesurf-runtime-config.js` && response.status() === 200,
@@ -41,6 +53,11 @@ test.describe('CodeSurf built-web smoke', () => {
     })
     await expect(page.locator('#root')).toBeVisible()
     await expect(page.locator('#root')).not.toContainText('Loading…', { timeout: 45_000 })
+    await expect(page.locator('#root')).not.toContainText(
+      'CodeSurf encountered an unexpected error. Check the console for details.',
+    )
+    await expect(page.locator('#root')).not.toContainText('Renderer failed to start')
+    await expect(page.locator('[data-canvas-surface="true"]')).toBeVisible({ timeout: 45_000 })
 
     const firstPass = await page.evaluate(async () => {
       const runtime = window as typeof window & {
@@ -52,6 +69,7 @@ test.describe('CodeSurf built-web smoke', () => {
           workspace: {
             list: () => Promise<Array<{ id: string }>>
             create: (name: string) => Promise<{ id: string }>
+            setActive: (id: string) => Promise<void>
           }
           canvas: {
             save: (workspaceId: string, state: unknown) => Promise<void>
@@ -64,8 +82,8 @@ test.describe('CodeSurf built-web smoke', () => {
       }
       const marker = `web-smoke-${crypto.randomUUID()}`
       const target = await runtime.electron.workspace.create(`${marker}-target`)
-      // Keep the persisted target out of the mounted App's active-workspace
-      // autosave path while the page reloads.
+      // Keep the target out of the mounted App's autosave path until its
+      // authoritative fixture state is written, then select it for reload.
       const guard = await runtime.electron.workspace.create(`${marker}-guard`)
       const canvasState = {
         tiles: [{ id: marker, type: 'note', x: 120, y: 80, width: 320, height: 200 }],
@@ -73,6 +91,7 @@ test.describe('CodeSurf built-web smoke', () => {
         nextZIndex: 2,
       }
       await runtime.electron.canvas.save(target.id, canvasState)
+      await runtime.electron.workspace.setActive(target.id)
 
       const listed = await runtime.electron.workspace.list()
       const loaded = (await runtime.electron.canvas.load(target.id)) as typeof canvasState | null
@@ -114,15 +133,27 @@ test.describe('CodeSurf built-web smoke', () => {
         typeof (window as typeof window & { electron?: { workspace?: { list?: unknown } } })
           .electron?.workspace?.list === 'function',
     )
+    await expect(page.locator('#root')).not.toContainText(
+      'CodeSurf encountered an unexpected error. Check the console for details.',
+    )
+    await expect(page.locator('#root')).not.toContainText('Renderer failed to start')
+    await expect(page.locator('[data-canvas-surface="true"]')).toBeVisible({ timeout: 45_000 })
+    const restoredTile = page.locator(`[data-tile-id="${firstPass.marker}"]`)
+    await expect(restoredTile).toBeVisible({ timeout: 45_000 })
+    const renderedNote = restoredTile.locator('textarea[placeholder="Type a note..."]')
+    await renderedNote.click()
+    await expect(renderedNote).toBeFocused()
+    await renderedNote.fill('Rendered through the built-web React surface')
+    await expect(renderedNote).toHaveValue('Rendered through the built-web React surface')
+    await expect(onboarding).toBeHidden()
 
     const afterReload = await page.evaluate(
-      async ({ targetId, guardId, marker }) => {
+      async ({ targetId, marker }) => {
         const bridge = (
           window as typeof window & {
             electron: {
               workspace: {
                 list: () => Promise<Array<{ id: string }>>
-                delete: (id: string) => Promise<void>
               }
               canvas: {
                 load: (workspaceId: string) => Promise<{
@@ -135,8 +166,6 @@ test.describe('CodeSurf built-web smoke', () => {
         ).electron
         const listed = await bridge.workspace.list()
         const loaded = await bridge.canvas.load(targetId)
-        await bridge.workspace.delete(targetId)
-        await bridge.workspace.delete(guardId)
         return {
           listedIds: listed.map((workspace) => workspace.id),
           hasMarkerTile:
@@ -146,7 +175,6 @@ test.describe('CodeSurf built-web smoke', () => {
       },
       {
         targetId: firstPass.targetId,
-        guardId: firstPass.guardId,
         marker: firstPass.marker,
       },
     )
@@ -156,5 +184,7 @@ test.describe('CodeSurf built-web smoke', () => {
     )
     expect(afterReload.hasMarkerTile).toBe(true)
     expect(afterReload.viewport).toEqual({ tx: 31, ty: 47, zoom: 1.25 })
+    expect(pageErrors).toEqual([])
+    expect(consoleErrors).toEqual([])
   })
 })

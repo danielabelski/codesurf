@@ -51,6 +51,9 @@ jobs:
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
 
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
       - name: Build the main-process test prerequisite
         run: npm run build:main
 
@@ -62,6 +65,9 @@ jobs:
 
       - name: Build and verify portable web/PWA artifacts
         run: npm run build:web && npm run verify:web-build
+
+      - name: Assert builds did not rewrite tracked files
+        run: git diff --exit-code
 
   build-and-test:
     runs-on: macos-latest
@@ -90,6 +96,9 @@ jobs:
           npm --prefix packages/codesurf-relay ci
           npm --prefix packages/codesurf-terminal-gateway ci
           npm --prefix apps/chat-app ci
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
 
       - name: Audit dependency trees
         run: |
@@ -133,7 +142,22 @@ jobs:
       - name: Run Playwright E2E suite
         run: npm run test:e2e
 
-      - name: Verify production-only install
+      - name: Assert builds did not rewrite tracked files
+        run: git diff --exit-code
+
+      - name: Verify production-only install in an isolated worktree
+        shell: bash
         run: |
-          npm ci --omit=dev
-          npm audit --omit=dev --audit-level=low
+          VERIFY_PARENT="$(mktemp -d "${RUNNER_TEMP}/codesurf-production-install.XXXXXX")"
+          VERIFY_WORKTREE="${VERIFY_PARENT}/worktree"
+          cleanup() {
+            if [ -d "${VERIFY_WORKTREE}" ]; then
+              git worktree remove --force "${VERIFY_WORKTREE}"
+            fi
+            rmdir "${VERIFY_PARENT}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "${VERIFY_WORKTREE}" HEAD
+          npm --prefix "${VERIFY_WORKTREE}" ci --omit=dev
+          npm --prefix "${VERIFY_WORKTREE}" audit --omit=dev --audit-level=low
