@@ -1,6 +1,8 @@
 import type {
   CodesurfRelay,
   RelayAgentExecutor,
+  RelayChannelMessageDraft,
+  RelayDirectMessageDraft,
   RelayEvent,
   RelayOperationContext,
   RelayParticipant,
@@ -185,6 +187,199 @@ export class WorkspaceRelayService {
     }
   }
 
+  async spawnWorkspaceRelayAgent(
+    workspacePath: string,
+    request: RelaySpawnRequest,
+  ): Promise<RelayParticipant> {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ runtime }) => runtime.spawn(request),
+    )
+  }
+
+  async stopWorkspaceRelayAgent(
+    workspacePath: string,
+    participantId: string,
+  ): Promise<void> {
+    await this.withWorkspaceRelay(
+      workspacePath,
+      ({ runtime }) => runtime.stop(participantId),
+    )
+  }
+
+  async sendWorkspaceDirectRelayMessage(
+    workspacePath: string,
+    from: string,
+    draft: RelayDirectMessageDraft,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.sendDirectMessage(
+        from,
+        draft,
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
+  async sendWorkspaceChannelRelayMessage(
+    workspacePath: string,
+    from: string,
+    draft: RelayChannelMessageDraft,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.sendChannelMessage(
+        from,
+        draft,
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
+  async listWorkspaceRelayParticipants(workspacePath: string) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.listParticipants(),
+    )
+  }
+
+  async listWorkspaceRelayChannels(workspacePath: string) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.listChannels(),
+    )
+  }
+
+  async listWorkspaceRelayCentralFeed(
+    workspacePath: string,
+    limit?: number,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.listCentralFeed(limit),
+    )
+  }
+
+  async listWorkspaceRelayMessages(
+    workspacePath: string,
+    participantId: string,
+    mailbox: 'inbox' | 'sent' | 'memory' | 'bin',
+    limit?: number,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.listMessages(participantId, mailbox, limit),
+    )
+  }
+
+  async readWorkspaceRelayMessage(
+    workspacePath: string,
+    participantId: string,
+    mailbox: 'inbox' | 'sent' | 'memory' | 'bin',
+    filename: string,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.readParticipantMessage(
+        participantId,
+        mailbox,
+        filename,
+      ),
+    )
+  }
+
+  async updateWorkspaceRelayMessageStatus(
+    workspacePath: string,
+    participantId: string,
+    mailbox: 'inbox' | 'sent' | 'memory' | 'bin',
+    filename: string,
+    status: 'unread' | 'read' | 'sent' | 'archived',
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.updateMessageStatus(
+        participantId,
+        mailbox,
+        filename,
+        status,
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
+  async moveWorkspaceRelayMessage(
+    workspacePath: string,
+    participantId: string,
+    fromMailbox: 'inbox' | 'sent' | 'memory' | 'bin',
+    toMailbox: 'inbox' | 'sent' | 'memory' | 'bin',
+    filename: string,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.moveMessage(
+        participantId,
+        fromMailbox,
+        toMailbox,
+        filename,
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
+  async setWorkspaceRelayWorkContext(
+    workspacePath: string,
+    participantId: string,
+    work: any,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.updateWorkContext(
+        participantId,
+        work,
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
+  async analyzeWorkspaceRelayRelationships(workspacePath: string) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }) => relay.analyzeRelationships(),
+    )
+  }
+
+  async waitForWorkspaceRelayReady(
+    workspacePath: string,
+    ids: string[],
+    timeoutMs?: number,
+  ): Promise<boolean> {
+    await this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.waitForReady(
+        ids,
+        { timeoutMs },
+        this.createRelayOperationContext(guard),
+      ),
+    )
+    return true
+  }
+
+  async waitForWorkspaceRelayAny(
+    workspacePath: string,
+    ids: string[],
+    timeoutMs?: number,
+  ) {
+    return this.withWorkspaceRelay(
+      workspacePath,
+      ({ relay }, guard) => relay.waitForAny(
+        ids,
+        { timeoutMs },
+        this.createRelayOperationContext(guard),
+      ),
+    )
+  }
+
   stopAll(): void {
     this.active = false
     this.abortController?.abort()
@@ -344,6 +539,19 @@ export class WorkspaceRelayService {
       }
       throw error
     }
+  }
+
+  private async withWorkspaceRelay<T>(
+    workspacePath: string,
+    operation: (
+      instance: WorkspaceRelayInstance,
+      guard: RelayLifecycleGuard,
+    ) => Promise<T>,
+  ): Promise<T> {
+    const guard = this.captureOperationGuard()
+    const instance = await this.getWorkspaceRelayForGuard(workspacePath, guard)
+    this.assertActive(guard)
+    return this.awaitGuarded(() => operation(instance, guard), guard)
   }
 
   private disposeInstance(instance: WorkspaceRelayInstance): void {
