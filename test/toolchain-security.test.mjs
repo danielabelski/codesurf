@@ -15,6 +15,8 @@ const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const RELAY_DIR = resolve(ROOT_DIR, 'packages/codesurf-relay')
 const require = createRequire(import.meta.url)
 const ensureElectron = require('../scripts/ensure-electron.js')
+const NODE_FLOOR = '>=22.12.0'
+const CI_NODE_VERSION = '22.12.0'
 const EXPECTED_TOOLCHAIN = {
   dependencies: {
     'monaco-editor': '0.56.0',
@@ -69,7 +71,9 @@ test('security-sensitive build tools remain on the reviewed exact versions', asy
     readJson(resolve(ROOT_DIR, 'package-lock.json')),
   ])
 
+  assert.equal(manifest.engines?.node, NODE_FLOOR)
   assert.equal(manifest.packageManager, 'npm@10.9.0')
+  assert.deepEqual(lock.packages?.['']?.engines, manifest.engines)
   assert.equal(manifest.dependencies?.['@types/better-sqlite3'], undefined)
   assert.equal(manifest.devDependencies?.['@types/better-sqlite3'], '^7.6.13')
   assert.deepEqual(manifest.overrides, EXPECTED_OVERRIDES)
@@ -98,15 +102,33 @@ test('security-sensitive build tools remain on the reviewed exact versions', asy
   }
 })
 
-test('npm package publication remains gated by its artifact smoke test', async () => {
+test('CI and release jobs exercise the declared minimum Node runtime', async () => {
+  const workflowPaths = [
+    resolve(ROOT_DIR, '.github/workflows/ci.yml'),
+    resolve(ROOT_DIR, '.github/workflows/release-on-tag.yml'),
+  ]
+  for (const path of workflowPaths) {
+    const workflow = await readFile(path, 'utf8')
+    assert.match(workflow, new RegExp(`node-version:\\s*${CI_NODE_VERSION.replaceAll('.', '\\.')}(?:\\s|$)`))
+    assert.match(workflow, /npm audit --audit-level=low/)
+    assert.match(workflow, /npm audit --omit=dev --audit-level=low/)
+    assert.match(workflow, /npm --prefix packages\/codesurf-relay audit --audit-level=low/)
+  }
+
+  const ciWorkflow = await readFile(workflowPaths[0], 'utf8')
+  assert.match(ciWorkflow, /npm ci --omit=dev/)
+  assert.match(ciWorkflow, /npm run build:web && npm run verify:web-build/)
+  assert.match(ciWorkflow, /npm run test:npm-package/)
+
   const manifest = await readJson(resolve(ROOT_DIR, 'package.json'))
+  assert.match(manifest.scripts?.['test:unit:core'] ?? '', /node --experimental-strip-types --test/)
   assert.equal(
     manifest.scripts?.['test:npm-package'],
     'npm run build:npm && node scripts/smoke-npm-package.mjs',
   )
 })
 
-test('relay test toolchain remains on the audited Vite and Vitest line', async () => {
+test('relay test toolchain remains on the audited Node, Vite, and Vitest line', async () => {
   const [manifest, lock] = await Promise.all([
     readJson(resolve(RELAY_DIR, 'package.json')),
     readJson(resolve(RELAY_DIR, 'package-lock.json')),
@@ -115,6 +137,8 @@ test('relay test toolchain remains on the audited Vite and Vitest line', async (
   assert.equal(manifest.name, '@codesurf/relay')
   assert.equal(lock.name, manifest.name)
   assert.equal(lock.packages?.['']?.name, manifest.name)
+  assert.equal(manifest.engines?.node, NODE_FLOOR)
+  assert.deepEqual(lock.packages?.['']?.engines, manifest.engines)
 
   const expectedDevTools = {
     postcss: '8.5.25',
