@@ -1585,6 +1585,7 @@ export function createChatJobManager({
         failureOrdinal: 0,
         durableFailureMetadata: null,
         finalizationPromise: null,
+        repairByteLength: null,
       }
       timelinePersistence.set(jobId, record)
     }
@@ -1598,7 +1599,14 @@ export function createChatJobManager({
         ?? record.failureMetadata
       if (!persistedMetadata) return null
 
+      if (Number.isFinite(record.repairByteLength)) {
+        await fs.truncate(jobTimelinePath(record.jobId), record.repairByteLength)
+      }
       let inspected = await inspectTimeline(record.jobId)
+      if (inspected.integrityError) {
+        await fs.truncate(jobTimelinePath(record.jobId), inspected.contiguousByteLength)
+        inspected = await inspectTimeline(record.jobId)
+      }
       const publicError = record.failureMetadata?.error
         ?? `Timeline persistence failed: ${record.error?.detail ?? record.error?.message ?? 'Unknown error'}`
       try {
@@ -1750,6 +1758,7 @@ export function createChatJobManager({
         const entry = record.entries[0]
         let lastError = null
         let persisted = false
+        let repairByteLength = null
         for (let attempt = 1; attempt <= TIMELINE_APPEND_ATTEMPTS; attempt += 1) {
           try {
             await timelineAppend(jobTimelinePath(record.jobId), entry.line)
@@ -1761,9 +1770,23 @@ export function createChatJobManager({
             // sequence is already visible at the ordered timeline high-water
             // mark, treat it as committed instead of retrying a duplicate.
             try {
-              const inspected = await inspectTimeline(record.jobId)
-              if (inspected.maxSequence >= Number(entry.payload?.sequence ?? 0)) {
+              const inspected = await inspectTimeline(record.jobId, {
+                expectedSerialized: entry.line.slice(0, -1),
+                expectedSequence: Number(entry.payload?.sequence ?? 0),
+              })
+              if (!inspected.integrityError && inspected.exactRecordCommitted) {
                 persisted = true
+                break
+              }
+              if (
+                inspected.integrityError
+                || inspected.maxSequence >= Number(entry.payload?.sequence ?? 0)
+              ) {
+                repairByteLength = inspected.contiguousByteLength
+                lastError = new Error(
+                  inspected.integrityError
+                    ?? `timeline sequence ${entry.payload?.sequence} contains different event content`,
+                )
                 break
               }
             } catch {}
@@ -1771,6 +1794,9 @@ export function createChatJobManager({
           }
         }
         if (!persisted) {
+          if (Number.isFinite(repairByteLength)) {
+            record.repairByteLength = repairByteLength
+          }
           failTimelinePersistence(record, lastError ?? new Error('timeline append failed'))
           break
         }
@@ -3777,8 +3803,21 @@ export function createChatJobManager({
       } catch (error) {
         lastError = error
         try {
-          const inspected = await inspectTimeline(jobId)
-          if (inspected.maxSequence >= Number(event.sequence ?? 0)) return
+          const inspected = await inspectTimeline(jobId, {
+            expectedSerialized: line.slice(0, -1),
+            expectedSequence: Number(event.sequence ?? 0),
+          })
+          if (!inspected.integrityError && inspected.exactRecordCommitted) return
+          if (
+            inspected.integrityError
+            || inspected.maxSequence >= Number(event.sequence ?? 0)
+          ) {
+            await fs.truncate(jobTimelinePath(jobId), inspected.contiguousByteLength)
+            lastError = new Error(
+              inspected.integrityError
+                ?? `timeline sequence ${event.sequence} contains different event content`,
+            )
+          }
         } catch {}
         if (attempt < TIMELINE_APPEND_ATTEMPTS) await waitBeforeTimelineRetry(attempt)
       }
@@ -3795,52 +3834,89 @@ export function createChatJobManager({
       if (!metadata || liveJobs.has(jobId)) return metadata
       const active = metadata.status === 'running' || metadata.status === 'queued'
       const persistenceFailed = metadata.timelinePersistenceFailed === true
-      if (!active && !persistenceFailed) return metadata
+      const terminalMetadata = metadata.status === 'completed' || metadata.status === 'failed'
+      let inspected = await inspectTimeline(jobId)
+      const metadataLastSequence = Math.max(0, Number(metadata.lastSequence) || 0)
+      const terminalConsistent = (
+        !inspected.integrityError
+        && inspected.terminalSeen
+        && inspected.lastEventType === 'done'
+        && inspected.maxSequence === metadataLastSequence
+        && (
+          (metadata.status === 'completed' && !inspected.lastError)
+          || (metadata.status === 'failed' && Boolean(inspected.lastError))
+        )
+      )
+      if (!active && !persistenceFailed && (!terminalMetadata || terminalConsistent)) {
+        return metadata
+      }
 
-      const inspected = await inspectTimeline(jobId)
-      let maxSequence = inspected.maxSequence
-      let lastError = inspected.lastError
+      let integrityDetail = inspected.integrityError
+      if (inspected.integrityError) {
+        await fs.truncate(jobTimelinePath(jobId), inspected.contiguousByteLength)
+        inspected = await inspectTimeline(jobId)
+      }
+
+      // A durable failure terminal is safe to adopt after a metadata-write
+      // failure. A success terminal paired with still-active metadata is not:
+      // remove that uncommitted terminal before appending failure semantics so
+      // replay can never stop on the stale success `done`.
+      if (inspected.terminalSeen && !inspected.lastError) {
+        integrityDetail ??= (
+          `Timeline integrity check failed for job ${jobId}: `
+          + 'terminal event was not committed by terminal metadata'
+        )
+        await fs.truncate(jobTimelinePath(jobId), inspected.terminalStartByte)
+        inspected = await inspectTimeline(jobId)
+      }
+
       const now = new Date().toISOString()
       const recoveryError = persistenceFailed
         ? String(metadata.error ?? 'Timeline persistence failed')
-        : INTERRUPTED_JOB_ERROR
+        : integrityDetail
+          ? integrityDetail
+          : terminalMetadata
+            ? `Timeline integrity check failed for job ${jobId}: terminal metadata does not match the durable timeline`
+            : INTERRUPTED_JOB_ERROR
 
       if (!inspected.terminalSeen) {
         if (inspected.lastEventType !== 'error') {
           const errorEvent = {
             jobId,
-            sequence: maxSequence + 1,
+            sequence: inspected.maxSequence + 1,
             timestamp: Date.now(),
             type: 'error',
             error: recoveryError,
           }
           await appendReconciliationEvent(jobId, errorEvent)
-          maxSequence = errorEvent.sequence
-          lastError = recoveryError
+          inspected = await inspectTimeline(jobId)
         }
         const doneEvent = {
           jobId,
-          sequence: maxSequence + 1,
+          sequence: inspected.maxSequence + 1,
           timestamp: Date.now(),
           type: 'done',
         }
         await appendReconciliationEvent(jobId, doneEvent)
-        maxSequence = doneEvent.sequence
+        inspected = await inspectTimeline(jobId)
       }
 
-      const terminalMetadata = {
+      const reconciledMetadata = {
         ...metadata,
-        status: lastError || persistenceFailed ? 'failed' : 'completed',
-        error: lastError ?? (persistenceFailed ? recoveryError : null),
+        status: 'failed',
+        error: inspected.lastError ?? recoveryError,
         updatedAt: now,
-        completedAt: metadata.completedAt ?? now,
-        lastSequence: maxSequence,
+        completedAt: metadata.completedAt
+          ?? metadata.updatedAt
+          ?? metadata.requestedAt
+          ?? now,
+        lastSequence: inspected.maxSequence,
         timelinePersistenceFailed: false,
       }
       // Strict ordering: both timeline terminal records are durable before the
       // metadata status and high-water mark advance.
-      await writeJobMetadata(terminalMetadata)
-      return terminalMetadata
+      await writeJobMetadata(reconciledMetadata)
+      return reconciledMetadata
     })()
     reconciliationLocks.set(jobId, reconciliation)
     try {
@@ -3866,15 +3942,7 @@ export function createChatJobManager({
     let persistedMetadata = await readJobMetadata(jobId)
     const live = liveJobs.get(jobId)
     const persistenceFailure = timelinePersistence.get(jobId)?.failureMetadata
-    if (
-      !live
-      && !persistenceFailure
-      && (
-        persistedMetadata?.status === 'running'
-        || persistedMetadata?.status === 'queued'
-        || persistedMetadata?.timelinePersistenceFailed === true
-      )
-    ) {
+    if (!live && !persistenceFailure && persistedMetadata) {
       persistedMetadata = await reconcileInterruptedJob(jobId)
     }
     const metadata = live?.metadata ?? persistenceFailure ?? persistedMetadata

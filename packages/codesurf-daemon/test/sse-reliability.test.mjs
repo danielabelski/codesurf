@@ -439,6 +439,131 @@ test('outcome-uncertain timeline append is verified instead of duplicating the s
   assert.equal(events.filter(event => event.type === 'text' && event.text === 'only once').length, 1)
 })
 
+test('outcome-uncertain partial terminal append never concatenates or publishes success', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-partial-terminal-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseProvider = deferred()
+  let partialDoneInjected = false
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineAppendMaxAttempts: 2,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      const event = JSON.parse(data)
+      if (event.type === 'done' && !partialDoneInjected) {
+        partialDoneInjected = true
+        await appendFile(path, data.slice(0, -1), 'utf8')
+        throw new Error('simulated partial append without newline')
+      }
+      await appendFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('before partial terminal')
+      await releaseProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  t.after(async () => {
+    releaseProvider.resolve()
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  ).includes('before partial terminal'))
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(job.id, 0, response), true)
+  releaseProvider.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  await waitFor(async () => (await manager.getJobState(job.id))?.status === 'failed')
+  await waitFor(() => response.endCalls === 1)
+
+  const streamed = writtenEvents(response)
+  assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.match(streamed.at(-2)?.error, /partial append without newline|timeline persistence/i)
+  assert.equal(streamed.filter(event => event.type === 'done').length, 1)
+
+  const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  assert.equal(timelineText.endsWith('\n'), true)
+  const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(durable.map(event => event.sequence), durable.map((_, index) => index + 1))
+  assert.deepEqual(durable.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(durable.filter(event => event.type === 'done').length, 1)
+})
+
+test('outcome-uncertain append rejects a different record at the same sequence', async t => {
+  const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-conflicting-terminal-'))
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  const releaseProvider = deferred()
+  let conflictInjected = false
+  const manager = createChatJobManager({
+    homeDir,
+    heartbeatMs: 0,
+    timelineAppendMaxAttempts: 2,
+    timelineAppendRetryDelayMs: 0,
+    timelineAppend: async (path, data) => {
+      const event = JSON.parse(data)
+      if (event.type === 'done' && !conflictInjected) {
+        conflictInjected = true
+        await appendFile(path, `${JSON.stringify({ ...event, type: 'text', text: 'wrong record' })}\n`, 'utf8')
+        throw new Error('simulated conflicting append outcome')
+      }
+      await appendFile(path, data, 'utf8')
+    },
+    claudeQuery: () => (async function* () {
+      yield textDelta('before conflicting terminal')
+      await releaseProvider.promise
+      yield { type: 'result', result: 'ok', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+  t.after(async () => {
+    releaseProvider.resolve()
+    await manager.shutdown()
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const job = await manager.startJob({
+    provider: 'claude',
+    model: 'test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    messages: [{ role: 'user', content: 'go' }],
+  })
+  await waitFor(async () => (
+    await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  ).includes('before conflicting terminal'))
+
+  const response = new FakeResponse()
+  assert.equal(await manager.streamJob(job.id, 0, response), true)
+  releaseProvider.resolve()
+  await waitFor(() => !manager.listLiveJobIds().includes(job.id))
+  await waitFor(() => response.endCalls === 1)
+
+  const streamed = writtenEvents(response)
+  assert.deepEqual(streamed.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(streamed.filter(event => event.type === 'done').length, 1)
+  assert.equal((await manager.getJobState(job.id))?.status, 'failed')
+
+  const timelineText = await readFile(join(homeDir, 'timelines', `${job.id}.jsonl`), 'utf8')
+  assert.equal(timelineText.endsWith('\n'), true)
+  const durable = timelineText.trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(durable.map(event => event.sequence), durable.map((_, index) => index + 1))
+  assert.deepEqual(durable.slice(-2).map(event => event.type), ['error', 'done'])
+  assert.equal(durable.filter(event => event.type === 'done').length, 1)
+})
+
 test('permanent timeline failure bounds pending state and stops a long provider stream fail-closed', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-sse-permanent-append-'))
   const workspaceDir = join(homeDir, 'workspace')
@@ -982,6 +1107,73 @@ test('completed timeline replay streams progressively under writable backpressur
   response.emit('drain')
   assert.equal(await streamPromise, false)
   assert.deepEqual(writtenEvents(response).map(event => event.sequence), events.map(event => event.sequence))
+})
+
+test('replay repairs malformed or gapped terminal history into contiguous failure semantics', async t => {
+  for (const scenario of [
+    {
+      name: 'malformed',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          '{"jobId":"broken"',
+          JSON.stringify({ jobId, sequence: 3, timestamp: 3, type: 'done' }),
+          '',
+        ].join('\n')
+      },
+    },
+    {
+      name: 'gap',
+      lines(jobId) {
+        return [
+          JSON.stringify({ jobId, sequence: 1, timestamp: 1, type: 'text', text: 'one' }),
+          JSON.stringify({ jobId, sequence: 3, timestamp: 3, type: 'done' }),
+          '',
+        ].join('\n')
+      },
+    },
+  ]) {
+    await t.test(scenario.name, async t => {
+      const homeDir = await mkdtemp(join(tmpdir(), `codesurf-sse-${scenario.name}-replay-`))
+      const jobsDir = join(homeDir, 'jobs')
+      const timelinesDir = join(homeDir, 'timelines')
+      await mkdir(jobsDir, { recursive: true })
+      await mkdir(timelinesDir, { recursive: true })
+      const jobId = `${scenario.name}-history-job`
+      await writeFile(join(jobsDir, `${jobId}.json`), JSON.stringify({
+        id: jobId,
+        status: 'completed',
+        lastSequence: 3,
+        updatedAt: new Date(0).toISOString(),
+        completedAt: new Date(0).toISOString(),
+        error: null,
+      }), 'utf8')
+      await writeFile(join(timelinesDir, `${jobId}.jsonl`), scenario.lines(jobId), 'utf8')
+
+      const manager = createChatJobManager({ homeDir, heartbeatMs: 0 })
+      t.after(async () => {
+        await manager.shutdown()
+        await rm(homeDir, { recursive: true, force: true })
+      })
+
+      const response = new FakeResponse()
+      assert.equal(await manager.streamJob(jobId, 0, response), false)
+      const events = writtenEvents(response)
+      assert.deepEqual(events.map(event => event.sequence), [1, 2, 3])
+      assert.deepEqual(events.map(event => event.type), ['text', 'error', 'done'])
+      assert.match(events[1].error, /timeline integrity/i)
+      const state = await manager.getJobState(jobId)
+      assert.equal(state.status, 'failed')
+      assert.equal(state.lastSequence, 3)
+      assert.match(state.error, /timeline integrity/i)
+
+      const durable = (await readFile(join(timelinesDir, `${jobId}.jsonl`), 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+      assert.deepEqual(durable, events)
+    })
+  }
 })
 
 test('blocked terminal history replay keeps its deadline and cannot hang real HTTP shutdown', async t => {
