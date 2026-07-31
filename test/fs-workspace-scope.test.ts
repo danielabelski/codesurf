@@ -223,7 +223,7 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       `
       const { stdout } = await execFileAsync(
         process.execPath,
-        ['--input-type=module', '--eval', script],
+        ['--experimental-strip-types', '--input-type=module', '--eval', script],
         {
           env: {
             ...process.env,
