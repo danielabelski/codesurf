@@ -587,7 +587,7 @@ export async function assertAuthorizedParentUnchanged(
   }
 }
 
-async function assertPathMatchesAuthorization(
+export async function assertPathMatchesAuthorization(
   targetPath: string,
   authorization: FsPathAuthorization,
 ): Promise<void> {
@@ -647,7 +647,7 @@ async function openExistingFileNoFollow(
   }
 }
 
-async function readUtf8FileNoFollow(
+export async function readUtf8FileNoFollow(
   targetPath: string,
   authorization?: FsPathAuthorization,
 ): Promise<string> {
@@ -725,7 +725,7 @@ export async function writeUtf8FileNoFollow(
   }
 }
 
-async function statPathNoFollow(
+export async function statPathNoFollow(
   targetPath: string,
   authorization?: FsPathAuthorization,
 ): Promise<Stats> {
@@ -748,7 +748,7 @@ async function statPathNoFollow(
   }
 }
 
-async function assertDirectoryNoFollow(
+export async function assertDirectoryNoFollow(
   targetPath: string,
   authorization?: FsPathAuthorization,
 ): Promise<Stats> {
@@ -770,7 +770,7 @@ export interface FsEntry {
   ext: string
 }
 
-async function getUniqueCopyPath(destDir: string, sourcePath: string): Promise<string> {
+export async function getUniqueCopyPath(destDir: string, sourcePath: string): Promise<string> {
   const resolvedDir = resolveFsPath(destDir)
   const parsed = parse(resolveFsPath(sourcePath))
   let attempt = 0
@@ -788,7 +788,7 @@ async function getUniqueCopyPath(destDir: string, sourcePath: string): Promise<s
   }
 }
 
-async function isProbablyTextFile(
+export async function isProbablyTextFile(
   resolvedPath: string,
   authorization?: FsPathAuthorization,
 ): Promise<boolean> {

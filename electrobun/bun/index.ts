@@ -1,16 +1,31 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs'
+import { lstat, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, extname, join } from 'node:path'
 import { ApplicationMenu, BrowserView, BrowserWindow, Utils } from 'electrobun/bun'
 import type { CodeSurfElectrobunRPC } from '../../src/shared/electrobun-rpc.ts'
-import type { ExecutionHostRecord, ExecutionPreference, ProjectRecord, Workspace, WorkspaceRecord } from '../../src/shared/types.ts'
+import type { AppSettings, ExecutionHostRecord, ExecutionPreference, ProjectRecord, Workspace, WorkspaceRecord } from '../../src/shared/types.ts'
 import { DEFAULT_SETTINGS, normalizeLoadedSettings, withDefaultSettings, withFreshInstallDefaults } from '../../src/shared/types.ts'
-import { buildHermesChatArgs, buildOpenClawAgentArgs, buildOpenCodeRunArgs, sanitizeAgentCliDiagnostic } from '../../src/main/agents/agent-cli-contracts.ts'
+import { buildOpenClawAgentArgs, buildOpenCodeRunArgs, sanitizeAgentCliDiagnostic } from '../../src/main/agents/agent-cli-contracts.ts'
 import { CODESURF_HOME, WORKSPACES_DIR } from '../../src/main/paths.ts'
 import { getDefaultElectrobunInvokeResponse } from '../../src/electrobun/browser/electron-facade.ts'
+import {
+  assertAuthorizedParentUnchanged,
+  assertDirectoryNoFollow,
+  assertPathMatchesAuthorization,
+  assertSafeCardId,
+  copyFileNoFollow,
+  getUniqueCopyPath,
+  isProbablyTextFile,
+  readUtf8FileNoFollow,
+  statPathNoFollow,
+  validateCanonicalFsPathDetails,
+  writeUtf8FileNoFollow,
+} from '../../src/main/ipc/fs.ts'
+import { buildSafeSpawnEnv, isAllowedBinary } from '../../src/main/ipc/terminal-helpers.ts'
+import type { ChatRequest } from '../../src/main/chat/types.ts'
 import {
   formatExtensionSidebarResponse,
   listExtensionsForBridge,
@@ -19,7 +34,16 @@ import {
 import { createElectrobunDbRuntime } from './runtime-db.ts'
 import { builtInDaemonHosts, createElectrobunDaemonRuntime, sanitizeDaemonStatusError, summarizeDaemonDashboard } from './runtime-daemon.ts'
 import { parseClaudeStreamJsonLine, parseCodexJsonLine, parseOpenClawOutput, parseOpenCodeJsonLine, type ElectrobunStreamEvent } from './chat-streams.ts'
-import { electrobunCodexPermissionArgs } from './chat-policy.ts'
+import {
+  authorizeElectrobunFsPath,
+  authorizeElectrobunTerminalPath,
+  buildElectrobunClaudeSpawnArgs,
+  buildElectrobunCodexSpawnArgs,
+  buildElectrobunHermesSpawnArgs,
+  buildElectrobunPersonaPrompt,
+  canonicalizeElectrobunChatRequest,
+  type ElectrobunChatRequest,
+} from './trust-policy.ts'
 import {
   galleryLocal as listPetsGalleryLocal,
   getPetManifest,
@@ -52,6 +76,7 @@ type TerminalSession = {
   shell: string
   buffer: string
   cwd: string
+  workspaceId: string | null
 }
 
 type PtyHostMessage = {
@@ -63,20 +88,6 @@ type PtyHostMessage = {
   cols?: number
   rows?: number
   buffer?: string
-}
-
-type ChatRequest = {
-  cardId: string
-  workspaceId?: string | null
-  provider?: string | null
-  model?: string | null
-  mode?: string | null
-  thinking?: string | null
-  workspaceDir?: string | null
-  sessionId?: string | null
-  jobId?: string | null
-  jobSequence?: number | null
-  messages?: Array<{ role?: string, content?: string }>
 }
 
 type BusEvent = {
@@ -180,6 +191,7 @@ const chatSessionIds = new Map<string, string>()
 const busHistory = new Map<string, BusEvent[]>()
 const tileContext = new Map<string, unknown>()
 const activityRecords = new Map<string, Record<string, unknown>>()
+const fsWatchers = new Map<string, { watcher: FSWatcher, debounce: ReturnType<typeof setTimeout> | null }>()
 let focusedWindowId = 1
 let shellPathCache: string | null | undefined
 let ptyHostProcess: ChildProcess | null = null
@@ -295,6 +307,8 @@ async function getActiveWorkspace(): Promise<Workspace | null> {
 }
 
 async function setActiveWorkspace(id: string): Promise<boolean> {
+  const workspace = (await listWorkspaces()).find(candidate => candidate.id === id)
+  if (!workspace) throw new Error(`Workspace not found: ${id}`)
   const doc = await readWorkspacesDoc()
   doc.activeWorkspaceId = id
   await writeWorkspacesDoc(doc)
@@ -303,7 +317,9 @@ async function setActiveWorkspace(id: string): Promise<boolean> {
 }
 
 async function upsertProjectForPath(projectPath: string): Promise<ProjectRecord> {
-  const normalizedPath = projectPath.trim()
+  const normalizedPath = (
+    await validateCanonicalFsPathDetails(projectPath.trim(), 'directory')
+  ).operationPath
   const doc = await readProjectsDoc()
   const existing = (doc.projects ?? []).find(project => project.path === normalizedPath)
   if (existing) return existing
@@ -337,13 +353,13 @@ async function createWorkspace(name: string, projectPath?: string | null): Promi
 }
 
 async function addProjectFolder(workspaceId: string, folderPath: string): Promise<Workspace | null> {
+  const doc = await readWorkspacesDoc()
+  const record = (doc.workspaces ?? []).find(item => item.id === workspaceId)
+  if (!record) throw new Error(`Workspace not found: ${workspaceId}`)
   const project = await upsertProjectForPath(folderPath)
   const projects = await listProjects()
   const projectById = new Map(projects.map(item => [item.id, item]))
   projectById.set(project.id, project)
-  const doc = await readWorkspacesDoc()
-  const record = (doc.workspaces ?? []).find(item => item.id === workspaceId)
-  if (!record) return null
   record.projectIds = unique([...(record.projectIds ?? []), project.id])
   record.primaryProjectId = record.primaryProjectId ?? project.id
   await writeWorkspacesDoc(doc)
@@ -357,7 +373,8 @@ async function removeProjectFolder(workspaceId: string, folderPath: string): Pro
   const project = projects.find(item => item.path === folderPath || item.id === folderPath)
   const doc = await readWorkspacesDoc()
   const record = (doc.workspaces ?? []).find(item => item.id === workspaceId)
-  if (!record || !project) return record ? workspaceFromRecord(record, new Map(projects.map(item => [item.id, item]))) : null
+  if (!record) throw new Error(`Workspace not found: ${workspaceId}`)
+  if (!project) throw new Error(`Project not found: ${folderPath}`)
   record.projectIds = (record.projectIds ?? []).filter(id => id !== project.id)
   if (record.primaryProjectId === project.id) record.primaryProjectId = record.projectIds[0] ?? null
   await writeWorkspacesDoc(doc)
@@ -368,6 +385,9 @@ async function removeProjectFolder(workspaceId: string, folderPath: string): Pro
 
 async function deleteWorkspace(id: string): Promise<boolean> {
   const doc = await readWorkspacesDoc()
+  if (!(doc.workspaces ?? []).some(item => item.id === id)) {
+    throw new Error(`Workspace not found: ${id}`)
+  }
   doc.workspaces = (doc.workspaces ?? []).filter(item => item.id !== id)
   if (doc.activeWorkspaceId === id) doc.activeWorkspaceId = doc.workspaces[0]?.id ?? null
   await writeWorkspacesDoc(doc)
@@ -501,7 +521,7 @@ async function appendQueuedMessageEvent(payload: any): Promise<boolean> {
   return true
 }
 
-async function readSettings(): Promise<unknown> {
+async function readSettings(): Promise<AppSettings> {
   try {
     const raw = await readJson<{ settings?: Partial<typeof DEFAULT_SETTINGS> } | Partial<typeof DEFAULT_SETTINGS>>(SETTINGS_PATH, DEFAULT_SETTINGS)
     if (raw && typeof raw === 'object' && 'settings' in raw) {
@@ -518,6 +538,30 @@ async function writeSettings(settings: unknown): Promise<unknown> {
   await writeJson(SETTINGS_PATH, { version: 1, settings: next })
   broadcast('appearance:updated', { shouldUseDark: true })
   return next
+}
+
+async function workspaceAuthority() {
+  const [settings, workspaces] = await Promise.all([readSettings(), listWorkspaces()])
+  return { settings, workspaces }
+}
+
+async function authorizeFsPath(
+  filePath: string,
+  intent: 'read' | 'create' | 'write' | 'delete-link' | 'directory',
+  workspaceId?: unknown,
+  allowReadOnlyOpenCodeConfig = false,
+) {
+  return await authorizeElectrobunFsPath({
+    ...(await workspaceAuthority()),
+    filePath,
+    intent,
+    workspaceId,
+    allowReadOnlyOpenCodeConfig,
+  })
+}
+
+function fsWatchKey(dirPath: string, workspaceId: unknown): string {
+  return `${typeof workspaceId === 'string' ? workspaceId : ''}\0${dirPath}`
 }
 
 async function readDirEntries(dirPath: string): Promise<Array<{ name: string, path: string, isDirectory: boolean, isFile: boolean }>> {
@@ -594,13 +638,7 @@ function getShellEnvPath(): string | null {
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const shellPath = getShellEnvPath()
-  return { ...process.env, ...(shellPath ? { PATH: shellPath } : {}), ...extra }
-}
-
-async function safeCwd(value: unknown): Promise<string> {
-  const candidate = typeof value === 'string' && value.trim() ? value.trim() : process.cwd()
-  const info = await stat(candidate).catch(() => null)
-  return info?.isDirectory() ? candidate : process.cwd()
+  return buildSafeSpawnEnv({ ...(shellPath ? { PATH: shellPath } : {}), ...extra })
 }
 
 function resolvePtyHostPath(): string | null {
@@ -709,18 +747,38 @@ function stopAllChatProcesses(): void {
   }
 }
 
+function stopAllFsWatchers(): void {
+  for (const entry of fsWatchers.values()) {
+    if (entry.debounce) clearTimeout(entry.debounce)
+    entry.watcher.close()
+  }
+  fsWatchers.clear()
+}
+
 function shutdownRuntimeChildren(): void {
   stopPtyHost()
   stopAllChatProcesses()
+  stopAllFsWatchers()
 }
 
-function createTerminal(tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): { cols: number, rows: number, buffer: string } {
+async function createTerminal(tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number, rows: number, buffer: string }> {
   const existing = terminalSessions.get(tileId)
   if (existing) return { cols: 80, rows: 24, buffer: existing.buffer }
 
+  const authorized = await authorizeElectrobunTerminalPath({
+    ...(await workspaceAuthority()),
+    filePath: workspaceDir,
+  })
+  workspaceDir = authorized.path.operationPath
+  if (launchBin && !isAllowedBinary(launchBin)) launchBin = undefined
   const shell = launchBin || defaultShell()
   const args = Array.isArray(launchArgs) ? launchArgs : []
-  const session: TerminalSession = { shell, buffer: '', cwd: workspaceDir }
+  const session: TerminalSession = {
+    shell,
+    buffer: '',
+    cwd: workspaceDir,
+    workspaceId: authorized.workspaceId,
+  }
   terminalSessions.set(tileId, session)
   publishBus(`tile:${tileId}`, 'system', `terminal:${tileId}`, { action: 'created', workspaceDir, runtime: 'electrobun-node-pty-host' })
 
@@ -728,6 +786,8 @@ function createTerminal(tileId: string, workspaceDir: string, launchBin?: string
   if (!ok) {
     const error = 'PTY host is unavailable. Node or electrobun/helpers/pty-host.cjs could not be found.'
     broadcast(`terminal:data:${tileId}`, `\r\n\x1b[31m${error}\x1b[0m\r\n`)
+    terminalSessions.delete(tileId)
+    throw new Error(error)
   }
 
   return { cols: 80, rows: 24, buffer: '' }
@@ -833,20 +893,12 @@ async function runHermesChat(req: ChatRequest, prompt: string): Promise<{ ok: bo
     return { ok: false, error }
   }
 
-  const modeMap: Record<string, string> = {
-    full: 'terminal,file,web,browser',
-    terminal: 'terminal,file',
-    web: 'web,browser',
-    query: '',
-  }
-  const args = buildHermesChatArgs({
+  const args = buildElectrobunHermesSpawnArgs(
+    req,
     prompt,
-    model: req.model,
-    resumeSessionId: req.sessionId ?? chatSessionIds.get(cardId) ?? null,
-    toolsets: modeMap[String(req.mode ?? '')] ?? 'terminal,file,web',
-    bypassPermissions: req.mode === 'bypassPermissions' || req.mode === 'full-access',
-  })
-  const cwd = await safeCwd(req.workspaceDir)
+    req.sessionId ?? chatSessionIds.get(cardId) ?? null,
+  )
+  const cwd = req.workspaceDir
   const proc = spawn(hermesBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
   chatProcesses.set(cardId, proc)
 
@@ -886,17 +938,10 @@ async function runClaudeChat(req: ChatRequest, prompt: string): Promise<{ ok: bo
     return { ok: false, error }
   }
 
-  const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages']
-  if (req.model) args.push('--model', req.model)
-  const permissionMode = typeof req.mode === 'string' && ['bypassPermissions', 'acceptEdits', 'default', 'plan', 'auto', 'dontAsk'].includes(req.mode)
-    ? req.mode
-    : 'default'
-  args.push('--permission-mode', permissionMode)
   const resumeSessionId = req.sessionId ?? chatSessionIds.get(cardId) ?? null
-  if (resumeSessionId) args.push('--resume', resumeSessionId)
-  args.push(prompt)
+  const args = buildElectrobunClaudeSpawnArgs(req, prompt, resumeSessionId)
 
-  const cwd = await safeCwd(req.workspaceDir)
+  const cwd = req.workspaceDir
   const proc = spawn(claudeBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
   chatProcesses.set(cardId, proc)
 
@@ -922,14 +967,14 @@ async function runOpenCodeChat(req: ChatRequest, prompt: string): Promise<{ ok: 
   }
 
   const args = buildOpenCodeRunArgs({
-    prompt,
+    prompt: buildElectrobunPersonaPrompt(prompt, req.agentMode),
     model: req.model,
     sessionId: req.sessionId ?? chatSessionIds.get(cardId) ?? null,
-    cwd: req.workspaceDir ?? null,
+    cwd: req.workspaceDir,
     bypassPermissions: req.mode === 'full-access' || req.mode === 'bypassPermissions',
   })
 
-  const cwd = await safeCwd(req.workspaceDir)
+  const cwd = req.workspaceDir
   const proc = spawn(opencodeBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
   chatProcesses.set(cardId, proc)
 
@@ -1031,14 +1076,14 @@ async function runOpenClawChat(req: ChatRequest, prompt: string): Promise<{ ok: 
     adaptive: 'medium',
   }
   const args = buildOpenClawAgentArgs({
-    prompt,
+    prompt: buildElectrobunPersonaPrompt(prompt, req.agentMode),
     agentId: selectedAgentId ?? 'main',
     sessionId: existingSessionId,
     thinking: thinkingMap[req.thinking ?? ''] ?? null,
     local: true,
   })
 
-  const cwd = await safeCwd(req.workspaceDir)
+  const cwd = req.workspaceDir
   const proc = spawn(openclawBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
   chatProcesses.set(cardId, proc)
 
@@ -1105,13 +1150,23 @@ async function runCodexChat(req: ChatRequest, prompt: string): Promise<{ ok: boo
     return { ok: false, error }
   }
 
-  const args = ['exec', '--json', '--model', req.model || 'gpt-5.5']
-  args.push(...electrobunCodexPermissionArgs(req.mode))
-  args.push('-c', 'mcp_servers={}', '--skip-git-repo-check')
-  if (req.workspaceDir) args.push('-C', req.workspaceDir)
-  args.push(prompt)
+  const workspaceDir = req.workspaceDir
+  if (!workspaceDir) {
+    const error = 'The authoritative workspace root is unavailable.'
+    sendStream(cardId, { type: 'error', error })
+    sendStream(cardId, { type: 'done' })
+    return { ok: false, error }
+  }
+  const args = buildElectrobunCodexSpawnArgs(
+    req,
+    prompt,
+    workspaceDir,
+    req.sessionId ?? chatSessionIds.get(cardId) ?? null,
+  )
+  const resumeIndex = args.indexOf('resume')
+  args.splice(resumeIndex >= 0 ? resumeIndex : args.length - 1, 0, '-c', 'mcp_servers={}')
 
-  const cwd = await safeCwd(req.workspaceDir)
+  const cwd = workspaceDir
   const proc = spawn(codexBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
   chatProcesses.set(cardId, proc)
 
@@ -1126,16 +1181,25 @@ async function runCodexChat(req: ChatRequest, prompt: string): Promise<{ ok: boo
   return { ok: true }
 }
 
-async function sendChat(req: ChatRequest): Promise<{ ok: boolean, error?: string, jobId?: string }> {
-  const cardId = String(req.cardId ?? '')
+async function sendChat(rawRequest: ElectrobunChatRequest): Promise<{ ok: boolean, error?: string, jobId?: string }> {
+  const cardId = String(rawRequest.cardId ?? '')
   if (!cardId) return { ok: false, error: 'missing cardId' }
-  stopChat(cardId)
+  let req: ChatRequest
+  try {
+    req = await canonicalizeElectrobunChatRequest(rawRequest, await listWorkspaces())
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    sendStream(cardId, { type: 'error', error: message })
+    sendStream(cardId, { type: 'done' })
+    return { ok: false, error: message }
+  }
   const prompt = lastUserMessage(req)
   if (!prompt) {
     sendStream(cardId, { type: 'error', error: 'No user message' })
     sendStream(cardId, { type: 'done' })
     return { ok: false, error: 'No user message' }
   }
+  stopChat(cardId)
 
   const provider = String(req.provider ?? 'claude').toLowerCase()
   if (provider === 'claude') return await runClaudeChat(req, prompt)
@@ -1176,13 +1240,11 @@ function gitBranches(cwd: string): unknown {
 }
 
 async function handleInvoke(channel: string, args: unknown[] = []): Promise<unknown> {
-  try {
-    switch (channel) {
+  switch (channel) {
       case 'appearance:shouldUseDark':
         return true
       case 'appearance:setThemeSource':
-        broadcast('appearance:updated', { shouldUseDark: true })
-        return true
+        return { ok: false, error: 'Electrobun theme source persistence is unavailable.' }
 
       case 'workspace:list':
         return await listWorkspaces()
@@ -1210,7 +1272,8 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return await deleteWorkspace(String(args[0] ?? ''))
       case 'workspace:openFolder': {
         const paths = await Utils.openFileDialog({ canChooseFiles: false, canChooseDirectory: true, allowsMultipleSelection: false })
-        return paths[0] || null
+        if (!paths[0]) return null
+        return (await validateCanonicalFsPathDetails(paths[0], 'directory')).operationPath
       }
 
       case 'settings:get':
@@ -1256,11 +1319,9 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'canvas:getSessionState':
         return await getSessionState(String(args[0] ?? ''), String(args[1] ?? ''))
       case 'canvas:renameSession':
-        return { ok: true }
       case 'canvas:setSessionArchived':
-        return { ok: true }
       case 'canvas:generateSessionTitle':
-        return { ok: true, title: 'CodeSurf session' }
+        return { ok: false, error: `${channel} is unavailable in the Electrobun local state store.` }
       case 'canvas:listCheckpoints':
         return await daemonRuntime.request('/checkpoint/list', {
           body: { workspaceId: String(args[0] ?? ''), sessionEntryId: String(args[1] ?? '') },
@@ -1279,64 +1340,228 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return []
 
       case 'fs:readDir':
-        return await readDirEntries(String(args[0] ?? process.cwd()))
-      case 'fs:readFile':
-        return await readFile(String(args[0] ?? ''), 'utf8').catch(() => '')
+      {
+        const { path: validated } = await authorizeFsPath(
+          String(args[0] ?? ''),
+          'directory',
+          args[1],
+          true,
+        )
+        await assertDirectoryNoFollow(validated.operationPath, validated.authorization)
+        try {
+          const entries = await readdir(validated.operationPath, { withFileTypes: true })
+          return entries
+            .map(entry => ({
+              name: entry.name,
+              path: join(validated.displayPath, entry.name),
+              isDir: entry.isDirectory(),
+              ext: entry.isDirectory() ? '' : extname(entry.name).toLowerCase(),
+            }))
+            .sort((left, right) => left.isDir === right.isDir
+              ? left.name.localeCompare(right.name)
+              : left.isDir ? -1 : 1)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+          throw error
+        }
+      }
+      case 'fs:readFile': {
+        const { path: validated } = await authorizeFsPath(
+          String(args[0] ?? ''),
+          'read',
+          args[1],
+          true,
+        )
+        try {
+          return await readUtf8FileNoFollow(validated.operationPath, validated.authorization)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+          throw error
+        }
+      }
       case 'fs:writeFile': {
-        const filePath = String(args[0] ?? '')
-        await mkdir(dirname(filePath), { recursive: true })
-        await writeFile(filePath, String(args[1] ?? ''))
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'write', args[2])
+        await writeUtf8FileNoFollow(validated.operationPath, String(args[1] ?? ''), {
+          authorization: validated.authorization,
+        })
         return true
       }
       case 'fs:createFile': {
-        const filePath = String(args[0] ?? '')
-        await mkdir(dirname(filePath), { recursive: true })
-        if (!existsSync(filePath)) await writeFile(filePath, '')
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'create', args[1])
+        await writeUtf8FileNoFollow(validated.operationPath, '', {
+          authorization: validated.authorization,
+        })
         return true
       }
-      case 'fs:createDir':
-        await mkdir(String(args[0] ?? ''), { recursive: true })
+      case 'fs:createDir': {
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'directory', args[1])
+        await assertAuthorizedParentUnchanged(validated.authorization)
+        await mkdir(validated.operationPath, { recursive: true })
         return true
-      case 'fs:deleteFile':
-        await rm(String(args[0] ?? ''), { recursive: true, force: true })
+      }
+      case 'fs:deleteFile': {
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'delete-link', args[1])
+        await assertAuthorizedParentUnchanged(validated.authorization)
+        let current
+        try {
+          current = await lstat(validated.operationPath)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+          throw error
+        }
+        if (current.isSymbolicLink()) await unlink(validated.operationPath)
+        else {
+          await assertPathMatchesAuthorization(validated.operationPath, validated.authorization)
+          await rm(validated.operationPath, { recursive: true, force: true })
+        }
         return true
-      case 'fs:renameFile':
-        await rename(String(args[0] ?? ''), String(args[1] ?? ''))
+      }
+      case 'fs:renameFile': {
+        const oldPath = await authorizeFsPath(String(args[0] ?? ''), 'write', args[2])
+        const newPath = await authorizeFsPath(String(args[1] ?? ''), 'create', args[2])
+        await assertPathMatchesAuthorization(oldPath.path.operationPath, oldPath.path.authorization)
+        await assertAuthorizedParentUnchanged(newPath.path.authorization)
+        await rename(oldPath.path.operationPath, newPath.path.operationPath)
         return true
-      case 'fs:stat':
-        return await statPath(String(args[0] ?? ''))
+      }
+      case 'fs:probeDir': {
+        try {
+          const { path: validated } = await authorizeFsPath(
+            String(args[0] ?? ''),
+            'directory',
+            args[1],
+            true,
+          )
+          await assertDirectoryNoFollow(validated.operationPath, validated.authorization)
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, code: (error as NodeJS.ErrnoException).code ?? 'ACCESS_DENIED' }
+        }
+      }
+      case 'fs:stat': {
+        try {
+          const { path: validated } = await authorizeFsPath(
+            String(args[0] ?? ''),
+            'read',
+            args[1],
+            true,
+          )
+          const info = await statPathNoFollow(validated.operationPath, validated.authorization)
+          return {
+            size: info.size,
+            mtimeMs: info.mtimeMs,
+            isFile: info.isFile(),
+            isDir: info.isDirectory(),
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+          throw error
+        }
+      }
       case 'fs:isProbablyTextFile': {
-        const info = await statPath(String(args[0] ?? ''))
-        if (!info?.isFile) return false
-        const sample = await readFile(String(args[0] ?? '')).catch(() => null)
-        return sample ? !sample.subarray(0, Math.min(sample.length, 8192)).includes(0) : false
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'read', args[1])
+        const info = await statPathNoFollow(validated.operationPath, validated.authorization)
+        if (!info.isFile()) return false
+        return await isProbablyTextFile(validated.operationPath, validated.authorization)
       }
-      case 'fs:revealInFinder':
-        return Utils.showItemInFolder(String(args[0] ?? ''))
+      case 'fs:revealInFinder': {
+        const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'read', args[1])
+        await statPathNoFollow(validated.operationPath, validated.authorization)
+        Utils.showItemInFolder(validated.operationPath)
+        return true
+      }
       case 'fs:copyIntoDir': {
-        const sourcePath = String(args[0] ?? '')
-        const destDir = String(args[1] ?? '')
-        const destPath = join(destDir, basename(sourcePath))
-        await mkdir(destDir, { recursive: true })
-        await cp(sourcePath, destPath, { recursive: true })
-        return { path: destPath }
+        const source = await authorizeFsPath(String(args[0] ?? ''), 'read', args[2])
+        const destinationDirectory = await authorizeFsPath(String(args[1] ?? ''), 'directory', args[2])
+        await assertAuthorizedParentUnchanged(destinationDirectory.path.authorization)
+        await mkdir(destinationDirectory.path.operationPath, { recursive: true })
+        await assertDirectoryNoFollow(
+          destinationDirectory.path.operationPath,
+          destinationDirectory.path.authorization,
+        )
+        const sourceInfo = await statPathNoFollow(source.path.operationPath, source.path.authorization)
+        if (!sourceInfo.isFile()) throw new Error('Only files can be copied into a workspace')
+        const candidate = await getUniqueCopyPath(
+          destinationDirectory.path.operationPath,
+          source.path.displayPath,
+        )
+        const destination = await authorizeFsPath(candidate, 'create', args[2])
+        await copyFileNoFollow(source.path.operationPath, destination.path.operationPath, {
+          sourceAuthorization: source.path.authorization,
+          destinationAuthorization: destination.path.authorization,
+        })
+        return { path: destination.path.displayPath }
       }
       case 'fs:writeBrief': {
-        const filePath = join(String(args[0] ?? process.cwd()), '.codesurf', 'BRIEF.md')
-        await mkdir(dirname(filePath), { recursive: true })
-        await writeFile(filePath, String(args[1] ?? ''))
-        return { ok: true, path: filePath }
+        const cardId = String(args[0] ?? '')
+        assertSafeCardId(cardId)
+        const directory = await validateCanonicalFsPathDetails(join(CODESURF_HOME, 'briefs'), 'directory')
+        await assertAuthorizedParentUnchanged(directory.authorization)
+        await mkdir(directory.operationPath, { recursive: true })
+        const brief = await validateCanonicalFsPathDetails(join(directory.displayPath, `${cardId}.md`), 'write')
+        await writeUtf8FileNoFollow(brief.operationPath, String(args[1] ?? ''), {
+          authorization: brief.authorization,
+        })
+        return brief.displayPath
+      }
+      case 'fs:watchStart': {
+        const rawPath = String(args[0] ?? '')
+        const key = fsWatchKey(rawPath, args[1])
+        if (fsWatchers.has(key)) return true
+        const { path: validated } = await authorizeFsPath(rawPath, 'directory', args[1])
+        await assertDirectoryNoFollow(validated.operationPath, validated.authorization)
+        const entry = { watcher: undefined as unknown as FSWatcher, debounce: null as ReturnType<typeof setTimeout> | null }
+        entry.watcher = watchDirectory(validated.operationPath, { recursive: true }, () => {
+          if (entry.debounce) clearTimeout(entry.debounce)
+          entry.debounce = setTimeout(() => broadcast(`fs:watch:${rawPath}`), 200)
+        })
+        fsWatchers.set(key, entry)
+        return true
+      }
+      case 'fs:watchStop': {
+        const rawPath = String(args[0] ?? '')
+        const key = fsWatchKey(rawPath, args[1])
+        await authorizeFsPath(rawPath, 'directory', args[1])
+        const entry = fsWatchers.get(key)
+        if (entry) {
+          if (entry.debounce) clearTimeout(entry.debounce)
+          entry.watcher.close()
+          fsWatchers.delete(key)
+        }
+        return true
       }
 
       case 'terminal:create':
-        return createTerminal(String(args[0] ?? ''), await safeCwd(args[1]), typeof args[2] === 'string' ? args[2] : undefined, Array.isArray(args[3]) ? args[3] as string[] : undefined)
-      case 'terminal:write':
-        sendPtyHost({ type: 'write', tileId: String(args[0] ?? ''), data: String(args[1] ?? '') })
+        return await createTerminal(String(args[0] ?? ''), String(args[1] ?? ''), typeof args[2] === 'string' ? args[2] : undefined, Array.isArray(args[3]) ? args[3] as string[] : undefined)
+      case 'terminal:write': {
+        const tileId = String(args[0] ?? '')
+        if (!terminalSessions.has(tileId)) throw new Error(`Terminal session not found: ${tileId}`)
+        if (!sendPtyHost({ type: 'write', tileId, data: String(args[1] ?? '') })) {
+          throw new Error('PTY host is unavailable')
+        }
         return true
+      }
       case 'terminal:cd': {
         const tileId = String(args[0] ?? '')
         const session = terminalSessions.get(tileId)
-        if (session) sendPtyHost({ type: 'write', tileId, data: `\x15${cdCommand(session.shell, String(args[1] ?? session.cwd))}\r` })
+        if (!session) throw new Error(`Terminal session not found: ${tileId}`)
+        const requestedPath = String(args[1] ?? '')
+        const authorized = session.workspaceId
+          ? await authorizeFsPath(requestedPath, 'directory', session.workspaceId)
+          : await authorizeElectrobunTerminalPath({
+              ...(await workspaceAuthority()),
+              filePath: requestedPath,
+            })
+        await assertDirectoryNoFollow(
+          authorized.path.operationPath,
+          authorized.path.authorization,
+        )
+        if (!sendPtyHost({
+          type: 'write',
+          tileId,
+          data: `\x15${cdCommand(session.shell, authorized.path.operationPath)}\r`,
+        })) throw new Error('PTY host is unavailable')
+        session.cwd = authorized.path.operationPath
         return true
       }
       case 'terminal:resize': {
@@ -1360,7 +1585,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return true
       }
       case 'terminal:update-peers':
-        return true
+        return { ok: false, error: 'Electrobun terminal peer context updates are unavailable.' }
 
       case 'chat:send':
         return await sendChat((args[0] ?? {}) as ChatRequest)
@@ -1378,7 +1603,13 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'chat:setPermissionMode':
       case 'chat:answerUserQuestion':
       case 'chat:answerToolPermission':
+        return { ok: false, error: `${channel} is unavailable for Electrobun CLI subprocess providers.` }
+      case 'chat:disposeCard': {
+        const cardId = String(args[0] ?? '')
+        stopChat(cardId)
+        chatSessionIds.delete(cardId)
         return { ok: true }
+      }
       case 'chat:selectFiles':
         return await Utils.openFileDialog({ canChooseFiles: true, canChooseDirectory: false, allowsMultipleSelection: true })
       case 'chat:writeTempAttachment': {
@@ -1453,7 +1684,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return fresh
       }
       case 'window:setSidebarCollapsed':
-        return true
+        return { ok: false, error: 'Electrobun sidebar collapse persistence is renderer-owned.' }
       case 'app:relaunch':
         shutdownRuntimeChildren()
         Utils.quit()
@@ -1528,7 +1759,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return {}
       case 'mcp:saveServers':
       case 'mcp:saveWorkspaceServers':
-        return { ok: true }
+        return { ok: false, error: `${channel} is unavailable in the Electrobun host.` }
 
       case 'system:memStats':
         return process.memoryUsage()
@@ -1550,7 +1781,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return await daemonRuntime.status()
       }
       case 'system:cleanupTile':
-        return true
+        return { ok: false, error: 'Electrobun tile cleanup is unavailable.' }
       case 'homedir:get':
         return homedir()
       case 'ui:setZoomLevel': {
@@ -1622,13 +1853,21 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'ext:enable':
       case 'ext:disable':
       case 'ext:refresh':
-        return { ok: true }
+        return { ok: false, error: `${channel} is unavailable in the Electrobun host.` }
 
       case 'permissions:list':
         return []
       case 'permissions:clear':
       case 'permissions:clearAll':
-        return true
+        return { ok: false, error: 'Electrobun does not provide a persistent permission grant store.' }
+
+      case 'secrets:list':
+        return { ok: false, names: [], error: 'Electrobun secure secret storage is unavailable.' }
+      case 'secrets:has':
+        return { ok: false, has: false, error: 'Electrobun secure secret storage is unavailable.' }
+      case 'secrets:set':
+      case 'secrets:delete':
+        return { ok: false, error: 'Electrobun secure secret storage is unavailable.' }
 
       // Pets — local scan/install without Electron IPC (runtime-pets.ts)
       case 'pets:list':
@@ -1681,10 +1920,6 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
 
       default:
         return getDefaultElectrobunInvokeResponse(channel)
-    }
-  } catch (error) {
-    console.warn(`[Electrobun] ${channel} failed:`, error)
-    return getDefaultElectrobunInvokeResponse(channel)
   }
 }
 
