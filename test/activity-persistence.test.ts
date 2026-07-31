@@ -18,8 +18,10 @@ import type { ActivityRecord } from '../src/shared/activity-types.ts'
 import {
   ACTIVITY_QUARANTINE_PREFIX,
   ActivityPersistenceError,
+  activityModeNeedsRepair,
   activityStorePath,
   createFileActivityPersistence,
+  serializeActivityDocument,
 } from '../src/main/activity-persistence.ts'
 import { ACTIVITY_DOCUMENT_VERSION } from '../src/main/activity-validation.ts'
 import { ActivityStore } from '../src/main/activity-store-core.ts'
@@ -85,6 +87,42 @@ describe('file activity persistence', () => {
         records: [record()],
         needsRewrite: true,
       })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('trims a compact legacy document to a canonical document that fits the exact read cap', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const records = Array.from({ length: 4 }, (_, index) => ({
+        ...record('workspace-1'),
+        id: `activity-${index}`,
+        detail: 'x'.repeat(300),
+        createdAt: NOW - index,
+        updatedAt: NOW - index,
+      }))
+      const raw = JSON.stringify([...records].reverse())
+      const maxFileBytes = Buffer.byteLength(raw, 'utf8')
+      assert.ok(Buffer.byteLength(serializeActivityDocument('workspace-1', records), 'utf8') > maxFileBytes)
+
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, raw)
+      const persistence = createFileActivityPersistence({ homeDir, maxFileBytes })
+      const loaded = await persistence.load('workspace-1')
+
+      assert.equal(loaded.needsRewrite, true)
+      assert.deepEqual(loaded.records.map(item => item.id), [
+        'activity-0',
+        'activity-1',
+        'activity-2',
+      ])
+      const store = new ActivityStore({ persistence, maxFileBytes })
+      await store.query({ workspaceId: 'workspace-1' })
+      await store.flushAll()
+      assert.ok((await stat(filePath)).size <= maxFileBytes)
+      assert.equal(JSON.parse(await readFile(filePath, 'utf8')).version, ACTIVITY_DOCUMENT_VERSION)
     } finally {
       await cleanup()
     }
@@ -158,7 +196,7 @@ describe('file activity persistence', () => {
     }
   })
 
-  test('leaves future and oversized files untouched without quarantining or rewriting them', async () => {
+  test('secures future and oversized files synchronously while preserving their bytes', async () => {
     const cases: Array<{ name: string, raw: string, maxFileBytes?: number }> = [
       {
         name: 'future',
@@ -173,17 +211,25 @@ describe('file activity persistence', () => {
         const filePath = activityStorePath(homeDir, testCase.name)
         await mkdir(dirname(filePath), { recursive: true })
         await writeFile(filePath, testCase.raw)
+        await chmod(filePath, 0o644)
         const persistence = createFileActivityPersistence({
           homeDir,
           ...(testCase.maxFileBytes === undefined ? {} : { maxFileBytes: testCase.maxFileBytes }),
         })
         await assert.rejects(persistence.load(testCase.name), ActivityPersistenceError)
         assert.equal(await readFile(filePath, 'utf8'), testCase.raw)
+        assert.equal((await stat(filePath)).mode & 0o777, 0o600)
         assert.deepEqual(await readdir(dirname(filePath)), ['activity.json'])
       } finally {
         await cleanup()
       }
     }
+  })
+
+  test('defines permission repair as a POSIX-only operation', () => {
+    assert.equal(activityModeNeedsRepair(0o100644n, 'darwin'), true)
+    assert.equal(activityModeNeedsRepair(0o100600n, 'linux'), false)
+    assert.equal(activityModeNeedsRepair(0o100644n, 'win32'), false)
   })
 
   test('quarantines corrupt bytes exactly and starts a rewriteable empty store', async () => {
@@ -205,6 +251,32 @@ describe('file activity persistence', () => {
       assert.ok(quarantine)
       assert.deepEqual(await readFile(join(dirname(filePath), quarantine)), raw)
       assert.equal((await stat(join(dirname(filePath), quarantine))).mode & 0o777, 0o600)
+    } finally {
+      await cleanup()
+    }
+  })
+
+  test('fatally rejects invalid UTF-8 instead of parsing replacement characters', async () => {
+    const { homeDir, cleanup } = await fixture()
+    try {
+      const filePath = activityStorePath(homeDir, 'workspace-1')
+      const raw = Buffer.concat([
+        Buffer.from('{"version":1,"records":[],"unknown":"'),
+        Buffer.from([0xff]),
+        Buffer.from('"}'),
+      ])
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, raw)
+      const persistence = createFileActivityPersistence({ homeDir })
+
+      assert.deepEqual(await persistence.load('workspace-1'), {
+        records: [],
+        needsRewrite: true,
+      })
+      const quarantine = (await readdir(dirname(filePath)))
+        .find(name => name.startsWith(ACTIVITY_QUARANTINE_PREFIX))
+      assert.ok(quarantine)
+      assert.deepEqual(await readFile(join(dirname(filePath), quarantine)), raw)
     } finally {
       await cleanup()
     }

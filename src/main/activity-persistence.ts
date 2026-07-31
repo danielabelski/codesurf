@@ -2,8 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { constants, promises as fs } from 'node:fs'
 import type { BigIntStats } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { TextDecoder } from 'node:util'
 import type { ActivityRecord } from '../shared/activity-types.ts'
 import { capActivityRecords } from './activity-cap.ts'
+import {
+  EMPTY_ACTIVITY_DOCUMENT_BYTES,
+  fitActivityRecordsToDocument,
+  serializeCompactActivityDocument,
+} from './activity-document-format.ts'
 import {
   ACTIVITY_DOCUMENT_VERSION,
   ActivityValidationError,
@@ -201,10 +207,14 @@ export function serializeActivityDocument(workspaceIdValue: unknown, recordsValu
     version: ACTIVITY_DOCUMENT_VERSION,
     records: recordsValue,
   }, workspaceId)
-  return `${JSON.stringify({
-    version: ACTIVITY_DOCUMENT_VERSION,
-    records: parsed.records,
-  }, null, 2)}\n`
+  return serializeCompactActivityDocument(parsed.records)
+}
+
+export function activityModeNeedsRepair(
+  mode: bigint,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform !== 'win32' && (mode & 0o777n) !== 0o600n
 }
 
 async function syncDirectoryHandle(handle: ActivityWriteBoundary['directoryHandle']): Promise<void> {
@@ -237,6 +247,7 @@ async function durableAtomicWrite(filePath: string, content: string | Uint8Array
     }
 
     handle = await fs.open(temporaryPath, 'wx', 0o600)
+    await handle.chmod(0o600)
     const openedTemporaryIdentity = await handle.stat({ bigint: true })
     temporaryIdentity = openedTemporaryIdentity
     await verifyReadBoundary(boundary, filePath)
@@ -330,7 +341,7 @@ async function loadActivityFile(
   }
 
   try {
-    const openedInfo = await handle.stat({ bigint: true })
+    let openedInfo = await handle.stat({ bigint: true })
     await hooks?.afterOpen?.(filePath)
     await verifyReadBoundary(boundary, filePath)
     const verifiedPathInfo = await fs.lstat(filePath, { bigint: true }).catch(() => null)
@@ -346,10 +357,31 @@ async function loadActivityFile(
     if (!openedInfo.isFile()) {
       throw persistenceError('not_a_file', 'Activity store path is not a regular file', filePath)
     }
+    if (activityModeNeedsRepair(openedInfo.mode)) {
+      try {
+        await handle.chmod(0o600)
+      } catch (error) {
+        throw persistenceError(
+          'permission_repair_failed',
+          'Unable to secure the activity store permissions',
+          filePath,
+          error,
+        )
+      }
+      openedInfo = await handle.stat({ bigint: true })
+      const repairedPathInfo = await fs.lstat(filePath, { bigint: true }).catch(() => null)
+      if (
+        !repairedPathInfo?.isFile()
+        || repairedPathInfo.isSymbolicLink()
+        || !sameIdentity(openedInfo, repairedPathInfo)
+        || activityModeNeedsRepair(openedInfo.mode)
+      ) {
+        throw persistenceError('path_changed', 'Activity store changed during permission repair', filePath)
+      }
+    }
     if (openedInfo.size > BigInt(maxFileBytes)) {
       throw persistenceError('file_too_large', `Activity store exceeds ${maxFileBytes} bytes`, filePath)
     }
-    const needsPermissionRepair = (openedInfo.mode & 0o777n) !== 0o600n
     const bytes = await handle.readFile()
     if (bytes.byteLength > maxFileBytes) {
       throw persistenceError('file_too_large', `Activity store exceeds ${maxFileBytes} bytes`, filePath)
@@ -366,9 +398,17 @@ async function loadActivityFile(
       throw persistenceError('path_changed', 'Activity store changed while it was being read', filePath)
     }
 
+    let text: string
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      await quarantineActivityBytes(filePath, bytes)
+      return { records: [], needsRewrite: true }
+    }
+
     let value: unknown
     try {
-      value = JSON.parse(bytes.toString('utf8'))
+      value = JSON.parse(text)
     } catch {
       await quarantineActivityBytes(filePath, bytes)
       return { records: [], needsRewrite: true }
@@ -380,9 +420,14 @@ async function loadActivityFile(
         await quarantineActivityBytes(filePath, bytes)
       }
       const capped = capActivityRecords(recovered.records)
+      const fitted = fitActivityRecordsToDocument(capped, maxFileBytes)
       return {
-        records: capped,
-        needsRewrite: needsPermissionRepair || recovered.needsRewrite || capped !== recovered.records,
+        records: fitted.records,
+        needsRewrite: (
+          recovered.needsRewrite
+          || capped !== recovered.records
+          || fitted.trimmed
+        ),
       }
     } catch (error) {
       if (error instanceof ActivityValidationError && error.code === 'future_document_version') {
@@ -405,6 +450,9 @@ export function createFileActivityPersistence(options: FileActivityPersistenceOp
   const maxFileBytes = options.maxFileBytes ?? MAX_ACTIVITY_FILE_BYTES
   if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1) {
     throw new TypeError('maxFileBytes must be a positive integer')
+  }
+  if (maxFileBytes < EMPTY_ACTIVITY_DOCUMENT_BYTES) {
+    throw new TypeError(`maxFileBytes must be at least ${EMPTY_ACTIVITY_DOCUMENT_BYTES}`)
   }
 
   return {
