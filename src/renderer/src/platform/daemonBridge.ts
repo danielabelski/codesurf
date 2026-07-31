@@ -406,6 +406,11 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
       minimize: async () => {},
       maximize: async () => {},
       close: async () => {},
+      // The soft namespace proxy synthesizes unknown methods. Keep lifecycle
+      // capability keys explicit so feature detection sees that browser/native
+      // hosts cannot delay close for a renderer persistence acknowledgement.
+      onPersistenceRequest: undefined,
+      persistenceReady: undefined,
     },
 
     bus: {

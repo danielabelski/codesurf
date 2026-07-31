@@ -261,6 +261,12 @@ interface ElectronAPI {
     closeById(id: number): Promise<void>
     openMiniChat(opts: { workspaceId: string; tileId: string; title?: string }): Promise<{ ok: boolean; id?: number; error?: string }>
     setSidebarCollapsed(collapsed: boolean): Promise<boolean>
+    onPersistenceRequest?(callback: (request: {
+      nonce: string
+      reason: 'close' | 'quit' | 'reload' | 'force-reload'
+      canvasOwner: boolean
+    }) => void): () => void
+    persistenceReady?(nonce: string): void
     onListChanged(cb: (list: { id: number; title: string; focused: boolean }[]) => void): () => void
     onNewTab(cb: () => void): () => void
   }
