@@ -354,6 +354,42 @@ const electronApi = {
     closeById: (id: number) => ipcRenderer.invoke('window:closeById', id),
     openMiniChat: (opts: { workspaceId: string; tileId: string; title?: string }) => ipcRenderer.invoke('window:openMiniChat', opts),
     setSidebarCollapsed: (collapsed: boolean) => ipcRenderer.invoke('window:setSidebarCollapsed', collapsed),
+    onPersistenceRequest: (callback: (request: {
+      nonce: string
+      reason: 'close' | 'quit' | 'reload' | 'force-reload'
+      canvasOwner: boolean
+    }) => void) => {
+      const handler = (_: unknown, request: {
+        nonce?: unknown
+        reason?: unknown
+        canvasOwner?: unknown
+      }) => {
+        const reason = request?.reason
+        const validReason = reason === 'close'
+          || reason === 'quit'
+          || reason === 'reload'
+          || reason === 'force-reload'
+        if (
+          typeof request?.nonce === 'string'
+          && request.nonce.length > 0
+          && validReason
+          && typeof request.canvasOwner === 'boolean'
+        ) {
+          callback({
+            nonce: request.nonce,
+            reason,
+            canvasOwner: request.canvasOwner,
+          })
+        }
+      }
+      ipcRenderer.on('window:persistence-request', handler)
+      return () => ipcRenderer.removeListener('window:persistence-request', handler)
+    },
+    persistenceReady: (nonce: string) => {
+      if (typeof nonce === 'string' && nonce.length > 0) {
+        ipcRenderer.send('window:persistence-ready', { nonce })
+      }
+    },
     onListChanged: (cb: (list: { id: number; title: string; focused: boolean }[]) => void) => {
       const handler = (_: unknown, list: { id: number; title: string; focused: boolean }[]) => cb(list)
       ipcRenderer.on('window:list-changed', handler)

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -50,6 +50,7 @@ import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
 import { stopAllRelayServices } from './relay/service'
+import { deactivateCanvasRelayProjectionSync } from './relay/canvasProjection'
 import { normalizeSafeExternalUrl } from './utils/externalUrl'
 import { log } from './utils/logger.ts'
 
@@ -60,6 +61,11 @@ import {
 } from './secure-web-preferences'
 import { isOwlHostProcess, runOwlHostProcess, stopOwlSupervisor } from './owl/runtime'
 import { isBrokerTestProcess, runBrokerTestHost } from './extensions/broker/test-harness'
+import {
+  createWindowPersistenceBarrierRegistry,
+  installAppQuitBarrier,
+  type WindowPersistenceReason,
+} from './window-persistence-barrier'
 
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
 const envMaxOldSpaceSizeMb = Number.parseInt(process.env.CODESURF_MAX_OLD_SPACE_SIZE_MB ?? '', 10)
@@ -128,6 +134,10 @@ const freshWindowIds = new Set<number>()
 const miniChatWindows = new Map<string, BrowserWindow>()
 const MAIN_WINDOW_TABBING_IDENTIFIER = `${APP_ID}.workspace-tabs`
 let extensionRegistry: ExtensionRegistry | null = null
+let windowPersistenceBarrierRegistry: ReturnType<
+  typeof createWindowPersistenceBarrierRegistry
+> | null = null
+let disposeAppQuitBarrier: (() => void) | null = null
 
 interface MainWindowOptions {
   fresh?: boolean
@@ -483,6 +493,7 @@ function createWindow(opts?: MainWindowOptions): BrowserWindow {
   attachGuestWebviewSecurityHandlers(win.webContents)
   const windowId = win.webContents.id
   installRenderPerfProbe(win)
+  windowPersistenceBarrierRegistry?.install(win, { role: 'primary-canvas' })
 
   win.on('ready-to-show', () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return
@@ -589,6 +600,7 @@ function createMiniChatWindow(owner: BrowserWindow | null, request: MiniChatWind
     webPreferences: createMainWindowWebPreferences(join(__dirname, '../preload/index.js')),
   })
   attachGuestWebviewSecurityHandlers(win.webContents)
+  windowPersistenceBarrierRegistry?.install(win, { role: 'auxiliary' })
 
   miniChatWindows.set(key, win)
   windowTitles.set(win.webContents.id, typeof request.title === 'string' && request.title.trim() ? request.title.trim() : 'Mini Chat')
@@ -710,6 +722,7 @@ app.whenReady().then(async () => {
   applyRuntimeAppBranding()
   installMediaPermissionHandlers()
   electronApp.setAppUserModelId(APP_ID)
+  windowPersistenceBarrierRegistry = createWindowPersistenceBarrierRegistry(ipcMain)
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -817,6 +830,27 @@ app.whenReady().then(async () => {
     openExternalIfSafe,
   })
 
+  const reloadFocusedWindow = (
+    reason: Extract<WindowPersistenceReason, 'reload' | 'force-reload'>,
+  ): void => {
+    const win = BrowserWindow.getFocusedWindow() ?? getFocusedMainWindow()
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+    const persistence = windowPersistenceBarrierRegistry?.requestPersistence(win, reason)
+      ?? Promise.resolve()
+    void persistence
+      .catch(error => {
+        console.error(`[window] ${reason} persistence challenge failed:`, error)
+      })
+      .then(() => {
+        if (win.isDestroyed() || win.webContents.isDestroyed()) return
+        if (reason === 'force-reload') {
+          win.webContents.reloadIgnoringCache()
+        } else {
+          win.webContents.reload()
+        }
+      })
+  }
+
   // Native app menu with Cmd+N / Cmd+T
   const menu = Menu.buildFromTemplate([
     {
@@ -876,8 +910,16 @@ app.whenReady().then(async () => {
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
+        {
+          label: 'Reload',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => reloadFocusedWindow('reload'),
+        },
+        {
+          label: 'Force Reload',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: () => reloadFocusedWindow('force-reload'),
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'resetZoom' },
@@ -922,14 +964,28 @@ app.whenReady().then(async () => {
 })
 }
 
-app.on('before-quit', () => {
+function runAppShutdownCleanup(): void {
   flushActivityStore()
   stopAllCollabWatchers()
+  deactivateCanvasRelayProjectionSync()
   extensionRegistry?.deactivateAll()
   stopAllRelayServices()
   killAllChatProcesses()
   stopOwlSupervisor()
   closeDb()
+}
+
+disposeAppQuitBarrier = installAppQuitBarrier(
+  app,
+  () => windowPersistenceBarrierRegistry,
+  runAppShutdownCleanup,
+)
+
+app.on('will-quit', () => {
+  disposeAppQuitBarrier?.()
+  disposeAppQuitBarrier = null
+  windowPersistenceBarrierRegistry?.dispose()
+  windowPersistenceBarrierRegistry = null
 })
 
 app.on('window-all-closed', () => {

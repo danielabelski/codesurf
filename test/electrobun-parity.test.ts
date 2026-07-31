@@ -22,6 +22,10 @@ const PRELOAD_SOURCE = readFileSync(
 )
 
 const PRELOAD_PATHS = extractPreloadBridgePaths(PRELOAD_SOURCE)
+const ELECTROBUN_UNAVAILABLE_PRELOAD_PATHS = [
+  'window.onPersistenceRequest',
+  'window.persistenceReady',
+]
 
 function createProbeFacade() {
   return createElectrobunElectronFacade({
@@ -39,10 +43,13 @@ describe('Electrobun preload parity checklist', () => {
     expect(PRELOAD_PATHS).toContain('secrets.has')
   })
 
-  test('facade exposes every preload callable', () => {
-    const facadePaths = new Set(collectBridgePaths(createProbeFacade()))
+  test('facade omits only Electron lifecycle APIs that Electrobun cannot honor', () => {
+    const facade = createProbeFacade()
+    const facadePaths = new Set(collectBridgePaths(facade))
     const missing = PRELOAD_PATHS.filter(path => !facadePaths.has(path))
-    expect(missing).toEqual([])
+    expect(missing).toEqual(ELECTROBUN_UNAVAILABLE_PRELOAD_PATHS)
+    expect('onPersistenceRequest' in facade.window).toBe(false)
+    expect('persistenceReady' in facade.window).toBe(false)
   })
 
   test('every facade leaf maps to a default invoke response or channel family', () => {
