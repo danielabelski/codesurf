@@ -9,7 +9,7 @@
  */
 
 import { promises as fs } from 'fs'
-import { join, resolve } from 'path'
+import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { CODESURF_HOME } from '../paths'
 import { ExtensionContext } from './context'
 import { activatePowerExtension, type ExtensionScope } from './loader'
@@ -23,7 +23,11 @@ import { log } from '../utils/logger.ts'
 import {
   getDeclaredSensitiveMediaCapabilities,
 } from '../../shared/extension-sensitive-media.ts'
-import { computeExtensionMediaIdentity } from './media-identity.ts'
+import {
+  captureExtensionMediaRoot,
+  computeExtensionMediaIdentity,
+  type ExtensionMediaRootBinding,
+} from './media-identity.ts'
 
 const extLog = log.scope('Extensions')
 
@@ -107,7 +111,8 @@ async function saveGrantsMap(grants: Record<string, string[]>): Promise<void> {
 
 export interface LoadedExtension {
   manifest: ExtensionManifest
-  mediaIdentity: string
+  mediaIdentity: string | null
+  installRootBinding: ExtensionMediaRootBinding
   deactivate?: () => void
 }
 
@@ -120,6 +125,127 @@ export interface ExtensionMediaPermission {
 }
 
 const EXTENSIONS_DIRNAME = 'extensions'
+const MAX_EXTENSION_MANIFEST_BYTES = 1024 * 1024
+
+async function readExtensionManifestText(extDir: string): Promise<string> {
+  const manifestPath = join(extDir, 'extension.json')
+  const before = await fs.lstat(manifestPath)
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error(`Extension manifest is not a regular file: ${manifestPath}`)
+  }
+  if (before.size > MAX_EXTENSION_MANIFEST_BYTES) {
+    throw new Error(`Extension manifest exceeds ${MAX_EXTENSION_MANIFEST_BYTES} bytes: ${manifestPath}`)
+  }
+  const opened = await openCanonicalResource(extDir, manifestPath)
+  if (!opened.ok) {
+    throw new Error(`Unable to safely open extension manifest: ${manifestPath}`)
+  }
+  const result = await readOpenedCanonicalResourceText(
+    opened,
+    MAX_EXTENSION_MANIFEST_BYTES,
+  )
+  if (!result.ok) {
+    throw new Error(`Unable to safely read extension manifest: ${manifestPath}`)
+  }
+  const after = await fs.lstat(manifestPath)
+  if (
+    !after.isFile()
+    || after.isSymbolicLink()
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || after.size !== before.size
+    || after.mtimeMs !== before.mtimeMs
+    || after.ctimeMs !== before.ctimeMs
+  ) {
+    throw new Error(`Extension manifest changed while being read: ${manifestPath}`)
+  }
+  return result.text
+}
+
+async function assertRegularExtensionRoot(
+  extensionRoot: string,
+): Promise<ExtensionMediaRootBinding> {
+  return captureExtensionMediaRoot(extensionRoot)
+}
+
+type ScanRootBinding = {
+  readonly root: ExtensionMediaRootBinding
+  readonly scopeCanonical: string
+  readonly scopeInfo: Awaited<ReturnType<typeof fs.lstat>>
+  readonly scopeLexical: string
+}
+type ScanRootValidator = () => Promise<void>
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+  return rel === '' || Boolean(
+    rel
+    && rel !== '..'
+    && !rel.startsWith(`..${sep}`)
+    && !isAbsolute(rel),
+  )
+}
+
+function sameScanInfo(
+  left: Awaited<ReturnType<typeof fs.lstat>>,
+  right: Awaited<ReturnType<typeof fs.lstat>>,
+): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+function sameRootBinding(
+  left: ExtensionMediaRootBinding,
+  right: ExtensionMediaRootBinding,
+): boolean {
+  return left.lexicalRoot === right.lexicalRoot
+    && left.canonicalRoot === right.canonicalRoot
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.birthtimeMs === right.birthtimeMs
+}
+
+async function captureScanRoot(
+  scanRoot: string,
+  authorizedScope: string,
+): Promise<ScanRootBinding | null> {
+  const scopeLexical = resolve(authorizedScope)
+  const rootLexical = resolve(scanRoot)
+  if (!isContainedPath(scopeLexical, rootLexical)) return null
+  try {
+    const scopeCanonical = await fs.realpath(scopeLexical)
+    const scopeInfo = await fs.lstat(scopeCanonical)
+    if (!scopeInfo.isDirectory() || scopeInfo.isSymbolicLink()) return null
+    const root = await captureExtensionMediaRoot(rootLexical)
+    if (!isContainedPath(scopeCanonical, root.canonicalRoot)) return null
+    return { root, scopeCanonical, scopeInfo, scopeLexical }
+  } catch {
+    return null
+  }
+}
+
+async function assertScanRootCurrent(binding: ScanRootBinding): Promise<void> {
+  const currentScope = await fs.realpath(binding.scopeLexical)
+  const currentScopeInfo = await fs.lstat(currentScope)
+  const currentRoot = await captureExtensionMediaRoot(binding.root.lexicalRoot)
+  if (
+    currentScope !== binding.scopeCanonical
+    || !sameScanInfo(currentScopeInfo, binding.scopeInfo)
+    || !sameRootBinding(currentRoot, binding.root)
+    || !isContainedPath(currentScope, currentRoot.canonicalRoot)
+  ) {
+    throw new Error(`Extension scan root changed or escaped its authorized scope: ${binding.root.lexicalRoot}`)
+  }
+}
 
 function normalizeTileTypes(manifest: ExtensionManifest): void {
   if (manifest.contributes?.tiles) {
@@ -184,14 +310,14 @@ export class ExtensionRegistry {
     this.enabledCatalogIds = await loadEnabledCatalogSet()
     this.grants = await loadGrantsMap()
     for (const bundledDir of this.bundledDirs) {
-      await this.scanDir(bundledDir)
+      await this.scanDir(bundledDir, undefined, bundledDir)
     }
     const globalDir = join(CODESURF_HOME, EXTENSIONS_DIRNAME)
-    await this.scanDir(globalDir)
+    await this.scanDir(globalDir, undefined, CODESURF_HOME)
     // Catalog dirs load last — any id already loaded from bundled/global wins,
     // so shipped bundled extensions override the catalog copies.
     for (const catalogDir of this.catalogDirs) {
-      await this.scanDir(catalogDir, { defaultEnabled: false })
+      await this.scanDir(catalogDir, { defaultEnabled: false }, catalogDir)
     }
   }
 
@@ -200,7 +326,7 @@ export class ExtensionRegistry {
     // A workspace's .codesurf/extensions dir is attacker-controllable (it ships
     // with any cloned repo). Mark the scan untrusted so power-tier extensions
     // there require explicit user enablement instead of auto-activating.
-    await this.scanDir(wsDir, { untrustedScope: true })
+    await this.scanDir(wsDir, { untrustedScope: true }, workspacePath)
   }
 
   async rescan(workspacePath?: string | null): Promise<void> {
@@ -251,16 +377,34 @@ export class ExtensionRegistry {
         : requestedWorkspacePath
 
       for (const bundledDir of this.bundledDirs) {
-        await this.scanDirLight(bundledDir, manifests, disabledIds)
+        await this.scanDirLight(bundledDir, manifests, disabledIds, undefined, bundledDir)
       }
-      await this.scanDirLight(join(CODESURF_HOME, EXTENSIONS_DIRNAME), manifests, disabledIds)
+      await this.scanDirLight(
+        join(CODESURF_HOME, EXTENSIONS_DIRNAME),
+        manifests,
+        disabledIds,
+        undefined,
+        CODESURF_HOME,
+      )
       // Match full scan ordering: catalog candidates follow bundled/global,
       // then the active workspace is considered last.
       for (const catalogDir of this.catalogDirs) {
-        await this.scanDirLight(catalogDir, manifests, disabledIds, { defaultEnabled: false })
+        await this.scanDirLight(
+          catalogDir,
+          manifests,
+          disabledIds,
+          { defaultEnabled: false },
+          catalogDir,
+        )
       }
       if (targetWorkspacePath) {
-        await this.scanDirLight(join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME), manifests, disabledIds, { untrustedScope: true })
+        await this.scanDirLight(
+          join(targetWorkspacePath, '.codesurf', EXTENSIONS_DIRNAME),
+          manifests,
+          disabledIds,
+          { untrustedScope: true },
+          targetWorkspacePath,
+        )
       }
 
       if (requestedWorkspacePath !== undefined) {
@@ -283,36 +427,55 @@ export class ExtensionRegistry {
     return result
   }
 
-  private async scanDir(dir: string, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
+  private async scanDir(
+    dir: string,
+    opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+    authorizedScope = dir,
+  ): Promise<void> {
+    const scanBinding = await captureScanRoot(dir, authorizedScope)
+    if (!scanBinding) return
     let entries: string[]
     try {
-      entries = await fs.readdir(dir)
+      entries = await fs.readdir(scanBinding.root.canonicalRoot)
     } catch {
       return // dir doesn't exist yet — that's fine
     }
+    await assertScanRootCurrent(scanBinding)
 
     for (const name of entries) {
+      await assertScanRootCurrent(scanBinding)
       if (name.startsWith('.')) continue
-      const extDir = join(dir, name)
-      const stat = await fs.stat(extDir).catch(() => null)
-      if (!stat?.isDirectory()) continue
+      const extDir = join(scanBinding.root.canonicalRoot, name)
+      const extensionBinding = await captureExtensionMediaRoot(extDir).catch(() => null)
+      if (
+        !extensionBinding
+        || !isContainedPath(scanBinding.root.canonicalRoot, extensionBinding.canonicalRoot)
+      ) continue
+      await assertScanRootCurrent(scanBinding)
+      const validateScanRoot = (): Promise<void> => assertScanRootCurrent(scanBinding)
 
       try {
-        const hasNativeManifest = await fs.stat(join(extDir, 'extension.json'))
+        const hasNativeManifest = await fs.lstat(join(extDir, 'extension.json'))
           .then(info => info.isFile())
           .catch(() => false)
         if (hasNativeManifest) {
-          await this.loadExtension(extDir, opts)
+          await this.loadExtension(extDir, opts, extensionBinding, validateScanRoot)
         } else {
           const adapted = await tryAdaptExtension(extDir)
           if (adapted) {
-            await this.loadFromManifest(adapted, opts)
+            await this.loadFromManifest(
+              adapted,
+              opts,
+              extensionBinding,
+              validateScanRoot,
+            )
           }
         }
       } catch (err) {
         console.error(`[Extensions] Failed to load ${extDir}:`, err)
       }
     }
+    await assertScanRootCurrent(scanBinding)
   }
 
   private async scanDirLight(
@@ -320,33 +483,55 @@ export class ExtensionRegistry {
     manifests: Map<string, ExtensionManifest>,
     disabledIds: Set<string>,
     opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+    authorizedScope = dir,
   ): Promise<void> {
+    const scanBinding = await captureScanRoot(dir, authorizedScope)
+    if (!scanBinding) return
+    const stagedManifests = new Map(manifests)
     let entries: string[]
     try {
-      entries = await fs.readdir(dir)
+      entries = await fs.readdir(scanBinding.root.canonicalRoot)
     } catch {
       return
     }
+    await assertScanRootCurrent(scanBinding)
 
     for (const name of entries) {
+      await assertScanRootCurrent(scanBinding)
       if (name.startsWith('.')) continue
-      const extDir = join(dir, name)
-      const stat = await fs.stat(extDir).catch(() => null)
-      if (!stat?.isDirectory()) continue
+      const extDir = join(scanBinding.root.canonicalRoot, name)
+      const extensionBinding = await captureExtensionMediaRoot(extDir).catch(() => null)
+      if (
+        !extensionBinding
+        || !isContainedPath(scanBinding.root.canonicalRoot, extensionBinding.canonicalRoot)
+      ) continue
+      await assertScanRootCurrent(scanBinding)
+      const validateScanRoot = (): Promise<void> => assertScanRootCurrent(scanBinding)
 
-      const candidate = await this.readManifestLight(extDir, disabledIds, opts)
+      const candidate = await this.readManifestLight(
+        extDir,
+        disabledIds,
+        opts,
+        extensionBinding,
+        validateScanRoot,
+      )
       if (!candidate) continue
       const { manifest, adapted } = candidate
 
-      if (manifests.has(manifest.id)) {
+      if (stagedManifests.has(manifest.id)) {
         // Match the full loader exactly:
         // - catalog candidates never replace installed/bundled/workspace ids;
         // - adapted candidates keep the first loaded id;
         // - later native manifests replace earlier native or adapted entries.
         if (opts?.defaultEnabled === false || adapted) continue
-        manifests.delete(manifest.id)
+        stagedManifests.delete(manifest.id)
       }
-      manifests.set(manifest.id, manifest)
+      stagedManifests.set(manifest.id, manifest)
+    }
+    await assertScanRootCurrent(scanBinding)
+    manifests.clear()
+    for (const [id, manifest] of stagedManifests) {
+      manifests.set(id, manifest)
     }
   }
 
@@ -354,15 +539,22 @@ export class ExtensionRegistry {
     extDir: string,
     disabledIds: Set<string>,
     opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+    expectedRoot?: ExtensionMediaRootBinding,
+    validateScanRoot?: ScanRootValidator,
   ): Promise<LightweightManifestCandidate | null> {
+    await validateScanRoot?.()
+    const currentRoot = await assertRegularExtensionRoot(extDir).catch(() => null)
+    if (!currentRoot || (expectedRoot && !sameRootBinding(currentRoot, expectedRoot))) {
+      return null
+    }
     const nativeManifestPath = join(extDir, 'extension.json')
-    const hasNativeManifest = await fs.stat(nativeManifestPath)
+    const hasNativeManifest = await fs.lstat(nativeManifestPath)
       .then(info => info.isFile())
       .catch(() => false)
 
     if (hasNativeManifest) {
       try {
-        const raw = await fs.readFile(nativeManifestPath, 'utf8')
+        const raw = await readExtensionManifestText(extDir)
         const manifest: ExtensionManifest = JSON.parse(raw)
         if (
           !isValidExtensionId(manifest.id)
@@ -389,6 +581,9 @@ export class ExtensionRegistry {
           manifestEnabled: manifest._enabled,
         })
         normalizeTileTypes(manifest)
+        await validateScanRoot?.()
+        const finalRoot = await assertRegularExtensionRoot(extDir).catch(() => null)
+        if (!finalRoot || !sameRootBinding(finalRoot, currentRoot)) return null
         return { manifest, adapted: false }
       } catch {
         return null
@@ -417,15 +612,27 @@ export class ExtensionRegistry {
         manifestEnabled: adapted._enabled,
       })
       normalizeTileTypes(adapted)
+      await validateScanRoot?.()
+      const finalRoot = await assertRegularExtensionRoot(extDir).catch(() => null)
+      if (!finalRoot || !sameRootBinding(finalRoot, currentRoot)) return null
       return { manifest: adapted, adapted: true }
     } catch {
       return null
     }
   }
 
-  private async loadExtension(extDir: string, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
-    const manifestPath = join(extDir, 'extension.json')
-    const raw = await fs.readFile(manifestPath, 'utf8')
+  private async loadExtension(
+    extDir: string,
+    opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+    expectedRoot?: ExtensionMediaRootBinding,
+    validateScanRoot?: ScanRootValidator,
+  ): Promise<void> {
+    await validateScanRoot?.()
+    const rootBinding = await assertRegularExtensionRoot(extDir)
+    if (expectedRoot && !sameRootBinding(rootBinding, expectedRoot)) {
+      throw new Error(`Extension root changed before manifest load: ${extDir}`)
+    }
+    const raw = await readExtensionManifestText(extDir)
     const manifest: ExtensionManifest = JSON.parse(raw)
 
     // Validate required fields
@@ -463,25 +670,44 @@ export class ExtensionRegistry {
     // Namespace tile types with ext: prefix
     normalizeTileTypes(manifest)
 
-    // Skip catalog duplicates; installed/bundled copies win over gallery entries.
-    if (this.extensions.has(manifest.id) && opts?.defaultEnabled === false) {
+    const existing = this.extensions.get(manifest.id)
+    // Decide precedence before recursive identity work. Catalog candidates lose
+    // to every already-loaded installation; later native non-catalog manifests
+    // remain the established winner (workspace overrides global).
+    if (existing && opts?.defaultEnabled === false) {
       return
     }
 
-    const mediaIdentity = await computeExtensionMediaIdentity(extDir, manifest)
+    const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
+    const mediaIdentity = manifest._enabled && declaredMedia.length > 0
+      ? await computeExtensionMediaIdentity(extDir, manifest, rootBinding)
+      : null
+    await validateScanRoot?.()
+    const finalRootBinding = await assertRegularExtensionRoot(extDir)
+    if (!sameRootBinding(finalRootBinding, rootBinding)) {
+      throw new Error(`Extension root changed before activation: ${extDir}`)
+    }
 
     // Skip if already loaded (workspace overrides global)
-    if (this.extensions.has(manifest.id)) {
-      const existing = this.extensions.get(manifest.id)!
+    if (existing) {
       // Workspace extensions override global — deactivate old one
       if (existing.deactivate) existing.deactivate()
       this.extensions.delete(manifest.id)
     }
 
-    const loaded: LoadedExtension = { manifest, mediaIdentity }
+    const loaded: LoadedExtension = {
+      manifest,
+      mediaIdentity,
+      installRootBinding: rootBinding,
+    }
 
     // Load power tier extensions
     if (manifest.tier === 'power' && manifest.main && manifest._enabled) {
+      await validateScanRoot?.()
+      const activationRoot = await assertRegularExtensionRoot(extDir)
+      if (!sameRootBinding(activationRoot, rootBinding)) {
+        throw new Error(`Extension root changed before activation: ${extDir}`)
+      }
       // Derive the scope for the audit log and defense-in-depth gate in loader.ts.
       const scope: ExtensionScope = opts?.untrustedScope
         ? 'workspace'
@@ -499,14 +725,38 @@ export class ExtensionRegistry {
       // tool to appear twice in getMCPTools() output (double-registration bug).
     }
 
+    try {
+      await validateScanRoot?.()
+      const commitRoot = await assertRegularExtensionRoot(extDir)
+      if (!sameRootBinding(commitRoot, rootBinding)) {
+        throw new Error(`Extension root changed before registry commit: ${extDir}`)
+      }
+    } catch (error) {
+      loaded.deactivate?.()
+      this.extraMCPTools = this.extraMCPTools.filter(tool => tool.extId !== manifest.id)
+      throw error
+    }
     this.extensions.set(manifest.id, loaded)
     extLog.info(`Loaded: ${manifest.name} v${manifest.version} (${manifest.tier})`)
   }
 
   /** Load an already-parsed manifest (used by adapters) */
-  async loadFromManifest(manifest: ExtensionManifest, opts?: { defaultEnabled?: boolean; untrustedScope?: boolean }): Promise<void> {
+  async loadFromManifest(
+    manifest: ExtensionManifest,
+    opts?: { defaultEnabled?: boolean; untrustedScope?: boolean },
+    expectedRoot?: ExtensionMediaRootBinding,
+    validateScanRoot?: ScanRootValidator,
+  ): Promise<void> {
     assertValidAdaptedManifest(manifest, manifest._path ?? '(unknown)')
     if (this.extensions.has(manifest.id)) return
+    if (!manifest._path) {
+      throw new Error(`Adapted extension ${manifest.id} is missing its install path`)
+    }
+    await validateScanRoot?.()
+    const rootBinding = await assertRegularExtensionRoot(manifest._path)
+    if (expectedRoot && !sameRootBinding(rootBinding, expectedRoot)) {
+      throw new Error(`Adapted extension root changed before manifest load: ${manifest._path}`)
+    }
 
     normalizeManifestUi(manifest)
 
@@ -524,13 +774,22 @@ export class ExtensionRegistry {
     // Namespace tiles
     normalizeTileTypes(manifest)
 
-    if (!manifest._path) {
-      throw new Error(`Adapted extension ${manifest.id} is missing its install path`)
+    const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
+    const mediaIdentity = manifest._enabled && declaredMedia.length > 0
+      ? await computeExtensionMediaIdentity(manifest._path, manifest, rootBinding)
+      : null
+    const loaded: LoadedExtension = {
+      manifest,
+      mediaIdentity,
+      installRootBinding: rootBinding,
     }
-    const mediaIdentity = await computeExtensionMediaIdentity(manifest._path, manifest)
-    const loaded: LoadedExtension = { manifest, mediaIdentity }
 
     if (manifest.tier === 'power' && manifest.main && manifest._enabled && manifest._path) {
+      await validateScanRoot?.()
+      const activationRoot = await assertRegularExtensionRoot(manifest._path)
+      if (!sameRootBinding(activationRoot, rootBinding)) {
+        throw new Error(`Adapted extension root changed before activation: ${manifest._path}`)
+      }
       const scope: ExtensionScope = opts?.untrustedScope
         ? 'workspace'
         : opts?.defaultEnabled === false
@@ -543,6 +802,17 @@ export class ExtensionRegistry {
       // do not push ctx.getRegisteredTools() here to avoid double-registration.
     }
 
+    try {
+      await validateScanRoot?.()
+      const commitRoot = await assertRegularExtensionRoot(manifest._path)
+      if (!sameRootBinding(commitRoot, rootBinding)) {
+        throw new Error(`Adapted extension root changed before registry commit: ${manifest._path}`)
+      }
+    } catch (error) {
+      loaded.deactivate?.()
+      this.extraMCPTools = this.extraMCPTools.filter(tool => tool.extId !== manifest.id)
+      throw error
+    }
     this.extensions.set(manifest.id, loaded)
     extLog.info(`Loaded (adapted): ${manifest.name} v${manifest.version}`)
   }
@@ -562,12 +832,14 @@ export class ExtensionRegistry {
     const extension = this.get(id)
     if (!extension) return undefined
     const { manifest, mediaIdentity } = extension
+    const declaredMedia = getDeclaredSensitiveMediaCapabilities(manifest.capabilities)
+    if (!mediaIdentity || declaredMedia.length === 0) return undefined
     return {
       id: manifest.id,
       identity: mediaIdentity,
       name: manifest.name,
       enabled: manifest._enabled === true,
-      declaredMedia: getDeclaredSensitiveMediaCapabilities(manifest.capabilities),
+      declaredMedia,
     }
   }
 
@@ -792,9 +1064,24 @@ export class ExtensionRegistry {
     const ext = this.extensions.get(id)
     if (!ext) return false
     if (ext.manifest._enabled !== true) {
+      if (!ext.manifest._path) {
+        throw new Error(`Extension ${id} is missing its install path`)
+      }
+      const currentRoot = await assertRegularExtensionRoot(ext.manifest._path)
+      if (!sameRootBinding(currentRoot, ext.installRootBinding)) {
+        throw new Error(`Extension root changed after scan; rescan before enabling: ${ext.manifest._path}`)
+      }
       // A disabled extension must always start from a fresh sensitive-media
       // consent state, even if an earlier disk revoke was interrupted.
       await this.revokeSensitiveMedia(id)
+      const declaredMedia = getDeclaredSensitiveMediaCapabilities(ext.manifest.capabilities)
+      ext.mediaIdentity = declaredMedia.length > 0 && ext.manifest._path
+        ? await computeExtensionMediaIdentity(
+            ext.manifest._path,
+            ext.manifest,
+            ext.installRootBinding,
+          )
+        : null
     }
     ext.manifest._enabled = true
     this.disabledIds.delete(id)
@@ -870,6 +1157,7 @@ export class ExtensionRegistry {
       persistEnabled ? saveEnabledCatalogSet(this.enabledCatalogIds) : Promise.resolve(),
       this.revokeSensitiveMedia(id),
     ])
+    ext.mediaIdentity = null
     if (ext.deactivate) {
       ext.deactivate()
       ext.deactivate = undefined
