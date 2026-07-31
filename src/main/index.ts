@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, Menu, nativeImage, screen } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -60,6 +60,7 @@ import {
 } from './secure-web-preferences'
 import { isOwlHostProcess, runOwlHostProcess, stopOwlSupervisor } from './owl/runtime'
 import { isBrokerTestProcess, runBrokerTestHost } from './extensions/broker/test-harness'
+import { installElectronPermissionBoundary } from './security/permissionBoundary'
 
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
 const envMaxOldSpaceSizeMb = Number.parseInt(process.env.CODESURF_MAX_OLD_SPACE_SIZE_MB ?? '', 10)
@@ -80,6 +81,10 @@ app.commandLine.appendSwitch('enable-native-gpu-memory-buffers')
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 
 const isOwlHost = isOwlHostProcess()
+const permissionBoundary = installElectronPermissionBoundary({
+  developmentRendererUrl: is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined,
+  productionRendererFilePath: join(__dirname, '../renderer/index.html'),
+})
 
 // .skill file association support -----------------------------------------
 // Capture launch-via-Finder / `open "X.skill"` before app.whenReady so the
@@ -373,92 +378,6 @@ function broadcastWindowList(): void {
   }
 }
 
-async function requestMacMediaAccess(kind: 'microphone' | 'camera'): Promise<boolean> {
-  if (process.platform !== 'darwin') return true
-  try {
-    return await systemPreferences.askForMediaAccess(kind)
-  } catch (error) {
-    console.warn(`[Permissions] Failed requesting ${kind} access:`, error)
-    return false
-  }
-}
-
-/**
- * Returns true if the given webContents belongs to a trusted main-app renderer
- * (i.e. a BrowserWindow we own), not a guest <webview> tag loading arbitrary content.
- * Webview webContents have getType() === 'webview' in Electron.
- */
-function isTrustedAppRenderer(wc: WebContents | null | undefined): boolean {
-  if (!wc || wc.isDestroyed()) return false
-  return (wc.getType() as string) !== 'webview'
-}
-
-function installMediaPermissionHandlers(): void {
-  const defaultSession = session.defaultSession
-  if (!defaultSession) return
-
-  defaultSession.setPermissionCheckHandler((wc, permission) => {
-    // Display-capture is only allowed for the trusted app renderer, never
-    // for guest <webview> tiles that load arbitrary third-party content.
-    if ((permission as string) === 'display-capture') {
-      return isTrustedAppRenderer(wc)
-    }
-    return permission === 'media'
-  })
-
-  defaultSession.setPermissionRequestHandler(async (wc, permission, callback) => {
-    try {
-      if (permission === 'media') {
-        // Allow mic/camera requests from the main renderer; deny from webviews.
-        if (!isTrustedAppRenderer(wc)) {
-          callback(false)
-          return
-        }
-        const [micAllowed, camAllowed] = await Promise.all([
-          requestMacMediaAccess('microphone'),
-          requestMacMediaAccess('camera'),
-        ])
-        callback(micAllowed || camAllowed)
-        return
-      }
-
-      if (permission === 'display-capture') {
-        // Only grant to trusted app renderer; deny to guest webviews.
-        callback(isTrustedAppRenderer(wc))
-        return
-      }
-
-      callback(false)
-    } catch (error) {
-      console.warn('[Permissions] Permission request failed:', error)
-      callback(false)
-    }
-  })
-
-  defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
-    try {
-      // Resolve the requesting WebContents from the frame when available.
-      // Guard against guest webviews reaching this handler (belt-and-suspenders
-      // in addition to setPermissionCheckHandler/setPermissionRequestHandler).
-      const requestingWc = request.frame ? electronWebContents.fromFrame(request.frame) : null
-      if (!isTrustedAppRenderer(requestingWc)) {
-        console.warn('[Permissions] Display-capture denied for guest webview')
-        callback({})
-        return
-      }
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] })
-      callback(
-        sources[0]
-          ? { video: sources[0], audio: 'loopback' as any }
-          : {},
-      )
-    } catch (error) {
-      console.warn('[Permissions] Display media request failed:', error)
-      callback({})
-    }
-  })
-}
-
 function createWindow(opts?: MainWindowOptions): BrowserWindow {
   const iconPath = resolveAppIconPath()
   const win = new BrowserWindow({
@@ -481,6 +400,7 @@ function createWindow(opts?: MainWindowOptions): BrowserWindow {
     webPreferences: createMainWindowWebPreferences(join(__dirname, '../preload/index.js')),
   })
   attachGuestWebviewSecurityHandlers(win.webContents)
+  permissionBoundary.registerAppWindow(win)
   const windowId = win.webContents.id
   installRenderPerfProbe(win)
 
@@ -589,6 +509,7 @@ function createMiniChatWindow(owner: BrowserWindow | null, request: MiniChatWind
     webPreferences: createMainWindowWebPreferences(join(__dirname, '../preload/index.js')),
   })
   attachGuestWebviewSecurityHandlers(win.webContents)
+  permissionBoundary.registerAppWindow(win)
 
   miniChatWindows.set(key, win)
   windowTitles.set(win.webContents.id, typeof request.title === 'string' && request.title.trim() ? request.title.trim() : 'Mini Chat')
@@ -708,7 +629,6 @@ if (isOwlHost) {
 } else {
 app.whenReady().then(async () => {
   applyRuntimeAppBranding()
-  installMediaPermissionHandlers()
   electronApp.setAppUserModelId(APP_ID)
 
   app.on('browser-window-created', (_, window) => {
