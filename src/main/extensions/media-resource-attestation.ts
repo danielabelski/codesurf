@@ -71,6 +71,8 @@ export async function extensionMediaResourcePathExists(
   root: ExtensionMediaRootBinding,
   candidatePath: string,
 ): Promise<boolean> {
+  const currentRoot = await captureExtensionMediaRoot(root.lexicalRoot).catch(() => null)
+  if (!currentRoot || !sameRootBinding(currentRoot, root)) return true
   const key = extensionMediaResourceKey(root, candidatePath)
   if (!key) return false
   const segments = key.split('/').filter(Boolean)
