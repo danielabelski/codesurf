@@ -1,11 +1,45 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build, type Plugin } from 'esbuild'
+
+const projectRoot = resolve(process.cwd())
+const projectRequire = createRequire(join(projectRoot, 'package.json'))
+const localDaemonRoot = realpathSync(join(projectRoot, 'packages', 'codesurf-daemon'))
+const resolvedDaemonManifest = realpathSync(
+  projectRequire.resolve('@codesurf/daemon/package.json'),
+)
+
+assert.equal(
+  resolvedDaemonManifest,
+  join(localDaemonRoot, 'package.json'),
+  '@codesurf/daemon must resolve from this checkout, not another worktree',
+)
+
+const hermeticDependencies: Plugin = {
+  name: 'hermetic-dependencies',
+  setup(builder) {
+    builder.onResolve({ filter: /^@codesurf\/daemon(?:\/|$)/ }, args => {
+      const resolvedPath = realpathSync(projectRequire.resolve(args.path))
+      assert.ok(
+        resolvedPath === localDaemonRoot || resolvedPath.startsWith(`${localDaemonRoot}${sep}`),
+        `${args.path} resolved outside this checkout: ${resolvedPath}`,
+      )
+      return { path: resolvedPath }
+    })
+    builder.onResolve({ filter: /^(better-sqlite3|node-pty)$/ }, args => ({
+      // Native packages cannot be safely rewritten into an ESM fixture. Keep
+      // the current checkout's installed native entry external and absolute.
+      path: realpathSync(projectRequire.resolve(args.path)),
+      external: true,
+    }))
+  },
+}
 
 async function loadRegistryModule(codesurfHome: string) {
   const bundleDir = await mkdtemp(join(tmpdir(), 'codesurf-registry-test-'))
@@ -42,7 +76,7 @@ async function loadRegistryModule(codesurfHome: string) {
     platform: 'node',
     format: 'esm',
     target: 'node24',
-    plugins: [electronStub],
+    plugins: [hermeticDependencies, electronStub],
     logLevel: 'silent',
   })
 
@@ -100,7 +134,7 @@ async function loadExtensionIpcModule(
     platform: 'node',
     format: 'cjs',
     target: 'node24',
-    plugins: [electronStub],
+    plugins: [hermeticDependencies, electronStub],
     logLevel: 'silent',
   })
 
