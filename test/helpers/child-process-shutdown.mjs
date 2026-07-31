@@ -80,13 +80,21 @@ function destroyStdio(child) {
   }
 }
 
+export function isIgnorablePostCloseProcessGroupError(error) {
+  // ESRCH means the group is already gone. On macOS, a post-close sweep can
+  // instead report EPERM after the owned group leader has exited and its last
+  // descendant is no longer signalable by this process. The initial TERM/KILL
+  // paths remain strict; this exception applies only to the redundant sweep.
+  return error?.code === 'ESRCH' || error?.code === 'EPERM'
+}
+
 function sweepRemainingProcessGroup(child, killProcessGroup) {
   if (!killProcessGroup || process.platform === 'win32' || !child.pid) return false
   try {
     process.kill(-child.pid, 'SIGKILL')
     return true
   } catch (error) {
-    if (error?.code === 'ESRCH') return false
+    if (isIgnorablePostCloseProcessGroupError(error)) return false
     throw error
   }
 }

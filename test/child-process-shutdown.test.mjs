@@ -4,7 +4,11 @@ import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 
-import { stopTestChild, trackTestChild } from './helpers/child-process-shutdown.mjs'
+import {
+  isIgnorablePostCloseProcessGroupError,
+  stopTestChild,
+  trackTestChild,
+} from './helpers/child-process-shutdown.mjs'
 
 async function spawnFixture(setup = '') {
   const child = spawn(process.execPath, [
@@ -48,6 +52,12 @@ async function waitForProcessGone(pid, timeoutMs = 1_000) {
     await delay(10)
   }
 }
+
+test('post-close group sweeps tolerate missing and inaccessible stale groups only', () => {
+  assert.equal(isIgnorablePostCloseProcessGroupError({ code: 'ESRCH' }), true)
+  assert.equal(isIgnorablePostCloseProcessGroupError({ code: 'EPERM' }), true)
+  assert.equal(isIgnorablePostCloseProcessGroupError({ code: 'EINVAL' }), false)
+})
 
 test('stopTestChild awaits graceful SIGTERM exit', { timeout: 5_000 }, async (t) => {
   const child = await spawnFixture()
