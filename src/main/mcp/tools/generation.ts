@@ -14,20 +14,25 @@ import { resolveGenerationKeys } from '../../generation-secrets'
 import { bus } from '../../event-bus'
 import { buildPeerCommandPayload } from '../../../shared/nodeTools'
 import { asString, type McpToolContext, type McpToolSchema } from '../types'
+import { peerTileChannel } from '../peer-scope'
 
 export function publishPeerCommand(
+  workspaceId: string,
   tileId: string,
   command: string,
   payload: Record<string, unknown>,
   ctx: McpToolContext,
 ): string {
-  const evt = bus.publish({
-    channel: `tile:${tileId}`,
+  bus.publish({
+    channel: peerTileChannel(workspaceId, tileId),
     type: 'data',
     source: 'mcp:codesurf',
-    payload: buildPeerCommandPayload(tileId, command, payload),
+    payload: buildPeerCommandPayload(tileId, command, {
+      ...payload,
+      workspaceId,
+    }),
   })
-  ctx.sendToRenderer('bus:event', evt)
+  void ctx
   return `Dispatched ${command} to ${tileId}`
 }
 
@@ -125,9 +130,13 @@ async function readCanvasStateTiles(workspaceId: string): Promise<TileState[]> {
   return []
 }
 
-async function findImageTileSourcePath(tileId: string): Promise<ResolvedImageTileSource | null> {
+async function findImageTileSourcePath(
+  workspaceId: string,
+  tileId: string,
+): Promise<ResolvedImageTileSource | null> {
   const workspaces = await readWorkspaceRefsFromUserConfig()
   for (const ws of workspaces) {
+    if (ws.id !== workspaceId) continue
     try {
       const tiles = await readCanvasStateTiles(ws.id)
       const tile = tiles.find(entry => entry?.id === tileId && entry?.type === 'image')
@@ -216,6 +225,7 @@ async function runGeminiImageEdit(options: {
 }
 
 export async function executeImageEditTool(
+  workspaceId: string,
   tileId: string,
   name: string,
   args: Record<string, unknown>,
@@ -232,12 +242,12 @@ export async function executeImageEditTool(
     outputPath: asString(args.output_path) ?? '',
     status: 'running',
   }
-  publishPeerCommand(tileId, name, requestPayload, ctx)
+  publishPeerCommand(workspaceId, tileId, name, requestPayload, ctx)
 
-  const source = await findImageTileSourcePath(tileId)
+  const source = await findImageTileSourcePath(workspaceId, tileId)
   if (!source) {
     const message = `Image block ${tileId} has no source file path, so it cannot be edited`
-    publishPeerCommand(tileId, 'image_edit_error', { message, prompt }, ctx)
+    publishPeerCommand(workspaceId, tileId, 'image_edit_error', { message, prompt }, ctx)
     return message
   }
 
@@ -263,7 +273,7 @@ export async function executeImageEditTool(
       prompt,
       at: Date.now(),
     }).catch(() => {})
-    publishPeerCommand(tileId, 'image_edit_error', { message: selection, prompt, sourcePath: source.filePath }, ctx)
+    publishPeerCommand(workspaceId, tileId, 'image_edit_error', { message: selection, prompt, sourcePath: source.filePath }, ctx)
     return selection
   }
 
@@ -279,7 +289,7 @@ export async function executeImageEditTool(
       model,
       at: Date.now(),
     }).catch(() => {})
-    publishPeerCommand(tileId, 'image_edit_error', { message, prompt, sourcePath: source.filePath }, ctx)
+    publishPeerCommand(workspaceId, tileId, 'image_edit_error', { message, prompt, sourcePath: source.filePath }, ctx)
     return message
   }
 
@@ -295,7 +305,7 @@ export async function executeImageEditTool(
       model,
       at: Date.now(),
     }).catch(() => {})
-    publishPeerCommand(tileId, 'image_edit_error', { message, prompt, sourcePath: source.filePath }, ctx)
+    publishPeerCommand(workspaceId, tileId, 'image_edit_error', { message, prompt, sourcePath: source.filePath }, ctx)
     return message
   }
 
@@ -307,7 +317,7 @@ export async function executeImageEditTool(
       sourcePath: source.filePath,
       outputPath: asString(args.output_path),
     })
-    publishPeerCommand(tileId, 'image_replace_source', {
+    publishPeerCommand(workspaceId, tileId, 'image_replace_source', {
       filePath: result.outputPath,
       note: prompt,
       provider: selection.provider.id,
@@ -338,7 +348,7 @@ export async function executeImageEditTool(
       model,
       at: Date.now(),
     }).catch(() => {})
-    publishPeerCommand(tileId, 'image_edit_error', {
+    publishPeerCommand(workspaceId, tileId, 'image_edit_error', {
       message,
       prompt,
       provider: selection.provider.id,
