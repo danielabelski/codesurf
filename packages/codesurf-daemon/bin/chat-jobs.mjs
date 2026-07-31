@@ -5,7 +5,6 @@ import { promises as fs } from 'node:fs'
 import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
-import { createInterface } from 'node:readline'
 import { promisify } from 'node:util'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
@@ -1495,6 +1494,7 @@ export function createChatJobManager({
   timelineAppendMaxAttempts = 3,
   timelineAppendRetryDelayMs = 25,
   timelineAppend = (path, data) => fs.appendFile(path, data, 'utf8'),
+  timelineReadStream = path => createReadStream(path),
   metadataWrite = (path, data) => fs.writeFile(path, data, 'utf8'),
 }) {
   const jobsDir = join(homeDir, 'jobs')
@@ -3617,49 +3617,154 @@ export function createChatJobManager({
 
   const INTERRUPTED_JOB_ERROR = 'Job was interrupted (the daemon restarted)'
 
-  async function inspectTimeline(jobId) {
+  async function scanTimeline(jobId, {
+    expectedSerialized = null,
+    expectedSequence = null,
+    onRecord = null,
+  } = {}) {
     const timelinePath = jobTimelinePath(jobId)
     if (!existsSync(timelinePath)) {
       return {
         maxSequence: 0,
         terminalSeen: false,
+        terminalSequence: null,
+        terminalStartByte: null,
         lastEventType: null,
         lastError: null,
+        contiguousByteLength: 0,
+        integrityError: null,
+        exactRecordCommitted: false,
       }
     }
 
-    const input = createReadStream(timelinePath, { encoding: 'utf8' })
-    const lines = createInterface({ input, crlfDelay: Infinity })
+    const input = timelineReadStream(timelinePath)
+    let buffered = Buffer.alloc(0)
+    let fileOffset = 0
+    let lineNumber = 0
+    let stopped = false
     let maxSequence = 0
     let terminalSeen = false
+    let terminalSequence = null
+    let terminalStartByte = null
     let lastEventType = null
     let lastError = null
+    let contiguousByteLength = 0
+    let integrityError = null
+    let exactRecordCommitted = false
+
+    const markIntegrityError = (detail) => {
+      if (!integrityError) {
+        integrityError = `Timeline integrity check failed for job ${jobId} at line ${lineNumber}: ${detail}`
+      }
+    }
+
+    const processLine = async (fullLine) => {
+      lineNumber += 1
+      const recordStartByte = fileOffset
+      fileOffset += fullLine.length
+      let content = fullLine.subarray(0, fullLine.length - 1)
+      if (content.at(-1) === 0x0d) content = content.subarray(0, content.length - 1)
+      const rawLine = content.toString('utf8')
+      if (!rawLine.trim()) {
+        markIntegrityError('empty JSONL record')
+        return
+      }
+
+      let payload
+      try {
+        payload = JSON.parse(rawLine)
+      } catch {
+        markIntegrityError('malformed JSONL record')
+        return
+      }
+
+      const sequence = Number(payload?.sequence ?? 0)
+      if (integrityError) return
+      if (!Number.isInteger(sequence) || sequence <= 0) {
+        markIntegrityError('invalid event sequence')
+        return
+      }
+      if (payload?.jobId !== jobId) {
+        markIntegrityError('event job identity does not match its timeline')
+        return
+      }
+      if (terminalSeen) {
+        markIntegrityError(`event sequence ${sequence} appears after terminal sequence ${terminalSequence}`)
+        return
+      }
+      const nextSequence = maxSequence + 1
+      if (sequence !== nextSequence) {
+        markIntegrityError(`expected sequence ${nextSequence}, received ${sequence}`)
+        return
+      }
+      if (
+        expectedSerialized !== null
+        && sequence === expectedSequence
+        && rawLine !== expectedSerialized
+      ) {
+        markIntegrityError(`sequence ${sequence} contains different event content`)
+        return
+      }
+
+      maxSequence = sequence
+      lastEventType = payload.type ?? null
+      if (payload.type === 'error') {
+        lastError = typeof payload.error === 'string' ? payload.error : 'Unknown error'
+      }
+      if (payload.type === 'done') {
+        terminalSeen = true
+        terminalSequence = sequence
+        terminalStartByte = recordStartByte
+      }
+      if (
+        expectedSerialized !== null
+        && sequence === expectedSequence
+        && rawLine === expectedSerialized
+      ) {
+        exactRecordCommitted = true
+      }
+      contiguousByteLength = fileOffset
+      if (onRecord && await onRecord(payload) === false) stopped = true
+    }
+
     try {
-      for await (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        let payload
-        try {
-          payload = JSON.parse(trimmed)
-        } catch {
-          continue
+      for await (const chunk of input) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        buffered = buffered.length === 0
+          ? bytes
+          : Buffer.concat([buffered, bytes])
+        let newlineIndex = buffered.indexOf(0x0a)
+        while (newlineIndex !== -1) {
+          const fullLine = buffered.subarray(0, newlineIndex + 1)
+          buffered = buffered.subarray(newlineIndex + 1)
+          await processLine(fullLine)
+          if (stopped) break
+          newlineIndex = buffered.indexOf(0x0a)
         }
-        const sequence = Number(payload?.sequence ?? 0)
-        if (!Number.isFinite(sequence) || sequence <= 0) continue
-        if (sequence >= maxSequence) {
-          maxSequence = sequence
-          lastEventType = payload.type ?? null
-        }
-        if (payload.type === 'error' && sequence <= maxSequence) {
-          lastError = typeof payload.error === 'string' ? payload.error : 'Unknown error'
-        }
-        if (payload.type === 'done') terminalSeen = true
+        if (stopped) break
+      }
+      if (!stopped && buffered.length > 0) {
+        lineNumber += 1
+        markIntegrityError('incomplete JSONL record without a trailing newline')
       }
     } finally {
-      lines.close()
       input.destroy()
     }
-    return { maxSequence, terminalSeen, lastEventType, lastError }
+    return {
+      maxSequence,
+      terminalSeen,
+      terminalSequence,
+      terminalStartByte,
+      lastEventType,
+      lastError,
+      contiguousByteLength,
+      integrityError,
+      exactRecordCommitted,
+    }
+  }
+
+  async function inspectTimeline(jobId, options) {
+    return await scanTimeline(jobId, options)
   }
 
   async function appendReconciliationEvent(jobId, event) {
@@ -3748,40 +3853,13 @@ export function createChatJobManager({
   }
 
   async function replayTimeline(record, jobId, sinceSequence, throughSequence = Number.POSITIVE_INFINITY) {
-    const timelinePath = jobTimelinePath(jobId)
-    if (!existsSync(timelinePath)) {
-      return { maxSequence: Math.max(0, sinceSequence), terminalSeen: false }
-    }
-
-    const input = createReadStream(timelinePath, { encoding: 'utf8' })
-    const lines = createInterface({ input, crlfDelay: Infinity })
-    let maxSequence = Math.max(0, sinceSequence)
-    let terminalSeen = false
-    try {
-      for await (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        let payload
-        try {
-          payload = JSON.parse(trimmed)
-        } catch {
-          // A corrupt line cannot be replayed, but the surrounding valid JSONL
-          // remains recoverable. No history-size cap is applied: replay streams
-          // the complete file under writable backpressure.
-          continue
-        }
-        const sequence = Number(payload?.sequence ?? 0)
-        if (!Number.isFinite(sequence) || sequence <= 0) continue
-        maxSequence = Math.max(maxSequence, sequence)
-        if (payload.type === 'done') terminalSeen = true
-        if (sequence <= sinceSequence || sequence > throughSequence) continue
-        if (!await subscriberRegistry.sendReplay(record, payload)) break
-      }
-    } finally {
-      lines.close()
-      input.destroy()
-    }
-    return { maxSequence, terminalSeen }
+    return await scanTimeline(jobId, {
+      onRecord: async payload => {
+        const sequence = Number(payload.sequence)
+        if (sequence <= sinceSequence || sequence > throughSequence) return true
+        return await subscriberRegistry.sendReplay(record, payload)
+      },
+    })
   }
 
   async function streamJob(jobId, sinceSequence, res) {
@@ -3823,12 +3901,16 @@ export function createChatJobManager({
     })
     subscriberRegistry.sendComment(subscriber, ': connected\n\n')
 
-    await replayTimeline(
+    const replayed = await replayTimeline(
       subscriber,
       jobId,
       normalizedSince,
       replayThrough,
     )
+    if (replayed.integrityError) {
+      subscriberRegistry.close(subscriber)
+      return false
+    }
     for (const payload of pendingAtRegistration.events) {
       if (!await subscriberRegistry.sendReplay(subscriber, payload)) break
     }
