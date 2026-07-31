@@ -1,7 +1,14 @@
 import { register } from 'node:module'
 import assert from 'node:assert/strict'
 import { describe, test, before, after } from 'node:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import {
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -49,10 +56,18 @@ register(`data:text/javascript,${encodeURIComponent(loader)}`, import.meta.url)
 const {
   requireMcpAuth,
   getMCPToken,
+  getTileToken,
+  revokeTileToken,
   buildContexHttpMcpServerEntry,
+  tileMcpConfigPath,
+  writeTileMcpConfig,
+  writeMCPConfigToWorkspace,
+  readContextFilesBounded,
+  isValidSseEventName,
   startMCPServer,
   stopMCPServer,
 } = await import('../src/main/mcp-server.ts')
+const { bus } = await import('../src/main/event-bus.ts')
 
 function mockResponse(): ServerResponse & { status?: number, body?: string, headers: Record<string, string | string[] | undefined> } {
   const headers: Record<string, string | string[] | undefined> = {}
@@ -111,6 +126,70 @@ describe('buildContexHttpMcpServerEntry', () => {
   })
 })
 
+describe('MCP persistence and context boundaries', () => {
+  test('scrubs legacy workspace-global CodeSurf credentials', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'codesurf-workspace-mcp-'))
+    try {
+      writeFileSync(join(workspace, '.mcp.json'), JSON.stringify({
+        mcpServers: {
+          codesurf: {
+            type: 'http',
+            url: 'http://127.0.0.1:9999/mcp',
+            headers: { Authorization: 'Bearer legacy-global-secret' },
+          },
+          userServer: { command: 'user-mcp' },
+        },
+      }))
+      await writeMCPConfigToWorkspace(workspace)
+      const scrubbed = JSON.parse(readFileSync(join(workspace, '.mcp.json'), 'utf8'))
+      assert.equal(scrubbed.mcpServers.codesurf, undefined)
+      assert.deepEqual(scrubbed.mcpServers.userServer, { command: 'user-mcp' })
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  test('context reads skip symlinks and bound aggregate source bytes', async () => {
+    const contextDir = mkdtempSync(join(tmpdir(), 'codesurf-context-'))
+    const outside = join(contextDir, '..', `outside-${Date.now()}.txt`)
+    try {
+      writeFileSync(outside, 'must-not-leak')
+      writeFileSync(join(contextDir, 'a.txt'), 'a'.repeat(20_000))
+      symlinkSync(outside, join(contextDir, 'escape.txt'))
+      const context = await readContextFilesBounded(contextDir)
+      assert.match(context, /--- a\.txt ---/)
+      assert.doesNotMatch(context, /must-not-leak/)
+      assert.ok(Buffer.byteLength(context, 'utf8') <= 8 * 1024)
+    } finally {
+      rmSync(contextDir, { recursive: true, force: true })
+      rmSync(outside, { force: true })
+    }
+  })
+
+  test('context reads reject a context directory that escapes through a symlink', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'codesurf-context-root-'))
+    const outsideRoot = mkdtempSync(join(tmpdir(), 'codesurf-context-outside-'))
+    try {
+      writeFileSync(join(outsideRoot, 'secret.txt'), 'must-not-leak')
+      const linkedContext = join(workspaceRoot, 'context')
+      symlinkSync(outsideRoot, linkedContext, 'dir')
+      assert.equal(
+        await readContextFilesBounded(linkedContext, workspaceRoot),
+        '',
+      )
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true })
+      rmSync(outsideRoot, { recursive: true, force: true })
+    }
+  })
+
+  test('accepts only single-line bounded SSE event names', () => {
+    assert.equal(isValidSseEventName('card_update.v2'), true)
+    assert.equal(isValidSseEventName('card_update\ndata: forged'), false)
+    assert.equal(isValidSseEventName('x'.repeat(65)), false)
+  })
+})
+
 describe('requireMcpAuth', () => {
   test('rejects missing Authorization with 401 JSON', () => {
     const req = { headers: {} } as IncomingMessage
@@ -133,6 +212,41 @@ describe('requireMcpAuth', () => {
     const res = mockResponse()
     assert.deepEqual(requireMcpAuth(req, res), { kind: 'global' })
     assert.equal(res.status, undefined)
+  })
+
+  test('same tile ID in different workspaces authenticates as distinct principals', () => {
+    const tileId = 'shared-auth-tile'
+    const workspaceAToken = getTileToken('auth-workspace-a', tileId)
+    const workspaceBToken = getTileToken('auth-workspace-b', tileId)
+    assert.notEqual(workspaceAToken, workspaceBToken)
+
+    const workspaceARequest = {
+      headers: { authorization: `Bearer ${workspaceAToken}` },
+    } as IncomingMessage
+    const workspaceBRequest = {
+      headers: { authorization: `Bearer ${workspaceBToken}` },
+    } as IncomingMessage
+    assert.deepEqual(requireMcpAuth(workspaceARequest, mockResponse()), {
+      kind: 'tile',
+      workspaceId: 'auth-workspace-a',
+      tileId,
+    })
+    assert.deepEqual(requireMcpAuth(workspaceBRequest, mockResponse()), {
+      kind: 'tile',
+      workspaceId: 'auth-workspace-b',
+      tileId,
+    })
+
+    revokeTileToken('auth-workspace-a', tileId)
+    const revokedResponse = mockResponse()
+    assert.equal(requireMcpAuth(workspaceARequest, revokedResponse), null)
+    assert.equal(revokedResponse.status, 401)
+    assert.deepEqual(requireMcpAuth(workspaceBRequest, mockResponse()), {
+      kind: 'tile',
+      workspaceId: 'auth-workspace-b',
+      tileId,
+    })
+    revokeTileToken('auth-workspace-b', tileId)
   })
 })
 
@@ -158,6 +272,18 @@ describe('MCP HTTP auth gates', () => {
     assert.deepEqual(JSON.parse(res.body), { error: 'Unauthorized' })
   })
 
+  test('server discovery config never persists the global bearer', () => {
+    const configText = readFileSync(join(testCodesurfHome, 'mcp-server.json'), 'utf8')
+    const config = JSON.parse(configText) as {
+      token?: string
+      mcpServers?: { codesurf?: { headers?: unknown, token?: unknown } }
+    }
+    assert.equal(config.token, undefined)
+    assert.equal(config.mcpServers?.codesurf?.headers, undefined)
+    assert.equal(config.mcpServers?.codesurf?.token, undefined)
+    assert.doesNotMatch(configText, new RegExp(getMCPToken()))
+  })
+
   test('POST /mcp with valid Bearer succeeds', async () => {
     const token = getMCPToken()
     const res = await request(port, {
@@ -170,8 +296,137 @@ describe('MCP HTTP auth gates', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
     })
     assert.equal(res.status, 200)
-    const payload = JSON.parse(res.body) as { result?: { tools?: unknown[] } }
+    const payload = JSON.parse(res.body) as {
+      result?: {
+        tools?: Array<{
+          name?: string
+          inputSchema?: { properties?: Record<string, unknown> }
+        }>
+      }
+    }
     assert.ok(Array.isArray(payload.result?.tools))
+    const browserNavigate = payload.result?.tools?.find(tool => tool.name === 'browser_navigate')
+    assert.ok(browserNavigate?.inputSchema?.properties?.workspace_id)
+  })
+
+  test('peer commands dispatch once inside the authenticated workspace', async () => {
+    const callerTileId = 'peer-caller'
+    const targetTileId = 'shared-peer-target'
+    const workspaceA = 'peer-workspace-a'
+    const workspaceB = 'peer-workspace-b'
+    const token = getTileToken(workspaceA, callerTileId)
+    const workspaceAEvents: unknown[] = []
+    const workspaceBEvents: unknown[] = []
+    bus.subscribe(`tile:${workspaceA}:${targetTileId}`, 'peer-scope-a', event => {
+      workspaceAEvents.push(event)
+    })
+    bus.subscribe(`tile:${workspaceB}:${targetTileId}`, 'peer-scope-b', event => {
+      workspaceBEvents.push(event)
+    })
+
+    const call = async (
+      authorization: string,
+      args: Record<string, unknown>,
+    ): Promise<string> => {
+      const response = await request(port, {
+        method: 'POST',
+        path: '/mcp',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${authorization}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 20,
+          method: 'tools/call',
+          params: {
+            name: 'browser_navigate',
+            arguments: {
+              tile_id: targetTileId,
+              url: 'https://example.com',
+              ...args,
+            },
+          },
+        }),
+      })
+      assert.equal(response.status, 200)
+      const body = JSON.parse(response.body) as {
+        result?: { content?: Array<{ text?: string }> }
+      }
+      return body.result?.content?.[0]?.text ?? ''
+    }
+
+    try {
+      assert.equal(await call(token, {}), `Dispatched browser_navigate to ${targetTileId}`)
+      assert.equal(workspaceAEvents.length, 1)
+      assert.equal(workspaceBEvents.length, 0)
+      assert.deepEqual(
+        (workspaceAEvents[0] as { payload?: Record<string, unknown> }).payload,
+        {
+          url: 'https://example.com',
+          mode: undefined,
+          workspaceId: workspaceA,
+          tileId: targetTileId,
+          cardId: targetTileId,
+          command: 'browser_navigate',
+        },
+      )
+
+      assert.match(await call(token, { workspace_id: workspaceB }), /Forbidden/)
+      assert.equal(workspaceAEvents.length, 1)
+      assert.equal(workspaceBEvents.length, 0)
+
+      assert.equal(await call(getMCPToken(), {}), 'Missing workspace_id')
+      assert.equal(workspaceAEvents.length, 1)
+      assert.equal(workspaceBEvents.length, 0)
+    } finally {
+      bus.unsubscribeAll('peer-scope-a')
+      bus.unsubscribeAll('peer-scope-b')
+      bus.dropChannel(`tile:${workspaceA}:${targetTileId}`)
+      bus.dropChannel(`tile:${workspaceB}:${targetTileId}`)
+      revokeTileToken(workspaceA, callerTileId)
+    }
+  })
+
+  test('writes workspace-qualified tile config with an authenticating tile bearer', async () => {
+    const workspaceId = 'config-workspace'
+    const tileId = 'config-tile'
+    const configPath = await writeTileMcpConfig(workspaceId, tileId)
+    assert.equal(configPath, tileMcpConfigPath(workspaceId, tileId))
+    assert.ok(configPath)
+    assert.equal(statSync(configPath!).mode & 0o777, 0o600)
+
+    const config = JSON.parse(readFileSync(configPath!, 'utf8')) as {
+      port: number
+      token: string
+      workspaceId: string
+      tileId: string
+      mcpServers: {
+        codesurf: {
+          url: string
+          headers: { Authorization: string }
+        }
+      }
+    }
+    assert.equal(config.port, port)
+    assert.equal(config.workspaceId, workspaceId)
+    assert.equal(config.tileId, tileId)
+    assert.notEqual(config.token, getMCPToken())
+    assert.equal(
+      config.mcpServers.codesurf.headers.Authorization,
+      `Bearer ${config.token}`,
+    )
+    assert.equal(config.mcpServers.codesurf.url, `http://127.0.0.1:${port}/mcp`)
+
+    const req = {
+      headers: { authorization: `Bearer ${config.token}` },
+    } as IncomingMessage
+    assert.deepEqual(requireMcpAuth(req, mockResponse()), {
+      kind: 'tile',
+      workspaceId,
+      tileId,
+    })
+    revokeTileToken(workspaceId, tileId)
   })
 
   test('POST /push without Bearer is rejected', async () => {
@@ -233,10 +488,82 @@ describe('MCP HTTP auth gates', () => {
         'content-type': 'application/json',
         authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ card_id: 'card-1', event: 'card_update', data: { note: 'ok' } }),
+      body: JSON.stringify({
+        workspace_id: 'push-workspace',
+        card_id: 'card-1',
+        event: 'card_update',
+        data: { note: 'ok' },
+      }),
     })
     assert.equal(res.status, 200)
     assert.deepEqual(JSON.parse(res.body), { ok: true })
+  })
+
+  test('POST /push rejects event-name framing injection', async () => {
+    const res = await request(port, {
+      method: 'POST',
+      path: '/push',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${getMCPToken()}`,
+      },
+      body: JSON.stringify({
+        workspace_id: 'push-workspace',
+        card_id: 'card-1',
+        event: 'card_update\ndata: forged',
+        data: {},
+      }),
+    })
+    assert.equal(res.status, 400)
+    assert.deepEqual(JSON.parse(res.body), { error: 'Invalid event name' })
+  })
+
+  test('same-card SSE streams do not cross workspace token scopes', async () => {
+    const cardId = 'shared-sse-card'
+    const tokenA = getTileToken('sse-workspace-a', cardId)
+    const tokenB = getTileToken('sse-workspace-b', cardId)
+    const responseA = await fetch(
+      `http://127.0.0.1:${port}/events?card_id=${cardId}&token=${encodeURIComponent(tokenA)}`,
+      { headers: { host: `127.0.0.1:${port}` } },
+    )
+    const responseB = await fetch(
+      `http://127.0.0.1:${port}/events?card_id=${cardId}&token=${encodeURIComponent(tokenB)}`,
+      { headers: { host: `127.0.0.1:${port}` } },
+    )
+    const readerA = responseA.body!.getReader()
+    const readerB = responseB.body!.getReader()
+    await readerA.read()
+    await readerB.read()
+
+    try {
+      const pushed = await request(port, {
+        method: 'POST',
+        path: '/push',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${tokenA}`,
+        },
+        body: JSON.stringify({
+          card_id: cardId,
+          event: 'card_update',
+          data: { note: 'workspace-a-only' },
+        }),
+      })
+      assert.equal(pushed.status, 200)
+
+      const eventA = new TextDecoder().decode((await readerA.read()).value)
+      assert.match(eventA, /workspace-a-only/)
+      const bReceived = await Promise.race([
+        readerB.read().then(() => true),
+        new Promise<false>(resolve => setTimeout(() => resolve(false), 100)),
+      ])
+      assert.equal(bReceived, false)
+    } finally {
+      await readerA.cancel()
+      await readerB.cancel()
+      revokeTileToken('sse-workspace-a', cardId)
+      revokeTileToken('sse-workspace-b', cardId)
+    }
   })
 
   test('POST /mcp tools/call without Bearer is rejected', async () => {
@@ -266,7 +593,11 @@ describe('MCP HTTP auth gates', () => {
           'content-type': 'application/json',
           authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ card_id: 'card-1', message: 'rm -rf ~' }),
+        body: JSON.stringify({
+          workspace_id: 'inject-workspace',
+          card_id: 'card-1',
+          message: 'rm -rf ~',
+        }),
       })
       assert.equal(res.status, 403)
     } finally {
@@ -285,7 +616,11 @@ describe('MCP HTTP auth gates', () => {
           'content-type': 'application/json',
           authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ card_id: 'card-1', message: 'hello from agent' }),
+        body: JSON.stringify({
+          workspace_id: 'inject-workspace',
+          card_id: 'card-1',
+          message: 'hello from agent',
+        }),
       })
       assert.equal(res.status, 200)
       const payload = JSON.parse(res.body) as { ok?: boolean }
