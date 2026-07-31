@@ -33,16 +33,14 @@ interface ElectronAPI {
     createFile(path: string, workspaceId?: string): Promise<void>
     createDir(path: string, workspaceId?: string): Promise<void>
     deleteFile(path: string, workspaceId?: string): Promise<void>
-    delete(path: string, workspaceId?: string): Promise<void>
-    rename(oldPath: string, newPath: string, workspaceId?: string): Promise<void>
     renameFile(oldPath: string, newPath: string, workspaceId?: string): Promise<void>
-    basename(path: string): Promise<string>
     revealInFinder?(path: string, workspaceId?: string): Promise<void>
     writeBrief(cardId: string, content: string): Promise<string>
     stat(path: string, workspaceId?: string): Promise<{ size: number; mtimeMs: number; isFile: boolean; isDir: boolean } | null>
     probeDir(path: string, workspaceId?: string): Promise<{ ok: true } | { ok: false, code: string }>
     isProbablyTextFile(path: string, workspaceId?: string): Promise<boolean>
     copyIntoDir(sourcePath: string, destDir: string, workspaceId?: string): Promise<{ path: string }>
+    selectDir(): Promise<string | null>
     watch(dirPath: string, callback: () => void, workspaceId?: string): () => void
   }
   git?: {
