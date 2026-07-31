@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
   createHarness,
+  FakeFrame,
   FakeSession,
   mainFrameDetails,
   requestPermission,
@@ -38,6 +39,168 @@ describe('permission boundary', () => {
       ),
       false,
     )
+  })
+
+  test('allows only declared and explicitly consented codesurf-ext child media principals', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('livekit-rooms', {
+      name: 'LiveKit Rooms',
+      declaredMedia: ['microphone', 'camera'],
+    })
+    const extensionUrl = 'codesurf-ext://livekit-rooms'
+    const origin = `${extensionUrl}/`
+    const details = {
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `${extensionUrl}/tiles/room/index.html`,
+      securityOrigin: origin,
+    }
+    const child = new FakeFrame(details.requestingUrl, extensionUrl, 100)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+
+    assert.equal(
+      trusted.session.checkHandler?.(
+        trusted.contents,
+        'media',
+        origin,
+        { ...details, mediaType: 'audio' },
+      ),
+      false,
+      'a declaration is not consent or a runtime grant',
+    )
+    assert.equal(
+      await requestPermission(trusted.session, trusted.contents, 'media', details),
+      true,
+    )
+    assert.deepEqual(harness.extensionConsentPrompts, ['livekit-rooms:microphone'])
+    assert.deepEqual(harness.mediaPrompts, ['microphone'])
+    assert.equal(
+      trusted.session.checkHandler?.(
+        trusted.contents,
+        'media',
+        origin,
+        { ...details, mediaType: 'audio' },
+      ),
+      true,
+    )
+    assert.equal(
+      trusted.session.checkHandler?.(
+        trusted.contents,
+        'media',
+        origin,
+        { ...details, mediaType: 'video' },
+      ),
+      false,
+      'a microphone grant must not grant camera',
+    )
+  })
+
+  test('denies unknown, disabled, undeclared, cross-origin, internal, and generic child frames', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('disabled-extension', {
+      enabled: false,
+      declaredMedia: ['microphone'],
+    })
+    harness.setExtension('undeclared-extension')
+    harness.setExtension('spoofed-extension', {
+      declaredMedia: ['microphone'],
+    })
+    harness.setExtensionConsent('spoofed-extension', ['microphone'])
+    const childDetails = (id: string, securityOrigin = `codesurf-ext://${id}/`) => ({
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `codesurf-ext://${id}/index.html`,
+      securityOrigin,
+    })
+    assert.equal(
+      await requestPermission(
+        trusted.session,
+        trusted.contents,
+        'media',
+        childDetails('spoofed-extension'),
+      ),
+      false,
+      'request metadata alone cannot invent a child-frame principal',
+    )
+
+    for (const [index, details] of [
+      childDetails('unknown-extension'),
+      childDetails('disabled-extension'),
+      childDetails('undeclared-extension'),
+      childDetails('disabled-extension', 'codesurf-ext://other-extension/'),
+      childDetails('__runext_internal'),
+      {
+        isMainFrame: false,
+        mediaTypes: ['audio' as const],
+        requestingUrl: 'https://chat.example/index.html',
+        securityOrigin: 'https://chat.example',
+      },
+    ].entries()) {
+      const parsed = new URL(details.requestingUrl)
+      const child = new FakeFrame(
+        details.requestingUrl,
+        `${parsed.protocol}//${parsed.host}`,
+        110 + index,
+      )
+      child.parent = trusted.contents.mainFrame
+      child.top = trusted.contents.mainFrame
+      harness.attachFrame(trusted.contents, child)
+      assert.equal(
+        await requestPermission(trusted.session, trusted.contents, 'media', details),
+        false,
+        details.requestingUrl,
+      )
+    }
+    assert.deepEqual(harness.extensionConsentPrompts, [])
+    assert.deepEqual(harness.mediaPrompts, [])
+  })
+
+  test('rechecks extension state and clears principal grants on navigation and revocation', async () => {
+    const harness = createHarness()
+    const trusted = harness.makeWindow()
+    harness.boundary.registerAppWindow(trusted.window)
+    harness.setExtension('media-extension', { declaredMedia: ['microphone'] })
+    harness.setExtensionConsent('media-extension', ['microphone'])
+    const extensionUrl = 'codesurf-ext://media-extension'
+    const origin = `${extensionUrl}/`
+    const request = {
+      isMainFrame: false,
+      mediaTypes: ['audio' as const],
+      requestingUrl: `${extensionUrl}/index.html`,
+      securityOrigin: origin,
+    }
+    const child = new FakeFrame(request.requestingUrl, extensionUrl, 120)
+    child.parent = trusted.contents.mainFrame
+    child.top = trusted.contents.mainFrame
+    harness.attachFrame(trusted.contents, child)
+    const check = () => trusted.session.checkHandler?.(
+      trusted.contents,
+      'media',
+      origin,
+      { ...request, mediaType: 'audio' },
+    )
+
+    assert.equal(await requestPermission(trusted.session, trusted.contents, 'media', request), true)
+    assert.equal(check(), true)
+    harness.navigate(trusted.contents)
+    assert.equal(check(), false)
+
+    assert.equal(await requestPermission(trusted.session, trusted.contents, 'media', request), true)
+    harness.boundary.clearExtensionGrants('media-extension')
+    assert.equal(check(), false)
+
+    assert.equal(await requestPermission(trusted.session, trusted.contents, 'media', request), true)
+    harness.setExtension('media-extension', {
+      enabled: false,
+      declaredMedia: ['microphone'],
+    })
+    assert.equal(check(), false)
   })
 
   test('denies null, destroyed, unregistered, and every non-window content type', () => {
