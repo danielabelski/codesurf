@@ -14,12 +14,22 @@ export const MAX_EVENT_TARGETS = 32
 export const MAX_METADATA_BYTES = 16 * 1024
 export const MAX_METADATA_DEPTH = 6
 export const MAX_METADATA_NODES = 256
+export const MAX_METADATA_LEAVES = 192
 export const MAX_METADATA_OBJECT_KEYS = 64
 export const MAX_METADATA_ARRAY_ITEMS = 64
 export const MAX_METADATA_STRING_BYTES = 2048
 export const MAX_EVENTS_PER_ROOM = 500
 export const MAX_RETAINED_EVENT_BYTES = 1024 * 1024
 export const MAX_PROMPT_BYTES = 32 * 1024
+export const MAX_PROMPT_ESTIMATED_TOKENS = 8 * 1024
+export const MAX_SNAPSHOT_BYTES = 96 * 1024
+export const MAX_SNAPSHOT_ESTIMATED_TOKENS = 24 * 1024
+export const MAX_PERSISTED_ROOM_BYTES = 128 * 1024
+export const MAX_PERSISTED_ROOM_ESTIMATED_TOKENS = 32 * 1024
+export const MAX_PEER_STATE_BYTES = 64 * 1024
+export const MAX_PEER_STATE_ESTIMATED_TOKENS = 16 * 1024
+export const MAX_MCP_RESULT_BYTES = 64 * 1024
+export const MAX_MCP_RESULT_ESTIMATED_TOKENS = 16 * 1024
 
 const SAFE_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/
 const WINDOWS_DEVICE_ID = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
@@ -51,7 +61,7 @@ export function assertValidAgentRoomId(value: unknown, label = 'tileId'): string
 export function truncateUtf8(
   rawValue: unknown,
   maxBytes: number,
-  options: { marker?: string, trim?: boolean } = {},
+  options: { marker?: string, trim?: boolean, maxEstimatedTokens?: number } = {},
 ): string {
   const marker = options.marker ?? TRUNCATION_MARKER
   let value: string
@@ -61,28 +71,108 @@ export function truncateUtf8(
   } catch {
     value = marker
   }
-  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value
+  const maxTokenUnits = options.maxEstimatedTokens === undefined
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, options.maxEstimatedTokens * 4)
+  if (
+    Buffer.byteLength(value, 'utf8') <= maxBytes
+    && estimatedTokenUnits(value) <= maxTokenUnits
+  ) return value
 
   const markerBytes = Buffer.byteLength(marker, 'utf8')
-  if (markerBytes >= maxBytes) {
+  const markerTokenUnits = estimatedTokenUnits(marker)
+  if (markerBytes >= maxBytes || markerTokenUnits >= maxTokenUnits) {
     let markerOnly = ''
+    let markerOnlyBytes = 0
+    let markerOnlyTokenUnits = 0
     for (const char of marker) {
-      if (Buffer.byteLength(markerOnly + char, 'utf8') > maxBytes) break
+      const charBytes = Buffer.byteLength(char, 'utf8')
+      const charTokenUnits = estimatedTokenUnits(char)
+      if (
+        markerOnlyBytes + charBytes > maxBytes
+        || markerOnlyTokenUnits + charTokenUnits > maxTokenUnits
+      ) break
       markerOnly += char
+      markerOnlyBytes += charBytes
+      markerOnlyTokenUnits += charTokenUnits
     }
     return markerOnly
   }
 
   const contentBudget = maxBytes - markerBytes
+  const contentTokenUnits = maxTokenUnits - markerTokenUnits
   let result = ''
-  let used = 0
+  let usedBytes = 0
+  let usedTokenUnits = 0
   for (const char of value) {
     const charBytes = Buffer.byteLength(char, 'utf8')
-    if (used + charBytes > contentBudget) break
+    const charTokenUnits = estimatedTokenUnits(char)
+    if (
+      usedBytes + charBytes > contentBudget
+      || usedTokenUnits + charTokenUnits > contentTokenUnits
+    ) break
     result += char
-    used += charBytes
+    usedBytes += charBytes
+    usedTokenUnits += charTokenUnits
   }
   return `${result}${marker}`
+}
+
+function estimatedTokenUnits(value: string): number {
+  let units = 0
+  for (const char of value) {
+    const codePoint = char.codePointAt(0) ?? 0
+    if (codePoint > 0x7f) {
+      units += 4
+    } else if (
+      (codePoint >= 0x30 && codePoint <= 0x39)
+      || (codePoint >= 0x41 && codePoint <= 0x5a)
+      || (codePoint >= 0x61 && codePoint <= 0x7a)
+      || codePoint === 0x20
+      || codePoint === 0x0a
+      || codePoint === 0x09
+    ) {
+      units += 1
+    } else {
+      units += 2
+    }
+  }
+  return units
+}
+
+export function estimateTokenCount(value: string): number {
+  return Math.ceil(estimatedTokenUnits(value) / 4)
+}
+
+export interface SerializedBudget {
+  maxBytes: number
+  maxEstimatedTokens: number
+}
+
+export function serializedMetrics(value: unknown): {
+  json: string
+  bytes: number
+  estimatedTokens: number
+} | null {
+  try {
+    const json = JSON.stringify(value)
+    return {
+      json,
+      bytes: Buffer.byteLength(json, 'utf8'),
+      estimatedTokens: estimateTokenCount(json),
+    }
+  } catch {
+    return null
+  }
+}
+
+export function fitsSerializedBudget(value: unknown, budget: SerializedBudget): boolean {
+  const metrics = serializedMetrics(value)
+  return Boolean(
+    metrics
+    && metrics.bytes <= budget.maxBytes
+    && metrics.estimatedTokens <= budget.maxEstimatedTokens,
+  )
 }
 
 export function boundTileType(value: unknown): string {
@@ -132,6 +222,7 @@ export function boundTargetTileIds(value: unknown): string[] {
 
 interface MetadataBudget {
   nodes: number
+  leaves: number
   truncated: boolean
   seen: WeakSet<object>
 }
@@ -141,15 +232,31 @@ function metadataMarker(reason: string): string {
 }
 
 function normalizeMetadataValue(value: unknown, depth: number, budget: MetadataBudget): unknown {
+  if (budget.nodes >= MAX_METADATA_NODES) {
+    budget.truncated = true
+    return metadataMarker('node limit')
+  }
+  if (budget.leaves >= MAX_METADATA_LEAVES) {
+    budget.truncated = true
+    return metadataMarker('leaf limit')
+  }
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    budget.leaves += 1
+    budget.nodes += 1
     return typeof value === 'string'
       ? truncateUtf8(value, MAX_METADATA_STRING_BYTES)
       : value
   }
   if (typeof value === 'number') {
+    budget.leaves += 1
+    budget.nodes += 1
     return Number.isFinite(value) ? value : metadataMarker('non-finite number')
   }
-  if (typeof value === 'bigint') return truncateUtf8(value.toString(), MAX_METADATA_STRING_BYTES)
+  if (typeof value === 'bigint') {
+    budget.leaves += 1
+    budget.nodes += 1
+    return truncateUtf8(value.toString(), MAX_METADATA_STRING_BYTES)
+  }
   if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
     budget.truncated = true
     return metadataMarker('unsupported value')
@@ -163,21 +270,24 @@ function normalizeMetadataValue(value: unknown, depth: number, budget: MetadataB
     budget.truncated = true
     return metadataMarker('circular reference')
   }
-  if (budget.nodes >= MAX_METADATA_NODES) {
-    budget.truncated = true
-    return metadataMarker('node limit')
-  }
-
   budget.nodes += 1
   budget.seen.add(value)
   try {
     if (Array.isArray(value)) {
-      const output = value
-        .slice(0, MAX_METADATA_ARRAY_ITEMS)
-        .map(item => normalizeMetadataValue(item, depth + 1, budget))
-      if (value.length > output.length) {
+      const output: unknown[] = []
+      const retainedLength = Math.min(value.length, MAX_METADATA_ARRAY_ITEMS)
+      for (let index = 0; index < retainedLength; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+        if (!descriptor || !('value' in descriptor)) {
+          budget.truncated = true
+          output.push(metadataMarker('accessor or missing array item'))
+        } else {
+          output.push(normalizeMetadataValue(descriptor.value, depth + 1, budget))
+        }
+      }
+      if (value.length > MAX_METADATA_ARRAY_ITEMS) {
         budget.truncated = true
-        output.push(metadataMarker(`${value.length - output.length} array item(s)`))
+        output.push(metadataMarker('additional array item(s)'))
       }
       return output
     }
@@ -189,24 +299,37 @@ function normalizeMetadataValue(value: unknown, depth: number, budget: MetadataB
     }
 
     const output: Record<string, unknown> = {}
-    const keys = Object.keys(value as Record<string, unknown>)
-      .filter(key => !BLOCKED_OBJECT_KEYS.has(key))
-      .sort()
-    for (const key of keys.slice(0, MAX_METADATA_OBJECT_KEYS)) {
-      const boundedKey = truncateUtf8(key, 128)
+    const boundedKeys = new Set<string>()
+    let inspectedKeys = 0
+    let hasAdditionalKeys = false
+    for (const key in value as Record<string, unknown>) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key)
-      if (!descriptor || !('value' in descriptor)) {
+      if (!descriptor) continue
+      inspectedKeys += 1
+      if (inspectedKeys > MAX_METADATA_OBJECT_KEYS) {
+        hasAdditionalKeys = true
+        break
+      }
+      if (BLOCKED_OBJECT_KEYS.has(key)) {
+        budget.truncated = true
+        continue
+      }
+      const boundedKey = truncateUtf8(key, 128)
+      if (boundedKeys.has(boundedKey)) {
+        budget.truncated = true
+        continue
+      }
+      boundedKeys.add(boundedKey)
+      if (!('value' in descriptor)) {
         budget.truncated = true
         output[boundedKey] = metadataMarker('accessor property')
       } else {
         output[boundedKey] = normalizeMetadataValue(descriptor.value, depth + 1, budget)
       }
     }
-    if (keys.length > MAX_METADATA_OBJECT_KEYS) {
+    if (hasAdditionalKeys) {
       budget.truncated = true
-      output.__codesurfTruncatedKeys = metadataMarker(
-        `${keys.length - MAX_METADATA_OBJECT_KEYS} object key(s)`,
-      )
+      output.__codesurfTruncatedKeys = metadataMarker('additional object key(s)')
     }
     return output
   } finally {
@@ -218,6 +341,7 @@ export function boundMetadata(value: unknown): Record<string, unknown> | undefin
   if (value === undefined) return undefined
   const budget: MetadataBudget = {
     nodes: 0,
+    leaves: 0,
     truncated: false,
     seen: new WeakSet(),
   }

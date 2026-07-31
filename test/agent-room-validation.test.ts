@@ -6,6 +6,9 @@ import {
   MAX_MEMBER_FILES,
   MAX_METADATA_ARRAY_ITEMS,
   MAX_METADATA_BYTES,
+  MAX_METADATA_LEAVES,
+  MAX_METADATA_NODES,
+  MAX_METADATA_OBJECT_KEYS,
   MAX_RETAINED_EVENT_BYTES,
   MAX_TILE_ID_BYTES,
   assertValidAgentRoomId,
@@ -14,8 +17,11 @@ import {
   boundMetadata,
   boundTargetTileIds,
   capRetainedEvents,
+  estimateTokenCount,
+  fitsSerializedBudget,
   isValidAgentRoomId,
   retainedEventBytes,
+  truncateUtf8,
 } from '../src/main/agent-room/validation.ts'
 import type { RoomEvent } from '../src/main/agent-room/types.ts'
 
@@ -56,6 +62,19 @@ describe('agent-room validation primitives', () => {
     assert.equal(bounded.includes('\ufffd'), false)
   })
 
+  test('enforces byte and estimated-token ceilings together', () => {
+    const bounded = truncateUtf8('😀'.repeat(1_000), 4_096, {
+      maxEstimatedTokens: 32,
+    })
+    assert.ok(Buffer.byteLength(bounded, 'utf8') <= 4_096)
+    assert.ok(estimateTokenCount(bounded) <= 32)
+    assert.match(bounded, /\[truncated\]$/)
+    assert.equal(fitsSerializedBudget({ bounded }, {
+      maxBytes: 4_096,
+      maxEstimatedTokens: 40,
+    }), true)
+  })
+
   test('normalizes cyclic and oversized metadata to bounded JSON', () => {
     const input: Record<string, unknown> = {
       huge: 'x'.repeat(MAX_METADATA_BYTES * 2),
@@ -80,6 +99,37 @@ describe('agent-room validation primitives', () => {
     })
     assert.match(JSON.stringify(boundMetadata(hostile)), /accessor property/i)
     assert.equal(getterCalls, 0)
+  })
+
+  test('stops hostile-width metadata enumeration and leaf traversal incrementally', () => {
+    const target: Record<string, unknown> = {}
+    let descriptorCalls = 0
+    const wideLeaf = new Proxy(
+      Array.from({ length: MAX_METADATA_LEAVES * 2 }, (_, index) => index),
+      {
+        getOwnPropertyDescriptor(object, key) {
+          descriptorCalls += 1
+          return Reflect.getOwnPropertyDescriptor(object, key)
+        },
+      },
+    )
+    for (let index = 0; index < 25_000; index += 1) {
+      Object.defineProperty(target, `key-${index}`, {
+        enumerable: true,
+        configurable: true,
+        value: wideLeaf,
+      })
+    }
+
+    const startedAt = performance.now()
+    const bounded = boundMetadata(target)
+    const elapsedMs = performance.now() - startedAt
+    const json = JSON.stringify(bounded)
+
+    assert.ok(descriptorCalls <= MAX_METADATA_NODES + MAX_METADATA_ARRAY_ITEMS)
+    assert.ok(Buffer.byteLength(json, 'utf8') <= MAX_METADATA_BYTES)
+    assert.match(json, /truncated/i)
+    assert.ok(elapsedMs < 2_000, `hostile metadata took ${elapsedMs.toFixed(1)}ms`)
   })
 
   test('bounds target and file array inspection to the retained prefix', () => {
