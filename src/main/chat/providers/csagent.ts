@@ -5,19 +5,21 @@
 
 import { runCodesurfAgent } from '../pi-runtime'
 import type { ChatRequest } from '../types'
-import { getPreparedMessages, sendStream } from '../runtime'
+import { chatRequestScope, getPreparedMessages, sendStream } from '../runtime'
 
 export async function chatCsagent(req: ChatRequest): Promise<void> {
+  const scope = chatRequestScope(req)
   const prepared = getPreparedMessages(req)
   const lastUser = [...prepared].reverse().find(m => m.role === 'user')
   if (!lastUser) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message to send.' })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: 'No user message to send.' })
+    sendStream(scope, { type: 'done' })
     return
   }
   await runCodesurfAgent(
     {
       cardId: req.cardId,
+      workspaceId: scope.workspaceId,
       model: req.model,
       workspaceDir: req.workspaceDir,
       sessionId: req.sessionId ?? null,
@@ -29,6 +31,6 @@ export async function chatCsagent(req: ChatRequest): Promise<void> {
       asyncExecution: req.asyncExecution,
       imageAttachments: req.imageAttachments?.map(a => ({ path: a.path, mediaType: a.mediaType })),
     },
-    (event) => sendStream(req.cardId, event),
+    (event) => sendStream(scope, event),
   )
 }

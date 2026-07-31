@@ -7,9 +7,12 @@ import {
 import { buildHermesSpawnArgs } from './agent-mode-payloads'
 import {
   activeProcesses,
+  chatRequestScope,
+  chatStreamScopeKey,
   getPreparedMessages,
   log,
   sendStream,
+  type ChatStreamScope,
 } from '../runtime'
 import type { ChatRequest } from '../types'
 
@@ -30,28 +33,30 @@ function resolveHermesBinary(): string | null {
   }
 }
 
-export function clearHermesSession(cardId: string): void {
-  hermesSessionIds.delete(cardId)
+export function clearHermesSession(scope: ChatStreamScope): void {
+  hermesSessionIds.delete(chatStreamScopeKey(scope))
 }
 
 export function chatHermes(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
   const hermesBin = resolveHermesBinary()
   if (!hermesBin) {
-    sendStream(req.cardId, { type: 'error', error: 'Hermes CLI not found. Install: pip install hermes-agent' })
+    sendStream(scope, { type: 'error', error: 'Hermes CLI not found. Install: pip install hermes-agent' })
     return
   }
 
   const shellPath = getShellEnvPath()
-  if (req.sessionId && !hermesSessionIds.has(req.cardId)) {
-    hermesSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !hermesSessionIds.has(scopeKey)) {
+    hermesSessionIds.set(scopeKey, req.sessionId)
   }
-  const existingSessionId = hermesSessionIds.get(req.cardId)
+  const existingSessionId = hermesSessionIds.get(scopeKey)
 
   log('chatHermes starting', {
     model: req.model,
@@ -75,8 +80,8 @@ export function chatHermes(req: ChatRequest): void {
       existingSessionId,
     })
   } catch (err) {
-    sendStream(req.cardId, { type: 'error', error: err instanceof Error ? err.message : String(err) })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
+    sendStream(scope, { type: 'done' })
     return
   }
 
@@ -86,12 +91,12 @@ export function chatHermes(req: ChatRequest): void {
     ...(req.workspaceDir && { cwd: req.workspaceDir }),
   })
 
-  activeProcesses.set(req.cardId, proc)
+  activeProcesses.set(scopeKey, proc)
 
   // H-9: identity-guard — only clean up / emit done|error if this proc is
   // still the active one for this card. A rapid re-send replaces the map
   // entry before the old proc's close handler fires, so we must check first.
-  const isCurrent = (): boolean => activeProcesses.get(req.cardId) === proc
+  const isCurrent = (): boolean => activeProcesses.get(scopeKey) === proc
 
   // NDJSON line dispatcher. Hermes' --stream-json mode emits one JSON event
   // per line on stdout, mapping directly to CodeSurf's existing stream event
@@ -115,8 +120,8 @@ export function chatHermes(req: ChatRequest): void {
       const sessionLineMatch = trimmed.match(/^(?:session_id|session)\s*:\s*(\S+)$/i)
       if (sessionLineMatch?.[1]) {
         const sid = sessionLineMatch[1]
-        hermesSessionIds.set(req.cardId, sid)
-        sendStream(req.cardId, { type: 'session', sessionId: sid })
+        hermesSessionIds.set(scopeKey, sid)
+        sendStream(scope, { type: 'session', sessionId: sid })
         continue
       }
 
@@ -124,7 +129,7 @@ export function chatHermes(req: ChatRequest): void {
       try {
         evt = JSON.parse(trimmed)
       } catch {
-        sendStream(req.cardId, { type: 'text', text: line + '\n' })
+        sendStream(scope, { type: 'text', text: line + '\n' })
         continue
       }
       if (!evt || typeof evt !== 'object' || typeof evt.type !== 'string') {
@@ -135,36 +140,36 @@ export function chatHermes(req: ChatRequest): void {
         case 'session':
           if (typeof evt.sessionId === 'string' && evt.sessionId.trim()) {
             const sid = evt.sessionId.trim()
-            hermesSessionIds.set(req.cardId, sid)
-            sendStream(req.cardId, { type: 'session', sessionId: sid })
+            hermesSessionIds.set(scopeKey, sid)
+            sendStream(scope, { type: 'session', sessionId: sid })
           }
           break
         case 'text':
           if (typeof evt.text === 'string') {
-            sendStream(req.cardId, { type: 'text', text: evt.text })
+            sendStream(scope, { type: 'text', text: evt.text })
           }
           break
         case 'thinking':
           if (typeof evt.text === 'string') {
-            sendStream(req.cardId, { type: 'thinking', text: evt.text })
+            sendStream(scope, { type: 'thinking', text: evt.text })
           }
           break
         case 'tool_start':
-          sendStream(req.cardId, {
+          sendStream(scope, {
             type: 'tool_start',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             toolName: typeof evt.toolName === 'string' ? evt.toolName : 'tool',
           })
           break
         case 'tool_input':
-          sendStream(req.cardId, {
+          sendStream(scope, {
             type: 'tool_input',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             text: typeof evt.text === 'string' ? evt.text : '',
           })
           break
         case 'tool_summary':
-          sendStream(req.cardId, {
+          sendStream(scope, {
             type: 'tool_summary',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             toolName: typeof evt.toolName === 'string' ? evt.toolName : undefined,
@@ -172,7 +177,7 @@ export function chatHermes(req: ChatRequest): void {
           })
           break
         case 'error':
-          sendStream(req.cardId, {
+          sendStream(scope, {
             type: 'error',
             error: typeof evt.error === 'string' ? evt.error : 'Unknown Hermes error',
           })
@@ -183,7 +188,7 @@ export function chatHermes(req: ChatRequest): void {
           break
         default:
           // Forward unrecognized event verbatim; the renderer can filter.
-          sendStream(req.cardId, evt as Record<string, unknown>)
+          sendStream(scope, evt as Record<string, unknown>)
       }
     }
   }
@@ -198,17 +203,17 @@ export function chatHermes(req: ChatRequest): void {
   proc.on('close', (code) => {
     if (!isCurrent()) return // superseded by a new turn — suppress stale done/error
     dispatchHermesEvents('', true)
-    activeProcesses.delete(req.cardId)
+    activeProcesses.delete(scopeKey)
     if (code !== 0 && stderrBuf.trim()) {
-      sendStream(req.cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderrBuf.trim()) })
+      sendStream(scope, { type: 'error', error: sanitizeAgentCliDiagnostic(stderrBuf.trim()) })
     }
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'done' })
   })
 
   proc.on('error', (err) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
-    activeProcesses.delete(req.cardId)
-    sendStream(req.cardId, {
+    activeProcesses.delete(scopeKey)
+    sendStream(scope, {
       type: 'error',
       error: err.message.includes('ENOENT')
         ? 'Hermes CLI not found. Install: pip install hermes-agent'

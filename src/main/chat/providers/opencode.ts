@@ -14,7 +14,14 @@ import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
 import type { ChatRequest } from '../types'
-import { log, sendStream, getPreparedMessages } from '../runtime'
+import {
+  chatRequestScope,
+  chatStreamScopeKey,
+  log,
+  sendStream,
+  getPreparedMessages,
+  type ChatStreamScope,
+} from '../runtime'
 import { createAuthenticatedOpenCodeClient, OpenCodeClientCache } from './opencode-client'
 
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
@@ -325,13 +332,14 @@ function normalizeOpenCodePermissionMode(mode?: string | null): string {
   return mode === 'plan' || mode === 'bypassPermissions' ? mode : 'default'
 }
 
-export function clearOpenCodeSession(cardId: string): void {
-  opencodeSessionIds.delete(cardId)
-  opencodeSessionPermissionModes.delete(cardId)
+export function clearOpenCodeSession(scope: ChatStreamScope): void {
+  const key = chatStreamScopeKey(scope)
+  opencodeSessionIds.delete(key)
+  opencodeSessionPermissionModes.delete(key)
 }
 
-export async function abortOpenCodeSession(cardId: string): Promise<void> {
-  const ocSessionId = opencodeSessionIds.get(cardId)
+export async function abortOpenCodeSession(scope: ChatStreamScope): Promise<void> {
+  const ocSessionId = opencodeSessionIds.get(chatStreamScopeKey(scope))
   if (!ocSessionId) return
   try {
     const mgr = OpenCodeServerManager.getInstance()
@@ -360,9 +368,11 @@ async function getOrCreateOpencodeClient(): Promise<{ client: any; url: string }
 }
 
 export function chatOpencode(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
@@ -372,13 +382,13 @@ export function chatOpencode(req: ChatRequest): void {
   const modelID = slashIdx > 0 ? req.model.slice(slashIdx + 1) : req.model
 
   const requestedPermissionMode = normalizeOpenCodePermissionMode(req.mode)
-  if (req.sessionId && !opencodeSessionIds.has(req.cardId)) {
-    opencodeSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !opencodeSessionIds.has(scopeKey)) {
+    opencodeSessionIds.set(scopeKey, req.sessionId)
   }
-  const recordedPermissionMode = opencodeSessionPermissionModes.get(req.cardId)
+  const recordedPermissionMode = opencodeSessionPermissionModes.get(scopeKey)
   const sessionPermissionModeMatches = recordedPermissionMode === requestedPermissionMode
-  const existingSessionId = sessionPermissionModeMatches ? opencodeSessionIds.get(req.cardId) : undefined
-  if (!sessionPermissionModeMatches && opencodeSessionIds.has(req.cardId)) {
+  const existingSessionId = sessionPermissionModeMatches ? opencodeSessionIds.get(scopeKey) : undefined
+  if (!sessionPermissionModeMatches && opencodeSessionIds.has(scopeKey)) {
     // OpenCode permissions are fixed at session creation. If the mode is unknown
     // after process restart, fail closed by creating a fresh session.
     log('opencode session permission mode changed; creating new session', {
@@ -386,8 +396,8 @@ export function chatOpencode(req: ChatRequest): void {
       from: recordedPermissionMode ?? 'unknown',
       to: requestedPermissionMode,
     })
-    opencodeSessionIds.delete(req.cardId)
-    opencodeSessionPermissionModes.delete(req.cardId)
+    opencodeSessionIds.delete(scopeKey)
+    opencodeSessionPermissionModes.delete(scopeKey)
   }
   log('chatOpencode starting', {
     model: req.model,
@@ -416,8 +426,8 @@ export function chatOpencode(req: ChatRequest): void {
         if (!sessionID) {
           throw new Error('Failed to create OpenCode session — no session ID returned')
         }
-        opencodeSessionIds.set(req.cardId, sessionID)
-        opencodeSessionPermissionModes.set(req.cardId, requestedPermissionMode)
+        opencodeSessionIds.set(scopeKey, sessionID)
+        opencodeSessionPermissionModes.set(scopeKey, requestedPermissionMode)
         log('opencode session created:', sessionID, req.mode === 'plan'
           ? '(plan mode)'
           : req.mode === 'bypassPermissions'
@@ -453,7 +463,7 @@ export function chatOpencode(req: ChatRequest): void {
       }).catch((err: any) => {
         if (!isDone) {
           log('opencode prompt error:', err.message)
-          sendStream(req.cardId, { type: 'error', error: err.message ?? String(err) })
+          sendStream(scope, { type: 'error', error: err.message ?? String(err) })
         }
       })
 
@@ -470,8 +480,8 @@ export function chatOpencode(req: ChatRequest): void {
             log('opencode SSE inactivity timeout (5min)')
             isDone = true
             // Best-effort server-side abort before closing the iterator.
-            void abortOpenCodeSession(req.cardId).catch(() => {})
-            sendStream(req.cardId, { type: 'done' })
+            void abortOpenCodeSession(scope).catch(() => {})
+            sendStream(scope, { type: 'done' })
           }
         }, INACTIVITY_MS)
       }
@@ -510,7 +520,7 @@ export function chatOpencode(req: ChatRequest): void {
                 assistantMessageId = info.id
                 // Report cost/token info when message completes
                 if (info.finish) {
-                  sendStream(req.cardId, {
+                  sendStream(scope, {
                     type: 'done',
                     cost: info.cost,
                     tokens: info.tokens,
@@ -537,7 +547,7 @@ export function chatOpencode(req: ChatRequest): void {
                 if (part.text && part.text.length > prev.length) {
                   const newText = part.text.slice(prev.length)
                   seenParts.set(part.id, part.text)
-                  sendStream(req.cardId, { type: 'text', text: newText })
+                  sendStream(scope, { type: 'text', text: newText })
                 }
               } else if (part.type === 'tool') {
                 const toolId = part.callID ?? part.id
@@ -548,26 +558,26 @@ export function chatOpencode(req: ChatRequest): void {
 
                 if (!prevStatus) {
                   // First time seeing this tool — send tool_start
-                  sendStream(req.cardId, { type: 'tool_start', toolId, toolName })
+                  sendStream(scope, { type: 'tool_start', toolId, toolName })
                   if (state?.input) {
                     const inputStr = typeof state.input === 'string' ? state.input : JSON.stringify(state.input, null, 2)
-                    sendStream(req.cardId, { type: 'tool_input', text: inputStr })
+                    sendStream(scope, { type: 'tool_input', text: inputStr })
                   }
                 }
 
                 if (state?.status === 'running' && prevStatus !== 'running') {
                   // Tool started running — update with title if available
                   if (state.title) {
-                    sendStream(req.cardId, { type: 'tool_use', toolName, toolInput: state.title })
+                    sendStream(scope, { type: 'tool_use', toolName, toolInput: state.title })
                   }
                 } else if (state?.status === 'completed') {
                   // Tool finished — send summary with output
                   const summary = state.title
                     ? `${state.title}${state.output ? '\n' + state.output.slice(0, 500) : ''}`
                     : state.output?.slice(0, 500) ?? 'Done'
-                  sendStream(req.cardId, { type: 'tool_summary', text: summary, toolName })
+                  sendStream(scope, { type: 'tool_summary', text: summary, toolName })
                 } else if (state?.status === 'error') {
-                  sendStream(req.cardId, { type: 'tool_summary', text: `Error: ${state.error}`, toolName })
+                  sendStream(scope, { type: 'tool_summary', text: `Error: ${state.error}`, toolName })
                 }
 
                 seenParts.set(seenKey, state?.status ?? 'unknown')
@@ -576,10 +586,10 @@ export function chatOpencode(req: ChatRequest): void {
                 if (part.text && part.text.length > prev.length) {
                   const newText = part.text.slice(prev.length)
                   seenParts.set(part.id, part.text)
-                  sendStream(req.cardId, { type: 'reasoning', text: newText })
+                  sendStream(scope, { type: 'reasoning', text: newText })
                 }
               } else if (part.type === 'step-finish') {
-                sendStream(req.cardId, {
+                sendStream(scope, {
                   type: 'step_finish',
                   cost: part.cost,
                   tokens: part.tokens,
@@ -603,7 +613,7 @@ export function chatOpencode(req: ChatRequest): void {
               if (field === 'text' && delta) {
                 const prev = seenParts.get(partID) ?? ''
                 seenParts.set(partID, prev + delta)
-                sendStream(req.cardId, { type: 'text', text: delta })
+                sendStream(scope, { type: 'text', text: delta })
               }
               break
             }
@@ -612,7 +622,7 @@ export function chatOpencode(req: ChatRequest): void {
               if (props.status?.type === 'idle' && assistantMessageId) {
                 if (!isDone) {
                   isDone = true
-                  sendStream(req.cardId, { type: 'done', sessionId: sessionID })
+                  sendStream(scope, { type: 'done', sessionId: sessionID })
                 }
               }
               break
@@ -620,7 +630,7 @@ export function chatOpencode(req: ChatRequest): void {
 
             case 'session.error': {
               isDone = true
-              sendStream(req.cardId, {
+              sendStream(scope, {
                 type: 'error',
                 error: props.error ?? 'OpenCode session error',
               })
@@ -643,7 +653,7 @@ export function chatOpencode(req: ChatRequest): void {
                 }
 
                 const toolUseIDHint = typeof permReq.id === 'string' ? permReq.id : null
-                const result = await resolveInlineToolPermission(req.cardId, permissionRequest, toolUseIDHint)
+                const result = await resolveInlineToolPermission(scope, permissionRequest, toolUseIDHint)
 
                 if ('error' in result) {
                   log('opencode permission error:', result.error)
@@ -703,7 +713,7 @@ export function chatOpencode(req: ChatRequest): void {
       await promptPromise
 
       if (!isDone) {
-        sendStream(req.cardId, { type: 'done', sessionId: sessionID })
+        sendStream(scope, { type: 'done', sessionId: sessionID })
       }
     } catch (err) {
       const msg = errorMessage(err)
@@ -713,8 +723,8 @@ export function chatOpencode(req: ChatRequest): void {
         : msg.includes('ESM/CJS')
           ? 'OpenCode SDK could not be loaded. Check @opencode-ai/sdk compatibility.'
           : msg
-      sendStream(req.cardId, { type: 'error', error: errorMsg })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'error', error: errorMsg })
+      sendStream(scope, { type: 'done' })
     }
   })()
 }

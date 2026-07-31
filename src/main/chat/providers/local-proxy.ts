@@ -6,7 +6,13 @@ import * as http from 'http'
 import { parseClaudeStream } from '../../agent-stream'
 import { ensureLocalProxyRunning } from '../../ipc/localProxy'
 import type { ChatRequest } from '../types'
-import { activeHttpRequests, getPreparedMessages, sendStream } from '../runtime'
+import {
+  activeHttpRequests,
+  chatRequestScope,
+  chatStreamScopeKey,
+  getPreparedMessages,
+  sendStream,
+} from '../runtime'
 
 function bufferHttpResponse(res: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -18,10 +24,12 @@ function bufferHttpResponse(res: http.IncomingMessage): Promise<string> {
 }
 
 export function chatLocalProxy(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const transport = req.providerTransport
   if (!transport || transport.type !== 'local-proxy') {
-    sendStream(req.cardId, { type: 'error', error: `Unsupported provider: ${req.provider}` })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: `Unsupported provider: ${req.provider}` })
+    sendStream(scope, { type: 'done' })
     return
   }
 
@@ -71,7 +79,7 @@ export function chatLocalProxy(req: ChatRequest): void {
     }, (res) => {
       if ((res.statusCode ?? 500) >= 400) {
         void bufferHttpResponse(res).then((raw) => {
-          activeHttpRequests.delete(req.cardId)
+          activeHttpRequests.delete(scopeKey)
           let errorMessage = `Proxy request failed (${res.statusCode ?? 500})`
           try {
             const parsed = JSON.parse(raw)
@@ -79,20 +87,20 @@ export function chatLocalProxy(req: ChatRequest): void {
           } catch {
             if (raw.trim()) errorMessage = raw.trim()
           }
-          sendStream(req.cardId, { type: 'error', error: errorMessage })
-          sendStream(req.cardId, { type: 'done' })
+          sendStream(scope, { type: 'error', error: errorMessage })
+          sendStream(scope, { type: 'done' })
         }).catch((err: Error) => {
-          activeHttpRequests.delete(req.cardId)
-          sendStream(req.cardId, { type: 'error', error: err.message })
-          sendStream(req.cardId, { type: 'done' })
+          activeHttpRequests.delete(scopeKey)
+          sendStream(scope, { type: 'error', error: err.message })
+          sendStream(scope, { type: 'done' })
         })
         return
       }
 
       res.on('close', () => {
-        activeHttpRequests.delete(req.cardId)
+        activeHttpRequests.delete(scopeKey)
       })
-      parseClaudeStream(req.cardId, res)
+      parseClaudeStream(req.cardId, res, event => sendStream(scope, { ...event }))
     })
 
     request.on('timeout', () => {
@@ -100,18 +108,18 @@ export function chatLocalProxy(req: ChatRequest): void {
     })
 
     request.on('error', (err) => {
-      if (!activeHttpRequests.has(req.cardId)) return
-      activeHttpRequests.delete(req.cardId)
-      sendStream(req.cardId, { type: 'error', error: err.message })
-      sendStream(req.cardId, { type: 'done' })
+      if (!activeHttpRequests.has(scopeKey)) return
+      activeHttpRequests.delete(scopeKey)
+      sendStream(scope, { type: 'error', error: err.message })
+      sendStream(scope, { type: 'done' })
     })
 
-    activeHttpRequests.set(req.cardId, request)
+    activeHttpRequests.set(scopeKey, request)
     request.write(body)
     request.end()
   })().catch((err: Error) => {
-    activeHttpRequests.delete(req.cardId)
-    sendStream(req.cardId, { type: 'error', error: err.message })
-    sendStream(req.cardId, { type: 'done' })
+    activeHttpRequests.delete(scopeKey)
+    sendStream(scope, { type: 'error', error: err.message })
+    sendStream(scope, { type: 'done' })
   })
 }
