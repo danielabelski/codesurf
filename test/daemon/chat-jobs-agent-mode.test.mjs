@@ -1512,7 +1512,9 @@ test('agent-mode-resolver drift guard: shared .ts data + daemon .mjs data + reso
 
 test('chat:send wires authoritative resolution as a chokepoint above the runtime/daemon split (#root-fix wiring)', () => {
   const src = readFileSync(join(ROOT_DIR, 'src/main/ipc/chat.ts'), 'utf8')
+  const canonicalIdx = src.indexOf('canonicalizeElectronChatRequest(req, getWorkspacePathById)')
   const callIdx = src.indexOf('resolveAuthoritativeAgentMode({')
+  assert.ok(canonicalIdx >= 0 && canonicalIdx < callIdx, 'chat:send must bind the request through the trusted workspace lookup first')
   assert.ok(callIdx >= 0, 'chat:send must call resolveAuthoritativeAgentMode')
   const failIdx = src.indexOf('if (!authoritativeResolution.ok)')
   assert.ok(failIdx > callIdx, 'must fail closed when resolution is not ok')
@@ -1522,9 +1524,11 @@ test('chat:send wires authoritative resolution as a chokepoint above the runtime
   const switchIdx = src.indexOf('switch (requestWithFileReferences.provider)')
   assert.ok(daemonIdx > callIdx && switchIdx > callIdx, 'resolution must be above the runtime/daemon split')
   // Trusted root only — never req.workspaceDir (the renderer-supplied spoof vector).
-  const block = src.slice(callIdx, failIdx)
-  assert.match(block, /getWorkspacePathById\(/, 'must resolve the trusted root via getWorkspacePathById')
-  assert.doesNotMatch(block, /req\.workspaceDir/, 'must NOT consult req.workspaceDir for resolution')
+  const bindingBlock = src.slice(canonicalIdx, callIdx)
+  assert.match(bindingBlock, /getWorkspacePathById/, 'must resolve the trusted root via getWorkspacePathById')
+  const resolutionBlock = src.slice(callIdx, failIdx)
+  assert.match(resolutionBlock, /canonicalRequest\.workspaceDir/, 'persona resolution must use the already-bound canonical root')
+  assert.doesNotMatch(resolutionBlock, /req\.workspaceDir/, 'must NOT consult req.workspaceDir for resolution')
 })
 
 test('daemon runJob adds gated defense-in-depth re-resolution (#root-fix daemon)', () => {
@@ -1684,11 +1688,20 @@ test('listPersonas (read-only): built-ins + agents.json overlay, never the disco
     { id: 'discovered-zzz', name: 'Ephemeral', tools: [], isBuiltin: false },
   ])
   const listed = await daemonListPersonas({ resolveWorkspaceRoot: () => root })
-  assert.deepEqual(listed, daemonOverlayAgentModes([
-    { id: 'custom-x', name: 'Custom X', tools: ['Read'], isBuiltin: false },
-    { id: 'ask', name: 'Ask Overridden', tools: ['Read'], isBuiltin: true },
-    { id: 'discovered-zzz', name: 'Ephemeral', tools: [], isBuiltin: false },
-  ]), 'listing must equal the shared overlay (cannot drift from resolution)')
+  assert.deepEqual(
+    listed.find(p => p.id === 'custom-x'),
+    {
+      id: 'custom-x',
+      name: 'Custom X',
+      description: '',
+      systemPrompt: '',
+      tools: ['Read'],
+      icon: 'robot',
+      color: '#3568ff',
+      isBuiltin: false,
+    },
+    'listing returns the same complete strict persona shape used by resolution',
+  )
   assert.ok(listed.some(p => p.id === 'custom-x'), 'overlay includes the custom persona')
   assert.equal(listed.find(p => p.id === 'ask')?.name, 'Ask Overridden', 'overlay applies a built-in override')
   assert.ok(!listed.some(p => String(p.id).startsWith('discovered-')), 'the discovered-* scan set must NEVER be listed')
@@ -1826,7 +1839,7 @@ test('persona extends: a TWO-NODE cycle where the child DEFINES tools:[] stays [
   }
 })
 
-test('persona extends FAIL-CLOSED: the production resolver denies all for a dangling extends with no child tools', async t => {
+test('persona extends FAIL-CLOSED: the production resolver rejects a dangling extends target', async t => {
   const root = await makeTestTempDir('persona-failclosed-resolve-')
   t.after(async () => { await rmP(root, { recursive: true, force: true }) })
   await writeAgentsJson(root, [
@@ -1834,8 +1847,8 @@ test('persona extends FAIL-CLOSED: the production resolver denies all for a dang
   ])
   const m = await resolveAuthoritativeMain({ agentId: 'orphan', resolveWorkspaceRoot: () => root })
   const d = await resolveAuthoritativeDaemon({ agentId: 'orphan', resolveWorkspaceRoot: () => root })
-  assert.equal(m.ok, true)
-  assert.deepEqual(m.agentMode.tools, [], 'production resolver must fail closed to [] for a broken extends with no child tools')
+  assert.equal(m.ok, false)
+  assert.equal(m.error, MAIN_DENIED)
   assert.deepEqual(m, d, 'main + daemon must agree on the fail-closed result')
 })
 
