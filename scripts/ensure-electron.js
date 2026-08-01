@@ -6,8 +6,6 @@
  * A trailing newline in path.txt also breaks electron-vite spawn (ENOENT).
  */
 
-const { downloadArtifact } = require('@electron/get')
-const extract = require('extract-zip')
 const childProcess = require('child_process')
 const fs = require('fs')
 const os = require('os')
@@ -51,6 +49,24 @@ function resolveArch(platform) {
   return arch
 }
 
+function isProductionOnlyInstall(env = process.env) {
+  const included = env.npm_config_include || env.NPM_CONFIG_INCLUDE || ''
+  if (included.split(/[,\s]+/).includes('dev')) return false
+
+  const omitted = env.npm_config_omit || env.NPM_CONFIG_OMIT || ''
+  if (omitted.split(/[,\s]+/).includes('dev')) return true
+
+  const only = String(env.npm_config_only || env.NPM_CONFIG_ONLY || '').toLowerCase()
+  if (only === 'prod' || only === 'production') return true
+
+  const production = String(
+    env.npm_config_production || env.NPM_CONFIG_PRODUCTION || '',
+  ).toLowerCase()
+  return env.NODE_ENV === 'production'
+    || production === 'true'
+    || production === '1'
+}
+
 function readPathTxt() {
   try {
     return fs.readFileSync(pathFile, 'utf8').trim()
@@ -82,11 +98,18 @@ function isInstalled(version, platformPath) {
 async function main() {
   if (process.env.ELECTRON_SKIP_BINARY_DOWNLOAD) return
 
+  if (isProductionOnlyInstall()) {
+    console.log('[ensure-electron] dev dependencies omitted; skipping Electron binary setup')
+    return
+  }
+
   if (!fs.existsSync(path.join(electronDir, 'package.json'))) {
     console.warn('[ensure-electron] electron package missing; skipping')
     return
   }
 
+  const { downloadArtifact } = require('@electron/get')
+  const extract = require('extract-zip')
   const { version } = require(path.join(electronDir, 'package.json'))
   const platform = process.env.npm_config_platform || process.platform
   const arch = resolveArch(platform)
@@ -121,7 +144,16 @@ async function main() {
   const distPath = process.env.ELECTRON_OVERRIDE_DIST_PATH || path.join(electronDir, 'dist')
   await fs.promises.rm(distPath, { recursive: true, force: true })
   await fs.promises.mkdir(distPath, { recursive: true })
-  await extract(zipPath, { dir: distPath })
+  if (platform === 'darwin' && process.platform === 'darwin') {
+    // extract-zip can stall partway through Electron's large archive on newer
+    // Node releases. ditto is a standard macOS tool and preserves the app
+    // bundle's executable modes and symlinks.
+    childProcess.execFileSync('/usr/bin/ditto', ['-x', '-k', zipPath, distPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } else {
+    await extract(zipPath, { dir: distPath })
+  }
 
   const srcTypeDefPath = path.join(distPath, 'electron.d.ts')
   const targetTypeDefPath = path.join(electronDir, 'electron.d.ts')
@@ -133,7 +165,18 @@ async function main() {
   console.log('[ensure-electron] Electron binary ready')
 }
 
-main().catch((error) => {
-  console.error('[ensure-electron]', error.stack || error)
-  process.exit(1)
-})
+// A pending Promise does not keep Node's event loop alive. Some @electron/get
+// transports can have no ref'ed handles while a cached/downloaded artifact is
+// being resolved, which previously let this process exit successfully before
+// extraction and path.txt creation completed.
+module.exports = { isProductionOnlyInstall, main }
+
+if (require.main === module) {
+  const keepAlive = setInterval(() => {}, 1_000)
+  main()
+    .catch((error) => {
+      console.error('[ensure-electron]', error.stack || error)
+      process.exitCode = 1
+    })
+    .finally(() => clearInterval(keepAlive))
+}

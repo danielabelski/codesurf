@@ -71,7 +71,8 @@ CodeSurf label (see § agent integration).
 Today `tier: 'safe' → ui.mode:'native'` and `power → custom` are conflated and the
 `native` path is unimplemented. Split into two independent axes:
 
-- **execution**: `iframe` (sandboxed, postMessage) · `node` (in-main, trusted) · `worker` (utilityProcess, isolated — stretch)
+- **execution**: `iframe` (sandboxed, postMessage) · `node` (trusted Node; brokered
+  child for non-bundled plugins by default) · `worker` (forces the brokered child)
 - **render**: `iframe` (custom HTML in sandbox) · `component` (in-host React) · `mcp-ui` (MCP-UI resource, themed by us)
 
 Back-compat aliases (absent v2 fields ⇒ derive from v1):
@@ -181,13 +182,15 @@ palette and the agent share one registry.
 ## 6. Capabilities + consent (surpass — both reference & us are weak here)
 
 Host services register **named capabilities** with a risk level; a plugin declares the
-ones it wants; the user **consents at enable/install time**; the broker returns a
-**scoped handle** with no ambient access. The relay 14-method surface becomes the
-broker's first consumer (retiring the hardcoded `id === 'codesurf-relay-suite'`
-special-case). `node` execution flows through the broker rather than raw `require()`
-into main. A `worker`/utilityProcess tier (true isolation) is the stretch. This gives
-the today-inert `permissions[]` real teeth — explicit user consent at install/enable
-time.
+ones it wants; the user **consents at enable/install time**; and the broker returns a
+scoped handle to CodeSurf APIs. The relay surface is the broker's first consumer.
+Non-bundled `node` execution flows through a utility-process child by default rather
+than raw `require()` into main, and `worker` forces that brokered path.
+
+This boundary gates CodeSurf APIs only. The child retains ambient Node.js access to
+filesystem, process, network, environment, and package APIs. The utility process
+provides crash isolation, not an OS security sandbox; removing ambient Node access
+requires a future confinement boundary.
 
 ---
 
@@ -307,13 +310,22 @@ store, capability, and UI systems.
 
 ### Current posture (as of this writing)
 
-`power`/`node` extensions are loaded via `require()` directly into the Electron
-**main process** and their `activate(ctx)` is called with a full `ExtensionContext`.
-This grants unrestricted access to all of Node.js — `fs`, `child_process`, `net`,
-arbitrary `require()`, etc.  It is equivalent to installing a native application.
+Non-bundled `power`/`node` extensions run in an Electron utility-process child by
+default. This keeps a plugin crash out of the Electron main process, but the child is
+**not a security sandbox**. Extension code retains ambient Node.js access to
+filesystem, process spawning, networking, environment variables, and arbitrary
+package imports. Treat enabling POWER code as equivalent to installing a native
+application.
 
-The **capability system** (§6, P1) gates the **iframe bridge** only.  It does not
-constrain power extensions.
+The capability system gates calls from that child into brokered **CodeSurf APIs**.
+For example, a plugin must receive the appropriate grant before it can invoke the
+CodeSurf canvas, relay, or host-filesystem surface. Capability grants do not intercept
+or confine direct Node built-ins such as `node:fs` and `node:child_process`.
+
+Bundled POWER extensions still use the legacy in-main `require()` path. The
+`CODESURF_POWER_BROKER=0` compatibility escape hatch also forces the legacy path for
+all POWER extensions. A manifest with `execution: "worker"` forces the brokered child
+even for a bundled extension.
 
 **Activation gates** (the current mitigations):
 
@@ -326,21 +338,18 @@ constrain power extensions.
 
 The workspace default-off is the critical protection: any project a user clones can
 ship `.contex/extensions/` but none of those power scripts will execute unless the
-user explicitly enables each one.  Opt-ins are persisted to
-`~/.codesurf/enabled-catalog-extensions.json`.
+user explicitly enables each one. Opt-ins, disabled extension IDs, and capability
+grants are committed together in the versioned
+`~/.codesurf/extension-security-state.json` document.
 
-A `[Security]` warning is emitted to the main-process log at `require()` time naming
-the extension, its scope, and the full entry path.  A separate `[Security]` warning is
-emitted at `enable()` time when the user opts in.
+Security warnings identify POWER activation and the selected runtime path in the
+main-process log. A separate warning is emitted when the user opts in.
 
-### Planned improvement — broker / utilityProcess isolation
+### Planned improvement — real confinement
 
-`§6` specifies the intended end state: _"`node` execution flows through the broker
-rather than raw `require()` into main"_.  The plan is a `worker`/`utilityProcess` tier
-that receives a scoped capability handle (not ambient Node) and communicates with main
-over a structured channel.  This would reduce a compromised power extension from
-"full main process" to "the capabilities the user consented to".
-
-This is a substantial rearchitecture tracked for a future phase.  Until it lands, the
-raw `require()` path persists and the workspace/catalog default-off gates remain the
-primary defence.
+The brokered child and main-process capability policy are valuable containment layers:
+they isolate crashes and prevent ungranted CodeSurf API calls. They do not make
+untrusted Node.js safe. Real confinement requires removing ambient Node built-ins or
+placing the child inside an OS-enforced sandbox with a deliberately narrow IPC
+surface. Until that lands, explicit enablement, source review, and the
+workspace/catalog default-off gates remain the primary trust controls.

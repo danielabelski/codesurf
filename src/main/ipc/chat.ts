@@ -9,6 +9,7 @@
 import { ipcMain, BrowserWindow, dialog } from 'electron'
 
 import { execFile } from 'child_process'
+import { randomUUID } from 'crypto'
 import { promises as fs } from 'fs'
 import { basename, join } from 'path'
 import { promisify } from 'util'
@@ -34,6 +35,11 @@ import type { ExecutionHostRecord } from '../../shared/types'
 import { daemonClient } from '../daemon/client'
 import { ensureDaemonRunning } from '../daemon/manager'
 import { parseSseJsonBuffer } from '@codesurf/daemon/sse'
+import {
+  MAX_SKILLS_SUMMARY_BYTES,
+  previewContextToolInput,
+  truncateUtf8,
+} from '../../../packages/codesurf-daemon/bin/context-budget.mjs'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
 import { getWorkspacePathById, readSettingsSync } from './workspace'
 
@@ -60,8 +66,12 @@ import {
 import { chatCodex } from '../chat/providers/codex'
 import { agentModeUnresolved, AGENT_MODE_UNRESOLVED_ERROR } from '../chat/agent-mode-tools'
 import { resolveAuthoritativeAgentMode } from '../chat/agent-mode-resolver'
+import {
+  applyAuthoritativePersonaPolicy,
+  canonicalizeElectronChatRequest,
+} from '../chat/request-policy'
 import { chatCsagent } from '../chat/providers/csagent'
-import { chatLocalProxy } from '../chat/providers/local-proxy'
+import { chatLocalProxy, stopLocalProxyTurn } from '../chat/providers/local-proxy'
 import type {
   ChatRequest,
   ChatImageAttachment,
@@ -73,13 +83,126 @@ import {
   cloneChatMessages,
   getPreparedMessages,
   activeQueries,
-  activeProcesses,
-  activeHttpRequests,
+  chatRequestScope,
+  chatStreamScopeKey,
+  createChatStreamScope,
   persistSessionIds,
   deleteCardSessionIds,
+  registerRoomContextAcknowledgement,
+  markRoomPromptAccepted,
+  discardRoomContextAcknowledgement,
+  beginRuntimeSessionPersistence,
+  bindRuntimeSessionPersistence,
+  clearRuntimeSessionState,
+  stopActiveChatProcess,
+  stopAllActiveChatProcesses,
+  type ChatStreamScope,
 } from '../chat/runtime'
+import { isValidAgentRoomId } from '../agent-room/validation.ts'
+import { appendComposedUserContextToLatestUser } from '../chat/room-context-message.ts'
+import { composeHostChatContext } from '../chat/request-context.ts'
+import { loadAuthoritativeChatPeers } from '../chat/peer-authority.ts'
+import {
+  isProviderAcceptanceEvent,
+  pollProviderCompletion,
+  isSuccessfulProviderCompletion,
+} from '../chat/provider-acceptance.ts'
+import {
+  BUILTIN_CHAT_PROVIDER_IDS,
+  resolveHostChatProvider,
+} from '../chat/provider-registry.ts'
+import {
+  ChatPreparationFence,
+  type ChatPreparationLease,
+} from '../chat/chat-preparation-fence.ts'
+import { ChatLifecycleCoordinator } from '../chat/chat-lifecycle-coordinator.ts'
+import { runConfirmedSessionClear } from '../chat/chat-session-lifecycle.ts'
+import { DaemonJobRegistry } from '../chat/daemon-job-registry.ts'
+import { getAuthoritativeNegotiatedPeerTools } from '../chat/peer-authority-policy.ts'
+import type { ProviderLaunchGuard } from '../chat/provider-launch-guard.ts'
+import { cleanupOwnedImageAttachments } from '../chat/provider-image-attachments.ts'
+import { routeHostForAttachments } from '../chat/attachment-route-policy.ts'
 
-const BUILTIN_CHAT_PROVIDERS = new Set(['claude', 'codex', 'opencode', 'openclaw', 'hermes', 'omnigent', 'csagent'])
+const BUILTIN_CHAT_PROVIDERS = new Set<string>(BUILTIN_CHAT_PROVIDER_IDS)
+const chatPreparationFence = new ChatPreparationFence()
+const chatLifecycleCoordinator = new ChatLifecycleCoordinator(chatPreparationFence)
+const ownedImageAttachmentsByScope = new Map<string, ChatImageAttachment[]>()
+const ownedImageAttachmentTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+type TempAttachmentIdentity = {
+  device: string
+  inode: string
+  byteCount: number
+  mtimeMs: number
+  ctimeMs: number
+}
+
+async function unlinkTempAttachmentIfIdentityMatches(
+  path: string,
+  expected: TempAttachmentIdentity,
+): Promise<void> {
+  try {
+    const stat = await fs.lstat(path)
+    if (
+      !stat.isFile()
+      || stat.isSymbolicLink()
+      || String(stat.dev) !== expected.device
+      || String(stat.ino) !== expected.inode
+      || stat.size !== expected.byteCount
+      || stat.mtimeMs !== expected.mtimeMs
+      || stat.ctimeMs !== expected.ctimeMs
+    ) return
+    await fs.unlink(path)
+  } catch {
+    // The daemon also sweeps strict stale owned names on startup. Never broaden
+    // a failed rollback into deleting an unattested path replacement.
+  }
+}
+
+function trackOwnedImageAttachments(
+  scope: ChatStreamScope,
+  attachments: ChatImageAttachment[] | undefined,
+): void {
+  const owned = (attachments ?? []).filter(attachment => attachment.ownedTemporary)
+  if (owned.length === 0) return
+  const scopeKey = chatStreamScopeKey(scope)
+  const previous = ownedImageAttachmentsByScope.get(scopeKey)
+  if (previous) void cleanupOwnedImageAttachments(previous)
+  const previousTimer = ownedImageAttachmentTimers.get(scopeKey)
+  if (previousTimer) clearTimeout(previousTimer)
+  ownedImageAttachmentsByScope.set(scopeKey, owned)
+  const timer = setTimeout(() => {
+    ownedImageAttachmentTimers.delete(scopeKey)
+    const pending = ownedImageAttachmentsByScope.get(scopeKey)
+    ownedImageAttachmentsByScope.delete(scopeKey)
+    if (pending) void cleanupOwnedImageAttachments(pending)
+  }, 5 * 60 * 1000)
+  timer.unref?.()
+  ownedImageAttachmentTimers.set(scopeKey, timer)
+}
+
+async function cleanupOwnedImageAttachmentsForScope(scope: ChatStreamScope): Promise<void> {
+  const scopeKey = chatStreamScopeKey(scope)
+  const timer = ownedImageAttachmentTimers.get(scopeKey)
+  if (timer) clearTimeout(timer)
+  ownedImageAttachmentTimers.delete(scopeKey)
+  const pending = ownedImageAttachmentsByScope.get(scopeKey)
+  ownedImageAttachmentsByScope.delete(scopeKey)
+  if (pending) await cleanupOwnedImageAttachments(pending)
+}
+
+function validatedChatScope(
+  workspaceId: unknown,
+  cardId: unknown,
+): ChatStreamScope | null {
+  const normalizedWorkspaceId = String(workspaceId ?? '').trim()
+  const normalizedCardId = String(cardId ?? '').trim()
+  if (
+    !isValidAgentRoomId(normalizedWorkspaceId)
+    || !isValidAgentRoomId(normalizedCardId)
+  ) return null
+  return createChatStreamScope(normalizedWorkspaceId, normalizedCardId)
+}
 
 export { warmOpenCodeModelsOnStartup } from '../chat/providers/opencode'
 
@@ -107,10 +230,48 @@ export {
 type LoadedMemoryContext = Awaited<ReturnType<typeof daemonClient.loadMemoryContext>>
 
 function mayContainFileReferences(text: string): boolean {
-  return text.includes('@') || text.includes('Attached file paths:')
+  return text.includes('@')
+    || text.includes('Attached file paths:')
+    || text.includes('Attached file capabilities:')
 }
 
-async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
+function extractHostAttachmentCapabilities(req: ChatRequest): string[] {
+  const messages = getPreparedMessages(req)
+  const lastUser = [...messages].reverse().find(message => message.role === 'user')
+  const content = String(lastUser?.content ?? '')
+  const marker = 'Attached file capabilities:'
+  const markerIndex = content.indexOf(marker)
+  if (markerIndex < 0) return []
+  return content
+    .slice(markerIndex + marker.length)
+    .split(/\r?\n/)
+    .map(line => line.trim().split('\t', 1)[0] ?? '')
+    .filter(capability => /^[A-Za-z0-9_-]{43}$/.test(capability))
+}
+
+async function hasHostValidatedAttachments(
+  req: ChatRequest,
+  selectedHost: ExecutionHostRecord | null,
+): Promise<boolean> {
+  if (selectedHost?.type !== 'local-daemon' || !req.workspaceId) return false
+  const capabilities = extractHostAttachmentCapabilities(req)
+  if (capabilities.length === 0) return false
+  const inspected = await daemonClient.inspectAttachmentCapabilities({
+    workspaceId: req.workspaceId,
+    cardId: req.cardId,
+    capabilities,
+  })
+  return inspected.hasAttachments
+}
+
+function supportedImageMediaTypesForRequest(req: ChatRequest, remoteExecution = false): string[] {
+  if (remoteExecution) return []
+  return ['claude', 'codex', 'csagent'].includes(req.provider)
+    ? [...ANTHROPIC_SUPPORTED_IMAGE_TYPES]
+    : []
+}
+
+async function expandLatestUserFileReferences(req: ChatRequest, remoteExecution = false): Promise<{
   request: ChatRequest
   expansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null
 }> {
@@ -139,9 +300,29 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
   const expansion = await daemonClient.expandFileReferences({
     message: lastUserMessage.content,
     workspaceId: req.workspaceId ?? null,
+    cardId: req.cardId,
     workspaceDir: req.workspaceDir ?? null,
     executionTarget: req.executionTarget === 'cloud' ? 'cloud' : 'local',
+    supportedImageMediaTypes: supportedImageMediaTypesForRequest(req, remoteExecution),
   })
+
+  // Register daemon-committed owned paths before cloning/mapping any response
+  // fields. A mapper failure or superseded turn can then clean every owned
+  // binary even though the one-shot capability transaction already committed.
+  trackOwnedImageAttachments(
+    chatRequestScope(req),
+    (expansion.ownedTemporaryAttachments ?? []).map(attachment => ({
+      path: String(attachment.path ?? ''),
+      mediaType: String(attachment.mediaType ?? ''),
+      displayPath: String(attachment.displayPath ?? ''),
+      byteCount: Number(attachment.byteCount),
+      device: String(attachment.device ?? ''),
+      inode: String(attachment.inode ?? ''),
+      mtimeMs: Number(attachment.mtimeMs),
+      ctimeMs: Number(attachment.ctimeMs),
+      ownedTemporary: true,
+    })),
+  )
 
   if (!expansion.changed) {
     return { request: req, expansion: null }
@@ -150,7 +331,7 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
   const expandedMessages = cloneChatMessages(preparedMessages)
   expandedMessages[lastUserIndex] = {
     ...expandedMessages[lastUserIndex],
-    content: expansion.message,
+    content: expansion.bodyText,
   }
 
   // Pull out binary image attachments so we can send them to Claude as real
@@ -169,17 +350,20 @@ async function expandLatestUserFileReferences(req: ChatRequest): Promise<{
         mediaType,
         displayPath: reference.displayPath,
         byteCount: reference.byteCount,
+        device: String(reference.device ?? ''),
+        inode: String(reference.inode ?? ''),
+        mtimeMs: Number(reference.mtimeMs),
+        ctimeMs: Number(reference.ctimeMs),
+        ownedTemporary: reference.ownedTemporary === true,
       })
-      continue
     }
-    const converted = await convertVisionImageToPng(resolvedPath, reference.displayPath, mediaType)
-    if (converted) imageAttachments.push(converted)
   }
 
   return {
     request: {
       ...req,
       expandedMessages,
+      fileReferencePrompt: expansion.contextText,
       ...(imageAttachments.length > 0 ? { imageAttachments } : {}),
     },
     expansion,
@@ -197,45 +381,6 @@ function isSupportedVisionMediaType(mediaType: string): boolean {
   return ANTHROPIC_SUPPORTED_IMAGE_TYPES.has(mediaType.toLowerCase())
 }
 
-function isConvertibleVisionImage(path: string, mediaType: string): boolean {
-  const normalized = mediaType.toLowerCase()
-  if (normalized === 'image/heic' || normalized === 'image/heif' || normalized === 'image/tiff' || normalized === 'image/bmp') return true
-  return /\.(heic|heif|tiff?|bmp)$/i.test(path)
-}
-
-async function convertVisionImageToPng(
-  sourcePath: string,
-  displayPath: string,
-  mediaType: string,
-): Promise<ChatImageAttachment | null> {
-  if (!isConvertibleVisionImage(sourcePath, mediaType)) return null
-  try {
-    // Use ~/.codesurf/chat-vision rather than os.tmpdir() so the path is
-    // stable across reboots AND inside a permission scope the CodeSurf
-    // daemon can access without per-job grants. (os.tmpdir() lives under
-    // /private/var/folders/... on macOS, which is not in the daemon's
-    // allowlist by default — Reads from agent jobs would fail.)
-    const dir = join(CODESURF_HOME, 'chat-vision')
-    await fs.mkdir(dir, { recursive: true })
-    const safeBase = basename(displayPath || sourcePath)
-      .replace(/\.[^.]+$/, '')
-      .replace(/[\\/:*?"<>|]/g, '_')
-      .slice(0, 80) || 'image'
-    const dest = join(dir, `${safeBase}-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}.png`)
-    await execFileAsync('sips', ['-s', 'format', 'png', sourcePath, '--out', dest], { maxBuffer: 1024 * 1024 * 4 })
-    const stat = await fs.stat(dest)
-    return {
-      path: dest,
-      mediaType: 'image/png',
-      displayPath: `${displayPath || sourcePath} (converted to PNG)`,
-      byteCount: stat.size,
-    }
-  } catch (error) {
-    log('failed to convert image attachment for vision', sourcePath, mediaType, error instanceof Error ? error.message : String(error))
-    return null
-  }
-}
-
 /**
  * Kill every live chat subprocess (Codex/OpenClaw/Hermes/OpenCode CLI children)
  * and stop the OpenCode server. Called from app `before-quit` so a hard quit
@@ -244,28 +389,38 @@ async function convertVisionImageToPng(
  * restarts (see terminal.ts), and the direct-PTY fallback receives SIGHUP when
  * the PTY master closes on parent death.
  */
-export function killAllChatProcesses(): void {
-  for (const [cardId, proc] of activeProcesses) {
-    try {
-      proc.kill('SIGTERM')
-      // Best-effort escalation if the child ignores SIGTERM; unref'd so it
-      // never keeps the quitting process alive.
-      const t = setTimeout(() => {
-        try { if (!proc.killed) proc.kill('SIGKILL') } catch { /* already gone */ }
-      }, 2000)
-      t.unref?.()
-    } catch { /* already exited */ }
-    activeProcesses.delete(cardId)
+export async function killAllChatProcesses(): Promise<void> {
+  const [processResult, openCodeResult] = await Promise.allSettled([
+    stopAllActiveChatProcesses(),
+    shutdownOpenCodeServer(),
+  ])
+  for (const timer of ownedImageAttachmentTimers.values()) clearTimeout(timer)
+  ownedImageAttachmentTimers.clear()
+  for (const attachments of ownedImageAttachmentsByScope.values()) {
+    void cleanupOwnedImageAttachments(attachments)
   }
-  try {
-    shutdownOpenCodeServer()
-  } catch { /* not running */ }
+  ownedImageAttachmentsByScope.clear()
+
+  const failures: string[] = []
+  if (processResult.status === 'rejected') {
+    failures.push(processResult.reason instanceof Error
+      ? processResult.reason.message
+      : String(processResult.reason))
+  } else {
+    failures.push(...processResult.value
+      .filter(result => !result.confirmed)
+      .map(result => `${result.scopeKey}: ${result.detail}`))
+  }
+  if (openCodeResult.status === 'rejected') {
+    failures.push(openCodeResult.reason instanceof Error
+      ? openCodeResult.reason.message
+      : String(openCodeResult.reason))
+  }
+  if (failures.length > 0) {
+    throw new Error(`Chat shutdown could not confirm every process tree exited: ${failures.join('; ')}`)
+  }
 }
-const activeDaemonStreams = new Map<string, {
-  abortController: AbortController
-  host: ExecutionHostRecord
-  jobId: string
-}>()
+const activeDaemonJobs = new DaemonJobRegistry<ExecutionHostRecord>()
 
 const execFileAsync = promisify(execFile)
 
@@ -278,19 +433,19 @@ interface PendingToolPermission {
   reject: (err: Error) => void
 }
 
-// Keyed by `${cardId}::${toolUseID}` so we can address the exact tool_use.
+// Keyed by workspace/card identity plus toolUseID.
 const pendingToolPermissions = new Map<string, PendingToolPermission>()
 
-function toolPermissionKey(cardId: string, toolUseID: string | null | undefined): string {
-  return `${cardId}::${toolUseID ?? ''}`
+function toolPermissionKey(scope: ChatStreamScope, toolUseID: string | null | undefined): string {
+  return JSON.stringify([chatStreamScopeKey(scope), toolUseID ?? ''])
 }
 
 export function awaitToolPermissionAnswer(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null,
   request: ToolPermissionRequest,
 ): Promise<ToolPermissionDecision> {
-  const key = toolPermissionKey(cardId, toolUseID)
+  const key = toolPermissionKey(scope, toolUseID)
   const prior = pendingToolPermissions.get(key)
   if (prior) {
     try { prior.reject(new Error('Tool permission superseded')) } catch { /* noop */ }
@@ -298,7 +453,7 @@ export function awaitToolPermissionAnswer(
   }
   return new Promise<ToolPermissionDecision>((resolve, reject) => {
     pendingToolPermissions.set(key, { resolve, reject })
-    sendStream(cardId, {
+    sendStream(scope, {
       type: 'tool_permission_request',
       toolId: toolUseID,
       provider: request.provider,
@@ -312,11 +467,11 @@ export function awaitToolPermissionAnswer(
 }
 
 function resolvePendingToolPermission(
-  cardId: string,
+  scope: ChatStreamScope,
   toolUseID: string | null | undefined,
   decision: ToolPermissionDecision,
 ): boolean {
-  const key = toolPermissionKey(cardId, toolUseID)
+  const key = toolPermissionKey(scope, toolUseID)
   const pending = pendingToolPermissions.get(key)
   if (!pending) return false
   pendingToolPermissions.delete(key)
@@ -324,21 +479,19 @@ function resolvePendingToolPermission(
   return true
 }
 
-function cancelPendingToolPermissionsForCard(cardId: string, reason: string = 'Cancelled'): void {
-  const prefix = `${cardId}::`
+function cancelPendingToolPermissionsForCard(
+  scope: ChatStreamScope,
+  reason: string = 'Cancelled',
+): void {
+  const scopeKey = chatStreamScopeKey(scope)
   for (const [key, pending] of pendingToolPermissions.entries()) {
-    if (key.startsWith(prefix)) {
+    try {
+      const parsed = JSON.parse(key)
+      if (!Array.isArray(parsed) || parsed[0] !== scopeKey) continue
       pendingToolPermissions.delete(key)
       try { pending.reject(new Error(reason)) } catch { /* noop */ }
-    }
+    } catch { /* ignore malformed internal keys */ }
   }
-}
-
-function stopDaemonStream(cardId: string): void {
-  const active = activeDaemonStreams.get(cardId)
-  if (!active) return
-  active.abortController.abort()
-  activeDaemonStreams.delete(cardId)
 }
 
 async function resolveHostEndpoint(host: ExecutionHostRecord): Promise<{ baseUrl: string; token: string | null }> {
@@ -443,11 +596,13 @@ function buildAsyncExecutionContext(params: {
 // are imported at the top of this file.
 
 function syncPeerLinks(req: ChatRequest): void {
+  if (!req.workspaceId) return
   const tileTypes: Record<string, string> = { [req.cardId]: 'chat' }
   for (const peer of req.peers ?? []) {
     tileTypes[peer.peerId] = peer.peerType || 'unknown'
   }
   updateLinks(
+    req.workspaceId,
     req.cardId,
     (req.peers ?? []).map(peer => peer.peerId),
     tileTypes,
@@ -456,14 +611,21 @@ function syncPeerLinks(req: ChatRequest): void {
 
 /** Join room from canvas wires, inject pending room traffic, announce identity. */
 function attachRoomContext(req: ChatRequest): ChatRequest {
+  if (!req.workspaceId) return { ...req, roomAckSequence: undefined }
   syncPeerLinks(req)
-  const { roomId, systemExtra } = prepareTurnContext(req.cardId, 'chat')
+  const {
+    roomId,
+    systemExtra,
+    acknowledgeThrough: roomAckSequence,
+  } = prepareTurnContext(req.workspaceId, req.cardId, 'chat', {
+    supplementalUntrustedContext: req.untrustedPeerContext,
+  })
   if (roomId) {
     // Share the latest user message into the room so peers get it on their next turn
     const lastUser = [...(req.messages ?? [])].reverse().find(m => m.role === 'user')
     const userText = String(lastUser?.content ?? '').trim()
     if (userText) {
-      roomPost({
+      roomPost(req.workspaceId, {
         fromTileId: req.cardId,
         fromTileType: 'chat',
         kind: 'message',
@@ -472,12 +634,17 @@ function attachRoomContext(req: ChatRequest): ChatRequest {
       })
     }
   }
-  if (!systemExtra.trim()) return req
+  if (!systemExtra.trim()) {
+    return {
+      ...req,
+      roomContext: undefined,
+      roomAckSequence: roomAckSequence ?? undefined,
+    }
+  }
   return {
     ...req,
     roomContext: systemExtra,
-    // Also fold into memoryPrompt so providers that only use memory still see it
-    memoryPrompt: [req.memoryPrompt, systemExtra].filter(Boolean).join('\n\n') || undefined,
+    roomAckSequence: roomAckSequence ?? undefined,
   }
 }
 
@@ -584,64 +751,101 @@ function buildMemoryContextInput(context: LoadedMemoryContext | null | undefined
   )
 }
 
-function emitMemoryContextLoaded(cardId: string, context: LoadedMemoryContext | null | undefined): void {
+function boundOptionalRuntimeContext(value: unknown, maxBytes: number, reason: string): string | undefined {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) return undefined
+  return truncateUtf8(normalized, maxBytes, { reason }).text
+}
+
+function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
+  const composed = composeHostChatContext(req)
+  const skillsSummary = boundOptionalRuntimeContext(
+    req.skillsSummary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
+  const messages = appendComposedUserContextToLatestUser(req.messages, composed.context.userSuffix)
+  const expandedMessages = req.expandedMessages
+    ? appendComposedUserContextToLatestUser(req.expandedMessages, composed.context.userSuffix)
+    : undefined
+  return {
+    ...req,
+    peers: composed.peers,
+    messages,
+    ...(expandedMessages ? { expandedMessages } : {}),
+    contextPrompt: composed.context.systemPrompt,
+    memoryPrompt: undefined,
+    roomContext: undefined,
+    fileReferencePrompt: undefined,
+    recentEditContext: undefined,
+    blockNotesContext: undefined,
+    skillsPrompt: undefined,
+    skillsSummary,
+  }
+}
+
+function emitMemoryContextLoaded(scope: ChatStreamScope, context: LoadedMemoryContext | null | undefined): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
   const toolId = `codesurf-memory-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
   const input = buildMemoryContextInput(context)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Workspace Instructions', text: summary })
 }
 
 function summarizeSelectedSkills(index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): string | undefined {
-  return String(index?.selection?.summary ?? '').trim() || undefined
+  return boundOptionalRuntimeContext(
+    index?.selection?.summary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
 }
 
 function buildSelectedSkillsPrompt(index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): string | undefined {
   return String(index?.selection?.prompt ?? '').trim() || undefined
 }
 
-function emitSelectedSkillsLoaded(cardId: string, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSelectedSkillsLoaded(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
   const summary = summarizeSelectedSkills(index)
   if (!summary) return
   const toolId = `codesurf-skills-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Included Skills' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Included Skills' })
   const input = buildSelectedSkillsPrompt(index)
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
 }
 
-function emitSkippedSkillLocations(cardId: string, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSkippedSkillLocations(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
   const skipped = index?.skippedLocations ?? []
   if (skipped.length === 0) return
   const toolId = `codesurf-skills-skipped-${Date.now()}`
   const lines = skipped.map(entry => `${entry.path} (${entry.code})`).join('\n')
   const summary = `${skipped.length} skill location${skipped.length === 1 ? '' : 's'} could not be read. Skills from those paths were skipped.`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Skill Scan Warning' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Skill Scan Warning' })
   if (lines) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: lines })
+    sendStream(scope, { type: 'tool_input', toolId, text: lines })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Skill Scan Warning', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Skill Scan Warning', text: summary })
 }
 
 function emitFileReferenceExpansion(
-  cardId: string,
+  scope: ChatStreamScope,
   expansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null | undefined,
 ): void {
   const summary = String(expansion?.summaryText ?? '').trim()
   if (!summary) return
   const toolId = `codesurf-file-refs-${Date.now()}`
-  sendStream(cardId, { type: 'tool_start', toolId, toolName: 'Workspace File References' })
+  sendStream(scope, { type: 'tool_start', toolId, toolName: 'Workspace File References' })
   const input = String(expansion?.inputText ?? '').trim()
   if (input) {
-    sendStream(cardId, { type: 'tool_input', toolId, text: input })
+    sendStream(scope, { type: 'tool_input', toolId, text: input })
   }
-  sendStream(cardId, { type: 'tool_summary', toolId, toolName: 'Workspace File References', text: summary })
+  sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Workspace File References', text: summary })
 }
 
 async function loadRuntimeMemoryContext(req: ChatRequest): Promise<LoadedMemoryContext | null> {
@@ -765,14 +969,18 @@ async function buildProjectContext(workspaceDir: string | undefined): Promise<Pr
   return value
 }
 
-async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, jobId: string, sinceSequence = 0): Promise<void> {
-  stopDaemonStream(cardId)
-
-  const endpoint = await resolveHostEndpoint(host)
-  const abortController = new AbortController()
-  activeDaemonStreams.set(cardId, { abortController, host, jobId })
+async function attachDaemonJobStream(
+  scope: ChatStreamScope,
+  host: ExecutionHostRecord,
+  jobId: string,
+  sinceSequence = 0,
+): Promise<void> {
+  const scopeKey = chatStreamScopeKey(scope)
+  const activity = activeDaemonJobs.register(scopeKey, jobId, host, 'foreground')
+  const abortController = activity.abortController
 
   try {
+    const endpoint = await resolveHostEndpoint(host)
     const response = await fetch(`${endpoint.baseUrl}/chat/job/events?jobId=${encodeURIComponent(jobId)}&since=${encodeURIComponent(String(sinceSequence))}`, {
       headers: {
         Accept: 'text/event-stream',
@@ -800,22 +1008,72 @@ async function attachDaemonJobStream(cardId: string, host: ExecutionHostRecord, 
         log('daemon stream parse error', error)
       }
       for (const payload of parsed.events) {
-        sendStream(cardId, payload)
+        if (isProviderAcceptanceEvent(payload)) markRoomPromptAccepted(scope)
+        // Daemon SSE is never host attestation for a later local file read.
+        sendStream(scope, { ...payload, fileChangesTrusted: false })
       }
     }
+    const state = await hostRequest<{ status: string; error?: string | null }>(
+      host,
+      `/chat/job/state?jobId=${encodeURIComponent(jobId)}`,
+    ).catch(() => null)
+    if (isSuccessfulProviderCompletion(state)) markRoomPromptAccepted(scope)
   } catch (error) {
     if (abortController.signal.aborted) return
     if (error instanceof Error && error.name === 'AbortError') return
     throw error
   } finally {
-    const active = activeDaemonStreams.get(cardId)
-    if (active?.jobId === jobId) {
-      activeDaemonStreams.delete(cardId)
-    }
+    activeDaemonJobs.complete(activity)
   }
 }
 
-async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Promise<{ ok: boolean; jobId: string; detached?: boolean }> {
+function waitForDaemonMonitor(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(finish, milliseconds)
+    const onAbort = (): void => finish()
+    function finish(): void {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function monitorDetachedDaemonRoomAcceptance(
+  scope: ChatStreamScope,
+  host: ExecutionHostRecord,
+  jobId: string,
+): Promise<void> {
+  const scopeKey = chatStreamScopeKey(scope)
+  const activity = activeDaemonJobs.register(scopeKey, jobId, host, 'background')
+  try {
+    const outcome = await pollProviderCompletion({
+      readState: () => hostRequest<{ status: string; error?: string | null }>(
+        host,
+        `/chat/job/state?jobId=${encodeURIComponent(jobId)}`,
+        { signal: activity.abortController.signal },
+      ),
+      isActive: () => activeDaemonJobs.isActive(activity),
+      wait: milliseconds => waitForDaemonMonitor(
+        milliseconds,
+        activity.abortController.signal,
+      ),
+    })
+    if (outcome === 'accepted') markRoomPromptAccepted(scope)
+    else if (outcome !== 'superseded') discardRoomContextAcknowledgement(scope)
+  } finally {
+    activeDaemonJobs.complete(activity)
+  }
+}
+
+async function sendChatToDaemon(
+  req: ChatRequest,
+  host: ExecutionHostRecord,
+  preparationLease: ChatPreparationLease,
+): Promise<{ ok: boolean; jobId: string; detached?: boolean; error?: string }> {
+  const scope = chatRequestScope(req)
   const rawProjectContext = await buildProjectContext(req.workspaceDir)
   const contextPolicy = buildProviderContextPolicy({
     executionTarget: req.executionTarget,
@@ -840,6 +1098,9 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
 
   let job: { id: string; status: string }
   try {
+    if (!chatPreparationFence.isCurrent(preparationLease)) {
+      return { ok: false, jobId: '', error: 'Chat preparation superseded' }
+    }
     job = await hostRequest<{
       id: string
       status: string
@@ -852,32 +1113,43 @@ async function sendChatToDaemon(req: ChatRequest, host: ExecutionHostRecord): Pr
         },
       },
     })
+    if (!chatPreparationFence.isCurrent(preparationLease)) {
+      try {
+        await hostRequest(host, '/chat/job/cancel', { body: { jobId: job.id } })
+      } catch {
+        // Best effort: invalidation still prevents stream attachment and ACKs.
+      }
+      return { ok: false, jobId: '', error: 'Chat preparation superseded' }
+    }
+    registerRoomContextAcknowledgement(req)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    sendStream(req.cardId, { type: 'error', error: message })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: message })
+    sendStream(scope, { type: 'done' })
     return { ok: false, jobId: '' }
   }
 
   if (req.runMode !== 'background') {
-    void attachDaemonJobStream(req.cardId, host, job.id, 0).catch((error: Error) => {
-      sendStream(req.cardId, { type: 'error', error: error.message, jobId: job.id })
-      sendStream(req.cardId, { type: 'done', jobId: job.id })
+    void attachDaemonJobStream(scope, host, job.id, 0).catch((error: Error) => {
+      sendStream(scope, { type: 'error', error: error.message, jobId: job.id })
+      sendStream(scope, { type: 'done', jobId: job.id })
     })
   } else {
-    sendStream(req.cardId, {
+    sendStream(scope, {
       type: 'tool_summary',
       toolName: 'Background job',
       text: `Started detached ${requestWithProviderSettings.provider} job ${job.id}.`,
       jobId: job.id,
     })
-    sendStream(req.cardId, { type: 'done', jobId: job.id })
+    sendStream(scope, { type: 'done', jobId: job.id })
+    void monitorDetachedDaemonRoomAcceptance(scope, host, job.id)
   }
 
   return { ok: true, jobId: job.id, detached: req.runMode === 'background' }
 }
 
 async function resumeChatDaemonJob(req: ChatRequest): Promise<{ ok: boolean; resumed: boolean; jobId: string | null }> {
+  const scope = chatRequestScope(req)
   if (!req.jobId) return { ok: false, resumed: false, jobId: null }
   const host = await selectChatExecutionHost(req)
   if (!host) return { ok: false, resumed: false, jobId: req.jobId }
@@ -893,33 +1165,49 @@ async function resumeChatDaemonJob(req: ChatRequest): Promise<{ ok: boolean; res
   const sinceSequence = Number(req.jobSequence ?? 0)
   if (state.status !== 'running' && sinceSequence >= Number(state.lastSequence ?? 0)) {
     if (state.error) {
-      sendStream(req.cardId, { type: 'error', error: state.error, jobId: req.jobId, sequence: state.lastSequence })
+      sendStream(scope, { type: 'error', error: state.error, jobId: req.jobId, sequence: state.lastSequence })
     }
-    sendStream(req.cardId, { type: 'done', jobId: req.jobId, sequence: state.lastSequence, sessionId: state.sessionId ?? undefined })
+    sendStream(scope, { type: 'done', jobId: req.jobId, sequence: state.lastSequence, sessionId: state.sessionId ?? undefined })
     return { ok: true, resumed: false, jobId: req.jobId }
   }
 
-  void attachDaemonJobStream(req.cardId, host, req.jobId, sinceSequence).catch((error: Error) => {
-    sendStream(req.cardId, { type: 'error', error: error.message, jobId: req.jobId })
-    sendStream(req.cardId, { type: 'done', jobId: req.jobId })
+  void attachDaemonJobStream(scope, host, req.jobId, sinceSequence).catch((error: Error) => {
+    sendStream(scope, { type: 'error', error: error.message, jobId: req.jobId })
+    sendStream(scope, { type: 'done', jobId: req.jobId })
   })
 
   return { ok: true, resumed: true, jobId: req.jobId }
 }
 
-async function cancelChatDaemonJob(cardId: string): Promise<void> {
-  const active = activeDaemonStreams.get(cardId)
-  if (!active) return
-
-  try {
-    await hostRequest(active.host, '/chat/job/cancel', {
-      body: { jobId: active.jobId },
-    })
-  } catch (error) {
-    log('daemon cancel error', error)
-  } finally {
-    stopDaemonStream(cardId)
-  }
+async function cancelChatDaemonJobs(scope: ChatStreamScope): Promise<{ ok: boolean, errors: string[] }> {
+  const scopeKey = chatStreamScopeKey(scope)
+  const jobs = activeDaemonJobs.list(scopeKey)
+  const errors: string[] = []
+  await Promise.all(jobs.map(async job => {
+    try {
+      const result = await hostRequest<{ ok?: boolean, error?: string }>(job.host, '/chat/job/cancel', {
+        body: { jobId: job.jobId },
+      })
+      if (result?.ok !== true) {
+        const state = await hostRequest<{ status?: string }>(
+          job.host,
+          `/chat/job/state?jobId=${encodeURIComponent(job.jobId)}`,
+        ).catch(() => null)
+        if (state?.status !== 'completed' && state?.status !== 'failed') {
+          errors.push(`${job.jobId}: ${result?.error || 'daemon did not confirm cancellation'}`)
+          return
+        }
+      }
+      job.abortController.abort()
+      activeDaemonJobs.complete(job)
+    } catch (error) {
+      log('daemon cancel error', job.jobId, error)
+      errors.push(
+        `${job.jobId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }))
+  return { ok: errors.length === 0, errors }
 }
 
 /**
@@ -929,100 +1217,194 @@ async function cancelChatDaemonJob(cardId: string): Promise<void> {
  * orphaned work streaming into a dead cardId.
  */
 async function stopCardExecution(
-  cardId: string,
-  options?: { emitDone?: boolean, reason?: string },
-): Promise<void> {
+  scope: ChatStreamScope,
+  options?: { emitDone?: boolean, reason?: string, preservePreparation?: boolean },
+): Promise<{ ok: boolean, error?: string }> {
   const reason = options?.reason ?? 'Chat stopped'
-  const ac = cardAbortControllers.get(cardId)
+  const scopeKey = chatStreamScopeKey(scope)
+  if (!options?.preservePreparation) chatPreparationFence.invalidate(scopeKey)
+  // Lifecycle completion generated by an explicit stop is not evidence that
+  // the provider accepted this turn. Preserve unread peer context for retry.
+  discardRoomContextAcknowledgement(scope)
+  const ac = cardAbortControllers.get(scopeKey)
   if (ac) {
     ac.abort()
-    cardAbortControllers.delete(cardId)
+    cardAbortControllers.delete(scopeKey)
   }
-  const q = activeQueries.get(cardId)
+  const q = activeQueries.get(scopeKey)
   if (q) {
     markClaudeQueryIntentionallyClosed(q)
     q.close()
-    activeQueries.delete(cardId)
+    activeQueries.delete(scopeKey)
   }
-  const proc = activeProcesses.get(cardId)
-  if (proc) {
-    proc.kill('SIGTERM')
-    activeProcesses.delete(cardId)
+  const processTermination = await stopActiveChatProcess(scopeKey)
+  stopLocalProxyTurn(scope)
+  const daemonCancellation = await cancelChatDaemonJobs(scope)
+  cancelPendingAskUserQuestionsForCard(scope, reason)
+  cancelPendingToolPermissionsForCard(scope, reason)
+  cardPermissionModes.delete(scopeKey)
+  await abortOpenCodeSession(scope)
+  try { await stopCsagent(scope) } catch { /* best-effort */ }
+  disposeCsagent(scope)
+  await cleanupOwnedImageAttachmentsForScope(scope)
+
+  const failures: string[] = []
+  if (processTermination && !processTermination.confirmed) {
+    failures.push(`CLI process tree: ${processTermination.detail}`)
   }
-  const httpRequest = activeHttpRequests.get(cardId)
-  if (httpRequest) {
-    httpRequest.destroy()
-    activeHttpRequests.delete(cardId)
+  if (!daemonCancellation.ok) {
+    failures.push(...daemonCancellation.errors.map(error => `daemon job ${error}`))
   }
-  await cancelChatDaemonJob(cardId)
-  cancelPendingAskUserQuestionsForCard(cardId, reason)
-  cancelPendingToolPermissionsForCard(cardId, reason)
-  cardPermissionModes.delete(cardId)
-  await abortOpenCodeSession(cardId)
-  try { await stopCsagent(cardId) } catch { /* best-effort */ }
-  disposeCsagent(cardId)
+  if (failures.length > 0) {
+    const error = `${reason}, but termination could not be confirmed: ${failures.join('; ')}`
+    sendStream(scope, { type: 'error', error })
+    return { ok: false, error }
+  }
   if (options?.emitDone !== false) {
-    sendStream(cardId, { type: 'done' })
+    sendStream(scope, { type: 'done' })
   }
+  return { ok: true }
 }
 
 export function registerChatIPC(): void {
   log('registerChatIPC: handlers registered')
-  ipcMain.handle('chat:send', async (_, req: ChatRequest) => {
-    log('chat:send received', { provider: req.provider, model: req.model, msgCount: req.messages.length })
+  ipcMain.handle('chat:send', async (_, incomingReq: ChatRequest) => {
+    const scope = validatedChatScope(incomingReq?.workspaceId, incomingReq?.cardId)
+    if (!scope) {
+      return { ok: false, error: 'Invalid or missing workspace/card identity' }
+    }
+    const req: ChatRequest = {
+      ...incomingReq,
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+    }
     const requestedRunMode = req.runMode === 'background' ? 'background' : 'foreground'
+    const scopeKey = chatStreamScopeKey(scope)
+    return chatLifecycleCoordinator.runSend(
+      scopeKey,
+      requestedRunMode,
+      async preparationLease => {
+    // Lease persistence before any asynchronous request preparation. A clear
+    // that occurs while memory/skills/files are loading tombstones this turn.
+    // Detached daemon work does not replace a live local foreground writer.
+    const runtimePersistenceLease = beginRuntimeSessionPersistence(
+      req,
+      requestedRunMode === 'foreground',
+    )
+    const submittedPeers = incomingReq?.peers
+    log('chat:send received', { provider: req.provider, model: req.model, msgCount: req.messages.length })
+    const preparationIsCurrent = (): boolean => chatPreparationFence.isCurrent(preparationLease)
+    const providerLaunchGuard: ProviderLaunchGuard = { isCurrent: preparationIsCurrent }
+    const preparationSuperseded = (): { ok: false; error: string } => ({
+      ok: false,
+      error: 'Chat preparation superseded',
+    })
     if (requestedRunMode === 'foreground') {
       // Foreground turns replace the current foreground execution for this card.
       // Full stop (incl. csagent) so the previous turn cannot interleave events.
       // emitDone:false — the new turn owns the stream; a premature done would
       // flip the UI to idle before the replacement send starts.
-      await stopCardExecution(req.cardId, { emitDone: false, reason: 'Replaced by new turn' })
+      const replacementStop = await stopCardExecution(scope, {
+        emitDone: false,
+        reason: 'Replaced by new turn',
+        preservePreparation: true,
+      })
+      if (!replacementStop.ok) return replacementStop
+      if (!preparationIsCurrent()) return preparationSuperseded()
     }
 
-    // ROOT FIX (server-side authoritative agent resolution). The renderer sends
-    // both `agentId` and a renderer-resolved `agentMode`; a race or a compromised
-    // renderer can ship a NON-null but LOOSER mode than the workspace's agents.json
-    // actually defines, and every downstream guard only rejects a NULL mode — so a
-    // wrong-but-non-null mode slips through. Re-resolve the agentId AUTHORITATIVELY
-    // here from the TRUSTED workspace root (NOT req.workspaceDir, which is renderer
-    // supplied) and OVERRIDE whatever the renderer sent. This is the single
-    // chokepoint above the runtime-vs-daemon split, so the authoritative mode flows
-    // into both the runtime switch and sendChatToDaemon (incl. remote/cloud, which
-    // cannot re-resolve). Fail closed: an unverifiable selected agent is denied.
+    let canonicalRequest: ChatRequest
+    try {
+      canonicalRequest = await canonicalizeElectronChatRequest(req, getWorkspacePathById)
+      const peerAuthority = await loadAuthoritativeChatPeers(
+        scope.workspaceId,
+        scope.cardId,
+        submittedPeers,
+      )
+      canonicalRequest = {
+        ...canonicalRequest,
+        peers: peerAuthority.peers,
+        untrustedPeerContext: peerAuthority.untrustedPeerContext,
+        providerTransport: await resolveHostChatProvider({
+          workspaceId: scope.workspaceId,
+          workspaceDir: canonicalRequest.workspaceDir ?? '',
+          provider: canonicalRequest.provider,
+          model: canonicalRequest.model,
+          peers: peerAuthority.peers,
+        }),
+        negotiatedTools: getAuthoritativeNegotiatedPeerTools(
+          peerAuthority.peers,
+          canonicalRequest.mcpEnabled,
+        ),
+      }
+    } catch (error) {
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      sendStream(scope, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(scope, { type: 'done' })
+      return { ok: false }
+    }
+    if (!preparationIsCurrent()) return preparationSuperseded()
+
     const authoritativeResolution = await resolveAuthoritativeAgentMode({
-      agentId: req.agentId ?? null,
-      resolveWorkspaceRoot: () =>
-        req.workspaceId ? getWorkspacePathById(req.workspaceId).catch(() => null) : null,
+      agentId: canonicalRequest.agentId ?? null,
+      resolveWorkspaceRoot: () => canonicalRequest.workspaceDir ?? null,
     })
+    if (!preparationIsCurrent()) return preparationSuperseded()
     if (!authoritativeResolution.ok) {
-      sendStream(req.cardId, { type: 'error', error: authoritativeResolution.error })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'error', error: authoritativeResolution.error })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
     const authoritativeAgentMode = authoritativeResolution.agentMode
+
+    let policyRequest: ChatRequest
+    try {
+      policyRequest = applyAuthoritativePersonaPolicy(
+        canonicalRequest,
+        authoritativeAgentMode,
+      )
+    } catch (error) {
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      sendStream(scope, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(scope, { type: 'done' })
+      return { ok: false }
+    }
+    if (!preparationIsCurrent()) return preparationSuperseded()
 
     let daemonHost: ExecutionHostRecord | null = null
     let localDaemonAvailable = false
     try {
       localDaemonAvailable = (await getExecutionRoutingState()).localDaemonAvailable
-      daemonHost = await selectChatExecutionHost(req)
+      daemonHost = await selectChatExecutionHost(policyRequest)
+      const hasHostAttachments = await hasHostValidatedAttachments(policyRequest, daemonHost)
+      daemonHost = routeHostForAttachments({
+        selectedHost: daemonHost,
+        executionMode: (policyRequest.executionPreference ?? readSettingsSync().execution).mode,
+        hasHostAttachments,
+      })
     } catch (error) {
-      sendStream(req.cardId, {
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
+    if (!preparationIsCurrent()) return preparationSuperseded()
 
     const effectiveRequest: ChatRequest = {
-      ...req,
-      // Authoritative override: whatever main resolved replaces the renderer's
-      // agentMode for EVERY downstream path (runtime switch + sendChatToDaemon).
+      ...policyRequest,
       agentMode: authoritativeAgentMode,
       runMode: requestedRunMode,
       asyncExecution: buildAsyncExecutionContext({
-        request: { ...req, runMode: requestedRunMode },
+        request: { ...policyRequest, runMode: requestedRunMode },
         daemonHost,
         localDaemonAvailable,
       }),
@@ -1034,13 +1416,15 @@ export function registerChatIPC(): void {
       memoryContext = await loadRuntimeMemoryContext(effectiveRequest)
       memoryPrompt = String(memoryContext?.prompt ?? '').trim() || undefined
     } catch (error) {
-      sendStream(req.cardId, {
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
+    if (!preparationIsCurrent()) return preparationSuperseded()
 
     let skillsPrompt: string | undefined
     let skillsSummary: string | null = null
@@ -1055,6 +1439,7 @@ export function registerChatIPC(): void {
         error instanceof Error ? error.message : String(error),
       )
     }
+    if (!preparationIsCurrent()) return preparationSuperseded()
 
     const requestWithContext: ChatRequest = {
       ...effectiveRequest,
@@ -1066,22 +1451,43 @@ export function registerChatIPC(): void {
     let requestWithFileReferences: ChatRequest = requestWithContext
     let fileReferenceExpansion: Awaited<ReturnType<typeof daemonClient.expandFileReferences>> | null = null
     try {
-      const expanded = await expandLatestUserFileReferences(requestWithContext)
-      requestWithFileReferences = expanded.request
-      fileReferenceExpansion = expanded.expansion
+      // Capability expansion can consume one-shot handles; never enter it for
+      // a turn invalidated by replacement, stop, clear, or disposal.
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      if (!daemonHost || daemonHost.type === 'remote-daemon') {
+        const expanded = await expandLatestUserFileReferences(
+          requestWithContext,
+          daemonHost?.type === 'remote-daemon',
+        )
+        requestWithFileReferences = expanded.request
+        fileReferenceExpansion = expanded.expansion
+      }
     } catch (error) {
-      sendStream(req.cardId, {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      sendStream(scope, {
         type: 'error',
         error: error instanceof Error ? error.message : String(error),
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
+    if (!preparationIsCurrent()) {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      return preparationSuperseded()
+    }
 
-    emitFileReferenceExpansion(req.cardId, fileReferenceExpansion)
+    emitFileReferenceExpansion(scope, fileReferenceExpansion)
 
     // Room membership + consume pending traffic (all execution backends)
-    requestWithFileReferences = attachRoomContext(requestWithFileReferences)
+    if (!preparationIsCurrent()) {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      return preparationSuperseded()
+    }
+    requestWithFileReferences = revalidateRuntimeContextRequest(
+      attachRoomContext(requestWithFileReferences),
+    )
+    bindRuntimeSessionPersistence(requestWithFileReferences, runtimePersistenceLease)
 
     if (daemonHost) {
       log('chat execution route', {
@@ -1095,19 +1501,21 @@ export function registerChatIPC(): void {
         hostId: daemonHost.id,
         hostType: daemonHost.type,
       })
-      return await sendChatToDaemon(requestWithFileReferences, daemonHost)
+      if (!preparationIsCurrent()) return preparationSuperseded()
+      return await sendChatToDaemon(requestWithFileReferences, daemonHost, preparationLease)
     }
 
-    emitMemoryContextLoaded(req.cardId, memoryContext)
-    emitSelectedSkillsLoaded(req.cardId, skillsContext)
-    emitSkippedSkillLocations(req.cardId, skillsContext)
+    emitMemoryContextLoaded(scope, memoryContext)
+    emitSelectedSkillsLoaded(scope, skillsContext)
+    emitSkippedSkillLocations(scope, skillsContext)
 
     if (requestedRunMode === 'background') {
-      sendStream(req.cardId, {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      sendStream(scope, {
         type: 'error',
         error: 'Detached background chat execution currently requires a daemon-backed Claude or Codex host.',
       })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1128,8 +1536,9 @@ export function registerChatIPC(): void {
     // agentMode entirely — so this switch-level guard is the non-bypassable net
     // that covers every provider in one place.
     if (agentModeUnresolved(requestWithFileReferences)) {
-      sendStream(requestWithFileReferences.cardId, { type: 'error', error: AGENT_MODE_UNRESOLVED_ERROR })
-      sendStream(requestWithFileReferences.cardId, { type: 'done' })
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      sendStream(scope, { type: 'error', error: AGENT_MODE_UNRESOLVED_ERROR })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
@@ -1137,54 +1546,94 @@ export function registerChatIPC(): void {
       requestWithFileReferences.providerTransport?.type === 'local-proxy'
       && BUILTIN_CHAT_PROVIDERS.has(requestWithFileReferences.provider)
     ) {
-      sendStream(requestWithFileReferences.cardId, {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      sendStream(scope, {
         type: 'error',
         error: `Extension provider id cannot use reserved built-in provider: ${requestWithFileReferences.provider}`,
       })
-      sendStream(requestWithFileReferences.cardId, { type: 'done' })
+      sendStream(scope, { type: 'done' })
       return { ok: false }
     }
 
-    switch (requestWithFileReferences.provider) {
-      case 'claude': chatClaude(requestWithFileReferences); break
-      case 'codex': chatCodex(requestWithFileReferences); break
-      case 'opencode': chatOpencode(requestWithFileReferences); break
-      case 'openclaw': chatOpenclaw(requestWithFileReferences); break
-      case 'hermes': chatHermes(requestWithFileReferences); break
-      case 'csagent': chatCsagent(requestWithFileReferences); break
-      default:
-        if (requestWithFileReferences.providerTransport?.type === 'local-proxy') {
-          chatLocalProxy(requestWithFileReferences)
-        } else {
-          sendStream(requestWithFileReferences.cardId, { type: 'error', error: `Unsupported provider: ${requestWithFileReferences.provider}` })
-          sendStream(requestWithFileReferences.cardId, { type: 'done' })
-        }
+    if (!preparationIsCurrent()) {
+      await cleanupOwnedImageAttachmentsForScope(scope)
+      return preparationSuperseded()
+    }
+    registerRoomContextAcknowledgement(requestWithFileReferences)
+    const reportProviderRejection = (error: unknown): void => {
+      void cleanupOwnedImageAttachmentsForScope(scope)
+      sendStream(scope, {
+        type: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      sendStream(scope, { type: 'done' })
+    }
+    try {
+      switch (requestWithFileReferences.provider) {
+        case 'claude': chatClaude(requestWithFileReferences); break
+        case 'codex':
+          void chatCodex(requestWithFileReferences, providerLaunchGuard).catch(reportProviderRejection)
+          break
+        case 'opencode': chatOpencode(requestWithFileReferences, providerLaunchGuard); break
+        case 'openclaw': chatOpenclaw(requestWithFileReferences); break
+        case 'hermes': chatHermes(requestWithFileReferences); break
+        case 'csagent':
+          void chatCsagent(requestWithFileReferences, providerLaunchGuard).catch(reportProviderRejection)
+          break
+        default:
+          if (requestWithFileReferences.providerTransport?.type === 'local-proxy') {
+            chatLocalProxy(requestWithFileReferences)
+          } else {
+            void cleanupOwnedImageAttachmentsForScope(scope)
+            sendStream(scope, { type: 'error', error: `Unsupported provider: ${requestWithFileReferences.provider}` })
+            sendStream(scope, { type: 'done' })
+          }
+      }
+    } catch (error) {
+      reportProviderRejection(error)
+      return { ok: false }
     }
 
     return { ok: true }
+      },
+    )
   })
 
-  ipcMain.handle('chat:resumeJob', async (_, req: ChatRequest) => {
-    return await resumeChatDaemonJob(req)
+  ipcMain.handle('chat:resumeJob', (_, req: ChatRequest) => {
+    const scope = validatedChatScope(req?.workspaceId, req?.cardId)
+    if (!scope) {
+      return { ok: false, resumed: false, jobId: req?.jobId ?? null }
+    }
+    return resumeChatDaemonJob({
+      ...req,
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+    })
   })
 
-  ipcMain.handle('chat:steer', async (_, payload: { cardId?: string; message?: string }) => {
-    const cardId = String(payload?.cardId ?? '').trim()
+  ipcMain.handle('chat:steer', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+    message?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
     const message = String(payload?.message ?? '').trim()
-    if (!cardId || !message) return { ok: false, error: 'missing cardId or message' }
+    if (!scope || !message) {
+      return { ok: false, error: 'invalid workspace/card identity or message' }
+    }
     try {
-      if (await steerCsagent(cardId, message)) {
-        sendStream(cardId, { type: 'steer_sent', text: message })
+      if (await steerCsagent(scope, message)) {
+        sendStream(scope, { type: 'steer_sent', text: message })
         return { ok: true }
       }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-    const q = activeQueries.get(cardId)
+    const q = activeQueries.get(chatStreamScopeKey(scope))
     if (!q) return { ok: false, error: 'no active steerable Claude stream' }
     try {
       await q.streamInput(buildClaudeTextInput(message, 'now'))
-      sendStream(cardId, { type: 'steer_sent', text: message })
+      sendStream(scope, { type: 'steer_sent', text: message })
       return { ok: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
@@ -1193,45 +1642,93 @@ export function registerChatIPC(): void {
     }
   })
 
-  ipcMain.handle('chat:stop', async (_, cardId: string) => {
-    await stopCardExecution(cardId, { emitDone: true, reason: 'Chat stopped' })
+  ipcMain.handle('chat:stop', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
+    return chatLifecycleCoordinator.runLifecycle(chatStreamScopeKey(scope), async () => {
+      return await stopCardExecution(scope, {
+        emitDone: true,
+        reason: 'Chat stopped',
+        preservePreparation: true,
+      })
+    })
   })
 
   // Permanently dispose a card's chat state when its tile is deleted. Unlike
   // clearSession (same tile, fresh conversation) this also stops live work and
   // prunes the persisted session-ids.json so neither the in-memory maps nor the
   // on-disk file grow unbounded across the install lifetime.
-  ipcMain.handle('chat:disposeCard', async (_, cardId: string) => {
-    if (!cardId || typeof cardId !== 'string') return { ok: false }
-    // Stop every provider first — tile delete used to only clear session maps,
-    // leaving Codex/Claude/daemon/csagent running against a dead cardId.
-    await stopCardExecution(cardId, { emitDone: true, reason: 'Card disposed' })
-    deleteCardSessionIds(cardId)
-    clearOpenCodeSession(cardId)
-    clearOpenclawSession(cardId)
-    clearHermesSession(cardId)
-    clearCsagentSession(cardId)
-    // Drop the tile-scoped MCP token so a deleted tile's agent can no longer auth.
-    revokeTileToken(cardId)
-    // Schedule a rewrite of session-ids.json from the (now-pruned) map.
-    persistSessionIds()
-    return { ok: true }
+  ipcMain.handle('chat:disposeCard', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
+    return chatLifecycleCoordinator.runLifecycle(chatStreamScopeKey(scope), async () => {
+      // Stop every provider first — tile delete used to only clear session maps,
+      // leaving Codex/Claude/daemon/csagent running against a dead cardId.
+      const stopResult = await stopCardExecution(scope, {
+        emitDone: true,
+        reason: 'Card disposed',
+        preservePreparation: true,
+      })
+      if (!stopResult.ok) return stopResult
+      let runtimeClearError: string | null = null
+      try {
+        await clearRuntimeSessionState(scope)
+      } catch (error) {
+        runtimeClearError = error instanceof Error ? error.message : String(error)
+      }
+      deleteCardSessionIds(scope)
+      clearOpenCodeSession(scope)
+      clearOpenclawSession(scope)
+      clearHermesSession(scope)
+      clearCsagentSession(scope)
+      // Drop the tile-scoped MCP token so a deleted tile's agent can no longer auth.
+      revokeTileToken(scope.workspaceId, scope.cardId)
+      // Schedule a rewrite of session-ids.json from the (now-pruned) map.
+      persistSessionIds()
+      return runtimeClearError
+        ? { ok: false, error: `Card disposed locally, but daemon session cleanup failed: ${runtimeClearError}` }
+        : { ok: true }
+    })
   })
 
   // Clear session for a card (start fresh conversation)
-  ipcMain.handle('chat:clearSession', async (_, cardId: string) => {
-    deleteCardSessionIds(cardId)
-    clearOpenCodeSession(cardId)
-    clearOpenclawSession(cardId)
-    clearHermesSession(cardId)
-    clearCsagentSession(cardId)
-    cancelPendingAskUserQuestionsForCard(cardId, 'Session cleared')
-    cancelPendingToolPermissionsForCard(cardId, 'Session cleared')
-    cardPermissionModes.delete(cardId)
-    // Persist the eviction so the cleared session does not reappear on restart.
-    persistSessionIds()
-    log('session cleared for card', cardId)
-    return { ok: true }
+  ipcMain.handle('chat:clearSession', async (_, payload: {
+    workspaceId?: string
+    cardId?: string
+  }) => {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) return { ok: false, error: 'invalid workspace/card identity' }
+    return chatLifecycleCoordinator.runLifecycle(chatStreamScopeKey(scope), async () => {
+      return await runConfirmedSessionClear({
+        // Clearing is a lifecycle boundary: stop every provider before
+        // evicting state so late close/events cannot recreate the record.
+        stopExecution: () => stopCardExecution(scope, {
+          emitDone: true,
+          reason: 'Session cleared',
+          preservePreparation: true,
+        }),
+        clearPersistedState: () => clearRuntimeSessionState(scope),
+        evictSessionState: () => {
+          deleteCardSessionIds(scope)
+          clearOpenCodeSession(scope)
+          clearOpenclawSession(scope)
+          clearHermesSession(scope)
+          clearCsagentSession(scope)
+          cancelPendingAskUserQuestionsForCard(scope, 'Session cleared')
+          cancelPendingToolPermissionsForCard(scope, 'Session cleared')
+          cardPermissionModes.delete(chatStreamScopeKey(scope))
+          // Persist eviction so the cleared session does not return on restart.
+          persistSessionIds()
+          log('session cleared for card', scope.workspaceId, scope.cardId)
+        },
+      })
+    })
   })
 
   // Change the Claude SDK permission mode mid-thread. This lets the user flip
@@ -1239,10 +1736,12 @@ export function registerChatIPC(): void {
   // If switching TO bypass, any pending permission prompts auto-resolve as
   // "once" (allow) so the agent stops waiting on the UI.
   ipcMain.handle('chat:setPermissionMode', async (_, payload: {
+    workspaceId: string
     cardId: string
     mode: string
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const sdkModeMap: Record<string, string> = {
@@ -1256,12 +1755,13 @@ export function registerChatIPC(): void {
       return { ok: false, error: `unknown mode: ${payload.mode}` }
     }
 
-    const previous = cardPermissionModes.get(payload.cardId) ?? 'default'
-    cardPermissionModes.set(payload.cardId, sdkMode)
+    const scopeKey = chatStreamScopeKey(scope)
+    const previous = cardPermissionModes.get(scopeKey) ?? 'default'
+    cardPermissionModes.set(scopeKey, sdkMode)
 
     // Tell the SDK too, so any internal gating (hooks, agents) uses the new
     // mode. Swallow errors — the query may have already closed.
-    const activeQuery = activeQueries.get(payload.cardId)
+    const activeQuery = activeQueries.get(scopeKey)
     if (activeQuery) {
       try {
         await activeQuery.setPermissionMode(sdkMode as any)
@@ -1273,24 +1773,24 @@ export function registerChatIPC(): void {
     // Auto-resolve pending prompts when flipping to bypass so the agent
     // unblocks immediately.
     if (sdkMode === 'bypassPermissions') {
-      const prefix = `${payload.cardId}::`
       for (const [key, pending] of pendingToolPermissions.entries()) {
-        if (key.startsWith(prefix)) {
-          pendingToolPermissions.delete(key)
-          try { pending.resolve('once') } catch { /* noop */ }
-          // Tell the UI the pending chip is gone.
-          const toolUseID = key.slice(prefix.length) || null
-          sendStream(payload.cardId, {
-            type: 'tool_permission_resolved',
-            toolId: toolUseID,
-            decision: 'once',
-            reason: 'mode_change',
-          })
-        }
+        let parsed: unknown
+        try { parsed = JSON.parse(key) } catch { continue }
+        if (!Array.isArray(parsed) || parsed[0] !== scopeKey) continue
+        pendingToolPermissions.delete(key)
+        try { pending.resolve('once') } catch { /* noop */ }
+        // Tell the UI the pending chip is gone.
+        const toolUseID = typeof parsed[1] === 'string' && parsed[1] ? parsed[1] : null
+        sendStream(scope, {
+          type: 'tool_permission_resolved',
+          toolId: toolUseID,
+          decision: 'once',
+          reason: 'mode_change',
+        })
       }
     }
 
-    sendStream(payload.cardId, {
+    sendStream(scope, {
       type: 'permission_mode_changed',
       mode: sdkMode,
       previous,
@@ -1302,20 +1802,23 @@ export function registerChatIPC(): void {
   // Tool permission — receive the user's decision from the renderer and resolve
   // the pending canUseTool promise so the agent can continue (or halt).
   ipcMain.handle('chat:answerToolPermission', async (_, payload: {
+    workspaceId: string
     cardId: string
     toolId: string | null
     decision: ToolPermissionDecision
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const validDecisions: ToolPermissionDecision[] = ['deny', 'never', 'once', 'session', 'today', 'forever']
     if (!validDecisions.includes(payload.decision)) {
       return { ok: false, error: 'invalid decision' }
     }
-    const delivered = resolvePendingToolPermission(payload.cardId, payload.toolId ?? null, payload.decision)
+    const delivered = resolvePendingToolPermission(scope, payload.toolId ?? null, payload.decision)
     if (!delivered) {
-      const activeDaemon = activeDaemonStreams.get(payload.cardId)
+      const activeDaemon = activeDaemonJobs.latest(chatStreamScopeKey(scope), 'foreground')
+        ?? activeDaemonJobs.latest(chatStreamScopeKey(scope))
       if (activeDaemon) {
         try {
           return await hostRequest(activeDaemon.host, '/chat/job/permission/answer', {
@@ -1330,7 +1833,7 @@ export function registerChatIPC(): void {
           return { ok: false, error: error instanceof Error ? error.message : String(error) }
         }
       }
-      log('chat:answerToolPermission: no pending request for', payload.cardId, payload.toolId)
+      log('chat:answerToolPermission: no pending request for', scope.workspaceId, scope.cardId, payload.toolId)
       return { ok: false, error: 'no pending request' }
     }
     return { ok: true }
@@ -1339,26 +1842,28 @@ export function registerChatIPC(): void {
   // AskUserQuestion — receive the user's form submission from the renderer and
   // resolve the pending canUseTool promise so the agent can continue.
   ipcMain.handle('chat:answerUserQuestion', async (_, payload: {
+    workspaceId: string
     cardId: string
     toolId: string | null
     answers: Record<string, string>
     annotations?: Record<string, { notes?: string; preview?: string }>
   }) => {
-    if (!payload || typeof payload.cardId !== 'string') {
+    const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+    if (!scope) {
       return { ok: false, error: 'invalid payload' }
     }
     const answers = (payload.answers && typeof payload.answers === 'object') ? payload.answers : {}
     const annotations = (payload.annotations && typeof payload.annotations === 'object') ? payload.annotations : undefined
-    const delivered = resolvePendingAskUserQuestion(payload.cardId, payload.toolId ?? null, { answers, annotations })
+    const delivered = resolvePendingAskUserQuestion(scope, payload.toolId ?? null, { answers, annotations })
     if (!delivered) {
-      log('chat:answerUserQuestion: no pending question for', payload.cardId, payload.toolId)
+      log('chat:answerUserQuestion: no pending question for', scope.workspaceId, scope.cardId, payload.toolId)
       return { ok: false, error: 'no pending question' }
     }
     // Emit a tool_summary so the form is replaced by a permanent summary of the
     // user's selections (persists across re-renders and session rehydration).
     const summaryLines = Object.entries(answers).map(([q, a]) => `• ${q} — ${a}`)
     if (summaryLines.length > 0) {
-      sendStream(payload.cardId, {
+      sendStream(scope, {
         type: 'tool_summary',
         toolId: payload.toolId,
         toolName: 'AskUserQuestion',
@@ -1369,7 +1874,11 @@ export function registerChatIPC(): void {
   })
 
   // Open a file picker dialog for attachments
-  ipcMain.handle('chat:selectFiles', async () => {
+  ipcMain.handle('chat:selectFiles', async (_, workspaceId: string, cardId: string) => {
+    const scope = validatedChatScope(workspaceId, cardId)
+    if (!scope || !(await getWorkspacePathById(scope.workspaceId))) {
+      throw new Error('A registered workspace and card are required')
+    }
     const win = BrowserWindow.getFocusedWindow()
     if (!win) return []
     const result = await dialog.showOpenDialog(win, {
@@ -1377,40 +1886,134 @@ export function registerChatIPC(): void {
       title: 'Attach Files',
     })
     if (result.canceled || result.filePaths.length === 0) return []
-    return result.filePaths
+    await ensureDaemonRunning()
+    const issued = await daemonClient.issueAttachmentCapabilities({
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+      paths: result.filePaths,
+    })
+    return issued.attachments
+  })
+
+  // Paths on this channel are produced only inside preload via
+  // webUtils.getPathForFile(File). Synthetic File objects and renderer-authored
+  // URI/text paths never reach this IPC.
+  ipcMain.handle('chat:authorizeDroppedFiles', async (
+    _,
+    workspaceId: string,
+    cardId: string,
+    paths: string[],
+  ) => {
+    const scope = validatedChatScope(workspaceId, cardId)
+    if (!scope || !(await getWorkspacePathById(scope.workspaceId))) {
+      throw new Error('A registered workspace and card are required')
+    }
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 12) return []
+    await ensureDaemonRunning()
+    const issued = await daemonClient.issueAttachmentCapabilities({
+      workspaceId: scope.workspaceId,
+      cardId: scope.cardId,
+      paths,
+    })
+    return issued.attachments
   })
 
   ipcMain.handle('chat:openclawAgents', async () => listOpenclawAgents())
 
-  // Write a renderer-supplied payload (e.g. a sketch image produced by a chat-surface extension)
-  // to a temp file and return its absolute path so the standard path-based attachment pipeline
-  // can pick it up.
+  // Write a bounded renderer payload and return only a host-issued capability.
   ipcMain.handle('chat:writeTempAttachment', async (_, payload: {
+    workspaceId: string
+    cardId: string
     data: string            // base64 (no data-URL prefix)
     mime?: string           // e.g. 'image/png'
     ext?: string            // e.g. 'png'
     filenameHint?: string   // optional, no path components
   }) => {
+    let dest: string | null = null
+    let destHandle: Awaited<ReturnType<typeof fs.open>> | null = null
+    let destIdentity: TempAttachmentIdentity | null = null
     try {
+      const scope = validatedChatScope(payload?.workspaceId, payload?.cardId)
+      if (!scope || !(await getWorkspacePathById(scope.workspaceId))) {
+        return { ok: false, error: 'A registered workspace and card are required' }
+      }
       if (!payload || typeof payload.data !== 'string' || !payload.data) {
         return { ok: false, error: 'missing data' }
       }
-      const ext = (payload.ext || (payload.mime?.split('/')[1]) || 'png').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'png'
+      const maxDecodedBytes = 5 * 1024 * 1024
+      const maxEncodedBytes = Math.ceil(maxDecodedBytes / 3) * 4
+      if (payload.data.length > maxEncodedBytes) {
+        return { ok: false, error: `attachment exceeds ${maxDecodedBytes} bytes` }
+      }
+      if (
+        payload.data.length % 4 !== 0
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(payload.data)
+      ) {
+        return { ok: false, error: 'attachment data must be canonical base64' }
+      }
+      const buf = Buffer.from(payload.data, 'base64')
+      if (buf.byteLength > maxDecodedBytes || buf.toString('base64') !== payload.data) {
+        return { ok: false, error: 'attachment data is invalid or too large' }
+      }
+      const ext = (
+        (payload.ext || (payload.mime?.split('/')[1]) || 'png')
+          .replace(/[^a-z0-9]/gi, '')
+          .toLowerCase()
+          .slice(0, 12)
+        || 'png'
+      )
       const safeHint = (payload.filenameHint || 'sketch')
-        .replace(/[\\/:*?"<>|]/g, '_')
-        .replace(/\s+/g, '-')
+        .normalize('NFKD')
+        .replace(/[^a-z0-9._-]+/gi, '-')
+        .replace(/^[._-]+|[._-]+$/g, '')
         .slice(0, 40) || 'sketch'
       // ~/.codesurf/chat-attachments — see chat-vision comment above for
       // the rationale: stable, user-owned path inside the daemon's
       // permission scope so agent jobs can Read attachments back.
       const dir = join(CODESURF_HOME, 'chat-attachments')
-      await fs.mkdir(dir, { recursive: true })
-      const filename = `${safeHint}-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}.${ext}`
-      const dest = join(dir, filename)
-      const buf = Buffer.from(payload.data, 'base64')
-      await fs.writeFile(dest, buf)
-      return { ok: true, path: dest }
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 })
+      const dirStat = await fs.lstat(dir)
+      if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+        throw new Error('Attachment directory must be a canonical directory')
+      }
+      await fs.chmod(dir, 0o700)
+      const filename = `codesurf-owned-v1-${Date.now()}-${randomUUID()}-${safeHint}.${ext}`
+      dest = join(dir, filename)
+      destHandle = await fs.open(dest, 'wx', 0o600)
+      try {
+        await destHandle.writeFile(buf)
+        await destHandle.sync()
+      } finally {
+        const stat = await destHandle.stat().catch(() => null)
+        if (stat?.isFile()) {
+          destIdentity = {
+            device: String(stat.dev),
+            inode: String(stat.ino),
+            byteCount: stat.size,
+            mtimeMs: stat.mtimeMs,
+            ctimeMs: stat.ctimeMs,
+          }
+        }
+        await destHandle.close().catch(() => {})
+        destHandle = null
+      }
+      await ensureDaemonRunning()
+      const issued = await daemonClient.issueAttachmentCapabilities({
+        workspaceId: scope.workspaceId,
+        cardId: scope.cardId,
+        paths: [dest],
+        ownedTemporary: true,
+      })
+      const attachment = issued.attachments[0]
+      if (!attachment) throw new Error('Attachment capability issuance returned no result')
+      dest = null
+      destIdentity = null
+      return { ok: true, attachment }
     } catch (err) {
+      await destHandle?.close().catch(() => {})
+      if (dest && destIdentity) {
+        await unlinkTempAttachmentIfIdentityMatches(dest, destIdentity)
+      }
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
     }
   })

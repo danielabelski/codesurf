@@ -6,8 +6,8 @@
 
 ## The smallest plugin
 
-Create `~/.codesurf/extensions/my-plugin/extension.json` (or a workspace
-`.contex/extensions/...`):
+Create `~/.codesurf/extensions/my-plugin/extension.json` (or
+`<workspace>/.codesurf/extensions/my-plugin/extension.json`):
 
 ```jsonc
 {
@@ -15,7 +15,7 @@ Create `~/.codesurf/extensions/my-plugin/extension.json` (or a workspace
   "name": "My Plugin",
   "version": "1.0.0",
   "manifestVersion": 2,
-  "tier": "safe",                 // safe = sandboxed iframe; power = node main.js
+  "tier": "safe",                 // safe = sandboxed iframe; power = trusted Node main.js
   "contributes": {
     "commands": [
       { "id": "my.hi", "title": "My: Say hi", "slash": "hi", "run": { "method": "hi" } }
@@ -52,9 +52,9 @@ tile when clicked.
 
 A `safe` (iframe) plugin's HTML automatically gets the host theme: the bridge injects
 the `--ct-*` design tokens + a base stylesheet, so plain `<button>`/`<input>` already
-look native. For host-rendered (`component`) UIs, import `@codesurf/ui`
-(`Button`, `Input`, `Switch`, `Select`, `Field`, `SettingsControl`). Override styles
-only when you want something bespoke.
+look native. The host-rendered control kit is currently internal to the CodeSurf
+renderer and is not a published `@codesurf/ui` package. External plugins should use
+the injected tokens and standard HTML controls.
 
 ## settingsSections — declarative, themed controls
 
@@ -108,7 +108,7 @@ Appears as "Layout: My Review" in `⌘⇧P`; selecting it builds the arrangement
 accepts any built-in (`chat`, `terminal`, `code`, `files`, `note`, `browser`, …) or
 `ext:<your-type>`.
 
-## Typed authoring (optional)
+## Typed authoring inside this repository
 
 ```ts
 import { definePlugin } from '@codesurf/plugin'
@@ -118,9 +118,26 @@ export default definePlugin({
 })
 ```
 
-`@codesurf/plugin` also exports `CodesurfBridge` to type `window.codesurf`.
+The repository maps `@codesurf/plugin` to `packages/codesurf-plugin` during local
+builds; it also exports `CodesurfBridge` to type `window.codesurf`. This package is
+not currently documented as a public registry dependency. External plugins should
+use `extension.json` and the runtime bridge until a published package is announced.
 
 ## Power tier (`tier: "power"` + `main.js`)
+
+POWER plugins are native-code-equivalent dependencies. Non-bundled POWER
+plugins run in an Electron utility-process child by default, which isolates a
+crash from the main process but is **not a security sandbox**. Plugin code
+retains ambient Node.js access, including filesystem, process spawning,
+networking, environment variables, and arbitrary package imports.
+
+Manifest capability requests and the grants recorded at enable time govern
+access to brokered **CodeSurf APIs** such as canvas, relay, and host filesystem
+methods. They do not confine Node built-ins such as `node:fs` or
+`node:child_process`. Review POWER code as carefully as a native application
+before enabling it. Bundled POWER plugins currently use the legacy in-main
+path, and `CODESURF_POWER_BROKER=0` is an explicit compatibility escape hatch
+that also selects that legacy path.
 
 ```js
 module.exports = {

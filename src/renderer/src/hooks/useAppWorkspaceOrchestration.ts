@@ -1,4 +1,4 @@
-import { useCallback, useEffect, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, type RefObject } from 'react'
 import type { CanvasState, GroupState, LayoutTemplate, LockedConnection, TileState, Workspace } from '../../../shared/types'
 import {
   createLeaf,
@@ -11,6 +11,12 @@ import { getCanonicalWorkspaceId } from '../lib/workspaceHelpers'
 import { applyEmptyCanvasWorkspaceState, applySavedCanvasState } from '../lib/canvasWorkspaceLoad'
 import { dedupeLockedConnections } from '../lib/canvasStateHelpers'
 import { generateLayoutFromTemplate } from '../lib/layoutTemplateLaunch'
+import { awaitCanvasBeforeWorkspaceSwitch } from '../lib/orderedCanvasPersistence'
+import {
+  commitWorkspaceCanvasOwnership,
+  LatestWorkspaceSwitchCoordinator,
+  transitionToWorkspacePicker,
+} from '../lib/workspaceSwitchCoordinator'
 
 export type UseAppWorkspaceOrchestrationParams = {
   workspace: Workspace | null
@@ -20,6 +26,7 @@ export type UseAppWorkspaceOrchestrationParams = {
   groupsRef: RefObject<GroupState[]>
   panelLayoutRef: RefObject<PanelNode | null>
   activePanelIdRef: RefObject<string | null>
+  expandedTileIdRef: RefObject<string | null>
   viewportRef: RefObject<{ tx: number, ty: number, zoom: number }>
   nextZIndexRef: RefObject<number>
   lockedConnectionsRef: RefObject<LockedConnection[]>
@@ -50,12 +57,14 @@ export type UseAppWorkspaceOrchestrationParams = {
    * Call before setWorkspace() so the outgoing workspace's last edits are not
    * dropped. Provided by useCanvasEngine.
    */
-  flushPendingSave: (workspaceId: string) => void
+  flushPendingSave: (workspaceId: string) => Promise<void>
   /**
    * Record that the canvas state for the given workspace id is now loaded.
    * Provided by useCanvasEngine — unblocks the auto-save effect after switch.
    */
   markCanvasLoaded: (id: string) => void
+  transferCanvasWorkspaceOwnership: (id: string | null) => void
+  releaseWorkspacePersistence: (id: string) => boolean
 }
 
 export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestrationParams) {
@@ -67,7 +76,9 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     groupsRef,
     panelLayoutRef,
     activePanelIdRef,
+    expandedTileIdRef,
     viewportRef,
+    nextZIndexRef,
     lockedConnectionsRef,
     savedLayoutRef,
     expandedCanvasGroupIdRef,
@@ -92,24 +103,61 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     clearHistory,
     flushPendingSave,
     markCanvasLoaded,
+    transferCanvasWorkspaceOwnership,
+    releaseWorkspacePersistence,
   } = params
+  const workspaceSwitchCoordinatorRef = useRef<LatestWorkspaceSwitchCoordinator | null>(null)
+  if (workspaceSwitchCoordinatorRef.current === null) {
+    workspaceSwitchCoordinatorRef.current = new LatestWorkspaceSwitchCoordinator()
+  }
+  const workspaceSwitchCoordinator = workspaceSwitchCoordinatorRef.current
 
-  const buildCanvasLoadAppliers = useCallback((includeLockedConnections = false) => ({
-    setTiles,
-    setGroups,
+  const buildCanvasLoadAppliers = useCallback(() => ({
+    setTiles: (nextTiles: TileState[]) => {
+      tilesRef.current = nextTiles
+      setTiles(nextTiles)
+    },
+    setGroups: (nextGroups: GroupState[]) => {
+      groupsRef.current = nextGroups
+      setGroups(nextGroups)
+    },
     restoreViewport,
-    setNextZIndex,
-    setPanelLayout,
-    setActivePanelId,
-    setExpandedTileId,
-    setExpandedCanvasGroupId,
+    setNextZIndex: (next: number) => {
+      nextZIndexRef.current = next
+      setNextZIndex(next)
+    },
+    setPanelLayout: (next: PanelNode | null) => {
+      panelLayoutRef.current = next
+      setPanelLayout(next)
+    },
+    setActivePanelId: (next: string | null) => {
+      activePanelIdRef.current = next
+      setActivePanelId(next)
+    },
+    setExpandedTileId: (next: string | null) => {
+      expandedTileIdRef.current = next
+      setExpandedTileId(next)
+    },
+    setExpandedCanvasGroupId: (next: string | null) => {
+      expandedCanvasGroupIdRef.current = next
+      setExpandedCanvasGroupId(next)
+    },
+    setLockedConnections: (next: LockedConnection[]) => {
+      lockedConnectionsRef.current = next
+      setLockedConnections(next)
+    },
     savedLayoutRef,
     expandedCanvasGroupIdRef,
     expandedCanvasPriorViewportRef,
-    ...(includeLockedConnections ? { setLockedConnections } : {}),
   }), [
+    activePanelIdRef,
     expandedCanvasGroupIdRef,
     expandedCanvasPriorViewportRef,
+    expandedTileIdRef,
+    groupsRef,
+    lockedConnectionsRef,
+    nextZIndexRef,
+    panelLayoutRef,
     restoreViewport,
     savedLayoutRef,
     setActivePanelId,
@@ -120,27 +168,74 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     setNextZIndex,
     setPanelLayout,
     setTiles,
+    tilesRef,
   ])
 
-  const showEmptyLayoutPage = useCallback((options?: { preserveOpenTabs?: boolean }) => {
+  const showEmptyLayoutPage = useCallback(async (
+    options?: { preserveOpenTabs?: boolean },
+  ): Promise<void> => {
     const preserveOpenTabs = options?.preserveOpenTabs ?? false
-    const emptyPanel = createLeaf([])
-    clearHistory()
-    setShowWorkspacePickerTab(true)
-    setWorkspacePickerReturnWorkspaceId(preserveOpenTabs ? currentWorkspaceIdRef.current : null)
-    setWorkspace(null)
-    if (!preserveOpenTabs) setOpenWorkspaceIds([])
-    setTiles([])
-    setGroups([])
-    setLockedConnections([])
-    resetViewportState()
-    savedLayoutRef.current = emptyPanel
-    setPanelLayout(emptyPanel)
-    setActivePanelId(emptyPanel.id)
-    setExpandedTileId(null)
+    const outgoingWorkspaceId = currentWorkspaceIdRef.current
+    await transitionToWorkspacePicker({
+      coordinator: workspaceSwitchCoordinator,
+      outgoingWorkspaceId,
+      flushOutgoing: flushPendingSave,
+      onFlushError: (workspaceId, error) => {
+        console.error(
+          `[canvas] Failed to persist workspace ${workspaceId} before opening the picker; continuing:`,
+          error,
+        )
+      },
+      commitPicker: () => {
+        const emptyPanel = createLeaf([])
+        commitWorkspaceCanvasOwnership(
+          null,
+          currentWorkspaceIdRef,
+          transferCanvasWorkspaceOwnership,
+          () => {
+            clearHistory()
+            setShowWorkspacePickerTab(true)
+            setWorkspacePickerReturnWorkspaceId(
+              preserveOpenTabs ? outgoingWorkspaceId : null,
+            )
+            setWorkspace(null)
+            if (!preserveOpenTabs) setOpenWorkspaceIds([])
+            tilesRef.current = []
+            groupsRef.current = []
+            lockedConnectionsRef.current = []
+            expandedCanvasGroupIdRef.current = null
+            expandedCanvasPriorViewportRef.current = null
+            setTiles([])
+            setGroups([])
+            setLockedConnections([])
+            resetViewportState()
+            savedLayoutRef.current = emptyPanel
+            panelLayoutRef.current = emptyPanel
+            activePanelIdRef.current = emptyPanel.id
+            expandedTileIdRef.current = null
+            setPanelLayout(emptyPanel)
+            setActivePanelId(emptyPanel.id)
+            setExpandedTileId(null)
+            setExpandedCanvasGroupId(null)
+          },
+        )
+        if (outgoingWorkspaceId) {
+          releaseWorkspacePersistence(outgoingWorkspaceId)
+        }
+      },
+    })
   }, [
+    activePanelIdRef,
     clearHistory,
     currentWorkspaceIdRef,
+    expandedTileIdRef,
+    expandedCanvasGroupIdRef,
+    expandedCanvasPriorViewportRef,
+    flushPendingSave,
+    groupsRef,
+    lockedConnectionsRef,
+    panelLayoutRef,
+    releaseWorkspacePersistence,
     resetViewportState,
     savedLayoutRef,
     setActivePanelId,
@@ -153,16 +248,21 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     setTiles,
     setWorkspace,
     setWorkspacePickerReturnWorkspaceId,
+    tilesRef,
+    transferCanvasWorkspaceOwnership,
+    workspaceSwitchCoordinator,
   ])
 
   const handleSwitchWorkspace = useCallback(async (id: string) => {
+    const switchToken = workspaceSwitchCoordinator.begin()
     let workspaceList = workspaces
+    let refreshedWorkspaceList: Workspace[] | null = null
     let targetWorkspaceId = getCanonicalWorkspaceId(workspaceList, id) ?? id
     let ws = workspaceList.find(candidate => candidate.id === targetWorkspaceId) ?? null
     if (!ws) {
       const refreshed = await window.electron.workspace.list().catch(() => [])
       if (refreshed.length > 0) {
-        setWorkspaces(refreshed)
+        refreshedWorkspaceList = refreshed
         workspaceList = refreshed
         targetWorkspaceId = getCanonicalWorkspaceId(refreshed, targetWorkspaceId) ?? targetWorkspaceId
         ws = refreshed.find(candidate => candidate.id === targetWorkspaceId) ?? null
@@ -175,31 +275,62 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     // ≤500ms of edits from being dropped when the timer is cleared by the
     // incoming workspace's first schedulePersistWrite call.
     const outgoingId = currentWorkspaceIdRef.current
-    if (outgoingId) flushPendingSave(outgoingId)
-
-    await window.electron.workspace.setActive(targetWorkspaceId)
-    setWorkspace(ws)
-    setShowWorkspacePickerTab(false)
-    setWorkspacePickerReturnWorkspaceId(null)
-    if (!ws) return
-
-    // Between setWorkspace(B) above and markCanvasLoaded(B) below, the
-    // canvasLoadedForWorkspaceIdRef inside useCanvasEngine does NOT equal
-    // workspace.id (still A or null), so the auto-save effect is gated off —
-    // preventing A's tiles from being written into B's canvas.json.
-    const saved = await window.electron.canvas.load(targetWorkspaceId)
-    const savedTiles = saved?.tiles ?? []
-    void window.electron?.collab?.pruneOrphanedTileDirs?.(ws.path, savedTiles.map(tile => tile.id))
-    if (saved) {
-      clearHistory()
-      applySavedCanvasState(saved, buildCanvasLoadAppliers())
-      markCanvasLoaded(targetWorkspaceId)
-      return
+    try {
+      await awaitCanvasBeforeWorkspaceSwitch(outgoingId, flushPendingSave)
+    } catch (error) {
+      // flushPendingSave already made its single authoritative retry. Surface
+      // the second failure, then fail open so navigation cannot deadlock.
+      console.error(
+        `[canvas] Failed to persist workspace ${outgoingId ?? '<unknown>'} before switch; continuing:`,
+        error,
+      )
     }
 
-    clearHistory()
-    applyEmptyCanvasWorkspaceState(buildCanvasLoadAppliers(), resetViewportState)
-    markCanvasLoaded(targetWorkspaceId)
+    const saved = ws
+      ? await window.electron.canvas.load(targetWorkspaceId)
+      : null
+
+    await workspaceSwitchCoordinator.commitLatest(switchToken, async isCurrent => {
+      await window.electron.workspace.setActive(targetWorkspaceId)
+      if (!isCurrent()) return
+
+      const ownedWorkspaceId = ws ? targetWorkspaceId : null
+      commitWorkspaceCanvasOwnership(
+        ownedWorkspaceId,
+        currentWorkspaceIdRef,
+        transferCanvasWorkspaceOwnership,
+        () => {
+          if (refreshedWorkspaceList) setWorkspaces(refreshedWorkspaceList)
+          setWorkspace(ws)
+          setShowWorkspacePickerTab(false)
+          setWorkspacePickerReturnWorkspaceId(null)
+          if (!ws) return
+
+          // Canvas refs and React state are applied synchronously inside the
+          // same serialized ownership commit. The next lifecycle challenge
+          // therefore cannot observe B ownership with A refs.
+          if (saved) {
+            clearHistory()
+            applySavedCanvasState(saved, buildCanvasLoadAppliers())
+          } else {
+            clearHistory()
+            applyEmptyCanvasWorkspaceState(buildCanvasLoadAppliers(), resetViewportState)
+          }
+          markCanvasLoaded(targetWorkspaceId)
+        },
+      )
+      if (!ws) return
+
+      if (outgoingId && outgoingId !== targetWorkspaceId) {
+        releaseWorkspacePersistence(outgoingId)
+      }
+
+      const savedTiles = saved?.tiles ?? []
+      void window.electron?.collab?.pruneOrphanedTileDirs?.(
+        ws.path,
+        savedTiles.map(tile => tile.id),
+      )
+    })
   }, [
     buildCanvasLoadAppliers,
     clearHistory,
@@ -207,10 +338,13 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     flushPendingSave,
     markCanvasLoaded,
     resetViewportState,
+    releaseWorkspacePersistence,
     setShowWorkspacePickerTab,
     setWorkspace,
     setWorkspacePickerReturnWorkspaceId,
     setWorkspaces,
+    transferCanvasWorkspaceOwnership,
+    workspaceSwitchCoordinator,
     workspaces,
   ])
 
@@ -218,7 +352,18 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     const wasActive = workspace?.id === id
     const nextOpenIds = openWorkspaceIds.filter(wsId => wsId !== id)
 
+    if (wasActive) {
+      try {
+        await flushPendingSave(id)
+      } catch (error) {
+        console.error(
+          `[canvas] Failed to persist workspace ${id} before deletion; continuing:`,
+          error,
+        )
+      }
+    }
     await window.electron.workspace.delete(id)
+    releaseWorkspacePersistence(id)
     const updated = await window.electron.workspace.list()
     setWorkspaces(updated)
     setOpenWorkspaceIds(nextOpenIds)
@@ -231,26 +376,50 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
       return
     }
 
-    showEmptyLayoutPage()
-  }, [workspace?.id, openWorkspaceIds, handleSwitchWorkspace, showEmptyLayoutPage, setOpenWorkspaceIds, setWorkspaces])
+    await showEmptyLayoutPage()
+  }, [
+    flushPendingSave,
+    handleSwitchWorkspace,
+    openWorkspaceIds,
+    releaseWorkspacePersistence,
+    setOpenWorkspaceIds,
+    setWorkspaces,
+    showEmptyLayoutPage,
+    workspace?.id,
+  ])
 
   const handleCloseWorkspaceTab = useCallback(async (id: string) => {
     const tabIndex = openWorkspaceIds.indexOf(id)
     if (tabIndex === -1) return
 
     const nextOpenIds = openWorkspaceIds.filter(wsId => wsId !== id)
-    setOpenWorkspaceIds(nextOpenIds)
 
-    if (workspace?.id !== id) return
-
-    const nextId = nextOpenIds[tabIndex] ?? nextOpenIds[tabIndex - 1] ?? null
-    if (nextId) {
-      await handleSwitchWorkspace(nextId)
+    if (workspace?.id !== id) {
+      setOpenWorkspaceIds(nextOpenIds)
+      releaseWorkspacePersistence(id)
       return
     }
 
-    showEmptyLayoutPage()
-  }, [openWorkspaceIds, workspace?.id, handleSwitchWorkspace, showEmptyLayoutPage, setOpenWorkspaceIds])
+    const nextId = nextOpenIds[tabIndex] ?? nextOpenIds[tabIndex - 1] ?? null
+    if (nextId) {
+      setOpenWorkspaceIds(nextOpenIds)
+      await handleSwitchWorkspace(nextId)
+      releaseWorkspacePersistence(id)
+      return
+    }
+
+    // The final-tab path uses the same serialized, flushing transition as the
+    // plus-tab picker. Do not clear A's refs until its debounce lane is durable.
+    await showEmptyLayoutPage()
+    releaseWorkspacePersistence(id)
+  }, [
+    handleSwitchWorkspace,
+    openWorkspaceIds,
+    releaseWorkspacePersistence,
+    setOpenWorkspaceIds,
+    showEmptyLayoutPage,
+    workspace?.id,
+  ])
 
   const handleNewWorkspace = useCallback(async (name: string) => {
     if (!name.trim()) return
@@ -311,17 +480,17 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
 
       await window.electron.canvas.save(ws.id, nextState)
       await window.electron.workspace.setActive(ws.id)
-      setWorkspace(ws)
-      setTiles(generatedTiles)
-      setGroups([])
-      setLockedConnections(generatedConnections)
-      setViewport({ tx: 0, ty: 0, zoom: 1 })
-      setNextZIndex(zIdx)
-      savedLayoutRef.current = generatedPanelLayout
-      setPanelLayout(generatedPanelLayout)
-      setActivePanelId(generatedActivePanelId)
-      setExpandedTileId(null)
-      setOpenWorkspaceIds(prev => prev.includes(ws.id) ? prev : [...prev, ws.id])
+      commitWorkspaceCanvasOwnership(
+        ws.id,
+        currentWorkspaceIdRef,
+        transferCanvasWorkspaceOwnership,
+        () => {
+          setWorkspace(ws)
+          applySavedCanvasState(nextState, buildCanvasLoadAppliers())
+          markCanvasLoaded(ws.id)
+          setOpenWorkspaceIds(prev => prev.includes(ws.id) ? prev : [...prev, ws.id])
+        },
+      )
       return
     }
 
@@ -373,6 +542,8 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
   }, [
     workspace,
     activePanelIdRef,
+    buildCanvasLoadAppliers,
+    currentWorkspaceIdRef,
     groupsRef,
     lockedConnectionsRef,
     panelLayoutRef,
@@ -390,6 +561,8 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     setWorkspaces,
     tilesRef,
     viewportRef,
+    markCanvasLoaded,
+    transferCanvasWorkspaceOwnership,
   ])
 
   return {
@@ -402,7 +575,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     handleLaunchTemplate,
     applySavedCanvasState: useCallback((saved: CanvasState) => {
       clearHistory()
-      applySavedCanvasState(saved, buildCanvasLoadAppliers(true))
+      applySavedCanvasState(saved, buildCanvasLoadAppliers())
     }, [buildCanvasLoadAppliers, clearHistory]),
   }
 }

@@ -8,6 +8,7 @@ import { LIVE_TOOL_COLLAPSE_GRACE_MS } from '../components/chat/chatTileLayout'
 
 export function useChatTileLifecycleEffects(options: {
   tileId: string
+  workspaceId: string
   sessionId: string | null
   linkedSessionEntryId: string | null
   provider: string
@@ -39,6 +40,7 @@ export function useChatTileLifecycleEffects(options: {
 }) {
   const {
     tileId,
+    workspaceId,
     sessionId,
     linkedSessionEntryId,
     provider,
@@ -174,8 +176,12 @@ export function useChatTileLifecycleEffects(options: {
     if (provider !== 'claude') return
     if (lastPushedModeRef.current === mode) return
     lastPushedModeRef.current = mode
-    void window.electron?.chat?.setPermissionMode?.({ cardId: tileId, mode })
-  }, [mode, isStreaming, provider, tileId, lastPushedModeRef])
+    void window.electron?.chat?.setPermissionMode?.({
+      workspaceId,
+      cardId: tileId,
+      mode,
+    })
+  }, [mode, isStreaming, provider, workspaceId, tileId, lastPushedModeRef])
 
   useEffect(() => {
     const sourceMessages = allMessages
@@ -215,6 +221,7 @@ export function useChatTileLifecycleEffects(options: {
     resumedJobKeyRef.current = resumeKey
 
     void window.electron.chat?.resumeJob?.({
+      workspaceId,
       cardId: tileId,
       provider,
       model,
@@ -225,12 +232,15 @@ export function useChatTileLifecycleEffects(options: {
       jobId,
       jobSequence,
     })
-  }, [tileId, provider, model, workspaceDir, executionTarget, cloudHostId, settingsExecution, jobId, jobSequence, stateLoadedRef, resumedJobKeyRef])
+  }, [workspaceId, tileId, provider, model, workspaceDir, executionTarget, cloudHostId, settingsExecution, jobId, jobSequence, stateLoadedRef, resumedJobKeyRef])
 
   useEffect(() => {
     if (!window.electron?.bus) return
     const seenPeerIds = new Set<string>()
-    const unsubscribe = window.electron.bus.subscribe(`tile:${tileId}`, `chat:${tileId}:mcp`, (evt: any) => {
+    const unsubscribe = window.electron.bus.subscribe(
+      `tile:${workspaceId}:${tileId}`,
+      `chat:${workspaceId}:${tileId}:mcp`,
+      (evt: any) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
       const command = typeof payload.command === 'string' ? payload.command : ''
@@ -260,7 +270,8 @@ export function useChatTileLifecycleEffects(options: {
         isStreaming: false,
       }
       setMessagesSafe(prev => (prev.some(m => m.id === peerMsgId) ? prev : [...prev, incomingMsg]))
-    })
+      },
+    )
     return () => unsubscribe?.()
-  }, [tileId, setMessagesSafe])
+  }, [workspaceId, tileId, setMessagesSafe])
 }

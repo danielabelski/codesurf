@@ -158,6 +158,8 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
   const latestStateRef = useRef<ChatTilePersistedState | null>(null)
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const stateLoadedRef = useRef(false)
+  const workspaceTileKey = JSON.stringify([workspaceId, tileId])
+  const activeScopeKeyRef = useRef(workspaceTileKey)
 
   const persistLatestState = useCallback((stateOverride?: ChatTilePersistedState | null) => {
     if (persistTimerRef.current) {
@@ -165,7 +167,12 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       persistTimerRef.current = null
     }
     const nextState = stateOverride ?? latestStateRef.current
-    if (!workspaceId || !stateLoadedRef.current || !nextState || isChatTileRuntimeStateDisposed(tileId)) return
+    if (
+      !workspaceId
+      || !stateLoadedRef.current
+      || !nextState
+      || isChatTileRuntimeStateDisposed(workspaceId, tileId)
+    ) return
     const persistedState = nextState.linkedSessionEntryId
       ? { ...nextState, messages: [] }
       : nextState
@@ -201,14 +208,18 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       isStreaming,
       activeView,
     }
-    if (stateLoadedRef.current) {
-      if (isChatTileRuntimeStateDisposed(tileId)) return
-      setChatTileRuntimeState(tileId, latestStateRef.current)
+    if (
+      stateLoadedRef.current
+      && activeScopeKeyRef.current === workspaceTileKey
+    ) {
+      if (isChatTileRuntimeStateDisposed(workspaceId, tileId)) return
+      setChatTileRuntimeState(workspaceId, tileId, latestStateRef.current)
     }
-  }, [tileId, messages, input, attachments, queuedTurns, openChatSurfaces, activeChatSurfaceId, executionTarget, provider, model, mcpEnabled, mode, thinking, agentId, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, sessionIdsByProvider, jobId, jobSequence, cloudHostId, isStreaming, activeView])
+  }, [workspaceId, tileId, workspaceTileKey, messages, input, attachments, queuedTurns, openChatSurfaces, activeChatSurfaceId, executionTarget, provider, model, mcpEnabled, mode, thinking, agentId, effectiveAgentMode, autoAgentMode, preserveSessionSummary, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages, sessionId, sessionIdsByProvider, jobId, jobSequence, cloudHostId, isStreaming, activeView])
 
   useEffect(() => {
-    reviveChatTileRuntimeState(tileId)
+    activeScopeKeyRef.current = workspaceTileKey
+    reviveChatTileRuntimeState(workspaceId, tileId)
     stateLoadedRef.current = false
 
     const applySavedState = (saved: Partial<ChatTilePersistedState> | null | undefined) => {
@@ -219,6 +230,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
         setAttachments(saved.attachments.filter((item: PendingAttachment) => typeof item?.path === 'string').map((item: PendingAttachment) => ({
           path: item.path,
           kind: item.kind === 'image' || isImagePath(item.path) ? 'image' : 'file',
+          ...(typeof item.capability === 'string' ? { capability: item.capability } : {}),
         })))
       }
       if (Array.isArray(saved.queuedTurns)) {
@@ -300,8 +312,11 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
     }
 
     const cached = reloadToken > 0
-      ? getChatTileRuntimeState<ChatTilePersistedState>(tileId)
-      : (initialRuntimeStateRef.current ?? getChatTileRuntimeState<ChatTilePersistedState>(tileId))
+      ? getChatTileRuntimeState<ChatTilePersistedState>(workspaceId, tileId)
+      : (
+          initialRuntimeStateRef.current
+          ?? getChatTileRuntimeState<ChatTilePersistedState>(workspaceId, tileId)
+        )
     if (cached) {
       applySavedState(cached)
       stateLoadedRef.current = true
@@ -313,12 +328,14 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       return
     }
 
+    let cancelled = false
     window.electron.canvas.loadTileState<Partial<ChatTilePersistedState> | null>(workspaceId, tileId).then(saved => {
-      applySavedState(saved)
+      if (!cancelled) applySavedState(saved)
     }).catch(() => {}).finally(() => {
-      stateLoadedRef.current = true
+      if (!cancelled) stateLoadedRef.current = true
     })
-  }, [workspaceId, tileId, reloadToken])
+    return () => { cancelled = true }
+  }, [workspaceId, tileId, workspaceTileKey, reloadToken])
 
   useEffect(() => {
     if (!stateLoadedRef.current) return
@@ -352,7 +369,11 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
   }, [workspaceId, linkedSessionEntryId, linkedSessionHint, reloadToken, isStreaming, sessionId, setMessagesSafe])
 
   useEffect(() => {
-    if (!workspaceId || !stateLoadedRef.current || isChatTileRuntimeStateDisposed(tileId)) return
+    if (
+      !workspaceId
+      || !stateLoadedRef.current
+      || isChatTileRuntimeStateDisposed(workspaceId, tileId)
+    ) return
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current)
     persistTimerRef.current = setTimeout(() => {
       persistTimerRef.current = null
@@ -374,7 +395,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
         persistTimerRef.current = null
       }
       const latest = latestStateRef.current
-      if (latest && !isChatTileRuntimeStateDisposed(tileId)) {
+      if (latest && !isChatTileRuntimeStateDisposed(workspaceId, tileId)) {
         persistLatestState(latest)
       }
     }
@@ -388,11 +409,11 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
       }
       const latest = latestStateRef.current
       if (!latest) return
-      if (isChatTileRuntimeStateDisposed(tileId)) return
-      setChatTileRuntimeState(tileId, latest)
+      if (isChatTileRuntimeStateDisposed(workspaceId, tileId)) return
+      setChatTileRuntimeState(workspaceId, tileId, latest)
       persistLatestState(latest)
     }
-  }, [tileId, persistLatestState])
+  }, [workspaceId, tileId, persistLatestState])
 
   return {
     latestStateRef,

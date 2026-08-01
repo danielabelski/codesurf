@@ -1,5 +1,5 @@
 name: release-on-tag
-run-name: Release ${{ github.ref_name }}
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
@@ -11,53 +11,103 @@ on:
         description: 'Existing version tag to release (for example v0.1.0)'
         required: true
 
-permissions:
-  contents: write
-
 concurrency:
-  group: release-${{ github.ref_name || inputs.tag }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  verify:
     runs-on: macos-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      CSC_LINK: ${{ secrets.CSC_LINK || secrets.MAC_CERTIFICATE }}
-      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD || secrets.MAC_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.tag.outputs.tag }}
+      release_sha: ${{ steps.tag.outputs.sha }}
     steps:
+      - name: Resolve and validate release tag
+        id: tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          SEMVER_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?(\+([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "${REQUESTED_TAG}" =~ ${SEMVER_PATTERN} ]]; then
+            echo "Release tag must be an exact SemVer tag such as v0.1.0."
+            exit 1
+          fi
+          VERSION_WITHOUT_BUILD="${REQUESTED_TAG%%+*}"
+          if [[ "${VERSION_WITHOUT_BUILD}" == *-* ]]; then
+            PRERELEASE="${VERSION_WITHOUT_BUILD#*-}"
+            IFS='.' read -r -a PRERELEASE_IDENTIFIERS <<< "${PRERELEASE}"
+            for IDENTIFIER in "${PRERELEASE_IDENTIFIERS[@]}"; do
+              if [[ "${IDENTIFIER}" =~ ^0[0-9]+$ ]]; then
+                echo "Numeric SemVer prerelease identifiers must not contain leading zeroes."
+                exit 1
+              fi
+            done
+          fi
+
+          read -r OBJECT_TYPE OBJECT_SHA < <(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${REQUESTED_TAG}" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )
+          DEREFERENCE_COUNT=0
+          while [ "${OBJECT_TYPE}" = "tag" ]; do
+            DEREFERENCE_COUNT=$((DEREFERENCE_COUNT + 1))
+            if [ "${DEREFERENCE_COUNT}" -gt 8 ]; then
+              echo "Release tag annotation chain is unexpectedly deep."
+              exit 1
+            fi
+            read -r OBJECT_TYPE OBJECT_SHA < <(
+              gh api "/repos/${GITHUB_REPOSITORY}/git/tags/${OBJECT_SHA}" \
+                --jq '[.object.type, .object.sha] | @tsv'
+            )
+          done
+          if [ "${OBJECT_TYPE}" != "commit" ] || [[ ! "${OBJECT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release tag must resolve to one immutable commit."
+            exit 1
+          fi
+          echo "tag=${REQUESTED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=${OBJECT_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+          ref: ${{ steps.tag.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.12.0
           cache: npm
 
-      - name: Resolve release tag
-        id: tag
+      - name: Verify exact tag ref and package version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          RELEASE_SHA: ${{ steps.tag.outputs.sha }}
         run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          TAG_REF="refs/tags/${RELEASE_TAG}"
+          if ! git show-ref --verify --quiet "${TAG_REF}"; then
+            echo "Release ref does not exist as an exact tag: ${TAG_REF}"
+            exit 1
           fi
 
-      - name: Verify tag matches package version
-        run: |
-          TAG_VERSION="${{ steps.tag.outputs.tag }}"
-          TAG_VERSION="${TAG_VERSION#v}"
-          PACKAGE_VERSION="$(node -p \"require('./package.json').version\")"
+          TAG_SHA="$(git rev-list -n 1 "${TAG_REF}")"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "${TAG_SHA}" != "${RELEASE_SHA}" ] || [ "${HEAD_SHA}" != "${RELEASE_SHA}" ]; then
+            echo "Checked out commit or exact tag no longer matches the resolved release SHA."
+            exit 1
+          fi
 
-          echo "Releasing tag: v${TAG_VERSION}"
+          TAG_VERSION="${RELEASE_TAG}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+
+          echo "Verifying tag: ${RELEASE_TAG}"
           echo "Package version: ${PACKAGE_VERSION}"
 
           if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
@@ -66,10 +116,157 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: npm ci --omit=optional
+        run: npm ci
+
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+          npm --prefix apps/chat-app ci
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Audit dependency trees
+        run: |
+          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-relay audit --audit-level=low
+          npm --prefix packages/codesurf-relay audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --omit=dev --audit-level=low
+          npm --prefix apps/chat-app audit --audit-level=low
+          npm --prefix apps/chat-app audit --omit=dev --audit-level=low
+
+      - name: Lint and verify formatting
+        run: npm run lint && npm run format:check
+
+      - name: Typecheck release sources
+        run: npm run typecheck:go && npm run typecheck:tsc
 
       - name: Run release gate tests
         run: npm test
 
+      - name: Build Electron app for E2E
+        run: npm run build
+
+      - name: Build and verify web/PWA artifacts
+        run: npm run build:web && npm run verify:web-build
+
+      - name: Build standalone chat app
+        run: npm --prefix apps/chat-app run build
+
+      - name: Build, install, and smoke npm package
+        run: npm run test:npm-package
+
+      - name: Build, smoke, and accept Electrobun runtime
+        run: npm run verify:electrobun-runtime
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Run Electron Playwright E2E suite
+        run: npm run test:e2e
+
+      - name: Smoke built web runtime
+        run: npm run test:web-smoke
+
+      - name: Assert builds did not rewrite tracked files
+        run: git diff --exit-code
+
+      - name: Verify production-only install in an isolated worktree
+        shell: bash
+        run: |
+          VERIFY_PARENT="$(mktemp -d "${RUNNER_TEMP}/codesurf-production-install.XXXXXX")"
+          VERIFY_WORKTREE="${VERIFY_PARENT}/worktree"
+          cleanup() {
+            if [ -d "${VERIFY_WORKTREE}" ]; then
+              git worktree remove --force "${VERIFY_WORKTREE}"
+            fi
+            rmdir "${VERIFY_PARENT}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "${VERIFY_WORKTREE}" HEAD
+          npm --prefix "${VERIFY_WORKTREE}" ci --omit=dev
+          npm --prefix "${VERIFY_WORKTREE}" audit --omit=dev --audit-level=low
+
+  publish:
+    needs: verify
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    environment:
+      name: release
+    steps:
+      - name: Check out verified release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.release_sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+
+      - name: Install release build dependencies
+        run: |
+          npm ci
+          npm --prefix packages/codesurf-daemon ci
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Verify publish checkout identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "${RELEASE_SHA}" ]; then
+            echo "Publish checkout does not match the verified release commit."
+            exit 1
+          fi
+          if [ "$(git rev-list -n 1 "refs/tags/${RELEASE_TAG}")" != "${RELEASE_SHA}" ]; then
+            echo "Verified release tag no longer resolves to the approved commit."
+            exit 1
+          fi
+
+          read -r OBJECT_TYPE OBJECT_SHA < <(
+            gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '[.object.type, .object.sha] | @tsv'
+          )
+          DEREFERENCE_COUNT=0
+          while [ "${OBJECT_TYPE}" = "tag" ]; do
+            DEREFERENCE_COUNT=$((DEREFERENCE_COUNT + 1))
+            if [ "${DEREFERENCE_COUNT}" -gt 8 ]; then
+              echo "Release tag annotation chain is unexpectedly deep."
+              exit 1
+            fi
+            read -r OBJECT_TYPE OBJECT_SHA < <(
+              gh api "/repos/${GITHUB_REPOSITORY}/git/tags/${OBJECT_SHA}" \
+                --jq '[.object.type, .object.sha] | @tsv'
+            )
+          done
+          if [ "${OBJECT_TYPE}" != "commit" ] || [ "${OBJECT_SHA}" != "${RELEASE_SHA}" ]; then
+            echo "Remote release tag changed after verification; refusing to publish."
+            exit 1
+          fi
+
       - name: Build and publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK || secrets.MAC_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD || secrets.MAC_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run release:github

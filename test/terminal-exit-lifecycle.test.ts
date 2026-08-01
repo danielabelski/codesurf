@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, test } from 'node:test'
 import {
   handlePtyExit,
@@ -32,7 +34,7 @@ describe('handlePtyExit', () => {
   test('removes the session from the terminals map', () => {
     const { terminals, deps } = makeDeps()
     const pty = {}
-    terminals.set('tile-1', { pty, listeners: new Set() })
+    terminals.set('tile-1', { workspaceId: 'workspace-a', pty, listeners: new Set() })
 
     handlePtyExit('tile-1', 0, pty, deps)
 
@@ -42,7 +44,7 @@ describe('handlePtyExit', () => {
   test('clears the pending buffer flush timer and deletes the buffer entry', () => {
     const { terminals, terminalBuffers, deps } = makeDeps()
     const pty = {}
-    terminals.set('tile-1', { pty, listeners: new Set() })
+    terminals.set('tile-1', { workspaceId: 'workspace-a', pty, listeners: new Set() })
     let cleared = false
     const timer = setTimeout(() => {}, 100000)
     // Wrap clearTimeout to observe it was invoked with our timer.
@@ -66,7 +68,7 @@ describe('handlePtyExit', () => {
     const { terminals, deps } = makeDeps()
     const pty = {}
     const listener = makeListener()
-    terminals.set('tile-1', { pty, listeners: new Set([listener]) })
+    terminals.set('tile-1', { workspaceId: 'workspace-a', pty, listeners: new Set([listener]) })
 
     handlePtyExit('tile-1', 7, pty, deps)
 
@@ -78,6 +80,7 @@ describe('handlePtyExit', () => {
     const pty = {}
     const killed: string[] = []
     terminals.set('tile-tmux', {
+      workspaceId: 'workspace-a',
       pty,
       listeners: new Set(),
       tmuxSession: 'contex-tile-tmux',
@@ -99,7 +102,7 @@ describe('handlePtyExit', () => {
       isDestroyed: () => true,
       send: () => { throw new Error('should not be called on destroyed listener') },
     }
-    terminals.set('tile-1', { pty, listeners: new Set([destroyed]) })
+    terminals.set('tile-1', { workspaceId: 'workspace-a', pty, listeners: new Set([destroyed]) })
 
     assert.doesNotThrow(() => handlePtyExit('tile-1', 0, pty, deps))
   })
@@ -107,16 +110,16 @@ describe('handlePtyExit', () => {
   test('publishes a tile:<id> system event with action "exited"', () => {
     const { terminals, published, deps } = makeDeps()
     const pty = {}
-    terminals.set('tile-1', { pty, listeners: new Set() })
+    terminals.set('tile-1', { workspaceId: 'workspace-a', pty, listeners: new Set() })
 
     handlePtyExit('tile-1', 130, pty, deps)
 
     assert.equal(published.length, 1)
     assert.deepEqual(published[0], {
-      channel: 'tile:tile-1',
+      channel: 'tile:workspace-a:tile-1',
       type: 'system',
       source: 'terminal:tile-1',
-      payload: { action: 'exited', exitCode: 130 },
+      payload: { action: 'exited', workspaceId: 'workspace-a', exitCode: 130 },
     })
   })
 
@@ -127,7 +130,11 @@ describe('handlePtyExit', () => {
     const newListener = makeListener()
     // Simulate terminal:create respawning tileId with a new pty before the
     // old pty's exit event is processed.
-    terminals.set('tile-1', { pty: newPty, listeners: new Set([newListener]) })
+    terminals.set('tile-1', {
+      workspaceId: 'workspace-a',
+      pty: newPty,
+      listeners: new Set([newListener]),
+    })
 
     handlePtyExit('tile-1', 1, oldPty, deps)
 
@@ -143,4 +150,27 @@ describe('handlePtyExit', () => {
     assert.equal(terminals.size, 0)
     assert.equal(published.length, 0)
   })
+})
+
+test('terminal data callback rejects bytes from a superseded PTY before side effects', () => {
+  // terminal.ts cannot be imported under plain node:test because it loads the
+  // Electron and node-pty hosts at module scope. Keep a source-level wiring
+  // contract around the identity guard while the pure exit lifecycle behavior
+  // above exercises the same stale-session invariant directly.
+  const source = readFileSync(resolve(process.cwd(), 'src/main/ipc/terminal.ts'), 'utf8')
+  const callbackStart = source.indexOf('term.onData((data: string) => {')
+  const callbackEnd = source.indexOf('\n    term.onExit(', callbackStart)
+  assert.ok(callbackStart >= 0 && callbackEnd > callbackStart, 'terminal data callback must exist')
+
+  const callback = source.slice(callbackStart, callbackEnd)
+  const guard = 'if (terminals.get(tileId) !== session || session.pty !== term) return'
+  const guardIndex = callback.indexOf(guard)
+  const bufferMutationIndex = callback.indexOf('session.buffer =')
+  const listenerSendIndex = callback.indexOf('listener.send(`terminal:data:${tileId}`, data)')
+  const busBufferMutationIndex = callback.indexOf('buf.data += data')
+
+  assert.ok(guardIndex >= 0, 'onData must identity-guard its PTY and session')
+  assert.ok(guardIndex < bufferMutationIndex, 'guard must precede session buffer mutation')
+  assert.ok(guardIndex < listenerSendIndex, 'guard must precede renderer delivery')
+  assert.ok(guardIndex < busBufferMutationIndex, 'guard must precede bus buffering')
 })

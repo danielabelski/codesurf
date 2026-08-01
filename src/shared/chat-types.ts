@@ -16,6 +16,14 @@ export interface CommandEntry {
   kind?: 'search' | 'read' | 'command'
 }
 
+export interface FileChangesOrigin {
+  workspaceId: string
+  cardId: string
+  provider: string
+  executionTarget: 'local' | 'cloud'
+  sessionId: string | null
+}
+
 export interface ToolBlock {
   id: string
   /** Provider-native tool name, kept for debugging, permissions, and expanded detail. */
@@ -32,6 +40,10 @@ export interface ToolBlock {
   elapsed?: number
   status: 'running' | 'done' | 'error'
   fileChanges?: FileChange[]
+  /** Main-process attestation for bounded local recent-edit reads. */
+  fileChangesTrusted?: boolean
+  /** Exact local turn identity that produced an attested file-change summary. */
+  fileChangesOrigin?: FileChangesOrigin
   commandEntries?: CommandEntry[]
   /** User-written margin note "stuck" to this tool-call block. */
   note?: BlockNote

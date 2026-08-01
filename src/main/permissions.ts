@@ -59,15 +59,29 @@ function normalizeStore(raw: unknown): ToolPermissionStore {
       })
     : []
 
+  // MCP grants are always workspace-scoped. A legacy null-workspace MCP grant
+  // is a global capability and must not survive a read/migration, otherwise it
+  // can authorize an unrelated workspace before the caller's scope is known.
+  const scopedMcpGrants = grants.filter(grant => (
+    grant.provider.trim().toLowerCase() !== 'mcp'
+    || normalizeWorkspaceDir(grant.workspaceDir) !== null
+  ))
+
   return {
     version: PERMISSIONS_VERSION,
-    grants,
+    grants: scopedMcpGrants,
   }
 }
 
 function readPersistedStore(): ToolPermissionStore {
   try {
-    return normalizeStore(JSON.parse(readFileSync(PERMISSIONS_PATH, 'utf8')))
+    const raw = JSON.parse(readFileSync(PERMISSIONS_PATH, 'utf8'))
+    const normalized = normalizeStore(raw)
+    const rawGrants = Array.isArray(raw?.grants) ? raw.grants : []
+    if (normalized.grants.length !== rawGrants.length) {
+      writePersistedStore(normalized)
+    }
+    return normalized
   } catch {
     return { version: PERMISSIONS_VERSION, grants: [] }
   }
@@ -114,6 +128,7 @@ function sameGrantTarget(grant: ToolPermissionGrant, request: ToolPermissionRequ
   if (grant.provider !== request.provider) return false
   if (grant.toolName !== request.toolName) return false
   const requestedWorkspace = normalizeWorkspaceDir(request.workspaceDir)
+  if (request.provider.trim().toLowerCase() === 'mcp' && requestedWorkspace === null) return false
   return (grant.workspaceDir ?? null) === requestedWorkspace
 }
 
@@ -121,8 +136,12 @@ function grantAppliesToRequest(grant: ToolPermissionGrant, request: ToolPermissi
   if (grant.provider !== request.provider) return false
   if (grant.toolName !== request.toolName) return false
   const grantWorkspace = normalizeWorkspaceDir(grant.workspaceDir)
+  const requestWorkspace = normalizeWorkspaceDir(request.workspaceDir)
+  if (grant.provider.trim().toLowerCase() === 'mcp') {
+    return grantWorkspace !== null && requestWorkspace !== null && grantWorkspace === requestWorkspace
+  }
   if (grantWorkspace === null) return true
-  return grantWorkspace === normalizeWorkspaceDir(request.workspaceDir)
+  return grantWorkspace === requestWorkspace
 }
 
 function buildGrant(request: ToolPermissionRequest, scope: Exclude<ToolPermissionDecisionScope, 'once'>): ToolPermissionGrant {
@@ -289,6 +308,11 @@ export async function requestToolPermissionDetailed(
   request: ToolPermissionRequest,
   interactive: boolean,
 ): Promise<ToolPermissionOutcome> {
+  // MCP callers can cross tile boundaries. Never let a missing workspace
+  // authority fall through to the legacy null-workspace/global grant scope.
+  if (request.provider.trim().toLowerCase() === 'mcp' && !normalizeWorkspaceDir(request.workspaceDir)) {
+    return { allowed: false }
+  }
   const stored = resolveStoredPermission(request)
   if (stored === 'allow') return { allowed: true, fromStored: true }
   if (stored === 'deny') return { allowed: false, fromStored: true }

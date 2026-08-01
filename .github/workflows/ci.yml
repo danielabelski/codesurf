@@ -17,8 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    runs-on: macos-latest
+  windows-process-containment:
+    runs-on: windows-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -26,25 +26,148 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+
+      - name: Verify Windows process-tree termination contract
+        run: node --test test/relay-windows-process-tree.test.ts
+
+  linux-core-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
 
       - name: Install dependencies
-        run: npm ci --omit=optional
+        run: npm ci
+
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Build the main-process test prerequisite
+        run: npm run build:main
+
+      - name: Verify portable type and test contracts
+        run: |
+          npm run typecheck
+          npm run test:unit:core
+          npm run test:packages
+
+      - name: Build and verify portable web/PWA artifacts
+        run: npm run build:web && npm run verify:web-build
+
+      - name: Assert builds did not rewrite tracked files
+        run: git diff --exit-code
+
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Review change size
+        env:
+          CODESURF_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: npm run check:change-size
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install package test dependencies
+        run: |
+          npm --prefix packages/codesurf-daemon ci
+          npm --prefix packages/codesurf-relay ci
+          npm --prefix packages/codesurf-terminal-gateway ci
+          npm --prefix apps/chat-app ci
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
+      - name: Audit dependency trees
+        run: |
+          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-relay audit --audit-level=low
+          npm --prefix packages/codesurf-relay audit --omit=dev --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --omit=dev --audit-level=low
+          npm --prefix apps/chat-app audit --audit-level=low
+          npm --prefix apps/chat-app audit --omit=dev --audit-level=low
+
+      - name: Lint and verify formatting
+        run: npm run lint && npm run format:check
 
       - name: Typecheck
-        run: npm run typecheck
+        run: npm run typecheck:go && npm run typecheck:tsc
 
-      - name: Run tests
+      - name: Run authoritative test gate
         run: npm test
-
-      - name: Install relay package deps
-        run: npm --prefix packages/codesurf-relay install
-
-      - name: Run relay test suite
-        run: npm run test:relay
 
       - name: Build Electron app for E2E
         run: npm run build
 
+      - name: Build and verify web/PWA artifacts
+        run: npm run build:web && npm run verify:web-build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Smoke built web runtime
+        run: npm run test:web-smoke
+
+      - name: Build standalone chat app
+        run: npm --prefix apps/chat-app run build
+
+      - name: Build, install, and smoke npm package
+        run: npm run test:npm-package
+
+      - name: Build, smoke, and accept Electrobun runtime
+        run: npm run verify:electrobun-runtime
+
       - name: Run Playwright E2E suite
         run: npm run test:e2e
+
+      - name: Assert builds did not rewrite tracked files
+        run: git diff --exit-code
+
+      - name: Verify production-only install in an isolated worktree
+        shell: bash
+        run: |
+          VERIFY_PARENT="$(mktemp -d "${RUNNER_TEMP}/codesurf-production-install.XXXXXX")"
+          VERIFY_WORKTREE="${VERIFY_PARENT}/worktree"
+          cleanup() {
+            if [ -d "${VERIFY_WORKTREE}" ]; then
+              git worktree remove --force "${VERIFY_WORKTREE}"
+            fi
+            rmdir "${VERIFY_PARENT}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          git worktree add --detach "${VERIFY_WORKTREE}" HEAD
+          npm --prefix "${VERIFY_WORKTREE}" ci --omit=dev
+          npm --prefix "${VERIFY_WORKTREE}" audit --omit=dev --audit-level=low

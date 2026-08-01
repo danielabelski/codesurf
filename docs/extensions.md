@@ -8,7 +8,8 @@ This repo now supports two extension locations:
 - global: `~/.codesurf/extensions/<ext>/`
 - workspace-local: `<workspace>/.codesurf/extensions/<ext>/`
 
-The active workspace path is rescanned by the renderer hook, so dropping a folder into `.contex/extensions/` is enough for local development.
+The active workspace path is rescanned by the renderer hook, so dropping a folder
+into `<workspace>/.codesurf/extensions/` is enough for local development.
 
 ## What an extension can contribute
 

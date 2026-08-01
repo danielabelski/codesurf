@@ -1,10 +1,10 @@
 import type { CanvasState } from '../../../shared/types'
-import type { PanelNode } from '../components/panelLayoutTree'
+import type { PanelNode } from '../components/panelLayoutTree.ts'
 import {
   createLeaf,
   findLeafById,
   sanitizePanelLayout,
-} from '../components/panelLayoutTree'
+} from '../components/panelLayoutTree.ts'
 
 export type CanvasWorkspaceLoadAppliers = {
   setTiles: (tiles: CanvasState['tiles']) => void
@@ -61,15 +61,23 @@ export function applyEmptyCanvasWorkspaceState(
     | 'setPanelLayout'
     | 'setActivePanelId'
     | 'setExpandedTileId'
+    | 'setExpandedCanvasGroupId'
+    | 'setLockedConnections'
     | 'savedLayoutRef'
+    | 'expandedCanvasGroupIdRef'
+    | 'expandedCanvasPriorViewportRef'
   >,
   resetViewportState: () => void,
 ): void {
   appliers.setTiles([])
   appliers.setGroups([])
+  appliers.setLockedConnections?.([])
   resetViewportState()
   appliers.savedLayoutRef.current = null
   appliers.setPanelLayout(null)
   appliers.setActivePanelId(null)
   appliers.setExpandedTileId(null)
+  appliers.setExpandedCanvasGroupId(null)
+  appliers.expandedCanvasGroupIdRef.current = null
+  appliers.expandedCanvasPriorViewportRef.current = null
 }

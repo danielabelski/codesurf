@@ -7,7 +7,7 @@
 
 import { persistGrant, resolveStoredPermission, storeSessionGrant, type ToolPermissionRequest } from '../permissions'
 import type { ToolPermissionDecision } from '../ipc/chat'
-import { sendStream } from './runtime'
+import { sendStream, type ChatStreamScope } from './runtime'
 
 export interface InlinePermissionResult {
   decision: ToolPermissionDecision
@@ -32,7 +32,7 @@ export interface InlinePermissionError {
  * Returns the decision + metadata, or an error if the prompt was cancelled.
  */
 export async function resolveInlineToolPermission(
-  cardId: string,
+  scope: ChatStreamScope,
   permissionRequest: ToolPermissionRequest,
   toolUseIDHint: string | null | undefined,
 ): Promise<InlinePermissionResult | InlinePermissionError> {
@@ -43,7 +43,7 @@ export async function resolveInlineToolPermission(
   const storedDecision = resolveStoredPermission(permissionRequest)
 
   if (storedDecision === 'allow') {
-    sendStream(cardId, {
+    sendStream(scope, {
       type: 'tool_permission_resolved',
       toolId: toolUseID,
       toolName: permissionRequest.toolName,
@@ -53,7 +53,7 @@ export async function resolveInlineToolPermission(
   }
 
   if (storedDecision === 'deny') {
-    sendStream(cardId, {
+    sendStream(scope, {
       type: 'tool_permission_resolved',
       toolId: toolUseID,
       toolName: permissionRequest.toolName,
@@ -63,7 +63,7 @@ export async function resolveInlineToolPermission(
   }
 
   // Prompt the user via renderer
-  sendStream(cardId, {
+  sendStream(scope, {
     type: 'tool_permission_request',
     toolId: toolUseID,
     provider: permissionRequest.provider,
@@ -77,12 +77,12 @@ export async function resolveInlineToolPermission(
   let decision: ToolPermissionDecision
   try {
     const { awaitToolPermissionAnswer } = await import('../ipc/chat')
-    decision = await awaitToolPermissionAnswer(cardId, toolUseID, permissionRequest)
+    decision = await awaitToolPermissionAnswer(scope, toolUseID, permissionRequest)
   } catch {
     return { error: 'Tool permission request was cancelled.', toolUseID: toolUseIDHint ?? null }
   }
 
-  sendStream(cardId, {
+  sendStream(scope, {
     type: 'tool_permission_resolved',
     toolId: toolUseID,
     toolName: permissionRequest.toolName,

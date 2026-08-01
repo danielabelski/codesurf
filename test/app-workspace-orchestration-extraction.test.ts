@@ -29,4 +29,33 @@ describe('wave 29 workspace orchestration extraction', () => {
     expect(LAYOUT_LAUNCH_SOURCE).toContain('export function generateLayoutFromTemplate')
     expect(LAYOUT_LAUNCH_SOURCE).toContain('tile-template-')
   })
+
+  test('initial canvas hydration uses the same generation-guarded switch lane', () => {
+    expect(APP_SOURCE).toContain('await handleSwitchWorkspaceRef.current(targetWorkspace.id)')
+    expect(APP_SOURCE).not.toContain('window.electron.canvas.load(')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('LatestWorkspaceSwitchCoordinator')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('commitLatest(switchToken')
+  })
+
+  test('quit persistence forces the ordered final window to write even when clean', () => {
+    expect(APP_SOURCE).toContain("force: request.reason === 'quit'")
+  })
+
+  test('picker and final-tab transitions flush before clearing authoritative refs', () => {
+    expect(WORKSPACE_HOOK_SOURCE).toContain('transitionToWorkspacePicker({')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('flushOutgoing: flushPendingSave')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('await showEmptyLayoutPage()')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('commitWorkspaceCanvasOwnership(')
+  })
+
+  test('workspace ownership is explicit and mini-chat canvas persistence is disabled', () => {
+    expect(APP_SOURCE).not.toContain(
+      'useEffect(() => { currentWorkspaceIdRef.current = workspace?.id ?? null }',
+    )
+    expect(APP_SOURCE).toContain('resolveCanvasPersistenceMode(')
+    expect(APP_SOURCE).toContain('Boolean(miniChatOptions)')
+    expect(APP_SOURCE).toContain('miniChatOptions || !request.canvasOwner')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('transferCanvasWorkspaceOwnership')
+    expect(WORKSPACE_HOOK_SOURCE).toContain('releaseWorkspacePersistence')
+  })
 })

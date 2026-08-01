@@ -2,14 +2,19 @@ import React, { Suspense } from 'react'
 import { Link2 } from 'lucide-react'
 import type { TileState } from '../../../../shared/types'
 import { TileColorProvider } from '../../TileColorContext'
+import { TileChrome } from '../TileChrome'
 import type { AppTheme } from '../../theme'
 import type { RenderTileBodyOptions } from '../../hooks/useRenderTileBody'
 import type { AnchorPoint } from '../../lib/discoveryRuntime'
 import { getConnectionHandlePoint } from '../../lib/connectionRoutes'
+import { createLoadableModuleTile } from '../../lib/loadableTile'
 import { perfFlags } from '../../perfFlags'
 
-const LazyTileChrome = React.lazy(() => import('../TileChrome').then(m => ({ default: m.TileChrome })))
-const LazyStickyColorPicker = React.lazy(() => import('../NoteTile').then(m => ({ default: m.StickyColorPicker })))
+const LazyStickyColorPicker = createLoadableModuleTile(
+  () => import('../NoteTile'),
+  module => module.StickyColorPicker,
+  () => null,
+)
 
 type ResizeDir = 'e' | 's' | 'se' | 'w' | 'n' | 'nw' | 'ne' | 'sw'
 type Side = AnchorPoint['side']
@@ -108,7 +113,7 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
     >
       <>
         <TileColorProvider>
-          <LazyTileChrome
+          <TileChrome
             tile={chromeTile}
             workspaceId={workspaceId}
             workspaceDir={workspaceDir}
@@ -168,7 +173,7 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
                 renderTileBody(tile, { isInteracting: isActiveDrag, isSelected })
               )}
             </Suspense>
-          </LazyTileChrome>
+          </TileChrome>
         </TileColorProvider>
         {isConnectionTarget && (
           <div
@@ -190,7 +195,10 @@ function CanvasTileItemComponent(props: CanvasTileItemProps): JSX.Element {
           const sensorStyle: React.CSSProperties = {
             position: 'absolute',
             pointerEvents: (connectionDragActive || isSelectedImageTile) ? 'none' : 'all',
-            zIndex: 99991,
+            // Discovery hit areas extend beyond their tile. Keep them below
+            // tile chrome so a nearby tile's invisible sensor cannot steal
+            // resize, titlebar, or content input from the visible tile.
+            zIndex: Math.max(0, tile.zIndex - 1),
           }
           if (side === 'left') Object.assign(sensorStyle, {
             left: tile.x - sensorThickness,

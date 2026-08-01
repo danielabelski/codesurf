@@ -18,6 +18,7 @@ const NON_SELECTABLE_UI_STYLE = {
 }
 
 export interface ChatTileTranscriptColumnProps {
+  workspaceId: string
   tileId: string
   isStartScreen: boolean
   messagesRef: React.RefObject<HTMLDivElement | null>
@@ -78,6 +79,7 @@ export interface ChatTileTranscriptColumnProps {
 }
 
 export function ChatTileTranscriptColumn({
+  workspaceId,
   tileId,
   isStartScreen,
   messagesRef,
@@ -134,6 +136,7 @@ export function ChatTileTranscriptColumn({
   const theme = useTheme()
   const terminalActive = activeView === 'terminal'
   const liveRenderedMessages = useTileTranscriptMessages({
+    workspaceId,
     tileId,
     renderedMessages,
     messagesRef,

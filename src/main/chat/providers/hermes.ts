@@ -6,12 +6,27 @@ import {
 } from '../../agents/agent-cli-contracts'
 import { buildHermesSpawnArgs } from './agent-mode-payloads'
 import {
-  activeProcesses,
+  chatRequestScope,
+  chatStreamScopeKey,
   getPreparedMessages,
+  isCurrentChatProcess,
   log,
+  markRoomPromptAccepted,
+  processTreeSpawnOptions,
+  registerActiveChatProcess,
   sendStream,
+  stopActiveChatProcess,
+  terminateProcessTree,
+  type ChatStreamScope,
 } from '../runtime'
+import {
+  clearStableSessionContext,
+  completeStableContextCliTurn,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from '../stable-session-context'
 import type { ChatRequest } from '../types'
+import { isProviderAcceptanceEvent } from '../provider-acceptance.ts'
 
 // Store hermes session IDs for multi-turn resume
 const hermesSessionIds = new Map<string, string>()
@@ -30,28 +45,37 @@ function resolveHermesBinary(): string | null {
   }
 }
 
-export function clearHermesSession(cardId: string): void {
-  hermesSessionIds.delete(cardId)
+export function clearHermesSession(scope: ChatStreamScope): void {
+  hermesSessionIds.delete(chatStreamScopeKey(scope))
+  clearStableSessionContext(scope, 'hermes')
 }
 
 export function chatHermes(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
   const hermesBin = resolveHermesBinary()
   if (!hermesBin) {
-    sendStream(req.cardId, { type: 'error', error: 'Hermes CLI not found. Install: pip install hermes-agent' })
+    sendStream(scope, { type: 'error', error: 'Hermes CLI not found. Install: pip install hermes-agent' })
     return
   }
 
   const shellPath = getShellEnvPath()
-  if (req.sessionId && !hermesSessionIds.has(req.cardId)) {
-    hermesSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !hermesSessionIds.has(scopeKey)) {
+    hermesSessionIds.set(scopeKey, req.sessionId)
   }
-  const existingSessionId = hermesSessionIds.get(req.cardId)
+  const existingSessionId = hermesSessionIds.get(scopeKey)
+  const stableContext = selectStableContextForTurn({
+    scope,
+    provider: req.provider,
+    sessionId: existingSessionId,
+    contextPrompt: req.contextPrompt,
+  })
 
   log('chatHermes starting', {
     model: req.model,
@@ -60,8 +84,8 @@ export function chatHermes(req: ChatRequest): void {
   })
 
   // Build the `hermes chat` argv from the shared, pure builder. It maps
-  // AgentMode.tools onto Hermes' coarse toolset categories, re-injects the
-  // persona on resumed turns (A-PR1 #1a), and FAILS CLOSED (throws) if a
+  // AgentMode.tools onto Hermes' coarse toolset categories, installs stable
+  // host context only when its session/version changes, and FAILS CLOSED if a
   // selected agent's definition has not resolved (A-PR1 BLOCKING-1) — caught
   // below so we surface the reason instead of launching unrestricted.
   let args: string[]
@@ -73,25 +97,38 @@ export function chatHermes(req: ChatRequest): void {
       model: req.model,
       userContent: lastUserMsg.content,
       existingSessionId,
+      contextPrompt: stableContext.contextPrompt,
     })
   } catch (err) {
-    sendStream(req.cardId, { type: 'error', error: err instanceof Error ? err.message : String(err) })
-    sendStream(req.cardId, { type: 'done' })
+    invalidateStableContextSelection(stableContext)
+    sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
+    sendStream(scope, { type: 'done' })
     return
   }
 
-  const proc = spawn(hermesBin, args, {
+  const proc = spawn(hermesBin, args, processTreeSpawnOptions({
     stdio: ['ignore', 'pipe', 'pipe'],
     env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     ...(req.workspaceDir && { cwd: req.workspaceDir }),
-  })
+  }))
 
-  activeProcesses.set(req.cardId, proc)
+  if (!registerActiveChatProcess(scopeKey, proc)) {
+    void terminateProcessTree(proc).then(termination => {
+      sendStream(scope, {
+        type: 'error',
+        error: termination.confirmed
+          ? 'Hermes launch refused because the previous chat process is still active'
+          : `Duplicate Hermes process could not be terminated: ${termination.detail}`,
+      })
+      if (termination.confirmed) sendStream(scope, { type: 'done' })
+    })
+    return
+  }
 
   // H-9: identity-guard — only clean up / emit done|error if this proc is
   // still the active one for this card. A rapid re-send replaces the map
   // entry before the old proc's close handler fires, so we must check first.
-  const isCurrent = (): boolean => activeProcesses.get(req.cardId) === proc
+  const isCurrent = (): boolean => isCurrentChatProcess(scopeKey, proc)
 
   // NDJSON line dispatcher. Hermes' --stream-json mode emits one JSON event
   // per line on stdout, mapping directly to CodeSurf's existing stream event
@@ -101,7 +138,14 @@ export function chatHermes(req: ChatRequest): void {
   // through to plain output) still produces *something* in the UI rather
   // than silence.
   let stdoutBuf = ''
+  let hadProviderError = false
+  let sawProviderAcceptance = false
+  const noteProviderAcceptance = (): void => {
+    sawProviderAcceptance = true
+    markRoomPromptAccepted(scope)
+  }
   const dispatchHermesEvents = (chunk: string, flushPartial = false): void => {
+    if (!isCurrent()) return
     stdoutBuf += chunk
     const lines = stdoutBuf.split(/\r?\n/)
     stdoutBuf = flushPartial ? '' : (lines.pop() ?? '')
@@ -115,8 +159,8 @@ export function chatHermes(req: ChatRequest): void {
       const sessionLineMatch = trimmed.match(/^(?:session_id|session)\s*:\s*(\S+)$/i)
       if (sessionLineMatch?.[1]) {
         const sid = sessionLineMatch[1]
-        hermesSessionIds.set(req.cardId, sid)
-        sendStream(req.cardId, { type: 'session', sessionId: sid })
+        hermesSessionIds.set(scopeKey, sid)
+        sendStream(scope, { type: 'session', sessionId: sid })
         continue
       }
 
@@ -124,7 +168,8 @@ export function chatHermes(req: ChatRequest): void {
       try {
         evt = JSON.parse(trimmed)
       } catch {
-        sendStream(req.cardId, { type: 'text', text: line + '\n' })
+        noteProviderAcceptance()
+        sendStream(scope, { type: 'text', text: line + '\n' })
         continue
       }
       if (!evt || typeof evt !== 'object' || typeof evt.type !== 'string') {
@@ -135,36 +180,41 @@ export function chatHermes(req: ChatRequest): void {
         case 'session':
           if (typeof evt.sessionId === 'string' && evt.sessionId.trim()) {
             const sid = evt.sessionId.trim()
-            hermesSessionIds.set(req.cardId, sid)
-            sendStream(req.cardId, { type: 'session', sessionId: sid })
+            hermesSessionIds.set(scopeKey, sid)
+            sendStream(scope, { type: 'session', sessionId: sid })
           }
           break
         case 'text':
           if (typeof evt.text === 'string') {
-            sendStream(req.cardId, { type: 'text', text: evt.text })
+            noteProviderAcceptance()
+            sendStream(scope, { type: 'text', text: evt.text })
           }
           break
         case 'thinking':
           if (typeof evt.text === 'string') {
-            sendStream(req.cardId, { type: 'thinking', text: evt.text })
+            noteProviderAcceptance()
+            sendStream(scope, { type: 'thinking', text: evt.text })
           }
           break
         case 'tool_start':
-          sendStream(req.cardId, {
+          noteProviderAcceptance()
+          sendStream(scope, {
             type: 'tool_start',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             toolName: typeof evt.toolName === 'string' ? evt.toolName : 'tool',
           })
           break
         case 'tool_input':
-          sendStream(req.cardId, {
+          noteProviderAcceptance()
+          sendStream(scope, {
             type: 'tool_input',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             text: typeof evt.text === 'string' ? evt.text : '',
           })
           break
         case 'tool_summary':
-          sendStream(req.cardId, {
+          noteProviderAcceptance()
+          sendStream(scope, {
             type: 'tool_summary',
             toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
             toolName: typeof evt.toolName === 'string' ? evt.toolName : undefined,
@@ -172,7 +222,8 @@ export function chatHermes(req: ChatRequest): void {
           })
           break
         case 'error':
-          sendStream(req.cardId, {
+          hadProviderError = true
+          sendStream(scope, {
             type: 'error',
             error: typeof evt.error === 'string' ? evt.error : 'Unknown Hermes error',
           })
@@ -183,7 +234,8 @@ export function chatHermes(req: ChatRequest): void {
           break
         default:
           // Forward unrecognized event verbatim; the renderer can filter.
-          sendStream(req.cardId, evt as Record<string, unknown>)
+          if (isProviderAcceptanceEvent(evt)) noteProviderAcceptance()
+          sendStream(scope, evt as Record<string, unknown>)
       }
     }
   }
@@ -198,21 +250,60 @@ export function chatHermes(req: ChatRequest): void {
   proc.on('close', (code) => {
     if (!isCurrent()) return // superseded by a new turn — suppress stale done/error
     dispatchHermesEvents('', true)
-    activeProcesses.delete(req.cardId)
-    if (code !== 0 && stderrBuf.trim()) {
-      sendStream(req.cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderrBuf.trim()) })
-    }
-    sendStream(req.cardId, { type: 'done' })
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      if (!termination?.confirmed) {
+        invalidateStableContextSelection(stableContext)
+        sendStream(scope, {
+          type: 'error',
+          error: `Hermes process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      completeStableContextCliTurn(stableContext, {
+        exitCode: code,
+        sawProviderAcceptance,
+        providerError: hadProviderError,
+        sessionId: hermesSessionIds.get(scopeKey) ?? existingSessionId,
+      })
+      if (code !== 0 && stderrBuf.trim()) {
+        sendStream(scope, { type: 'error', error: sanitizeAgentCliDiagnostic(stderrBuf.trim()) })
+      }
+      if (code === 0 && !hadProviderError && sawProviderAcceptance) markRoomPromptAccepted(scope)
+      sendStream(scope, { type: 'done' })
+    })().catch(error => {
+      invalidateStableContextSelection(stableContext)
+      sendStream(scope, {
+        type: 'error',
+        error: `Hermes process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    })
   })
 
   proc.on('error', (err) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
-    activeProcesses.delete(req.cardId)
-    sendStream(req.cardId, {
-      type: 'error',
-      error: err.message.includes('ENOENT')
-        ? 'Hermes CLI not found. Install: pip install hermes-agent'
-        : err.message,
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      invalidateStableContextSelection(stableContext)
+      sendStream(scope, {
+        type: 'error',
+        error: err.message.includes('ENOENT')
+          ? 'Hermes CLI not found. Install: pip install hermes-agent'
+          : err.message,
+      })
+      if (!termination?.confirmed) {
+        sendStream(scope, {
+          type: 'error',
+          error: `Hermes process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      sendStream(scope, { type: 'done' })
+    })().catch(error => {
+      sendStream(scope, {
+        type: 'error',
+        error: `Hermes process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
     })
   })
 }

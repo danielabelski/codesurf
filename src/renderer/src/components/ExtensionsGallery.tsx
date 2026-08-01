@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { Package, Search, Star, X, Check, Plus, AlertTriangle } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { getExtensionTrustDisclosure } from './extensionTrustDisclosure'
 
 const EXTENSIONS_CHANGED_EVENT = 'codesurf:extensions-changed'
 
@@ -446,6 +447,7 @@ function ExtensionCard({
   const theme = useTheme()
   const fonts = useAppFonts()
   const installed = ext.enabled
+  const trustDisclosure = getExtensionTrustDisclosure(ext.tier)
 
   return (
     <div style={{
@@ -500,6 +502,30 @@ function ExtensionCard({
       }}>
         {ext.description ?? 'No description provided.'}
       </div>
+      {trustDisclosure && (
+        <div
+          aria-label="POWER plugin trust notice"
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: 6,
+            padding: '7px 8px',
+            borderRadius: 6,
+            background: `${theme.status.warning}14`,
+            border: `1px solid ${theme.status.warning}44`,
+            color: theme.text.secondary,
+            fontSize: Math.max(10, fonts.secondarySize - 1),
+            lineHeight: 1.35,
+          }}
+        >
+          <AlertTriangle
+            size={13}
+            aria-hidden="true"
+            style={{ color: theme.status.warning, flexShrink: 0, marginTop: 1 }}
+          />
+          <span>{trustDisclosure}</span>
+        </div>
+      )}
       {ext.capabilities && ext.capabilities.length > 0 && (
         <div
           title={ext.capabilities.map(c => `${c.name}${c.reason ? ` — ${c.reason}` : ''}`).join('\n')}

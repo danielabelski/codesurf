@@ -11,15 +11,15 @@
 
 import { bus } from './event-bus'
 import { createServer, type Server, IncomingMessage, ServerResponse } from 'http'
-import { promises as fs } from 'fs'
-import { join } from 'path'
+import { constants as fsConstants, promises as fs } from 'fs'
+import { join, sep } from 'path'
 import { randomUUID } from 'node:crypto'
 import type { ExtensionRegistry } from './extensions/registry'
 import { broadcastToRenderer } from './utils/broadcast'
 import { log } from './utils/logger.ts'
 
 const mcpLog = log.scope('MCP')
-import { getAllNodeTools } from '../shared/nodeTools'
+import { getAllNodeTools, getPeerBridgeNodeTools } from '../shared/nodeTools'
 import { CODESURF_HOME } from './paths'
 import { assertSafePathSegment } from './security/pathSegments'
 import { dispatchTool, getAllStaticTools } from './mcp/registry'
@@ -27,36 +27,97 @@ import { executeImageEditTool as executeImageEditToolImpl } from './mcp/tools/ge
 import { resolveTileWorkspaceDir } from './mcp/tools/peer-bridge'
 import { requestToolPermission } from './permissions'
 import type { McpToolContext, McpToolSchema } from './mcp/types'
-import { resolvePrincipal, assertTileScope, type McpPrincipal } from './mcp/auth'
+import {
+  resolvePrincipal,
+  assertTileScope,
+  type McpPrincipal,
+  type TileTokenRecord,
+} from './mcp/auth'
+import {
+  MAX_MCP_RESULT_BYTES,
+  MAX_MCP_RESULT_ESTIMATED_TOKENS,
+  estimateTokenCount,
+  truncateUtf8,
+} from './agent-room/validation.ts'
 
 const MCP_TOKEN = randomUUID()
 const MAX_BODY = 1024 * 1024 // 1MB
+const MAX_CONTEXT_FILES = 32
+const MAX_CONTEXT_SOURCE_BYTES = 8 * 1024
+const MAX_SSE_CLIENTS = 128
 
 // Per-tile token registry — limits blast radius if a tile's token leaks.
 // The global MCP_TOKEN remains for server discovery and renderer IPC.
-const tileTokens = new Map<string, string>()
+const tileTokens = new Map<string, TileTokenRecord>()
+
+function tileTokenKey(workspaceId: string, tileId: string): string {
+  return `${workspaceId}\0${tileId}`
+}
 
 /** Generate a per-tile token for scoped MCP auth. */
-export function generateTileToken(tileId: string): string {
-  const existing = tileTokens.get(tileId)
-  if (existing) return existing
+export function generateTileToken(workspaceId: string, tileId: string): string {
+  const key = tileTokenKey(workspaceId, tileId)
+  const existing = tileTokens.get(key)
+  if (existing) return existing.token
   const token = randomUUID()
-  tileTokens.set(tileId, token)
+  tileTokens.set(key, { workspaceId, tileId, token })
   return token
 }
 
 /** Revoke a tile's MCP token (call on tile deletion). */
-export function revokeTileToken(tileId: string): void {
-  tileTokens.delete(tileId)
+export function revokeTileToken(workspaceId: string, tileId: string): void {
+  tileTokens.delete(tileTokenKey(workspaceId, tileId))
 }
 
 /** Get a tile-specific token, generating one if needed. */
-export function getTileToken(tileId: string): string {
-  return generateTileToken(tileId)
+export function getTileToken(workspaceId: string, tileId: string): string {
+  return generateTileToken(workspaceId, tileId)
 }
 
-// SSE client registry: cardId → response streams
+// SSE client registry: workspace/card scope → response streams.
+// The two wildcard keys preserve the operator-facing global stream while
+// allowing workspace UI surfaces to avoid cross-workspace event delivery.
 const sseClients = new Map<string, Set<ServerResponse>>()
+const GLOBAL_SSE_SCOPE = 'global'
+
+function workspaceSseScopeKey(workspaceId: string): string {
+  return JSON.stringify(['workspace', workspaceId])
+}
+
+function cardSseScopeKey(workspaceId: string, cardId: string): string {
+  return JSON.stringify(['card', workspaceId, cardId])
+}
+
+function isSafeMcpScopeId(value: unknown, label: string): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    assertSafePathSegment(value, label)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function requireMcpPermissionWorkspace(
+  workspaceDir: string | null | undefined,
+  operation: string,
+): string {
+  const scopedWorkspaceDir = String(workspaceDir ?? '').trim()
+  if (!scopedWorkspaceDir) {
+    throw new Error(`${operation} requires an authoritative workspace scope`)
+  }
+  return scopedWorkspaceDir
+}
+
+export function isValidSseEventName(event: unknown): event is string {
+  return typeof event === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(event)
+}
+
+function totalSseClients(): number {
+  let total = 0
+  for (const clients of sseClients.values()) total += clients.size
+  return total
+}
 
 const getContexDir = (): string => CODESURF_HOME
 
@@ -197,6 +258,7 @@ const LOCAL_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         tile_id: { type: 'string', description: 'The block ID whose objective to read' }
       },
       required: ['tile_id']
@@ -221,6 +283,7 @@ const LOCAL_TOOLS: McpToolSchema[] = [
     inputSchema: {
       type: 'object',
       properties: {
+        workspace_id: { type: 'string', description: 'Workspace ID (required for global-token callers)' },
         tile_id: { type: 'string', description: 'The block ID whose context to read' }
       },
       required: ['tile_id']
@@ -229,13 +292,25 @@ const LOCAL_TOOLS: McpToolSchema[] = [
 ]
 
 function getAllTools() {
+  const peerBridgeToolNames = new Set(getPeerBridgeNodeTools().map(tool => tool.name))
   const tools = [
     ...getAllStaticTools(),
     ...LOCAL_TOOLS,
     ...getAllNodeTools().map(tool => ({
       name: tool.name,
       description: tool.description,
-      inputSchema: tool.inputSchema,
+      inputSchema: peerBridgeToolNames.has(tool.name)
+        ? {
+            ...tool.inputSchema,
+            properties: {
+              workspace_id: {
+                type: 'string',
+                description: 'Workspace ID (required for global-token callers; inferred for tile tokens)',
+              },
+              ...tool.inputSchema.properties,
+            },
+          }
+        : tool.inputSchema,
     })),
     ...getExtensionTools().map(tool => ({
       name: tool.name,
@@ -255,8 +330,13 @@ export function getMCPToken(): string {
   return MCP_TOKEN
 }
 
-export function buildContexHttpMcpServerEntry(contexUrl: string, tileId?: string): Record<string, unknown> {
-  const token = tileId ? getTileToken(tileId) : MCP_TOKEN
+export function buildContexHttpMcpServerEntry(
+  contexUrl: string,
+  scope?: { workspaceId: string, tileId: string },
+): Record<string, unknown> {
+  const token = scope
+    ? getTileToken(scope.workspaceId, scope.tileId)
+    : MCP_TOKEN
   return {
     type: 'http',
     url: contexUrl.replace(/\/$/, ''),
@@ -270,38 +350,60 @@ export function buildContexHttpMcpServerEntry(contexUrl: string, tileId?: string
  * of the global `~/.codesurf/mcp-server.json` so plan-010 tile scope guards
  * actually fire (SEC-05).
  */
-export function tileMcpConfigPath(tileId: string): string {
-  return join(getContexDir(), 'tiles', assertSafePathSegment(tileId, 'tileId'), 'mcp-server.json')
+export function tileMcpConfigPath(workspaceId: string, tileId: string): string {
+  return join(
+    getContexDir(),
+    'workspaces',
+    assertSafePathSegment(workspaceId, 'workspaceId'),
+    'tiles',
+    assertSafePathSegment(tileId, 'tileId'),
+    'mcp-server.json',
+  )
 }
 
 /**
  * Write (or refresh) a tile-scoped MCP config. Returns the absolute path, or
  * null when the server is not yet listening / tileId is invalid.
  */
-export async function writeTileMcpConfig(tileId: string): Promise<string | null> {
-  if (!serverPort || !tileId) return null
+export async function writeTileMcpConfig(
+  workspaceId: string,
+  tileId: string,
+): Promise<string | null> {
+  if (!serverPort || !workspaceId || !tileId) return null
+  let safeWorkspaceId: string
   let safeTileId: string
   try {
+    safeWorkspaceId = assertSafePathSegment(workspaceId, 'workspaceId')
     safeTileId = assertSafePathSegment(tileId, 'tileId')
   } catch {
     return null
   }
 
-  const configPath = join(getContexDir(), 'tiles', safeTileId, 'mcp-server.json')
+  const configPath = tileMcpConfigPath(safeWorkspaceId, safeTileId)
   const baseUrl = `http://127.0.0.1:${serverPort}`
   const contexUrl = `${baseUrl}/mcp`
   const config = {
     port: serverPort,
     url: baseUrl,
     // tile token only — not the global MCP_TOKEN
-    token: getTileToken(safeTileId),
+    token: getTileToken(safeWorkspaceId, safeTileId),
+    workspaceId: safeWorkspaceId,
     tileId: safeTileId,
     updatedAt: new Date().toISOString(),
     mcpServers: {
-      codesurf: buildContexHttpMcpServerEntry(contexUrl, safeTileId),
+      codesurf: buildContexHttpMcpServerEntry(contexUrl, {
+        workspaceId: safeWorkspaceId,
+        tileId: safeTileId,
+      }),
     },
   }
-  await fs.mkdir(join(getContexDir(), 'tiles', safeTileId), { recursive: true })
+  await fs.mkdir(join(
+    getContexDir(),
+    'workspaces',
+    safeWorkspaceId,
+    'tiles',
+    safeTileId,
+  ), { recursive: true })
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 })
   await fs.chmod(configPath, 0o600).catch(() => {})
   return configPath
@@ -317,18 +419,100 @@ export function getContexMcpToolNames(): string[] {
   ]))
 }
 
-function pushSSE(cardId: string, event: string, data: unknown): void {
+function writeSseEvent(scopeKey: string, payload: string): void {
+  const clients = sseClients.get(scopeKey)
+  clients?.forEach(res => {
+    try {
+      if (!res.write(payload)) {
+        clients.delete(res)
+        res.end()
+      }
+    } catch {
+      clients.delete(res)
+    }
+  })
+  if (clients?.size === 0) sseClients.delete(scopeKey)
+}
+
+function pushSSE(
+  workspaceId: string,
+  cardId: string,
+  event: string,
+  data: unknown,
+): void {
+  if (!isValidSseEventName(event)) return
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-  sseClients.get(cardId)?.forEach(res => {
-    try { res.write(payload) } catch { /* client disconnected */ }
-  })
-  sseClients.get('global')?.forEach(res => {
-    try { res.write(payload) } catch { /* client disconnected */ }
-  })
+  if (workspaceId && cardId) {
+    writeSseEvent(cardSseScopeKey(workspaceId, cardId), payload)
+  }
+  if (workspaceId) writeSseEvent(workspaceSseScopeKey(workspaceId), payload)
+  writeSseEvent(GLOBAL_SSE_SCOPE, payload)
 }
 
 function sendToRenderer(event: string, data: unknown): void {
   broadcastToRenderer('mcp:kanban', { event, data })
+}
+
+export async function readContextFilesBounded(
+  ctxDir: string,
+  allowedRoot?: string,
+): Promise<string> {
+  if (allowedRoot) {
+    try {
+      const [realRoot, realContext] = await Promise.all([
+        fs.realpath(allowedRoot),
+        fs.realpath(ctxDir),
+      ])
+      if (
+        realContext !== realRoot
+        && !realContext.startsWith(`${realRoot}${sep}`)
+      ) return ''
+    } catch {
+      return ''
+    }
+  }
+  let entries
+  try {
+    entries = await fs.readdir(ctxDir, { withFileTypes: true })
+  } catch {
+    return ''
+  }
+
+  const parts: string[] = []
+  let retainedBytes = 0
+  for (const entry of entries
+    .filter(candidate => !candidate.name.startsWith('.') && candidate.isFile())
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .slice(0, MAX_CONTEXT_FILES)) {
+    const separatorBytes = parts.length > 0 ? 2 : 0
+    const header = `--- ${entry.name} ---\n`
+    const headerBytes = Buffer.byteLength(header, 'utf8')
+    const remaining = MAX_CONTEXT_SOURCE_BYTES
+      - retainedBytes
+      - separatorBytes
+      - headerBytes
+    if (remaining <= 0) break
+
+    let handle
+    try {
+      handle = await fs.open(
+        join(ctxDir, entry.name),
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      )
+      const stat = await handle.stat()
+      if (!stat.isFile()) continue
+      const buffer = Buffer.alloc(Math.min(remaining, Number(stat.size)))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      const content = buffer.subarray(0, bytesRead).toString('utf8')
+      parts.push(`${header}${content}`)
+      retainedBytes += separatorBytes + headerBytes + Buffer.byteLength(content, 'utf8')
+    } catch {
+      // Ignore entries replaced by symlinks or removed during enumeration.
+    } finally {
+      await handle?.close().catch(() => {})
+    }
+  }
+  return parts.join('\n\n')
 }
 
 function buildMcpToolContext(principal: McpPrincipal): McpToolContext {
@@ -341,13 +525,28 @@ function buildMcpToolContext(principal: McpPrincipal): McpToolContext {
 }
 
 export async function executeImageEditTool(
+  workspaceId: string,
   tileId: string,
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
   // Called from ipc/image.ts — a direct main-process call triggered by the
   // renderer UI, not an external MCP client. Treat as fully trusted.
-  return executeImageEditToolImpl(tileId, name, args, buildMcpToolContext({ kind: 'global' }))
+  let safeWorkspaceId: string
+  let safeTileId: string
+  try {
+    safeWorkspaceId = assertSafePathSegment(workspaceId, 'workspaceId')
+    safeTileId = assertSafePathSegment(tileId, 'tileId')
+  } catch {
+    return 'Invalid image workspace or block id'
+  }
+  return executeImageEditToolImpl(
+    safeWorkspaceId,
+    safeTileId,
+    name,
+    args,
+    buildMcpToolContext({ kind: 'global' }),
+  )
 }
 
 async function handleLocalTool(name: string, args: Record<string, unknown>, principal: McpPrincipal): Promise<string | null> {
@@ -363,21 +562,25 @@ async function handleLocalTool(name: string, args: Record<string, unknown>, prin
   }
 
   if (name === 'reload_objective') {
+    const workspaceId = principal.kind === 'tile'
+      ? principal.workspaceId
+      : typeof args.workspace_id === 'string' ? args.workspace_id : ''
     let tileId: string
     try { tileId = assertSafePathSegment(args.tile_id as string, 'tile_id') }
     catch { return 'Invalid tile_id' }
-    const scopeError = assertTileScope(principal, tileId)
+    if (!workspaceId) return 'Missing workspace_id'
+    const scopeError = assertTileScope(principal, workspaceId, tileId)
     if (scopeError) return scopeError
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
-      for (const ws of workspaces) {
-        const objPath = join(ws.path, '.codesurf', tileId, 'objective.md')
-        try {
-          return await fs.readFile(objPath, 'utf8')
-        } catch { /* not in this workspace */ }
-      }
+      const workspace = workspaces.find(candidate => candidate.id === workspaceId)
+      if (!workspace) return 'Workspace not found'
+      const objPath = join(workspace.path, '.codesurf', tileId, 'objective.md')
+      try {
+        return await fs.readFile(objPath, 'utf8')
+      } catch { /* no objective in this workspace */ }
     } catch { /**/ }
-    return `No objective.md found for block ${tileId}`
+    return 'No objective.md found for this block'
   }
 
   if (name === 'pause_task') {
@@ -392,36 +595,70 @@ async function handleLocalTool(name: string, args: Record<string, unknown>, prin
   }
 
   if (name === 'get_context') {
+    const workspaceId = principal.kind === 'tile'
+      ? principal.workspaceId
+      : typeof args.workspace_id === 'string' ? args.workspace_id : ''
     let tileId: string
     try { tileId = assertSafePathSegment(args.tile_id as string, 'tile_id') }
     catch { return 'Invalid tile_id' }
-    const scopeError = assertTileScope(principal, tileId)
+    if (!workspaceId) return 'Missing workspace_id'
+    const scopeError = assertTileScope(principal, workspaceId, tileId)
     if (scopeError) return scopeError
     try {
       const workspaces = await readWorkspaceRefsFromUserConfig()
-      for (const ws of workspaces) {
-        const ctxDir = join(ws.path, '.codesurf', tileId, 'context')
-        try {
-          const entries = await fs.readdir(ctxDir)
-          const parts: string[] = []
-          for (const entry of entries) {
-            if (entry.startsWith('.')) continue
-            try {
-              const content = await fs.readFile(join(ctxDir, entry), 'utf8')
-              parts.push(`--- ${entry} ---\n${content}`)
-            } catch { /**/ }
-          }
-          if (parts.length > 0) return parts.join('\n\n')
-        } catch { /* not in this workspace */ }
-      }
+      const workspace = workspaces.find(candidate => candidate.id === workspaceId)
+      if (!workspace) return 'Workspace not found'
+      const ctxDir = join(workspace.path, '.codesurf', tileId, 'context')
+      const context = await readContextFilesBounded(ctxDir, workspace.path)
+      if (context) return context
     } catch { /**/ }
-    return `No context files found for block ${tileId}`
+    return 'No context files found for this block'
   }
 
   return null
 }
 
+function boundMcpToolResult(result: string): string {
+  if (
+    Buffer.byteLength(result, 'utf8') <= MAX_MCP_RESULT_BYTES
+    && estimateTokenCount(result) <= MAX_MCP_RESULT_ESTIMATED_TOKENS
+  ) return result
+  let previewBytes = Math.max(256, Math.floor(MAX_MCP_RESULT_BYTES / 2))
+  while (previewBytes >= 256) {
+    const preview = truncateUtf8(result, previewBytes, {
+      maxEstimatedTokens: Math.max(
+        64,
+        Math.floor(MAX_MCP_RESULT_ESTIMATED_TOKENS * 0.7),
+      ),
+    })
+    const bounded = JSON.stringify({
+      truncated: true,
+      originalBytes: Buffer.byteLength(result, 'utf8'),
+      originalEstimatedTokens: estimateTokenCount(result),
+      preview,
+    })
+    if (
+      Buffer.byteLength(bounded, 'utf8') <= MAX_MCP_RESULT_BYTES
+      && estimateTokenCount(bounded) <= MAX_MCP_RESULT_ESTIMATED_TOKENS
+    ) return bounded
+    previewBytes = Math.floor(previewBytes / 2)
+  }
+  return JSON.stringify({
+    truncated: true,
+    originalBytes: Buffer.byteLength(result, 'utf8'),
+    originalEstimatedTokens: estimateTokenCount(result),
+  })
+}
+
 async function handleTool(name: string, args: Record<string, unknown>, principal: McpPrincipal): Promise<string> {
+  return boundMcpToolResult(await handleToolUnbounded(name, args, principal))
+}
+
+async function handleToolUnbounded(
+  name: string,
+  args: Record<string, unknown>,
+  principal: McpPrincipal,
+): Promise<string> {
   const ctx = buildMcpToolContext(principal)
   const dispatched = await dispatchTool(name, args, ctx)
   if (dispatched !== null) return dispatched
@@ -560,14 +797,28 @@ export function stopMCPServer(): Promise<void> {
   return new Promise(resolve => {
     const server = mcpHttpServer
     if (!server) {
+      sseClients.clear()
       resolve()
       return
     }
-    server.close(() => {
-      mcpHttpServer = null
-      serverPort = null
-      resolve()
-    })
+    mcpHttpServer = null
+    serverPort = null
+
+    // Long-lived SSE responses and keep-alive sockets otherwise keep the
+    // Electron main process alive after app.quit has already emitted.
+    for (const responses of sseClients.values()) {
+      for (const response of responses) {
+        try {
+          response.end()
+        } catch {
+          response.destroy()
+        }
+      }
+    }
+    sseClients.clear()
+
+    server.close(() => resolve())
+    server.closeAllConnections?.()
   })
 }
 
@@ -613,13 +864,47 @@ export async function startMCPServer(): Promise<number> {
       // SSE: GET /events?card_id=xxx  — agent streams status to canvas
       if (isEvents) {
         const cardId = url.searchParams.get('card_id') ?? 'global'
+        const requestedWorkspaceId = url.searchParams.get('workspace_id')
+        const workspaceId = principal.kind === 'tile'
+          ? principal.workspaceId
+          : requestedWorkspaceId
+        if (
+          (workspaceId && !isSafeMcpScopeId(workspaceId, 'workspace_id'))
+          || (cardId !== 'global' && !isSafeMcpScopeId(cardId, 'card_id'))
+        ) {
+          setCorsHeaders(res, req)
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Invalid event stream scope' }))
+          return
+        }
         // A tile-scoped token may only subscribe to its own card's stream;
         // 'global'/absent card subscriptions require the global token.
-        const scopeError = assertTileScope(principal, cardId)
+        const scopeError = assertTileScope(
+          principal,
+          requestedWorkspaceId ?? workspaceId,
+          cardId,
+        )
         if (scopeError) {
           setCorsHeaders(res, req)
           res.writeHead(403, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: scopeError }))
+          return
+        }
+        if (cardId !== 'global' && !workspaceId) {
+          setCorsHeaders(res, req)
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Missing workspace_id' }))
+          return
+        }
+        const clientScopeKey = cardId === 'global'
+          ? workspaceId
+            ? workspaceSseScopeKey(workspaceId)
+            : GLOBAL_SSE_SCOPE
+          : cardSseScopeKey(workspaceId!, cardId)
+        if (totalSseClients() >= MAX_SSE_CLIENTS) {
+          setCorsHeaders(res, req)
+          res.writeHead(429, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Too many event stream clients' }))
           return
         }
         setCorsHeaders(res, req)
@@ -630,20 +915,27 @@ export async function startMCPServer(): Promise<number> {
         })
         res.write(':connected\n\n')
 
-        if (!sseClients.has(cardId)) sseClients.set(cardId, new Set())
-        sseClients.get(cardId)!.add(res)
+        if (!sseClients.has(clientScopeKey)) sseClients.set(clientScopeKey, new Set())
+        sseClients.get(clientScopeKey)!.add(res)
 
         // Keepalive ping every 15s
         const ping = setInterval(() => {
-          try { res.write(':ping\n\n') } catch { clearInterval(ping) }
+          try {
+            if (!res.write(':ping\n\n')) {
+              clearInterval(ping)
+              res.end()
+            }
+          } catch {
+            clearInterval(ping)
+          }
         }, 15000)
 
         req.on('close', () => {
           clearInterval(ping)
-          const set = sseClients.get(cardId)
+          const set = sseClients.get(clientScopeKey)
           if (set) {
             set.delete(res)
-            if (set.size === 0) sseClients.delete(cardId)
+            if (set.size === 0) sseClients.delete(clientScopeKey)
           }
         })
         return
@@ -666,16 +958,57 @@ export async function startMCPServer(): Promise<number> {
         })
         req.on('end', () => {
           try {
-            const { card_id, event, data } = JSON.parse(body)
-            const scopeError = assertTileScope(principal, card_id)
+            const { workspace_id, card_id, event, data } = JSON.parse(body)
+            if (!isValidSseEventName(event)) {
+              setCorsHeaders(res, req)
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Invalid event name' }))
+              return
+            }
+            if (
+              (workspace_id !== undefined
+                && !isSafeMcpScopeId(workspace_id, 'workspace_id'))
+              || (card_id !== 'global'
+                && !isSafeMcpScopeId(card_id, 'card_id'))
+            ) {
+              setCorsHeaders(res, req)
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Invalid push scope' }))
+              return
+            }
+            const workspaceId = principal.kind === 'tile'
+              ? principal.workspaceId
+              : workspace_id
+            const scopeError = assertTileScope(
+              principal,
+              workspace_id ?? workspaceId,
+              card_id,
+            )
             if (scopeError) {
               setCorsHeaders(res, req)
               res.writeHead(403, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: scopeError }))
               return
             }
-            pushSSE(card_id, event, data)
-            sendToRenderer(event, { cardId: card_id, ...data })
+            if (card_id !== 'global' && !workspaceId) {
+              setCorsHeaders(res, req)
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Missing workspace_id' }))
+              return
+            }
+            const eventData = data && typeof data === 'object' && !Array.isArray(data)
+              ? data as Record<string, unknown>
+              : {}
+            pushSSE(String(workspaceId ?? ''), String(card_id ?? ''), event, {
+              ...eventData,
+              workspaceId: workspaceId ?? null,
+              cardId: card_id,
+            })
+            sendToRenderer(event, {
+              ...eventData,
+              workspaceId: workspaceId ?? null,
+              cardId: card_id,
+            })
             setCorsHeaders(res, req)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end('{"ok":true}')
@@ -704,22 +1037,62 @@ export async function startMCPServer(): Promise<number> {
         })
         req.on('end', async () => {
           try {
-            const { card_id, message, append_newline = true } = JSON.parse(body)
-            const scopeError = assertTileScope(principal, card_id)
+            const {
+              workspace_id,
+              card_id,
+              message,
+              append_newline = true,
+            } = JSON.parse(body)
+            if (
+              (workspace_id !== undefined
+                && !isSafeMcpScopeId(workspace_id, 'workspace_id'))
+              || !isSafeMcpScopeId(card_id, 'card_id')
+            ) {
+              setCorsHeaders(res, req)
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Invalid inject scope' }))
+              return
+            }
+            const workspaceId = principal.kind === 'tile'
+              ? principal.workspaceId
+              : workspace_id
+            const scopeError = assertTileScope(
+              principal,
+              workspace_id ?? workspaceId,
+              card_id,
+            )
             if (scopeError) {
               setCorsHeaders(res, req)
               res.writeHead(403, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: scopeError }))
               return
             }
+            if (!workspaceId) {
+              setCorsHeaders(res, req)
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'Missing workspace_id' }))
+              return
+            }
             // /inject writes into a live terminal — the same capability class
             // as terminal_send_input, so gate it behind the same permission
             // prompt instead of leaving it as an ungated bypass route.
-            const workspaceDir = await resolveTileWorkspaceDir(String(card_id ?? ''))
+            const workspaceDir = await resolveTileWorkspaceDir(
+              String(card_id ?? ''),
+              typeof workspaceId === 'string' ? workspaceId : undefined,
+            )
+            let permissionWorkspace: string
+            try {
+              permissionWorkspace = requireMcpPermissionWorkspace(workspaceDir, '/inject')
+            } catch (error) {
+              setCorsHeaders(res, req)
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: (error as Error).message }))
+              return
+            }
             const allowed = await requestToolPermission({
               provider: 'mcp',
               toolName: 'terminal_send_input',
-              workspaceDir: workspaceDir ?? undefined,
+              workspaceDir: permissionWorkspace,
               title: 'Terminal input via /inject',
               description: `An MCP agent wants to write into terminal tile "${card_id}" via /inject:\n${String(message ?? '').slice(0, 200)}${String(message ?? '').length > 200 ? '...' : ''}`,
             }, /* interactive */ true)
@@ -730,9 +1103,18 @@ export async function startMCPServer(): Promise<number> {
               return
             }
             // Tell renderer to write to the terminal
-            broadcastToRenderer('mcp:inject', { cardId: card_id, message, appendNewline: append_newline })
+            broadcastToRenderer('mcp:inject', {
+              workspaceId,
+              cardId: card_id,
+              message,
+              appendNewline: append_newline,
+            })
             // Also push SSE so other agents/subscribers know
-            pushSSE(card_id, 'canvas_message', { message })
+            pushSSE(workspaceId, card_id, 'canvas_message', {
+              workspaceId,
+              cardId: card_id,
+              message,
+            })
             setCorsHeaders(res, req)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end('{"ok":true}')
@@ -773,6 +1155,7 @@ export async function startMCPServer(): Promise<number> {
           })
           res.end(JSON.stringify(response))
         } catch (e) {
+          mcpLog.debug('MCP request failed', e)
           setCorsHeaders(res, req)
           res.writeHead(400); res.end()
         }
@@ -806,16 +1189,25 @@ export async function startMCPServer(): Promise<number> {
         ? existingConfig.mcpServers as Record<string, unknown>
         : {}
       const normalizedServers = normalizeMcpServers(existingServers, contexUrl)
-      normalizedServers['codesurf'] = {
-        ...(normalizeMcpServer(existingConfig.mcpServers && typeof existingConfig.mcpServers === 'object' ? (existingConfig.mcpServers as Record<string, unknown>)['codesurf'] : undefined, contexUrl) as Record<string, unknown>),
-        ...buildContexHttpMcpServerEntry(contexUrl),
+      // The global principal is trusted UI state, not an agent credential.
+      // Persist discovery metadata only; scoped agent configs are written
+      // separately by writeTileMcpConfig.
+      normalizedServers['codesurf'] = { type: 'http', url: contexUrl }
+      if (
+        normalizedServers.contex
+        && /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/mcp\/?$/.test(
+          String(normalizedServers.contex.url ?? ''),
+        )
+      ) {
+        delete normalizedServers.contex
       }
+      const persistedConfig = { ...existingConfig }
+      delete persistedConfig.token
 
       const mcpConfig = {
-        ...(existingConfig ?? {}),
+        ...persistedConfig,
         port: serverPort,
         url: baseUrl,
-        token: MCP_TOKEN,
         updatedAt: new Date().toISOString(),
         mcpServers: normalizedServers,
         tools: getAllTools().map(t => ({ name: t.name, description: t.description })),
@@ -826,14 +1218,13 @@ export async function startMCPServer(): Promise<number> {
           inject: `${baseUrl}/inject`
         }
       }
-      // 0o600: this file holds the server port and bearer token; keep it
-      // readable only by the owning user (matches secrets.json). chmod covers
-      // files that already existed at the default 0o644.
+      // Keep user-supplied server settings private even though CodeSurf's
+      // global bearer is deliberately never persisted here.
       await fs.writeFile(configPath, JSON.stringify(mcpConfig, null, 2), { mode: 0o600 })
       await fs.chmod(configPath, 0o600).catch(() => {})
 
-      // Write .mcp.json to all known workspace directories so Claude Code
-      // sessions in terminal tiles auto-discover the codesurf MCP server
+      // Scrub legacy workspace-global CodeSurf credentials. Terminal/chat
+      // agents receive workspace/tile configs directly.
       try {
         const workspaceRefs = await readWorkspaceRefsFromUserConfig()
         for (const ws of workspaceRefs) {
@@ -854,53 +1245,44 @@ export function getMCPPort(): number | null {
 }
 
 /**
- * Write a .mcp.json to a workspace directory so Claude Code sessions
- * in terminal tiles auto-discover the codesurf MCP server.
- * Also adds tool permissions so MCP tools don't need manual approval.
+ * Remove a legacy workspace-global CodeSurf server entry while preserving
+ * user-owned MCP servers and collaboration instructions. Agent processes get
+ * only workspace/tile-scoped credentials through writeTileMcpConfig.
  */
 export async function writeMCPConfigToWorkspace(workspacePath: string): Promise<void> {
-  if (!serverPort) return
-
-  // Ensure .mcp.json (which embeds the bearer token) is gitignored BEFORE we
-  // write it. If the gitignore append fails we bail out: a leaked token in a
-  // committed .mcp.json is worse than missing auto-discovery (L3).
-  const { ensureWorkspaceSecretsGitignored } = await import('./security/workspaceSecrets.ts')
-  try {
-    await ensureWorkspaceSecretsGitignored(workspacePath)
-  } catch (err) {
-    console.warn(`[MCP] Skipping .mcp.json write to ${workspacePath}: could not update .gitignore — ${(err as Error).message}`)
-    return
-  }
-
   const mcpJsonPath = join(workspacePath, '.mcp.json')
-  const contexUrl = `http://127.0.0.1:${serverPort}/mcp`
-
-  // Read existing .mcp.json to preserve user-added servers
-  let existing: Record<string, unknown> = {}
+  let existing: Record<string, unknown> | null = null
   try {
     const raw = await fs.readFile(mcpJsonPath, 'utf8')
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object') existing = parsed as Record<string, unknown>
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.warn('[mcp] Failed to read existing .mcp.json for merge:', err)
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') console.warn('[mcp] Failed to inspect existing .mcp.json:', err)
+  }
+
+  if (existing) {
+    const existingServers = typeof existing.mcpServers === 'object' && existing.mcpServers !== null
+      ? { ...existing.mcpServers as Record<string, unknown> }
+      : {}
+    let changed = false
+    for (const name of ['codesurf', 'contex']) {
+      const managed = existingServers[name]
+      const managedUrl = managed && typeof managed === 'object'
+        ? String((managed as Record<string, unknown>).url ?? '')
+        : ''
+      if (!/^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/mcp\/?$/.test(managedUrl)) continue
+      delete existingServers[name]
+      changed = true
+    }
+    if (changed) {
+      await fs.writeFile(mcpJsonPath, JSON.stringify({
+        ...existing,
+        mcpServers: existingServers,
+      }, null, 2), { mode: 0o600 })
+      await fs.chmod(mcpJsonPath, 0o600).catch(() => {})
+      mcpLog.info(`Removed legacy global CodeSurf credential from ${mcpJsonPath}`)
     }
   }
-
-  const existingServers = typeof existing.mcpServers === 'object' && existing.mcpServers !== null
-    ? existing.mcpServers as Record<string, unknown>
-    : {}
-
-  existingServers['codesurf'] = buildContexHttpMcpServerEntry(contexUrl)
-
-  const config = {
-    ...existing,
-    mcpServers: existingServers,
-  }
-
-  await fs.writeFile(mcpJsonPath, JSON.stringify(config, null, 2), { mode: 0o600 })
-  await fs.chmod(mcpJsonPath, 0o600).catch(() => {})
-  mcpLog.info(`Wrote .mcp.json to ${workspacePath}`)
 
   // Write .claude/CLAUDE.md with peer collaboration instructions
   // Claude Code reads this automatically on every session
@@ -972,7 +1354,7 @@ Your block ID is the environment variable \`CARD_ID\`. Wires on the canvas put y
 3. mcp__codesurf__room_consume(tile_id=$CARD_ID)   # if unconsumed > 0
 \`\`\`
 
-Also read \`~/.codesurf/room-inboxes/$CARD_ID/ROOM.md\` for a live inbox dump.
+Also read \`~/.codesurf/workspaces/$CODESURF_WORKSPACE_ID/agent-rooms/inboxes/$CARD_ID/ROOM.md\` for a live inbox dump.
 
 ## Agent Room Protocol
 

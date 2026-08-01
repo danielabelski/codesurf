@@ -1,26 +1,27 @@
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline/promises'
 import { stdin, stdout, stderr } from 'node:process'
-import { dirname, join, resolve } from 'node:path'
+import { realpath, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   createDaemonClient,
   type DaemonClient,
-} from './client.ts'
+} from './client.js'
 import {
   createDaemonManager,
   resolveDaemonScriptFromCandidates,
-} from './manager.ts'
+} from './manager.js'
 import {
   DAEMON_PACKAGE_VERSION,
   defaultCodesurfHome,
-} from './paths.ts'
+} from './paths.js'
 import type {
   DaemonChatJobEvent,
   DaemonChatJobRequest,
   DaemonChatJobState,
   DaemonPersona,
   DaemonToolPermissionDecision,
-} from './types.ts'
+} from './types.js'
 import {
   clearChatCliSession,
   readChatCliSession,
@@ -28,11 +29,11 @@ import {
   upsertChatCliSession,
   type ChatCliSession,
   type ChatCliSessionIdentity,
-} from './chat-session-store.ts'
+} from './chat-session-store.js'
 import {
   resolvePersonaModelSeed,
   type PersonaModelSeed,
-} from './persona-model-binding.ts'
+} from './persona-model-binding.js'
 
 interface ChatCliRunOptions {
   appDir?: string
@@ -66,6 +67,7 @@ interface ChatRunContext {
   client: DaemonClient
   homeDir: string
   args: ResolvedChatArgs
+  workspaceId: string
   readline: ReadlineInterface | null
   currentJobId: string | null
   currentAbortController: AbortController | null
@@ -308,13 +310,17 @@ export function buildStartRequest(params: {
   args: ResolvedChatArgs
   prior: ChatCliSession | null
   message: string
+  workspaceId: string
 }): DaemonChatJobRequest {
   const { args, prior, message } = params
+  const workspaceId = String(params.workspaceId ?? '').trim()
+  if (!workspaceId) throw new Error('A registered workspace is required to start chat')
   const request: DaemonChatJobRequest = {
     provider: args.provider,
     model: args.model,
     mode: args.mode,
     runMode: 'foreground',
+    workspaceId,
     workspaceDir: args.workspaceDir,
     sessionId: prior?.sessionId ?? null,
     messages: [{ role: 'user', content: message }],
@@ -600,7 +606,12 @@ async function startTurn(ctx: ChatRunContext, message: string): Promise<ChatCliS
   }
 
   const prior = ctx.args.resume ? readChatCliSession(ctx.homeDir, identityFor(ctx.args)) : null
-  const request = buildStartRequest({ args: ctx.args, prior, message: trimmed })
+  const request = buildStartRequest({
+    args: ctx.args,
+    prior,
+    message: trimmed,
+    workspaceId: ctx.workspaceId,
+  })
 
   const job = await ctx.client.startChatJob(request)
   const session = upsertChatCliSession(ctx.homeDir, {
@@ -707,6 +718,34 @@ async function fetchPersonaModelSeed(
   }
 }
 
+async function canonicalDirectory(path: string): Promise<string> {
+  const canonical = await realpath(path)
+  if (!(await stat(canonical)).isDirectory()) {
+    throw new Error(`Chat workspace is not a directory: ${path}`)
+  }
+  return canonical
+}
+
+async function resolveRegisteredChatWorkspace(client: DaemonClient, workspaceDir: string): Promise<string> {
+  const canonicalRoot = await canonicalDirectory(workspaceDir)
+  const workspaces = await client.listWorkspaces()
+  for (const workspace of workspaces) {
+    try {
+      if (await canonicalDirectory(workspace.path) === canonicalRoot) return workspace.id
+    } catch {
+      // Ignore stale registry entries and continue to an exact usable root.
+    }
+  }
+  const created = await client.createWorkspaceWithPath(
+    basename(canonicalRoot) || 'Workspace',
+    canonicalRoot,
+  )
+  if (!created?.id || await canonicalDirectory(created.path) !== canonicalRoot) {
+    throw new Error('The daemon did not register the requested chat workspace')
+  }
+  return created.id
+}
+
 async function interactiveLoop(ctx: ChatRunContext): Promise<void> {
   if (!ctx.readline) return
   const personaLabel = ctx.args.agentId ? ` [persona: ${ctx.args.agentId}]` : ''
@@ -748,6 +787,7 @@ export async function runCodesurfChatCli(argv: string[], options: ChatCliRunOpti
     : null
 
   const args = resolveChatArgs(parsed, homeDir, personaSeed)
+  const workspaceId = await resolveRegisteredChatWorkspace(client, args.workspaceDir)
   if (args.newSession) clearChatCliSession(homeDir, identityFor(args))
   const readline = isTTY() && !args.message
     ? createInterface({ input: stdin, output: stdout })
@@ -756,6 +796,7 @@ export async function runCodesurfChatCli(argv: string[], options: ChatCliRunOpti
     client,
     homeDir,
     args,
+    workspaceId,
     readline,
     currentJobId: null,
     currentAbortController: null,

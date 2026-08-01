@@ -20,7 +20,8 @@ const hostUrl = process.env.CODESURF_WEB_HOST_URL || 'http://127.0.0.1:4177'
 const hostHealth = `${hostUrl.replace(/\/$/, '')}/host/health`
 const hostToken = process.env.CODESURF_WEB_HOST_TOKEN || randomBytes(32).toString('base64url')
 const usingExternalTerminal = Boolean(process.env.CODESURF_TERMINAL_ENDPOINT?.trim())
-const terminalUrl = process.env.CODESURF_TERMINAL_ENDPOINT?.trim() || 'http://127.0.0.1:4178'
+const previewTerminalPort = process.env.CODESURF_WEB_PREVIEW_TERMINAL_PORT || '4178'
+const terminalUrl = process.env.CODESURF_TERMINAL_ENDPOINT?.trim() || `http://127.0.0.1:${previewTerminalPort}`
 const terminalHealth = `${terminalUrl.replace(/\/$/, '')}/healthz`
 const terminalToken = process.env.CODESURF_TERMINAL_TOKEN || randomBytes(32).toString('base64url')
 const terminalGatewayScript = path.join(root, 'packages', 'codesurf-terminal-gateway', 'bin', 'codesurf-terminal-gateway.mjs')
@@ -98,7 +99,7 @@ async function ensureTerminalGateway() {
     fatal: true,
     env: {
       CODESURF_TERMINAL_GATEWAY_BIND: '127.0.0.1',
-      CODESURF_TERMINAL_GATEWAY_PORT: '4178',
+      CODESURF_TERMINAL_GATEWAY_PORT: previewTerminalPort,
       CODESURF_TERMINAL_TOKEN: terminalToken,
       CODESURF_TERMINAL_TENANTS_JSON: tenants,
       CODESURF_TERMINAL_ALLOWED_ORIGINS: `http://127.0.0.1:${previewPort},http://localhost:${previewPort}`,

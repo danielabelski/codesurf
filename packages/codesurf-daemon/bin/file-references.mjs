@@ -1,94 +1,373 @@
 import { promises as fs } from 'node:fs'
 import { resolve, relative, sep } from 'node:path'
+import {
+  CAPABILITY_PATTERN,
+  commitAttachmentCapabilityReservation,
+  getReservedAttachmentCapability,
+  MAX_PER_ISSUE,
+  reserveAttachmentCapabilities,
+  rollbackAttachmentCapabilityReservation,
+  sanitizeAttachmentDisplayName,
+} from './attachment-capabilities.mjs'
+import { openNoFollowFile, readHandlePrefix } from './secure-file-reader.mjs'
 
 const ATTACHMENT_MARKER = 'Attached file paths:'
-const DEFAULT_MAX_REFERENCES = 6
+export const ATTACHMENT_CAPABILITY_MARKER = 'Attached file capabilities:'
+const DEFAULT_MAX_REFERENCES = MAX_PER_ISSUE
 const DEFAULT_MAX_BYTES_PER_FILE = 16 * 1024
+const INTERNAL_CONTEXT_TAGS = [
+  {
+    open: '<codesurf_peer_context trust="untrusted" source="agent-room">',
+    close: '</codesurf_peer_context>',
+  },
+  {
+    open: '<codesurf_file_context trust="untrusted" source="workspace-files">',
+    close: '</codesurf_file_context>',
+  },
+  {
+    open: '<codesurf_recent_edit_context trust="untrusted" source="renderer-derived-file-state">',
+    close: '</codesurf_recent_edit_context>',
+  },
+  {
+    open: '<codesurf_block_notes_context trust="untrusted" source="renderer-derived-transcript">',
+    close: '</codesurf_block_notes_context>',
+  },
+]
+
+function normalizeWorkspaceId(value) {
+  const id = String(value ?? '').trim()
+  if (!id || !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(id) || id.includes('..')) {
+    return null
+  }
+  return id
+}
+
+function normalizeSupportedImageMediaTypes(value) {
+  if (value === undefined || value === null) return null
+  if (!Array.isArray(value)) throw new Error('supportedImageMediaTypes must be an array')
+  return new Set(value
+    .filter(item => typeof item === 'string')
+    .map(item => item.trim().toLowerCase())
+    .filter(item => /^image\/[a-z0-9.+-]+$/.test(item)))
+}
+
+async function reserveCapabilityReferences(references, workspaceId, cardId, supportedImages) {
+  const capabilityReferences = references.filter(reference => reference.source === 'capability')
+  if (capabilityReferences.length === 0) return null
+  const reservation = await reserveAttachmentCapabilities({
+    capabilities: capabilityReferences.map(reference => reference.capability),
+    workspaceId,
+    cardId,
+    sampleBytes: DEFAULT_MAX_BYTES_PER_FILE,
+  })
+  try {
+    for (const record of reservation.preflight) {
+      const mediaType = guessMediaType(record.resolvedPath)
+      const binary = record.binarySample || isKnownBinaryMediaType(mediaType)
+      if (
+        supportedImages
+        && binary
+        && (!mediaType.startsWith('image/') || !supportedImages.has(mediaType))
+      ) {
+        throw new Error(`Binary attachment type ${mediaType} is not supported by this provider or execution target`)
+      }
+    }
+    return reservation
+  } catch (error) {
+    await rollbackAttachmentCapabilityReservation(reservation)
+    throw error
+  }
+}
+
+function normalizeAttachmentSelections(value) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) throw new Error('attachmentSelections must be an array')
+  if (value.length > DEFAULT_MAX_REFERENCES) {
+    throw new Error(`attachmentSelections may contain at most ${DEFAULT_MAX_REFERENCES} values`)
+  }
+  const receipts = value.map(item => String(
+    typeof item === 'string' ? item : item?.selectionReceipt,
+  ).trim())
+  if (receipts.some(receipt => !receipt)) {
+    throw new Error('Each attachment selection must include a selectionReceipt')
+  }
+  if (new Set(receipts).size !== receipts.length) {
+    throw new Error('Attachment selection receipts must not contain duplicates')
+  }
+  return receipts
+}
+
+async function reserveSelectionReferences({
+  attachmentSelections,
+  attachmentSelectionRegistry,
+  workspaceId,
+  cardId,
+  supportedImages,
+}) {
+  const selectionReceipts = normalizeAttachmentSelections(attachmentSelections)
+  if (selectionReceipts.length === 0) return null
+  if (!attachmentSelectionRegistry) {
+    throw new Error('Attachment selection service is unavailable')
+  }
+  const reservation = await attachmentSelectionRegistry.reserve({
+    workspaceId,
+    cardId,
+    selectionReceipts,
+  })
+  try {
+    const references = []
+    for (const [activationCapability, activation] of reservation.activations) {
+      const mediaType = guessMediaType(activation.record.resolvedPath)
+      const sample = await readHandlePrefix(
+        activation.handle,
+        activation.stat.size,
+        DEFAULT_MAX_BYTES_PER_FILE,
+        true,
+      )
+      const binary = sample.includes(0) || isKnownBinaryMediaType(mediaType)
+      if (
+        supportedImages
+        && binary
+        && (!mediaType.startsWith('image/') || !supportedImages.has(mediaType))
+      ) {
+        throw new Error(`Binary attachment type ${mediaType} is not supported by this provider or execution target`)
+      }
+      references.push({
+        source: 'selection',
+        activationCapability,
+        start: Number.MAX_SAFE_INTEGER,
+        end: Number.MAX_SAFE_INTEGER,
+      })
+    }
+    return { reservation, references }
+  } catch (error) {
+    await attachmentSelectionRegistry.rollback(reservation)
+    throw error
+  }
+}
 
 export async function expandFileReferences({
   message,
+  workspaceId,
+  cardId,
   workspaceDir,
   executionTarget = 'local',
   maxReferences = DEFAULT_MAX_REFERENCES,
   maxBytesPerFile = DEFAULT_MAX_BYTES_PER_FILE,
+  supportedImageMediaTypes,
+  attachmentSelections,
+  attachmentSelectionRegistry,
 } = {}) {
   const normalizedWorkspaceDir = normalizeWorkspaceDir(workspaceDir)
+  const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId)
+  const normalizedCardId = normalizeWorkspaceId(cardId)
   const normalizedMessage = normalizeMessageText(message)
 
-  if (!normalizedWorkspaceDir || !normalizedMessage) {
+  const normalizedSelections = normalizeAttachmentSelections(attachmentSelections)
+  if (!normalizedWorkspaceDir || (!normalizedMessage && normalizedSelections.length === 0)) {
     return {
       changed: false,
       message: normalizedMessage,
+      bodyText: normalizedMessage,
+      contextText: undefined,
       references: [],
       summaryText: undefined,
       inputText: undefined,
     }
   }
 
-  const parsed = parseReferenceMentions(normalizedMessage)
-  if (parsed.references.length === 0) {
+  // Host-appended room/file context is model-visible user data, not part of
+  // the user's file-reference expression. Protect it before scanning so a
+  // peer message such as `please inspect @secret.txt` cannot make the daemon
+  // read and inline an unrelated workspace file on the next chat turn.
+  const protectedContext = splitTrailingInternalContext(normalizedMessage)
+  const parsed = parseReferenceMentions(protectedContext.bodyText)
+  const bodyText = appendInternalContext(parsed.bodyText, protectedContext.suffixText)
+  if (parsed.hadAttachmentCapabilities && normalizedSelections.length > 0) {
+    throw new Error('Legacy attachment capabilities cannot be combined with structured attachment selections')
+  }
+  if (parsed.references.length === 0 && normalizedSelections.length === 0) {
     return {
       changed: false,
       message: normalizedMessage,
+      bodyText: normalizedMessage,
+      contextText: undefined,
       references: [],
       summaryText: undefined,
       inputText: undefined,
     }
+  }
+
+  if (parsed.references.length + normalizedSelections.length > maxReferences) {
+    throw new Error(`A message may contain at most ${maxReferences} combined file references and attachments`)
   }
 
   const resolvedWorkspaceDir = await fs.realpath(normalizedWorkspaceDir)
-  const collected = []
-  const seenPaths = new Set()
+  const supportedImages = normalizeSupportedImageMediaTypes(supportedImageMediaTypes)
+  const reservation = await reserveCapabilityReferences(
+    parsed.references,
+    normalizedWorkspaceId,
+    normalizedCardId,
+    supportedImages,
+  )
+  const selection = await reserveSelectionReferences({
+    attachmentSelections: normalizedSelections,
+    attachmentSelectionRegistry,
+    workspaceId: normalizedWorkspaceId,
+    cardId: normalizedCardId,
+    supportedImages,
+  }).catch(async error => {
+    if (reservation) await rollbackAttachmentCapabilityReservation(reservation)
+    throw error
+  })
+  const allReferences = selection
+    ? [...parsed.references, ...selection.references]
+    : parsed.references
+  let capabilityCommitted = false
+  let selectionCommitted = false
+  try {
+    const collected = []
+    const seenPaths = new Set()
 
-  for (const reference of parsed.references) {
-    if (collected.length >= maxReferences) break
-    const loaded = await loadWorkspaceReference(reference, resolvedWorkspaceDir, maxBytesPerFile)
-    if (!loaded) continue
-    if (seenPaths.has(loaded.resolvedPath)) continue
-    seenPaths.add(loaded.resolvedPath)
-    collected.push(loaded)
-  }
+    for (const reference of allReferences) {
+      if (collected.length >= maxReferences) break
+      const loaded = await loadWorkspaceReference(
+        reference,
+        resolvedWorkspaceDir,
+        maxBytesPerFile,
+        supportedImages,
+        reservation,
+        selection?.reservation,
+        attachmentSelectionRegistry,
+      )
+      if (!loaded) continue
+      if (seenPaths.has(loaded.resolvedPath)) continue
+      seenPaths.add(loaded.resolvedPath)
+      collected.push(loaded)
+    }
 
-  if (collected.length === 0) {
-    if (parsed.hadAttachmentPaths && parsed.bodyText !== normalizedMessage) {
-      return {
-        changed: true,
-        message: parsed.bodyText,
-        references: [],
-        summaryText: undefined,
-        inputText: undefined,
+    let result
+    if (collected.length === 0) {
+      result = (parsed.hadAttachmentCapabilities || normalizedSelections.length > 0)
+        ? {
+            changed: true,
+            message: bodyText,
+            bodyText,
+            contextText: undefined,
+            references: [],
+            summaryText: undefined,
+            inputText: undefined,
+          }
+        : {
+            changed: false,
+            message: normalizedMessage,
+            bodyText: normalizedMessage,
+            contextText: undefined,
+            references: [],
+            summaryText: undefined,
+            inputText: undefined,
+          }
+    } else {
+      const contextText = buildFileReferenceContext({
+        executionTarget,
+        references: collected,
+      })
+      const messageText = [bodyText.trim(), contextText].filter(Boolean).join('\n\n').trim()
+      result = {
+        changed: messageText !== normalizedMessage,
+        message: messageText,
+        bodyText,
+        contextText,
+        references: collected.map(reference => ({
+          source: reference.source,
+          capability: reference.capability,
+          displayPath: reference.displayPath,
+          byteCount: reference.byteCount,
+          truncated: reference.truncated,
+          binary: Boolean(reference.binary),
+          mediaType: reference.mediaType,
+          resolvedPath: reference.resolvedPath,
+          device: reference.device,
+          inode: reference.inode,
+          mtimeMs: reference.mtimeMs,
+          ctimeMs: reference.ctimeMs,
+          ownedTemporary: reference.ownedTemporary === true,
+        })),
+        ownedTemporaryAttachments: collected
+          .filter(reference => reference.binary && reference.ownedTemporary)
+          .map(reference => ({
+            ...(reference.hostCleanupToken
+              ? { hostCleanupToken: reference.hostCleanupToken }
+              : { capability: reference.legacyCapability }),
+            path: reference.resolvedPath,
+            mediaType: reference.mediaType,
+            displayPath: reference.displayPath,
+            byteCount: reference.byteCount,
+            device: reference.device,
+            inode: reference.inode,
+            mtimeMs: reference.mtimeMs,
+            ctimeMs: reference.ctimeMs,
+            ownedTemporary: true,
+          })),
+        summaryText: buildSummaryText(collected),
+        inputText: buildInputText(collected),
       }
     }
-    return {
-      changed: false,
-      message: normalizedMessage,
-      references: [],
-      summaryText: undefined,
-      inputText: undefined,
+
+    if (reservation) {
+      await commitAttachmentCapabilityReservation(reservation, {
+        deferOwnedCapabilities: collected
+          .filter(reference => reference.binary && reference.ownedTemporary && reference.legacyCapability)
+          .map(reference => reference.legacyCapability),
+      })
+      capabilityCommitted = true
+    }
+    if (selection) {
+      await attachmentSelectionRegistry.commit(selection.reservation, {
+        deferOwnedActivationCapabilities: collected
+          .filter(reference => reference.binary && reference.ownedTemporary && reference.activationCapability)
+          .map(reference => reference.activationCapability),
+      })
+      selectionCommitted = true
+    }
+    return result
+  } finally {
+    if (reservation && !capabilityCommitted) {
+      await rollbackAttachmentCapabilityReservation(reservation)
+    }
+    if (selection && !selectionCommitted) {
+      await attachmentSelectionRegistry.rollback(selection.reservation)
     }
   }
+}
 
-  const messageText = buildExpandedMessage({
-    bodyText: parsed.bodyText,
-    executionTarget,
-    references: collected,
-  })
+function splitTrailingInternalContext(message) {
+  let bodyText = message
+  const suffixes = []
+
+  while (bodyText) {
+    let match = null
+    for (const tag of INTERNAL_CONTEXT_TAGS) {
+      const marker = `\n\n${tag.open}\n`
+      const close = `\n${tag.close}`
+      if (!bodyText.endsWith(close)) continue
+      const start = bodyText.lastIndexOf(marker)
+      if (start < 0) continue
+      if (!match || start > match.start) match = { ...tag, marker, start }
+    }
+    if (!match) break
+    suffixes.unshift(bodyText.slice(match.start + 2))
+    bodyText = bodyText.slice(0, match.start).trimEnd()
+  }
 
   return {
-    changed: messageText !== normalizedMessage,
-    message: messageText,
-    references: collected.map(reference => ({
-      source: reference.source,
-      displayPath: reference.displayPath,
-      byteCount: reference.byteCount,
-      truncated: reference.truncated,
-      binary: Boolean(reference.binary),
-      mediaType: reference.mediaType,
-      resolvedPath: reference.resolvedPath,
-    })),
-    summaryText: buildSummaryText(collected),
-    inputText: buildInputText(collected),
+    bodyText,
+    suffixText: suffixes.join('\n\n') || undefined,
   }
+}
+
+function appendInternalContext(bodyText, suffixText) {
+  return [bodyText.trim(), suffixText].filter(Boolean).join('\n\n').trim()
 }
 
 function normalizeWorkspaceDir(value) {
@@ -103,7 +382,11 @@ function normalizeMessageText(value) {
 }
 
 function parseReferenceMentions(message) {
-  const { bodyText, attachmentPaths } = splitAttachmentPaths(message)
+  const {
+    bodyText,
+    attachmentCapabilities: capabilities,
+    hadAttachmentCapabilities,
+  } = splitAttachmentReferences(message)
   const parsedReferences = []
   const explicitRanges = []
 
@@ -116,10 +399,11 @@ function parseReferenceMentions(message) {
     parsedReferences.push(reference)
   }
 
-  for (const attachmentPath of attachmentPaths) {
+  for (const attachment of capabilities) {
     parsedReferences.push({
-      source: 'attachment',
-      candidatePath: attachmentPath,
+      source: 'capability',
+      capability: attachment.capability,
+      displayName: attachment.displayName,
       start: Number.MAX_SAFE_INTEGER,
       end: Number.MAX_SAFE_INTEGER,
     })
@@ -130,36 +414,51 @@ function parseReferenceMentions(message) {
   return {
     bodyText,
     references: parsedReferences,
-    hadAttachmentPaths: attachmentPaths.length > 0,
+    hadAttachmentCapabilities,
   }
 }
 
-function splitAttachmentPaths(message) {
-  const markerIndex = message.indexOf(ATTACHMENT_MARKER)
+function splitAttachmentReferences(message) {
+  if (message.includes(ATTACHMENT_MARKER)) {
+    throw new Error('Raw attachment paths are not accepted; use a host-issued attachment capability')
+  }
+  const markerIndex = message.indexOf(ATTACHMENT_CAPABILITY_MARKER)
   if (markerIndex < 0) {
     return {
       bodyText: message,
-      attachmentPaths: [],
+      attachmentCapabilities: [],
+      hadAttachmentCapabilities: false,
     }
   }
 
   const bodyText = message.slice(0, markerIndex).trim()
-  const attachmentText = message.slice(markerIndex + ATTACHMENT_MARKER.length).trim()
-  const attachmentPaths = attachmentText
+  const attachmentText = message.slice(markerIndex + ATTACHMENT_CAPABILITY_MARKER.length).trim()
+  const attachmentCapabilities = attachmentText
     .split(/\n/)
-    .map(line => line.trim())
+    .map(line => {
+      const [capability, ...labelParts] = line.trim().split('\t')
+      if (!CAPABILITY_PATTERN.test(capability ?? '')) {
+        throw new Error('Attachment capability is invalid')
+      }
+      return {
+        capability,
+        displayName: sanitizeAttachmentDisplayName(labelParts.join(' ') || 'attachment'),
+      }
+    })
     .filter(Boolean)
 
-  if (attachmentPaths.length === 0) {
+  if (attachmentCapabilities.length === 0) {
     return {
       bodyText: message,
-      attachmentPaths: [],
+      attachmentCapabilities: [],
+      hadAttachmentCapabilities: false,
     }
   }
 
   return {
     bodyText,
-    attachmentPaths,
+    attachmentCapabilities,
+    hadAttachmentCapabilities: true,
   }
 }
 
@@ -231,93 +530,150 @@ function rangeOverlaps(candidate, ranges) {
   return ranges.some(range => candidate.start < range.end && range.start < candidate.end)
 }
 
-async function loadWorkspaceReference(reference, workspaceRoot, maxBytesPerFile) {
-  const isAttachment = reference.source === 'attachment'
-  const resolvedRequestedPath = resolveReferencePath(reference.candidatePath, workspaceRoot)
+async function loadWorkspaceReference(
+  reference,
+  workspaceRoot,
+  maxBytesPerFile,
+  supportedImages,
+  reservation,
+  selectionReservation,
+  attachmentSelectionRegistry,
+) {
+  const isCapability = reference.source === 'capability'
+  const isSelection = reference.source === 'selection'
+  const isExternalAttachment = isCapability || isSelection
+  const resolvedRequestedPath = isExternalAttachment
+    ? null
+    : resolveReferencePath(reference.candidatePath, workspaceRoot)
   let handle = null
+  let attachmentRecord = null
 
   try {
-    handle = await fs.open(resolvedRequestedPath, 'r')
-    const openedStat = await handle.stat()
-    if (!openedStat.isFile()) {
-      throw new Error(`File reference ${reference.source} must point to a file`)
+    let openedStat
+    let resolvedPath
+    let displayPath
+    if (isExternalAttachment) {
+      const reserved = isCapability
+        ? await getReservedAttachmentCapability(reservation, reference.capability)
+        : await attachmentSelectionRegistry.getReserved(
+            selectionReservation,
+            reference.activationCapability,
+          )
+      attachmentRecord = reserved.record
+      handle = reserved.handle
+      openedStat = reserved.stat
+      resolvedPath = attachmentRecord.resolvedPath
+      displayPath = attachmentRecord.displayName ?? attachmentRecord.displayPath
+    } else {
+      let opened
+      try {
+        opened = await openNoFollowFile(resolvedRequestedPath, null, `File reference ${reference.source}`)
+      } catch (error) {
+        if (error && typeof error === 'object' && error.code === 'ELOOP') {
+          throw new Error(`File reference ${reference.source} must not be a symlink`)
+        }
+        throw error
+      }
+      handle = opened.handle
+      openedStat = opened.stat
+      resolvedPath = await fs.realpath(resolvedRequestedPath)
+      if (!isWithinRoot(resolvedPath, workspaceRoot)) {
+        throw new Error(`File reference ${reference.source} resolves outside the workspace root`)
+      }
+      const currentStat = await fs.stat(resolvedPath)
+      if (openedStat.dev !== currentStat.dev || openedStat.ino !== currentStat.ino) {
+        throw new Error(`File reference ${reference.source} changed during validation`)
+      }
+      displayPath = getDisplayPath(resolvedPath, workspaceRoot)
     }
 
-    const resolvedPath = await fs.realpath(resolvedRequestedPath)
-    // Attachments (dropped images, pasted screenshots, downloads, etc.) are allowed to
-    // live outside the workspace root. Text-mode `@file`/`@path` references stay strict.
-    if (!isAttachment && !isWithinRoot(resolvedPath, workspaceRoot)) {
-      throw new Error(`File reference ${reference.source} resolves outside the workspace root`)
+    const byteCount = openedStat.size
+    const sampled = await readHandlePrefix(handle, byteCount, maxBytesPerFile, true)
+    if (isExternalAttachment) {
+      // Detect a rename/replacement that races the positional read. The open
+      // handle protects the bytes we sampled; this second path attestation
+      // prevents committing a transaction whose visible path changed midway.
+      if (isCapability) {
+        await getReservedAttachmentCapability(reservation, reference.capability)
+      } else {
+        await attachmentSelectionRegistry.getReserved(
+          selectionReservation,
+          reference.activationCapability,
+        )
+      }
     }
-
-    const currentStat = await fs.stat(resolvedPath)
-    if (openedStat.dev !== currentStat.dev || openedStat.ino !== currentStat.ino) {
-      throw new Error(`File reference ${reference.source} changed during validation`)
-    }
-
-    const buffer = await handle.readFile()
-    const isBinary = buffer.includes(0)
-
-    // Non-attachment references must be UTF-8 text.
-    if (isBinary && !isAttachment) {
-      throw new Error(`File reference ${reference.source} must point to a UTF-8 text file`)
-    }
-
-    const byteCount = buffer.byteLength
-    const withinRoot = isWithinRoot(resolvedPath, workspaceRoot)
-    const displayPath = withinRoot
-      ? getDisplayPath(resolvedPath, workspaceRoot)
-      : (resolvedPath.split(sep).pop() || resolvedPath)
+    const mediaType = guessMediaType(resolvedPath)
+    const isBinary = sampled.includes(0) || isKnownBinaryMediaType(mediaType)
 
     if (isBinary) {
-      // Binary attachment (image, pdf, archive, …). Don't inline its bytes; emit a
-      // structured reference so the agent knows the file is attached and where it is.
+      if (
+        supportedImages
+        && (!mediaType.startsWith('image/') || !supportedImages.has(mediaType))
+      ) {
+        throw new Error(`Binary attachment type ${mediaType} is not supported by this provider or execution target`)
+      }
       return {
         source: normalizeReferenceSource(reference.source, displayPath),
+        capability: isCapability ? reference.capability : undefined,
+        legacyCapability: isCapability ? reference.capability : undefined,
+        activationCapability: isSelection ? reference.activationCapability : undefined,
+        hostCleanupToken: isSelection ? attachmentRecord.hostCleanupToken : undefined,
         resolvedPath,
         displayPath,
         byteCount,
         truncated: false,
         binary: true,
-        mediaType: guessMediaType(resolvedPath),
+        mediaType,
+        device: String(openedStat.dev),
+        inode: String(openedStat.ino),
+        mtimeMs: openedStat.mtimeMs,
+        ctimeMs: openedStat.ctimeMs,
+        ownedTemporary: attachmentRecord?.ownedTemporary === true,
         content: '',
         previewByteCount: 0,
       }
     }
 
-    const limitedBuffer = byteCount > maxBytesPerFile
-      ? buffer.subarray(0, maxBytesPerFile)
-      : buffer
-
+    const limitedBuffer = sampled.byteLength > maxBytesPerFile
+      ? sampled.subarray(0, maxBytesPerFile)
+      : sampled
     return {
       source: normalizeReferenceSource(reference.source, displayPath),
+      capability: isCapability ? reference.capability : undefined,
+      legacyCapability: isCapability ? reference.capability : undefined,
+      activationCapability: isSelection ? reference.activationCapability : undefined,
+      hostCleanupToken: isSelection ? attachmentRecord.hostCleanupToken : undefined,
       resolvedPath,
       displayPath,
       byteCount,
       truncated: byteCount > maxBytesPerFile,
       binary: false,
+      ownedTemporary: attachmentRecord?.ownedTemporary === true,
       content: normalizeFileContent(limitedBuffer.toString('utf8')),
       previewByteCount: limitedBuffer.byteLength,
     }
   } catch (error) {
     if (error?.code === 'ENOENT' && handle == null) {
-      // Auto-detected inline @mentions (and attachments) are non-fatal when the
-      // path simply doesn't exist — e.g. an npm spec like @ai-sdk/harness@canary
-      // is left in the prompt as literal text instead of erroring. Security and
-      // integrity failures (escapes / outside-root) still throw below.
-      if (isAttachment || reference.heuristic) return null
+      if (reference.heuristic) return null
       throw new Error(`File reference ${reference.source} was not found in the workspace`)
     }
     if (error?.code === 'EISDIR') {
       throw new Error(`File reference ${reference.source} must point to a file`)
     }
-    if (error instanceof Error && /(outside the workspace root|changed during validation|must point to a file|UTF-8 text file|was not found)/i.test(error.message)) {
+    if (error instanceof Error && /(outside the workspace root|symlink|symbolic link|changed during validation|must point to a file|was not found|capability|attachment changed)/i.test(error.message)) {
       throw error
     }
     throw new Error(`Failed to read file reference ${reference.source}: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
-    await handle?.close().catch(() => {})
+    if (!attachmentRecord) {
+      await handle?.close().catch(() => {})
+    }
   }
+}
+
+function isKnownBinaryMediaType(mediaType) {
+  return mediaType !== 'application/octet-stream'
+    && mediaType !== 'image/svg+xml'
 }
 
 function guessMediaType(filePath) {
@@ -363,7 +719,7 @@ function getDisplayPath(filePath, workspaceRoot) {
 }
 
 function normalizeReferenceSource(source, displayPath) {
-  return source === 'attachment'
+  return source === 'capability' || source === 'selection'
     ? 'attachment'
     : `@${displayPath}`
 }
@@ -375,7 +731,7 @@ function normalizeFileContent(value) {
     .trimEnd()
 }
 
-function buildExpandedMessage({ bodyText, executionTarget, references }) {
+function buildFileReferenceContext({ executionTarget, references }) {
   const lines = [
     '## Referenced workspace files',
     executionTarget === 'cloud'
@@ -391,7 +747,6 @@ function buildExpandedMessage({ bodyText, executionTarget, references }) {
       const mediaType = reference.mediaType || 'application/octet-stream'
       lines.push(`Type: ${mediaType}`)
       lines.push(`Size: ${formatByteCount(reference.byteCount)}`)
-      lines.push(`Path: ${reference.resolvedPath}`)
       lines.push(`(binary attachment — content not inlined)`)
       continue
     }
@@ -403,7 +758,7 @@ function buildExpandedMessage({ bodyText, executionTarget, references }) {
     lines.push(`<<<END FILE ${reference.displayPath}>>>`)
   }
 
-  return [bodyText.trim(), lines.join('\n')].filter(Boolean).join('\n\n').trim()
+  return lines.join('\n').trim()
 }
 
 function buildSummaryText(references) {

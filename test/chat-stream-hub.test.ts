@@ -28,17 +28,17 @@ describe('chatStreamHub demux', () => {
 
     const a: ChatStreamChunk[] = []
     const b: ChatStreamChunk[] = []
-    const unsubA = subscribeChatStream('tile-a', e => { a.push(e) })
-    const unsubB = subscribeChatStream('tile-b', e => { b.push(e) })
+    const unsubA = subscribeChatStream('workspace-a', 'tile-a', e => { a.push(e) })
+    const unsubB = subscribeChatStream('workspace-a', 'tile-b', e => { b.push(e) })
 
     assert.equal(attachCount, 1)
     assert.equal(isChatStreamHubTransportActive(), true)
     assert.equal(getChatStreamHubTileCount(), 2)
     assert.equal(getChatStreamHubListenerCount(), 2)
 
-    push!({ cardId: 'tile-a', type: 'text', text: 'only-a' })
-    push!({ cardId: 'tile-b', type: 'text', text: 'only-b' })
-    push!({ cardId: 'tile-a', type: 'text', text: 'a2' })
+    push!({ workspaceId: 'workspace-a', cardId: 'tile-a', type: 'text', text: 'only-a' })
+    push!({ workspaceId: 'workspace-a', cardId: 'tile-b', type: 'text', text: 'only-b' })
+    push!({ workspaceId: 'workspace-a', cardId: 'tile-a', type: 'text', text: 'a2' })
 
     assert.deepEqual(a.map(e => e.text), ['only-a', 'a2'])
     assert.deepEqual(b.map(e => e.text), ['only-b'])
@@ -60,8 +60,8 @@ describe('chatStreamHub demux', () => {
       return () => {}
     })
 
-    const u1 = subscribeChatStream('tile-a', () => {})
-    const u2 = subscribeChatStream('tile-a', () => {})
+    const u1 = subscribeChatStream('workspace-a', 'tile-a', () => {})
+    const u2 = subscribeChatStream('workspace-a', 'tile-a', () => {})
     assert.equal(attachCount, 1)
     assert.equal(getChatStreamHubListenerCount(), 2)
     assert.equal(getChatStreamHubTileCount(), 1)
@@ -71,17 +71,48 @@ describe('chatStreamHub demux', () => {
     assert.equal(isChatStreamHubTransportActive(), false)
   })
 
-  test('drops events with missing cardId', () => {
+  test('isolates identical card IDs by workspace', () => {
+    let push: ((e: ChatStreamChunk) => void) | null = null
+    setChatStreamHubTransportForTests((onChunk) => {
+      push = onChunk
+      return () => {}
+    })
+    const a: ChatStreamChunk[] = []
+    const b: ChatStreamChunk[] = []
+    const unsubA = subscribeChatStream('workspace-a', 'same-card', event => a.push(event))
+    const unsubB = subscribeChatStream('workspace-b', 'same-card', event => b.push(event))
+
+    push!({
+      workspaceId: 'workspace-a',
+      cardId: 'same-card',
+      type: 'text',
+      text: 'only-a',
+    })
+    push!({
+      workspaceId: 'workspace-b',
+      cardId: 'same-card',
+      type: 'text',
+      text: 'only-b',
+    })
+
+    assert.deepEqual(a.map(event => event.text), ['only-a'])
+    assert.deepEqual(b.map(event => event.text), ['only-b'])
+    unsubA()
+    unsubB()
+  })
+
+  test('drops events with missing workspace or card identity', () => {
     let push: ((e: ChatStreamChunk) => void) | null = null
     setChatStreamHubTransportForTests((onChunk) => {
       push = onChunk
       return () => {}
     })
     const seen: ChatStreamChunk[] = []
-    const unsub = subscribeChatStream('tile-a', e => { seen.push(e) })
-    push!({ cardId: '', type: 'text', text: 'nope' } as ChatStreamChunk)
-    push!({ type: 'text', text: 'nope2' } as ChatStreamChunk)
-    push!({ cardId: 'tile-a', type: 'text', text: 'ok' })
+    const unsub = subscribeChatStream('workspace-a', 'tile-a', e => { seen.push(e) })
+    push!({ workspaceId: 'workspace-a', cardId: '', type: 'text', text: 'nope' } as ChatStreamChunk)
+    push!({ workspaceId: '', cardId: 'tile-a', type: 'text', text: 'nope2' } as ChatStreamChunk)
+    push!({ cardId: 'tile-a', type: 'text', text: 'nope3' } as ChatStreamChunk)
+    push!({ workspaceId: 'workspace-a', cardId: 'tile-a', type: 'text', text: 'ok' })
     assert.equal(seen.length, 1)
     assert.equal(seen[0]?.text, 'ok')
     unsub()

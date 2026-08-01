@@ -2,13 +2,31 @@ import { query } from '@anthropic-ai/claude-agent-sdk'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
+import {
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from './process-tree.mjs'
+import { StableSessionContextCache } from './stable-session-context.mjs'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
+import {
+  MAX_SKILLS_SUMMARY_BYTES,
+  previewContextToolInput,
+  truncateUtf8,
+} from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
+import { buildPeerContextPrompt } from './peer-context-policy.mjs'
+import { composeChatContext } from './context-composer.mjs'
+import {
+  buildCodeSurfActivityConvention,
+  buildCodeSurfInsightConvention,
+  buildCodeSurfOutputConvention,
+} from './prompt-conventions.mjs'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,
   buildCodexSdkThreadOptions,
@@ -123,11 +141,23 @@ function readPermissionGrants(homeDir) {
 }
 
 function writePermissionGrants(homeDir, grants) {
-  ensureDir(homeDir)
+  mkdirSync(homeDir, { recursive: true, mode: 0o700 })
+  chmodSync(homeDir, 0o700)
   const filePath = join(homeDir, 'permissions.json')
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
-  writeFileSync(tempPath, `${JSON.stringify({ version: 1, grants }, null, 2)}\n`, 'utf8')
-  renameSync(tempPath, filePath)
+  let replaced = false
+  try {
+    writeFileSync(tempPath, `${JSON.stringify({ version: 1, grants }, null, 2)}\n`, {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600,
+    })
+    renameSync(tempPath, filePath)
+    replaced = true
+    chmodSync(filePath, 0o600)
+  } finally {
+    if (!replaced && existsSync(tempPath)) unlinkSync(tempPath)
+  }
 }
 
 function normalizeWorkspaceDir(workspaceDir) {
@@ -582,30 +612,56 @@ async function ensureProvisionedWorkspace(homeDir, projectContext) {
   return workspaceDir
 }
 
-function buildClaudeSystemPrompt(peers) {
-  if (!Array.isArray(peers) || peers.length === 0) return undefined
-  const peerLines = peers.map(peer => {
-    const lines = []
-    if (Array.isArray(peer.tools) && peer.tools.length > 0) {
-      lines.push(`  Tools: ${peer.tools.join(', ')}`)
-    }
-    if (peer.context && typeof peer.context === 'object') {
-      lines.push('  Context:')
-      for (const [key, value] of Object.entries(peer.context)) {
-        const display = value === null ? 'null' : typeof value === 'object' ? JSON.stringify(value) : String(value)
-        lines.push(`    ${key}: ${display}`)
-      }
-    }
-    if (lines.length === 0) lines.push('  (no additional peer context)')
-    return `- Block "${peer.peerId}" (${peer.peerType}):\n${lines.join('\n')}`
-  }).join('\n')
+const validatedContextPrompt = Symbol('validatedContextPrompt')
+const validatedStableContextPrompt = Symbol('validatedStableContextPrompt')
+const validatedPerTurnContextPrompt = Symbol('validatedPerTurnContextPrompt')
+const stableSessionContextKinds = new Set([
+  'persona',
+  'memory',
+  'skills',
+  'output-convention',
+  'insight-convention',
+  'activity-convention',
+])
 
-  return [
-    'You are an AI agent running inside CodeSurf.',
-    '',
-    'The following peer blocks are directly connected to you on the canvas:',
-    peerLines,
-  ].join('\n')
+function contextPromptForRequest(request) {
+  if (request && Object.prototype.hasOwnProperty.call(request, validatedContextPrompt)) {
+    return request[validatedContextPrompt]
+  }
+  return undefined
+}
+
+function stableContextPromptForRequest(request) {
+  if (request && Object.prototype.hasOwnProperty.call(request, validatedStableContextPrompt)) {
+    return request[validatedStableContextPrompt]
+  }
+  return undefined
+}
+
+function perTurnContextPromptForRequest(request) {
+  if (request && Object.prototype.hasOwnProperty.call(request, validatedPerTurnContextPrompt)) {
+    return request[validatedPerTurnContextPrompt]
+  }
+  return undefined
+}
+
+function systemPromptForVolatility(context, volatility) {
+  return context.fragments
+    .filter(fragment => {
+      if (fragment.placement !== 'system') return false
+      const fragmentVolatility = fragment.volatility
+        ?? (stableSessionContextKinds.has(fragment.kind) ? 'stable-session' : 'per-turn')
+      return fragmentVolatility === volatility
+    })
+    .map(fragment => fragment.text)
+    .join('\n\n') || undefined
+}
+
+function codexContextPromptForTurn(request, stableContextPrompt) {
+  return [stableContextPrompt, perTurnContextPromptForRequest(request)]
+    .map(value => String(value ?? '').trim())
+    .filter(Boolean)
+    .join('\n\n') || undefined
 }
 
 function buildAsyncExecutionPrompt(asyncExecution) {
@@ -633,77 +689,227 @@ function buildAsyncExecutionPrompt(asyncExecution) {
   return lines.join('\n')
 }
 
-function joinPromptSections(...sections) {
-  const normalized = sections
-    .map(section => String(section ?? '').trim())
-    .filter(Boolean)
-  return normalized.length > 0 ? normalized.join('\n\n') : undefined
-}
-
-const CODESURF_INSIGHT_CONVENTION = [
-  '## CodeSurf Insight Convention',
-  '',
-  'Use an Insight block when you notice a non-obvious constraint, risk, hidden dependency, or design implication that the user should understand before trusting the answer.',
-  'Do not emit an Insight block for routine summaries, obvious statements, or tiny mechanical edits.',
-  '',
-  'When you emit one, use this exact wrapper:',
-  '`★ Insight ─────────────────────────────────────`',
-  '- [point 1]',
-  '- [point 2]',
-  '`─────────────────────────────────────────────────`',
-  '',
-  'Keep it to 1–2 bullets. It must explain non-obvious reasoning, not summarize the work.',
-].join('\n')
-
-function buildCodeSurfInsightConvention() {
-  return CODESURF_INSIGHT_CONVENTION
-}
-
-const CODESURF_ACTIVITY_CONVENTION = [
-  '## CodeSurf Activity Convention',
-  '',
-  'Keep your native agent instructions, tools, and strengths. This convention only standardizes what CodeSurf can show to the user.',
-  '',
-  'For non-trivial multi-step work, keep a visible task plan current using your native todo/plan tool when one is available.',
-  'If the native environment does not expose a todo/plan tool, use concise natural-language progress updates instead of inventing unavailable tools.',
-  '',
-  'Use neutral tool/action language. Avoid provider-specific status phrasing when a plain action name is enough.',
-  'Prefer short completion wording unless the task needs a structured handoff.',
-].join('\n')
-
-function buildCodeSurfActivityConvention() {
-  return CODESURF_ACTIVITY_CONVENTION
-}
-
 function summarizeMemoryContext(contextBuckets, instructionPrompt) {
-  return describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
+  return String(contextBuckets?.inspect?.summary ?? '').trim()
+    || describeContextBucketsForTool(contextBuckets, instructionPrompt).summary
 }
 
 function buildMemoryContextInput(contextBuckets, instructionPrompt) {
   return describeContextBucketsForTool(contextBuckets, instructionPrompt).input
 }
 
-// The selected agent definition's persona prompt (AgentMode.systemPrompt). Sits
-// at the front of the assembled system prompt — ahead of memory/skills/async —
-// so the persona frames the turn the same way for every provider. Empty/missing
-// systemPrompt contributes nothing (joinPromptSections drops blank sections).
-function agentPersonaPrompt(request) {
-  return String(request?.agentMode?.systemPrompt ?? '').trim() || undefined
+function boundOptionalContext(value, maxBytes, reason) {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) {
+    return {
+      value: undefined,
+      metadata: {
+        originalBytes: 0,
+        includedBytes: 0,
+        truncated: false,
+        truncationReason: null,
+      },
+    }
+  }
+  const bounded = truncateUtf8(normalized, maxBytes, { reason })
+  return {
+    value: bounded.text,
+    metadata: {
+      originalBytes: bounded.originalBytes,
+      includedBytes: bounded.includedBytes,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+    },
+  }
 }
 
-function buildClaudeAgentPrompt(peers, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
-  const peerPrompt = buildClaudeSystemPrompt(peers)
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  return joinPromptSections(peerPrompt, agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
+function fragmentFor(context, kind) {
+  return context.fragments.find(fragment => fragment.kind === kind)
 }
 
-function buildCodexPrompt(userText, asyncExecution, instructionPrompt, skillsPrompt, agentPrompt) {
-  const asyncPrompt = buildAsyncExecutionPrompt(asyncExecution)
-  const insightConvention = buildCodeSurfInsightConvention()
-  const activityConvention = buildCodeSurfActivityConvention()
-  const preamble = joinPromptSections(agentPrompt, instructionPrompt, skillsPrompt, asyncPrompt, insightConvention, activityConvention)
+function fragmentMetadata(context, kind) {
+  const fragment = fragmentFor(context, kind)
+  return fragment
+    ? {
+        originalBytes: fragment.originalBytes,
+        includedBytes: fragment.includedBytes,
+        truncated: fragment.truncated,
+        truncationReason: fragment.truncated ? `maximum ${kind} context bytes (${fragment.maxUtf8Bytes})` : null,
+      }
+    : {
+        originalBytes: 0,
+        includedBytes: 0,
+        truncated: false,
+        truncationReason: null,
+      }
+}
+
+function appendComposedUserContext(messages, userSuffix) {
+  const suffix = String(userSuffix ?? '').trim()
+  if (!suffix || !Array.isArray(messages)) return messages
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) return messages
+  return messages.map((message, index) => index === lastUserIndex
+    ? { ...message, content: `${String(message?.content ?? '')}\n\n${suffix}` }
+    : message)
+}
+
+function extractTaggedUserContext(messages, openTag, closeTag) {
+  if (!Array.isArray(messages)) return { messages, text: undefined }
+  let lastUserIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index
+      break
+    }
+  }
+  if (lastUserIndex < 0) return { messages, text: undefined }
+  const content = String(messages[lastUserIndex]?.content ?? '')
+  const marker = `\n\n${openTag}\n`
+  const start = content.lastIndexOf(marker)
+  if (start < 0 || !content.endsWith(`\n${closeTag}`)) {
+    return { messages, text: undefined }
+  }
+  const valueStart = start + marker.length
+  const valueEnd = content.length - closeTag.length - 1
+  const text = content.slice(valueStart, valueEnd).trim() || undefined
+  const nextMessages = messages.map((message, index) => index === lastUserIndex
+    ? { ...message, content: content.slice(0, start).trimEnd() }
+    : message)
+  return { messages: nextMessages, text }
+}
+
+function extractComposedUserContext(messages) {
+  const tags = [
+    {
+      key: 'room',
+      open: '<codesurf_peer_context trust="untrusted" source="agent-room">',
+      close: '</codesurf_peer_context>',
+    },
+    {
+      key: 'fileReferences',
+      open: '<codesurf_file_context trust="untrusted" source="workspace-files">',
+      close: '</codesurf_file_context>',
+    },
+    {
+      key: 'recentEdit',
+      open: '<codesurf_recent_edit_context trust="untrusted" source="renderer-derived-file-state">',
+      close: '</codesurf_recent_edit_context>',
+    },
+    {
+      key: 'blockNotes',
+      open: '<codesurf_block_notes_context trust="untrusted" source="renderer-derived-transcript">',
+      close: '</codesurf_block_notes_context>',
+    },
+  ]
+  let remainingMessages = messages
+  const values = Object.fromEntries(tags.map(tag => [tag.key, []]))
+  for (;;) {
+    let stripped = false
+    for (const tag of tags) {
+      const extracted = extractTaggedUserContext(remainingMessages, tag.open, tag.close)
+      if (extracted.messages === remainingMessages) continue
+      remainingMessages = extracted.messages
+      if (extracted.text) values[tag.key].unshift(extracted.text)
+      stripped = true
+      break
+    }
+    if (!stripped) break
+  }
+  return {
+    messages: remainingMessages,
+    room: values.room.join('\n\n') || undefined,
+    fileReferences: values.fileReferences.join('\n\n') || undefined,
+    recentEdit: values.recentEdit.join('\n\n') || undefined,
+    blockNotes: values.blockNotes.join('\n\n') || undefined,
+  }
+}
+
+export function revalidateDaemonContextRequest(request = {}) {
+  const peerContext = buildPeerContextPrompt(request.peers)
+  const primaryContext = extractComposedUserContext(request.messages)
+  const expandedContext = extractComposedUserContext(request.expandedMessages)
+  const skillsSummary = boundOptionalContext(
+    request.skillsSummary,
+    MAX_SKILLS_SUMMARY_BYTES,
+    `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+  )
+  const roomContext = [
+    request.roomContext ?? primaryContext.room ?? expandedContext.room,
+    request.untrustedPeerContext,
+  ].map(value => String(value ?? '').trim()).filter(Boolean).join('\n\n') || undefined
+  const context = composeChatContext({
+    persona: request?.agentMode?.systemPrompt,
+    memory: request.memoryPrompt,
+    skills: request.skillsPrompt,
+    outputConvention: buildCodeSurfOutputConvention(),
+    insightConvention: buildCodeSurfInsightConvention(),
+    activityConvention: buildCodeSurfActivityConvention(),
+    async: buildAsyncExecutionPrompt(request.asyncExecution),
+    // Canvas peer topology is functional state, never system authority.
+    peer: undefined,
+    room: roomContext,
+    fileReferences: request.fileReferencePrompt ?? primaryContext.fileReferences ?? expandedContext.fileReferences,
+    recentEdit: request.recentEditContext ?? primaryContext.recentEdit ?? expandedContext.recentEdit,
+    blockNotes: request.blockNotesContext ?? primaryContext.blockNotes ?? expandedContext.blockNotes,
+  })
+  const persona = fragmentFor(context, 'persona')
+  const memory = fragmentFor(context, 'memory')
+  const skills = fragmentFor(context, 'skills')
+  return {
+    request: {
+      ...request,
+      peers: peerContext.peers,
+      [validatedContextPrompt]: context.systemPrompt,
+      [validatedStableContextPrompt]: systemPromptForVolatility(context, 'stable-session'),
+      [validatedPerTurnContextPrompt]: systemPromptForVolatility(context, 'per-turn'),
+      contextPrompt: undefined,
+      messages: appendComposedUserContext(primaryContext.messages, context.userSuffix),
+      ...(Array.isArray(request.expandedMessages)
+        ? { expandedMessages: appendComposedUserContext(expandedContext.messages, context.userSuffix) }
+        : {}),
+      memoryPrompt: memory?.text,
+      roomContext: undefined,
+      untrustedPeerContext: undefined,
+      fileReferencePrompt: undefined,
+      recentEditContext: undefined,
+      blockNotesContext: undefined,
+      skillsPrompt: skills?.text,
+      skillsSummary: skillsSummary.value,
+      ...(request?.agentMode && typeof request.agentMode === 'object'
+        ? {
+            agentMode: {
+              ...request.agentMode,
+              systemPrompt: persona?.text ?? '',
+            },
+          }
+        : {}),
+    },
+    metadata: {
+      context: context.metadata,
+      memoryPrompt: fragmentMetadata(context, 'memory'),
+      skillsPrompt: fragmentMetadata(context, 'skills'),
+      skillsSummary: skillsSummary.metadata,
+      personaPrompt: fragmentMetadata(context, 'persona'),
+      roomContext: fragmentMetadata(context, 'room'),
+      fileReferencePrompt: fragmentMetadata(context, 'file-reference'),
+      peerContext: peerContext.metadata,
+    },
+  }
+}
+
+function buildClaudeAgentPrompt(contextPrompt) {
+  return String(contextPrompt ?? '').trim() || undefined
+}
+
+function buildCodexPrompt(userText, contextPrompt) {
+  const preamble = String(contextPrompt ?? '').trim() || undefined
   return preamble ? `${preamble}\n\n## User Request\n${userText}` : userText
 }
 
@@ -814,7 +1020,7 @@ function omnigentTitleFromPrompt(text) {
 // can assert AgentMode.tools constrains the constructed command. Codex's CLI has
 // no per-tool allow-list, so the allow-list maps onto the sandbox (the only real
 // toolset lever): when it grants no write-capable tool, force read-only.
-export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = '') {
+export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = '', options = {}) {
   const lastUserMsg = [...(request.messages ?? [])].reverse().find(message => message.role === 'user')
   const codexMode = ['default', 'auto', 'read-only', 'full-access'].includes(request.mode)
     ? request.mode
@@ -828,7 +1034,8 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
   // the client as request.sessionId), resume that thread so the model keeps the
   // full conversation — `codex exec [OPTIONS] resume <threadId> [PROMPT]`.
   // Codex's CLI grammar requires every exec-level OPTION (--json, --model,
-  // --skip-git-repo-check, -C <dir>, sandbox/approval flags) to precede the
+  // --ignore-user-config, --skip-git-repo-check, -C <dir>,
+  // sandbox/approval flags) to precede the
   // `resume` subcommand; only SESSION_ID and PROMPT follow it. Placing `resume`
   // before the options makes codex reject the trailing flags (e.g.
   // `error: unexpected argument '-C' found`). Mirrors the runtime builder
@@ -840,24 +1047,27 @@ export function buildCodexExecArgs(request, workspaceDir, instructionPrompt = ''
     '--json',
     '--model',
     request.model,
+    ...sandboxApprovalFlags,
+    '--ignore-user-config',
     '--skip-git-repo-check',
     ...(workspaceDir ? ['-C', workspaceDir] : []),
-    ...sandboxApprovalFlags,
     ...resumeArgs,
   ]
   codexArgs.push(buildCodexPrompt(
     lastUserMsg?.content ?? '',
-    request.asyncExecution,
-    instructionPrompt,
-    request.skillsPrompt,
-    agentPersonaPrompt(request),
+    codexContextPromptForTurn(
+      request,
+      Object.prototype.hasOwnProperty.call(options, 'contextPrompt')
+        ? options.contextPrompt
+        : stableContextPromptForRequest(request),
+    ),
   ))
   return codexArgs
 }
 
 // Providers the @ai-sdk/harness backend can host. Module-level mirror of the
 // closure-local set, so shouldUseHarness() stays a pure, exported predicate.
-const HARNESS_CAPABLE_PROVIDERS = new Set(['claude', 'codex', 'pi'])
+const HARNESS_CAPABLE_PROVIDERS = new Set(['claude', 'codex'])
 
 // Decide whether a request routes through the harness backend vs a native
 // provider path. Pure + exported so the daemon test can assert the routing
@@ -1045,18 +1255,351 @@ function extractOpenCodeTextPayload(event) {
   return ''
 }
 
-function writeSseEvent(res, payload) {
-  // Isolate per-subscriber failures: a throwing/closed socket must not starve
-  // sibling subscribers of the same event. Returns the write() backpressure
-  // signal (false = buffer full) so callers can react if needed.
-  try {
-    return res.write(`data: ${JSON.stringify(payload)}\n\n`)
-  } catch {
-    return false
+function sseEventEntry(payload) {
+  const sequence = Number(payload?.sequence ?? 0)
+  return {
+    chunk: `data: ${JSON.stringify(payload)}\n\n`,
+    sequence: Number.isFinite(sequence) ? sequence : 0,
+    terminal: payload?.type === 'done',
   }
 }
 
-export function createChatJobManager({ homeDir, checkpointStore = null, claudeQuery = query, codexSdkFactory = null, maxConcurrentJobs = 4 }) {
+function responseIsClosed(res) {
+  return Boolean(res?.destroyed || res?.writableEnded || res?.closed)
+}
+
+export function createSseSubscriberRegistry({
+  maxQueuedEvents = 256,
+  maxQueuedBytes = 1024 * 1024,
+  drainTimeoutMs = 30_000,
+  heartbeatMs = 15_000,
+} = {}) {
+  const subscribers = new Map()
+  const eventLimit = Math.max(1, Number(maxQueuedEvents) || 256)
+  const byteLimit = Math.max(1, Number(maxQueuedBytes) || 1024 * 1024)
+  const drainLimitMs = Math.max(1, Number(drainTimeoutMs) || 30_000)
+  let stopped = false
+
+  function removeFromRegistry(record) {
+    const current = subscribers.get(record.jobId)
+    if (!current) return
+    current.delete(record)
+    if (current.size === 0) subscribers.delete(record.jobId)
+  }
+
+  function clearDrainTimer(record) {
+    if (!record.drainTimer) return
+    clearTimeout(record.drainTimer)
+    record.drainTimer = null
+  }
+
+  function resolveDrainWaiters(record, writable) {
+    const waiters = Array.from(record.drainWaiters)
+    record.drainWaiters.clear()
+    for (const resolveWaiter of waiters) resolveWaiter(writable)
+  }
+
+  function closeRecord(record, { destroy = false, end = true } = {}) {
+    if (!record || record.closed) return
+    record.closed = true
+    clearDrainTimer(record)
+    removeFromRegistry(record)
+    record.res.off?.('drain', record.onDrain)
+    record.res.off?.('finish', record.onFinish)
+    record.res.off?.('close', record.onClose)
+    record.res.off?.('error', record.onError)
+    record.queue.length = 0
+    record.replayBuffer.length = 0
+    record.bufferedEvents = 0
+    record.bufferedBytes = 0
+    resolveDrainWaiters(record, false)
+
+    if (destroy && !record.res.destroyed) {
+      try { record.res.destroy?.() } catch {}
+    } else if (end && !record.res.writableEnded && !record.res.destroyed) {
+      try { record.res.end?.() } catch {}
+    }
+  }
+
+  function markBlocked(record) {
+    if (record.closed || record.blocked) return
+    record.blocked = true
+    record.drainTimer = setTimeout(() => {
+      closeRecord(record, { destroy: true, end: false })
+    }, drainLimitMs)
+    record.drainTimer.unref?.()
+  }
+
+  function unaccountEntry(record, entry) {
+    record.bufferedEvents = Math.max(0, record.bufferedEvents - 1)
+    record.bufferedBytes = Math.max(0, record.bufferedBytes - entry.bytes)
+  }
+
+  function entryFits(record, entry) {
+    if (entry.bytes <= byteLimit) return true
+    closeRecord(record, { destroy: true, end: false })
+    return false
+  }
+
+  function beginTerminalEnd(record) {
+    if (record.closed || record.terminalEnding) return
+    record.terminalEnding = true
+    try {
+      record.res.end?.()
+    } catch {
+      closeRecord(record, { destroy: true, end: false })
+    }
+  }
+
+  function writeEntry(record, entry) {
+    if (record.closed) return false
+    if (!entryFits(record, entry)) return false
+    if (responseIsClosed(record.res)) {
+      closeRecord(record, { end: false })
+      return false
+    }
+
+    let writable
+    try {
+      writable = record.res.write(entry.chunk)
+    } catch {
+      closeRecord(record, { destroy: true, end: false })
+      return false
+    }
+
+    if (entry.sequence > record.lastSentSequence) {
+      record.lastSentSequence = entry.sequence
+    }
+    if (!writable) markBlocked(record)
+    if (entry.terminal) {
+      if (writable) {
+        closeRecord(record)
+      } else {
+        // `ServerResponse.end()` does not guarantee the buffered terminal frame
+        // reached a client that stopped reading. Keep the record and its drain
+        // deadline alive until `finish`/`close`; shutdown can then destroy it.
+        beginTerminalEnd(record)
+      }
+      return false
+    }
+    return !record.closed
+  }
+
+  function enqueue(record, entry, target) {
+    if (record.closed) return false
+    if (!entryFits(record, entry)) return false
+    if (
+      record.bufferedEvents + 1 > eventLimit
+      || record.bufferedBytes + entry.bytes > byteLimit
+    ) {
+      closeRecord(record, { destroy: true, end: false })
+      return false
+    }
+    target.push(entry)
+    record.bufferedEvents += 1
+    record.bufferedBytes += entry.bytes
+    return true
+  }
+
+  function flushQueue(record) {
+    while (!record.closed && !record.blocked && record.queue.length > 0) {
+      const entry = record.queue.shift()
+      unaccountEntry(record, entry)
+      if (entry.sequence > 0 && entry.sequence <= record.lastSentSequence) continue
+      if (!writeEntry(record, entry)) return
+    }
+  }
+
+  function handleDrain(record) {
+    if (record.closed) return
+    // A terminal frame that returned false is already ending. A `drain`
+    // notification alone is not proof the response finished, so retain the
+    // bounded destroy deadline until `finish` or `close`.
+    if (record.terminalEnding) return
+    clearDrainTimer(record)
+    record.blocked = false
+    flushQueue(record)
+    if (!record.closed && !record.blocked) resolveDrainWaiters(record, true)
+  }
+
+  function register(jobId, res, { sinceSequence = 0, replaying = true } = {}) {
+    const record = {
+      jobId,
+      res,
+      queue: [],
+      replayBuffer: [],
+      replaying,
+      blocked: false,
+      terminalEnding: false,
+      closed: false,
+      bufferedEvents: 0,
+      bufferedBytes: 0,
+      drainTimer: null,
+      drainWaiters: new Set(),
+      lastSentSequence: Math.max(0, Number(sinceSequence) || 0),
+      onDrain: null,
+      onFinish: null,
+      onClose: null,
+      onError: null,
+    }
+    record.onDrain = () => handleDrain(record)
+    record.onFinish = () => closeRecord(record, { end: false })
+    record.onClose = () => closeRecord(record, { end: false })
+    record.onError = () => closeRecord(record, { destroy: true, end: false })
+    res.on?.('drain', record.onDrain)
+    res.on?.('finish', record.onFinish)
+    res.on?.('close', record.onClose)
+    res.on?.('error', record.onError)
+
+    const listeners = subscribers.get(jobId) ?? new Set()
+    listeners.add(record)
+    subscribers.set(jobId, listeners)
+    if (stopped) {
+      closeRecord(record)
+    } else if (responseIsClosed(res)) {
+      closeRecord(record, { end: false })
+    }
+    return record
+  }
+
+  function publish(jobId, payload) {
+    const listeners = subscribers.get(jobId)
+    if (!listeners) return
+    const baseEntry = sseEventEntry(payload)
+    for (const record of Array.from(listeners)) {
+      if (record.closed || baseEntry.sequence <= record.lastSentSequence) continue
+      const entry = { ...baseEntry, bytes: Buffer.byteLength(baseEntry.chunk) }
+      if (record.replaying) {
+        enqueue(record, entry, record.replayBuffer)
+      } else if (record.blocked || record.queue.length > 0) {
+        enqueue(record, entry, record.queue)
+      } else {
+        writeEntry(record, entry)
+      }
+    }
+  }
+
+  function waitForWritable(record) {
+    if (record.closed) return Promise.resolve(false)
+    if (!record.blocked) return Promise.resolve(true)
+    return new Promise(resolveWaiter => {
+      record.drainWaiters.add(resolveWaiter)
+    })
+  }
+
+  async function sendReplay(record, payload) {
+    if (record.closed) return false
+    const entry = sseEventEntry(payload)
+    entry.bytes = Buffer.byteLength(entry.chunk)
+    if (entry.sequence <= record.lastSentSequence) return true
+    if (!entryFits(record, entry)) return false
+    if (!await waitForWritable(record)) return false
+    return writeEntry(record, entry)
+  }
+
+  function finishReplay(record) {
+    if (record.closed) return false
+    record.replaying = false
+    const buffered = record.replayBuffer
+      .splice(0)
+      .sort((a, b) => a.sequence - b.sequence)
+    for (const entry of buffered) {
+      unaccountEntry(record, entry)
+      if (record.closed || entry.sequence <= record.lastSentSequence) continue
+      if (record.blocked || record.queue.length > 0) {
+        if (!enqueue(record, entry, record.queue)) break
+      } else if (!writeEntry(record, entry)) {
+        break
+      }
+    }
+    return !record.closed
+  }
+
+  function sendComment(record, comment) {
+    if (record.closed || record.blocked) return false
+    const chunk = comment.endsWith('\n\n') ? comment : `${comment}\n\n`
+    return writeEntry(record, {
+      chunk,
+      bytes: Buffer.byteLength(chunk),
+      sequence: 0,
+      terminal: false,
+    })
+  }
+
+  function pulseHeartbeat() {
+    for (const listeners of subscribers.values()) {
+      for (const record of Array.from(listeners)) {
+        if (
+          record.closed
+          || record.blocked
+          || record.replaying
+          || record.queue.length > 0
+          || record.replayBuffer.length > 0
+        ) {
+          continue
+        }
+        sendComment(record, ': ping\n\n')
+      }
+    }
+  }
+
+  const heartbeatTimer = heartbeatMs > 0
+    ? setInterval(pulseHeartbeat, Math.max(1, Number(heartbeatMs) || 15_000))
+    : null
+  heartbeatTimer?.unref?.()
+
+  function shutdown() {
+    if (stopped) return
+    stopped = true
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    const records = Array.from(subscribers.values()).flatMap(listeners => Array.from(listeners))
+    for (const record of records) {
+      closeRecord(record, {
+        destroy: record.blocked || record.terminalEnding,
+        end: !record.blocked && !record.terminalEnding,
+      })
+    }
+    subscribers.clear()
+  }
+
+  return {
+    register,
+    publish,
+    sendReplay,
+    finishReplay,
+    sendComment,
+    pulseHeartbeat,
+    close: closeRecord,
+    shutdown,
+    count(jobId) {
+      if (jobId) return subscribers.get(jobId)?.size ?? 0
+      let total = 0
+      for (const listeners of subscribers.values()) total += listeners.size
+      return total
+    },
+  }
+}
+
+export function createChatJobManager({
+  homeDir,
+  checkpointStore = null,
+  claudeQuery = query,
+  codexSdkFactory = null,
+  harnessRunnerFactory = null,
+  maxConcurrentJobs = 4,
+  subscriberMaxQueuedEvents = 256,
+  subscriberMaxQueuedBytes = 1024 * 1024,
+  subscriberDrainTimeoutMs = 30_000,
+  heartbeatMs = 15_000,
+  timelineMaxQueuedEvents = 512,
+  timelineMaxQueuedBytes = 4 * 1024 * 1024,
+  timelineMaxFailedRecords = 128,
+  timelineAppendMaxAttempts = 3,
+  timelineAppendRetryDelayMs = 25,
+  timelineAppend = (path, data) => fs.appendFile(path, data, 'utf8'),
+  timelineReadStream = path => createReadStream(path),
+  metadataWrite = (path, data) => fs.writeFile(path, data, 'utf8'),
+}) {
   const jobsDir = join(homeDir, 'jobs')
   const timelinesDir = join(homeDir, 'timelines')
   ensureDir(jobsDir)
@@ -1079,50 +1622,407 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
   let harnessRunnerPromise = null
   function getHarnessRunner() {
     if (!harnessRunnerPromise) {
-      harnessRunnerPromise = import('./harness-runtime.mjs').then(m => m.createHarnessRunner({ homeDir }))
+      harnessRunnerPromise = harnessRunnerFactory
+        ? Promise.resolve(harnessRunnerFactory({ homeDir }))
+        : import('./harness-runtime.mjs').then(m => m.createHarnessRunner({ homeDir }))
     }
     return harnessRunnerPromise
   }
 
   const liveJobs = new Map()
-  const subscribers = new Map()
-  const sessionPermissionGrants = new Map()
-  const pendingToolPermissions = new Map()
+  const stableSessionContexts = new StableSessionContextCache()
 
-  // daemon-07: debounce the full metadata rewrite. The timeline jsonl is still
-  // appended on every event (cheap, append-only), but the whole-object
-  // metadata file is only rewritten at most every METADATA_FLUSH_MS during a
-  // streaming turn. Terminal/session events flush immediately so the final
-  // status + sessionId are always durable; lastSequence is recoverable from the
-  // timeline if a crash loses the last sub-flush window.
-  const METADATA_FLUSH_MS = 250
-  const metadataFlushTimers = new Map() // jobId -> timeout
-  const timelineWriteChains = new Map() // jobId -> Promise<void>
-
-  function enqueueTimelineWrite(jobId, payload) {
-    const previous = timelineWriteChains.get(jobId) ?? Promise.resolve()
-    const next = previous
-      .catch(() => {})
-      .then(() => fs.appendFile(jobTimelinePath(jobId), `${JSON.stringify(payload)}\n`, 'utf8'))
-    timelineWriteChains.set(jobId, next)
-    next.finally(() => {
-      if (timelineWriteChains.get(jobId) === next) timelineWriteChains.delete(jobId)
-    }).catch(() => {})
-    return next
+  function selectCodexStableContext(request) {
+    return stableSessionContexts.select({
+      workspaceId: request.workspaceId,
+      cardId: request.cardId,
+      provider: 'codex',
+      sessionId: request.sessionId,
+      contextPrompt: stableContextPromptForRequest(request),
+    })
   }
 
-  // Periodic SSE heartbeat so clients can detect a silently-dead stream (e.g. a
-  // half-open socket, or the post-crash wedge that streamJob's liveness guard
-  // also defends against). One unref'd timer for the manager's lifetime.
-  const SSE_HEARTBEAT_MS = 15000
-  const heartbeatTimer = setInterval(() => {
-    for (const listeners of subscribers.values()) {
-      for (const res of listeners) {
-        try { res.write(': ping\n\n') } catch { /* dropped; close handler cleans up */ }
+  function bindJobProcess(job, proc) {
+    job.proc = proc
+    job.cancel = async () => {
+      if (job.processTerminationPromise) {
+        return await job.processTerminationPromise
+      }
+      const pending = terminateProcessTree(proc).then(result => {
+        job.processTerminationResult = result
+        job.terminationFailed = !result.confirmed
+        return result
+      }).finally(() => {
+        if (job.processTerminationPromise === pending && !job.processTerminationResult?.confirmed) {
+          job.processTerminationPromise = null
+        }
+      })
+      job.processTerminationPromise = pending
+      return await pending
+    }
+  }
+
+  async function waitForJobRunnerSettlement(job, timeoutMs = 3_000) {
+    if (job.runnerFinished) return true
+    const runPromise = job.runPromise
+    if (!runPromise) return false
+    return await Promise.race([
+      Promise.resolve(runPromise).then(() => true, () => true),
+      new Promise(resolve => setTimeout(() => resolve(false), timeoutMs)),
+    ])
+  }
+
+  const sessionPermissionGrants = new Map()
+  const pendingToolPermissions = new Map()
+  const subscriberRegistry = createSseSubscriberRegistry({
+    maxQueuedEvents: subscriberMaxQueuedEvents,
+    maxQueuedBytes: subscriberMaxQueuedBytes,
+    drainTimeoutMs: subscriberDrainTimeoutMs,
+    heartbeatMs,
+  })
+
+  // Timeline persistence is a bounded, recoverable per-job queue. A rejected
+  // append is retried in-place so later writes are never chained to a poisoned
+  // promise. If retries or queue limits are exhausted, the provider is stopped
+  // and the job fails closed in memory; durable metadata remains behind the
+  // timeline gap rather than claiming a completion that cannot be replayed.
+  const METADATA_FLUSH_MS = 250
+  const TIMELINE_EVENT_LIMIT = Math.max(1, Number(timelineMaxQueuedEvents) || 512)
+  const TIMELINE_BYTE_LIMIT = Math.max(1, Number(timelineMaxQueuedBytes) || 4 * 1024 * 1024)
+  const TIMELINE_FAILED_RECORD_LIMIT = Math.max(1, Number(timelineMaxFailedRecords) || 128)
+  const TIMELINE_APPEND_ATTEMPTS = Math.max(1, Number(timelineAppendMaxAttempts) || 3)
+  const TIMELINE_RETRY_DELAY_MS = Math.max(0, Number(timelineAppendRetryDelayMs) || 0)
+  const metadataFlushTimers = new Map() // jobId -> timeout
+  const metadataWriteTails = new Map() // jobId -> serialized atomic write
+  const timelinePersistence = new Map() // jobId -> bounded queue record
+  const timelineWriteTails = new Map() // jobId -> latest queued entry promise
+  const reconciliationLocks = new Map() // jobId -> Promise<metadata>
+  const failedCleanupTasks = new Set()
+  let timelineFailureOrdinal = 0
+
+  class TimelinePersistenceError extends Error {
+    constructor(jobId, cause) {
+      const rawDetail = cause instanceof Error ? cause.message : String(cause)
+      const detail = truncateUtf8(rawDetail, 1_024, {
+        reason: 'maximum timeline persistence diagnostic bytes (1024)',
+      }).text
+      super(`Timeline persistence failed for job ${jobId}: ${detail}`)
+      this.name = 'TimelinePersistenceError'
+      this.cause = cause
+      this.detail = detail
+    }
+  }
+
+  function isTimelinePersistenceError(error) {
+    return error instanceof TimelinePersistenceError
+      || error?.name === 'TimelinePersistenceError'
+  }
+
+  function timelineRecord(jobId) {
+    let record = timelinePersistence.get(jobId)
+    if (!record) {
+      record = {
+        jobId,
+        entries: [],
+        queuedBytes: 0,
+        processing: false,
+        failed: false,
+        error: null,
+        failureEvents: [],
+        failureMetadata: null,
+        failureOrdinal: 0,
+        durableFailureMetadata: null,
+        finalizationPromise: null,
+        repairByteLength: null,
+      }
+      timelinePersistence.set(jobId, record)
+    }
+    return record
+  }
+
+  function scheduleFailedRecordFinalization(record) {
+    if (record.finalizationPromise) return record.finalizationPromise
+    const finalization = (async () => {
+      const persistedMetadata = await readJobMetadata(record.jobId)
+        ?? record.failureMetadata
+      if (!persistedMetadata) return null
+
+      if (Number.isFinite(record.repairByteLength)) {
+        await fs.truncate(jobTimelinePath(record.jobId), record.repairByteLength)
+      }
+      let inspected = await inspectTimeline(record.jobId)
+      if (inspected.integrityError) {
+        await fs.truncate(jobTimelinePath(record.jobId), inspected.contiguousByteLength)
+        inspected = await inspectTimeline(record.jobId)
+      }
+      const publicError = record.failureMetadata?.error
+        ?? `Timeline persistence failed: ${record.error?.detail ?? record.error?.message ?? 'Unknown error'}`
+      try {
+        if (!inspected.terminalSeen) {
+          if (inspected.lastEventType !== 'error') {
+            await appendReconciliationEvent(record.jobId, {
+              jobId: record.jobId,
+              sequence: inspected.maxSequence + 1,
+              timestamp: Date.now(),
+              type: 'error',
+              error: publicError,
+            })
+          }
+          inspected = await inspectTimeline(record.jobId)
+          if (!inspected.terminalSeen) {
+            await appendReconciliationEvent(record.jobId, {
+              jobId: record.jobId,
+              sequence: inspected.maxSequence + 1,
+              timestamp: Date.now(),
+              type: 'done',
+            })
+          }
+          inspected = await inspectTimeline(record.jobId)
+        }
+      } catch {
+        // The timeline may remain unavailable even though atomic metadata writes
+        // work. Persist a truthful terminal state at the actual disk high-water
+        // mark; never claim the in-memory failure-event sequences are durable.
+        inspected = await inspectTimeline(record.jobId)
+      }
+
+      const now = new Date().toISOString()
+      const terminalMetadata = {
+        ...persistedMetadata,
+        status: 'failed',
+        error: publicError,
+        updatedAt: now,
+        completedAt: persistedMetadata.completedAt ?? now,
+        lastSequence: inspected.maxSequence,
+        timelinePersistenceFailed: !inspected.terminalSeen,
+      }
+      await writeJobMetadata(terminalMetadata)
+      record.durableFailureMetadata = terminalMetadata
+      return terminalMetadata
+    })().finally(() => {
+      failedCleanupTasks.delete(finalization)
+    })
+    // Keep an observer attached even if callers only need eventual cleanup.
+    finalization.catch(() => {})
+    record.finalizationPromise = finalization
+    failedCleanupTasks.add(finalization)
+    return finalization
+  }
+
+  function enforceFailedTimelineRecordLimit() {
+    const evictable = Array.from(timelinePersistence.values())
+      .filter(record => record.failed && !liveJobs.has(record.jobId))
+      .sort((a, b) => a.failureOrdinal - b.failureOrdinal)
+    const excess = evictable.length - TIMELINE_FAILED_RECORD_LIMIT
+    if (excess <= 0) return
+
+    for (const record of evictable.slice(0, excess)) {
+      const evict = () => {
+        if (timelinePersistence.get(record.jobId) !== record) return
+        timelinePersistence.delete(record.jobId)
+        timelineWriteTails.delete(record.jobId)
+        reconciliationLocks.delete(record.jobId)
+        clearMetadataFlush(record.jobId)
+        enforceFailedTimelineRecordLimit()
+      }
+      // Durable finalization is best-effort. The original metadata remains in an
+      // active state when it fails, which restart reconciliation understands.
+      // A persistent storage fault must not defeat the aggregate memory cap.
+      void scheduleFailedRecordFinalization(record).then(evict, evict)
+    }
+  }
+
+  function failTimelinePersistence(record, cause) {
+    if (record.failed) return record.error
+    const failure = cause instanceof TimelinePersistenceError
+      ? cause
+      : new TimelinePersistenceError(record.jobId, cause)
+    record.failed = true
+    record.error = failure
+    record.failureOrdinal = ++timelineFailureOrdinal
+    clearMetadataFlush(record.jobId)
+
+    for (const entry of record.entries) entry.reject(failure)
+
+    const live = liveJobs.get(record.jobId)
+    if (live) {
+      try { live.cancel?.() } catch {}
+      cancelPendingToolPermissionsForJob(record.jobId, 'Timeline persistence failed')
+      const now = new Date().toISOString()
+      const baseSequence = Math.max(0, Number(live.metadata?.lastSequence) || 0)
+      const publicError = `Timeline persistence failed: ${failure.detail}`
+      const errorEvent = {
+        jobId: record.jobId,
+        sequence: baseSequence + 1,
+        timestamp: Date.now(),
+        type: 'error',
+        error: publicError,
+      }
+      const doneEvent = {
+        jobId: record.jobId,
+        sequence: baseSequence + 2,
+        timestamp: Date.now(),
+        type: 'done',
+      }
+      record.failureEvents = [errorEvent, doneEvent]
+      record.failureMetadata = {
+        ...live.metadata,
+        status: 'failed',
+        error: publicError,
+        updatedAt: now,
+        completedAt: now,
+        lastSequence: doneEvent.sequence,
+      }
+      live.metadata = record.failureMetadata
+      live.terminalEmitted = true
+      live.persistenceFailed = true
+      subscriberRegistry.publish(record.jobId, errorEvent)
+      subscriberRegistry.publish(record.jobId, doneEvent)
+    }
+
+    // The high-water and bounded terminal snapshot above are sufficient for
+    // same-process state/reporting. Do not retain every failed payload and its
+    // serialized line for the daemon lifetime (up to the per-job byte cap).
+    record.entries.length = 0
+    record.queuedBytes = 0
+    timelineWriteTails.delete(record.jobId)
+    enforceFailedTimelineRecordLimit()
+    return failure
+  }
+
+  async function waitBeforeTimelineRetry(attempt) {
+    if (TIMELINE_RETRY_DELAY_MS <= 0) return
+    await new Promise(resolve => setTimeout(
+      resolve,
+      Math.min(1_000, TIMELINE_RETRY_DELAY_MS * (2 ** Math.max(0, attempt - 1))),
+    ))
+  }
+
+  async function pumpTimelineWrites(record) {
+    if (record.processing || record.failed) return
+    record.processing = true
+    try {
+      while (!record.failed && record.entries.length > 0) {
+        const entry = record.entries[0]
+        let lastError = null
+        let persisted = false
+        let repairByteLength = null
+        for (let attempt = 1; attempt <= TIMELINE_APPEND_ATTEMPTS; attempt += 1) {
+          try {
+            await timelineAppend(jobTimelinePath(record.jobId), entry.line)
+            persisted = true
+            break
+          } catch (error) {
+            lastError = error
+            // appendFile-style failures can be outcome-uncertain. If the exact
+            // sequence is already visible at the ordered timeline high-water
+            // mark, treat it as committed instead of retrying a duplicate.
+            try {
+              const inspected = await inspectTimeline(record.jobId, {
+                expectedSerialized: entry.line.slice(0, -1),
+                expectedSequence: Number(entry.payload?.sequence ?? 0),
+              })
+              if (!inspected.integrityError && inspected.exactRecordCommitted) {
+                persisted = true
+                break
+              }
+              if (
+                inspected.integrityError
+                || inspected.maxSequence >= Number(entry.payload?.sequence ?? 0)
+              ) {
+                repairByteLength = inspected.contiguousByteLength
+                lastError = new Error(
+                  inspected.integrityError
+                    ?? `timeline sequence ${entry.payload?.sequence} contains different event content`,
+                )
+                break
+              }
+            } catch {}
+            if (attempt < TIMELINE_APPEND_ATTEMPTS) await waitBeforeTimelineRetry(attempt)
+          }
+        }
+        if (!persisted) {
+          if (Number.isFinite(repairByteLength)) {
+            record.repairByteLength = repairByteLength
+          }
+          failTimelinePersistence(record, lastError ?? new Error('timeline append failed'))
+          break
+        }
+
+        record.entries.shift()
+        record.queuedBytes = Math.max(0, record.queuedBytes - entry.bytes)
+        if (timelineWriteTails.get(record.jobId) === entry.promise && record.entries.length === 0) {
+          timelineWriteTails.delete(record.jobId)
+        }
+        entry.resolve()
+      }
+    } finally {
+      record.processing = false
+      if (!record.failed && record.entries.length === 0) {
+        timelinePersistence.delete(record.jobId)
       }
     }
-  }, SSE_HEARTBEAT_MS)
-  heartbeatTimer.unref?.()
+  }
+
+  function enqueueTimelineWrite(jobId, payload) {
+    const record = timelineRecord(jobId)
+    if (record.failed) throw record.error
+    const line = `${JSON.stringify(payload)}\n`
+    const bytes = Buffer.byteLength(line)
+    if (
+      record.entries.length + 1 > TIMELINE_EVENT_LIMIT
+      || record.queuedBytes + bytes > TIMELINE_BYTE_LIMIT
+    ) {
+      throw failTimelinePersistence(
+        record,
+        new Error(
+          `pending timeline queue limit exceeded (${TIMELINE_EVENT_LIMIT} events, ${TIMELINE_BYTE_LIMIT} bytes)`,
+        ),
+      )
+    }
+
+    let resolveEntry
+    let rejectEntry
+    const promise = new Promise((resolve, reject) => {
+      resolveEntry = resolve
+      rejectEntry = reject
+    })
+    // Every promise has a rejection observer even for streaming events whose
+    // caller intentionally does not await disk latency.
+    promise.catch(() => {})
+    record.entries.push({
+      payload,
+      line,
+      bytes,
+      promise,
+      resolve: resolveEntry,
+      reject: rejectEntry,
+    })
+    record.queuedBytes += bytes
+    timelineWriteTails.set(jobId, promise)
+    void pumpTimelineWrites(record)
+    return promise
+  }
+
+  function snapshotPendingTimelineEvents(jobId, sinceSequence, throughSequence) {
+    const events = []
+    let maxSequence = Math.max(0, sinceSequence)
+    let terminalSeen = false
+    const record = timelinePersistence.get(jobId)
+    const pending = [
+      ...(record?.entries.map(entry => entry.payload) ?? []),
+      ...(record?.failureEvents ?? []),
+    ]
+    for (const payload of pending) {
+      const sequence = Number(payload?.sequence ?? 0)
+      if (!Number.isFinite(sequence) || sequence <= 0 || sequence > throughSequence) continue
+      maxSequence = Math.max(maxSequence, sequence)
+      if (payload?.type === 'done') terminalSeen = true
+      if (sequence > sinceSequence) events.push(payload)
+    }
+    events.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0))
+    return { events, maxSequence, terminalSeen }
+  }
 
   function jobMetaPath(jobId) {
     return join(jobsDir, `${jobId}.json`)
@@ -1140,7 +2040,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     }
   }
 
-  async function writeJobMetadata(job) {
+  async function writeJobMetadataNow(job) {
     // Atomic write: a crash/SIGKILL mid-write must not leave a truncated
     // {jobId}.json — a corrupt record is invisible to the dashboard AND
     // un-prunable by retention sweep (it skips on parse error), leaking the
@@ -1148,11 +2048,47 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const finalPath = jobMetaPath(job.id)
     const tmpPath = `${finalPath}.tmp-${randomUUID()}`
     try {
-      await fs.writeFile(tmpPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8')
+      await metadataWrite(tmpPath, `${JSON.stringify(job, null, 2)}\n`)
       await fs.rename(tmpPath, finalPath)
     } catch (err) {
       try { await fs.unlink(tmpPath) } catch {}
       throw err
+    }
+  }
+
+  async function writeJobMetadata(job) {
+    const snapshot = { ...job }
+    const previous = metadataWriteTails.get(job.id)
+    const write = (previous ? previous.catch(() => {}) : Promise.resolve())
+      .then(() => writeJobMetadataNow(snapshot))
+    metadataWriteTails.set(job.id, write)
+    try {
+      await write
+    } finally {
+      if (metadataWriteTails.get(job.id) === write) {
+        metadataWriteTails.delete(job.id)
+      }
+    }
+  }
+
+  async function stageJobMetadata(job) {
+    const pendingWrite = metadataWriteTails.get(job.id)
+    if (pendingWrite) await pendingWrite.catch(() => {})
+    const finalPath = jobMetaPath(job.id)
+    const tmpPath = `${finalPath}.tmp-${randomUUID()}`
+    try {
+      await metadataWrite(tmpPath, `${JSON.stringify(job, null, 2)}\n`)
+    } catch (error) {
+      try { await fs.unlink(tmpPath) } catch {}
+      throw error
+    }
+    return {
+      async commit() {
+        await fs.rename(tmpPath, finalPath)
+      },
+      async discard() {
+        try { await fs.unlink(tmpPath) } catch {}
+      },
     }
   }
 
@@ -1169,25 +2105,61 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const timer = setTimeout(() => {
       metadataFlushTimers.delete(jobId)
       const live = liveJobs.get(jobId)
-      if (live?.metadata) void writeJobMetadata(live.metadata).catch(() => {})
+      if (!live?.metadata || live.terminalFinalizing || live.terminalEmitted) return
+      const persistence = timelinePersistence.get(jobId)
+      if (persistence?.failed) return
+      const timelineWrite = timelineWriteTails.get(jobId)
+      if (!timelineWrite) {
+        void writeJobMetadata(live.metadata).catch(() => {})
+        return
+      }
+      void timelineWrite.then(() => {
+        if (timelinePersistence.get(jobId)?.failed) return
+        if (timelineWriteTails.has(jobId)) {
+          scheduleMetadataFlush(jobId)
+          return
+        }
+        const currentLive = liveJobs.get(jobId)
+        if (
+          currentLive?.metadata
+          && !currentLive.terminalFinalizing
+          && !currentLive.terminalEmitted
+        ) {
+          return writeJobMetadata(currentLive.metadata)
+        }
+      }).catch(() => {
+        // Fail closed: never advance durable metadata beyond a timeline gap.
+        // The pending event map remains available for same-process SSE replay.
+      })
     }, METADATA_FLUSH_MS)
     timer.unref?.()
     metadataFlushTimers.set(jobId, timer)
   }
 
-  async function appendEvent(jobId, event) {
+  async function appendEvent(jobId, event, options = {}) {
     const live = liveJobs.get(jobId)
-    const metadata = live?.metadata ?? await readJobMetadata(jobId)
-    if (!metadata) return null
+    const currentMetadata = live?.metadata ?? await readJobMetadata(jobId)
+    if (!currentMetadata) return null
+
+    // Cancellation owns the terminal sequence once requested. Provider output
+    // arriving during TERM grace (including a direct child's close handler)
+    // is stale and must not overtake the confirmed cancellation result.
+    if (live?.cancelRequested && options.allowDuringCancellation !== true) {
+      return null
+    }
 
     // Idempotent terminals: once a 'done' has fired for a job, ignore further
     // terminal appends. Prevents the duplicate error+done pair when cancelJob
     // and the runner's own catch both emit terminals (the second pair would
     // otherwise write a confusing duplicate timeline + re-run status logic).
-    if ((event.type === 'done' || event.type === 'error') && live?.terminalEmitted) {
+    if (live?.terminalEmitted || live?.terminalFinalizing) {
       return null
     }
 
+    // Work on a copy until the event has been accepted by the bounded queue.
+    // A synchronous queue-limit failure must not advance metadata to a
+    // sequence that can never exist in the timeline.
+    const metadata = { ...currentMetadata }
     metadata.lastSequence = Number(metadata.lastSequence ?? 0) + 1
     metadata.updatedAt = new Date().toISOString()
     if (event.sessionId) metadata.sessionId = event.sessionId
@@ -1196,7 +2168,6 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     } else if (event.type === 'done') {
       metadata.status = metadata.error ? 'failed' : 'completed'
       metadata.completedAt = new Date().toISOString()
-      if (live) live.terminalEmitted = true
     }
 
     const payload = {
@@ -1206,21 +2177,88 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       ...event,
     }
 
-    if (live) {
-      live.metadata = metadata
-    }
+    if (event.type === 'done') {
+      if (live) live.terminalFinalizing = true
+      clearMetadataFlush(jobId)
+      const pendingTimelineWrite = timelineWriteTails.get(jobId)
+      if (pendingTimelineWrite) await pendingTimelineWrite
 
-    // Fast path: deliver provider deltas to subscribers before touching disk.
-    // Timeline persistence is still ordered per job, but it runs behind the SSE
-    // fanout so token rendering latency is provider/network-bound, not fs-bound.
-    const timelineWrite = enqueueTimelineWrite(jobId, payload)
-
-    const listeners = subscribers.get(jobId)
-    if (listeners) {
-      for (const res of listeners) {
-        writeSseEvent(res, payload)
+      // Prepare terminal metadata in a private temp file before the closing
+      // timeline event, then atomically install it only after that exact event
+      // is durable. A crash therefore leaves either active metadata (which
+      // startup reconciliation fails closed) or a fully committed terminal.
+      let stagedMetadata
+      try {
+        stagedMetadata = await stageJobMetadata(metadata)
+      } catch (error) {
+        throw failTimelinePersistence(
+          timelineRecord(jobId),
+          new Error(
+            `terminal metadata persistence failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
       }
+
+      let terminalStartByte
+      try {
+        terminalStartByte = (await fs.stat(jobTimelinePath(jobId))).size
+      } catch (error) {
+        await stagedMetadata.discard()
+        throw failTimelinePersistence(
+          timelineRecord(jobId),
+          new Error(
+            `terminal timeline inspection failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
+      }
+
+      try {
+        await enqueueTimelineWrite(jobId, payload)
+      } catch (error) {
+        await stagedMetadata.discard()
+        console.error(
+          `[chat-jobs] timeline append failed for job ${jobId} at sequence ${payload.sequence}:`,
+          error,
+        )
+        return payload
+      }
+
+      try {
+        await stagedMetadata.commit()
+      } catch (error) {
+        await stagedMetadata.discard()
+        try { await fs.truncate(jobTimelinePath(jobId), terminalStartByte) } catch {}
+        const record = timelineRecord(jobId)
+        record.repairByteLength = terminalStartByte
+        throw failTimelinePersistence(
+          record,
+          new Error(
+            `terminal metadata commit failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          ),
+        )
+      }
+
+      if (live) {
+        live.metadata = metadata
+        live.terminalEmitted = true
+      }
+      subscriberRegistry.publish(jobId, payload)
+      cancelPendingToolPermissionsForJob(jobId, 'Job completed')
+      return payload
     }
+
+    // Accept non-closing events into the bounded queue before fanout. The queue
+    // starts its append concurrently, but provider delivery does not await disk
+    // latency.
+    const timelineWrite = enqueueTimelineWrite(jobId, payload)
+    if (live) live.metadata = metadata
+    subscriberRegistry.publish(jobId, payload)
 
     // daemon-07: flush metadata immediately on terminal/session events (status,
     // completedAt, sessionId must be durable right away) or when the job has no
@@ -1228,21 +2266,23 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const isTerminalEvent = event.type === 'done' || event.type === 'error'
     if (isTerminalEvent || event.sessionId || !live) {
       clearMetadataFlush(jobId)
-      await timelineWrite.catch(() => {})
-      await writeJobMetadata(metadata)
+      let timelinePersisted = true
+      try {
+        await timelineWrite
+      } catch (error) {
+        timelinePersisted = false
+        console.error(
+          `[chat-jobs] timeline append failed for job ${jobId} at sequence ${payload.sequence}:`,
+          error,
+        )
+      }
+      if (timelinePersisted) await writeJobMetadata(metadata)
     } else {
       scheduleMetadataFlush(jobId)
     }
 
     if (event.type === 'done' || event.type === 'error') {
       cancelPendingToolPermissionsForJob(jobId, event.type === 'done' ? 'Job completed' : 'Job failed')
-      if (event.type === 'done') {
-        const listeners = subscribers.get(jobId)
-        if (listeners) {
-          for (const res of listeners) res.end()
-        }
-        subscribers.delete(jobId)
-      }
     }
 
     return payload
@@ -1526,7 +2566,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       options.tools = agentToolAllowList
     }
 
-    const systemPrompt = buildClaudeAgentPrompt(request.peers, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const systemPrompt = buildClaudeAgentPrompt(contextPromptForRequest(request))
     if (systemPrompt) {
       options.agent = 'codesurf'
       options.agents = {
@@ -1677,7 +2717,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     }
   }
 
-  async function runCodexSdkJob(job, request, workspaceDir, instructionPrompt) {
+  async function runCodexSdkJob(job, request, workspaceDir, instructionPrompt, stableContext) {
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(message => message.role === 'user')
     if (!lastUserMsg) {
       await appendEvent(job.id, { type: 'error', error: 'No user message' })
@@ -1706,16 +2746,14 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       await appendEvent(job.id, { type: 'done' })
       return true
     }
+    if (job.cancelRequested) return true
 
     const abortController = new AbortController()
     job.cancel = () => abortController.abort()
 
     const prompt = buildCodexPrompt(
       lastUserMsg.content ?? '',
-      request.asyncExecution,
-      instructionPrompt,
-      request.skillsPrompt,
-      agentPersonaPrompt(request),
+      codexContextPromptForTurn(request, stableContext.contextPrompt),
     )
 
     const pendingSnapshots = new Map()
@@ -1726,10 +2764,16 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     let exploreStarted = false
     let commandSeq = 0
     let fatalFailure = null
+    let providerError = false
+    let providerSessionId = typeof request.sessionId === 'string'
+      ? request.sessionId.trim() || null
+      : null
+    let sawProviderAcceptance = false
 
     const emitSession = async (sessionId) => {
       if (typeof sessionId !== 'string' || !sessionId.trim()) return
       const normalized = sessionId.trim()
+      providerSessionId = normalized
       if (emittedSessionIds.has(normalized)) return
       emittedSessionIds.add(normalized)
       await appendEvent(job.id, { type: 'session', sessionId: normalized })
@@ -1752,6 +2796,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         await appendEvent(job.id, { type: 'error', error: String(fatalFailure) })
         abortSdkTurn()
         return
+      }
+
+      if (
+        evt.type === 'turn.started'
+        || evt.type === 'turn.completed'
+        || evt.type === 'item.started'
+        || evt.type === 'item.completed'
+      ) {
+        sawProviderAcceptance = true
       }
 
       if (evt.type === 'item.started') {
@@ -1871,19 +2924,35 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         await handleCodexJsonEvent(evt)
       }
     } catch (err) {
+      providerError = true
       if (!fatalFailure) {
         const message = err instanceof Error ? err.message : String(err)
         await appendEvent(job.id, { type: 'error', error: sanitizeAgentCliDiagnostic(message) })
       }
     }
 
+    stableSessionContexts.complete(stableContext, {
+      accepted: sawProviderAcceptance
+        && !providerError
+        && !fatalFailure
+        && !job.cancelRequested,
+      sessionId: providerSessionId,
+    })
+
     await appendEvent(job.id, { type: 'done' })
     return true
   }
 
   async function runCodexJob(job, request, workspaceDir, instructionPrompt) {
+    const stableContext = selectCodexStableContext(request)
     if (shouldUseCodexSdkProvider(request)) {
-      const handledBySdk = await runCodexSdkJob(job, request, workspaceDir, instructionPrompt)
+      const handledBySdk = await runCodexSdkJob(
+        job,
+        request,
+        workspaceDir,
+        instructionPrompt,
+        stableContext,
+      )
       if (handledBySdk) return
     }
 
@@ -1896,7 +2965,9 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
 
     let codexArgs
     try {
-      codexArgs = buildCodexExecArgs(request, workspaceDir, instructionPrompt)
+      codexArgs = buildCodexExecArgs(request, workspaceDir, instructionPrompt, {
+        contextPrompt: stableContext.contextPrompt,
+      })
     } catch (err) {
       // Fail closed: e.g. an unenforceable deny-all tool list on Codex. Surface
       // the specific reason instead of spawning Codex with weaker enforcement.
@@ -1905,16 +2976,12 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       return
     }
 
-    const proc = spawn('codex', codexArgs, {
+    const proc = spawn('codex', codexArgs, processTreeSpawnOptions({
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
-      detached: true,
-    })
+    }))
 
-    job.proc = proc
-    job.cancel = () => {
-      try { process.kill(-proc.pid, 'SIGTERM') } catch { proc.kill('SIGTERM') }
-    }
+    bindJobProcess(job, proc)
 
     const pendingSnapshots = new Map()
     const aggregatedFileChanges = new Map()
@@ -1928,14 +2995,28 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     let stderrBuf = ''
     let exitCode = null
     let procError = null
+    let providerSessionId = typeof request.sessionId === 'string'
+      ? request.sessionId.trim() || null
+      : null
+    let sawProviderAcceptance = false
 
     const handleCodexJsonEvent = async (evt) => {
       if (!evt || typeof evt !== 'object') return
       if (evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
+        providerSessionId = evt.thread_id.trim() || providerSessionId
         await appendEvent(job.id, { type: 'session', sessionId: evt.thread_id })
         return
       }
       if (checkpointFailure) return
+
+      if (
+        evt.type === 'turn.started'
+        || evt.type === 'turn.completed'
+        || evt.type === 'item.started'
+        || evt.type === 'item.completed'
+      ) {
+        sawProviderAcceptance = true
+      }
 
       if (evt.type === 'item.started') {
         const item = evt.item
@@ -1947,7 +3028,13 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
               type: 'error',
               error: `Checkpoint creation failed before Codex file change: ${checkpointFailure}`,
             })
-            if (!proc.killed) proc.kill('SIGTERM')
+            const termination = await job.cancel()
+            if (!termination.confirmed) {
+              await appendEvent(job.id, {
+                type: 'error',
+                error: `Codex process-tree termination failed: ${termination.detail}`,
+              })
+            }
             return
           }
           const checkpoint = await createDaemonCheckpoint(job, request, 'Codex file change', checkpointPaths, {
@@ -1959,7 +3046,13 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
               type: 'error',
               error: `Checkpoint creation failed before Codex file change: ${checkpointFailure}`,
             })
-            if (!proc.killed) proc.kill('SIGTERM')
+            const termination = await job.cancel()
+            if (!termination.confirmed) {
+              await appendEvent(job.id, {
+                type: 'error',
+                error: `Codex process-tree termination failed: ${termination.detail}`,
+              })
+            }
             return
           }
 
@@ -2082,6 +3175,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       })
     })
 
+    const processTreeExit = await job.cancel()
+    if (!processTreeExit.confirmed) {
+      await appendEvent(job.id, {
+        type: 'error',
+        error: `Codex process-tree exit could not be confirmed: ${processTreeExit.detail}`,
+      })
+      return
+    }
+
     await stdoutChain.catch(() => {})
     if (pendingStdout.trim()) {
       try {
@@ -2098,6 +3200,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     } else if (typeof exitCode === 'number' && exitCode !== 0) {
       await appendEvent(job.id, { type: 'error', error: `Codex exited with code ${exitCode}` })
     }
+    stableSessionContexts.completeCli(stableContext, {
+      exitCode,
+      sawProviderAcceptance,
+      providerError: procError instanceof Error
+        || Boolean(checkpointFailure)
+        || Boolean(stderrText)
+        || job.cancelRequested,
+      sessionId: providerSessionId,
+    })
     await appendEvent(job.id, { type: 'done' })
   }
 
@@ -2109,26 +3220,22 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, contextPromptForRequest(request))
     const proc = spawn('hermes', buildHermesChatArgs({
       prompt,
       model: request.model,
       provider: request.providerId ?? request.modelProvider ?? request.providerName,
       toolsets: hermesToolsetsForRequest(request),
       resumeSessionId: request.sessionId,
-      ignoreRules: Boolean(instructionPrompt || request.skillsPrompt || request.contextBuckets || request.memoryPrompt || agentPersonaPrompt(request)),
+      ignoreRules: Boolean(contextPromptForRequest(request) || request.contextBuckets),
       bypassPermissions: request.mode === 'bypassPermissions',
-    }), {
+    }), processTreeSpawnOptions({
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
-      detached: true,
       ...(workspaceDir ? { cwd: workspaceDir } : {}),
-    })
+    }))
 
-    job.proc = proc
-    job.cancel = () => {
-      try { process.kill(-proc.pid, 'SIGTERM') } catch { proc.kill('SIGTERM') }
-    }
+    bindJobProcess(job, proc)
 
     let stdoutBuf = ''
     let stderrBuf = ''
@@ -2153,6 +3260,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       })
     })
 
+    const processTreeExit = await job.cancel()
+    if (!processTreeExit.confirmed) {
+      await appendEvent(job.id, {
+        type: 'error',
+        error: `Hermes process-tree exit could not be confirmed: ${processTreeExit.detail}`,
+      })
+      return
+    }
+
     if (procError instanceof Error) {
       await appendEvent(job.id, { type: 'error', error: sanitizeAgentCliDiagnostic(procError.message) })
     } else if (typeof exitCode === 'number' && exitCode !== 0) {
@@ -2175,7 +3291,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       return
     }
 
-    const prompt = buildCodexPrompt(lastUserMsg.content, request.asyncExecution, instructionPrompt, request.skillsPrompt, agentPersonaPrompt(request))
+    const prompt = buildCodexPrompt(lastUserMsg.content, contextPromptForRequest(request))
     const agent = typeof request.agent === 'string'
       ? request.agent
       : typeof request.agentName === 'string'
@@ -2190,16 +3306,12 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       sessionId: request.sessionId,
       cwd: workspaceDir,
       bypassPermissions: request.mode === 'bypassPermissions',
-    }), {
+    }), processTreeSpawnOptions({
       stdio: ['ignore', 'pipe', 'pipe'],
       env: process.env,
-      detached: true,
-    })
+    }))
 
-    job.proc = proc
-    job.cancel = () => {
-      try { process.kill(-proc.pid, 'SIGTERM') } catch { proc.kill('SIGTERM') }
-    }
+    bindJobProcess(job, proc)
 
     const emittedSessionIds = new Set()
     const fallbackTextParts = []
@@ -2255,6 +3367,15 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       })
     })
 
+    const processTreeExit = await job.cancel()
+    if (!processTreeExit.confirmed) {
+      await appendEvent(job.id, {
+        type: 'error',
+        error: `OpenCode process-tree exit could not be confirmed: ${processTreeExit.detail}`,
+      })
+      return
+    }
+
     await stdoutChain.catch(() => {})
     if (pendingStdout.trim()) {
       await processOpenCodeLine(pendingStdout)
@@ -2296,10 +3417,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
 
     const prompt = buildCodexPrompt(
       lastUserMsg.content ?? '',
-      request.asyncExecution,
-      instructionPrompt,
-      request.skillsPrompt,
-      agentPersonaPrompt(request),
+      contextPromptForRequest(request),
     )
 
     const abortController = new AbortController()
@@ -2529,6 +3647,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
 
   async function runJob(job, request, workspaceDir) {
     try {
+      if (job.cancelRequested) return
       // PRE-START authoritative resolution (#cli-persona). A caller may supply only
       // an `agentId` and NO `agentMode` — the `codesurf chat --persona` CLI does
       // exactly this on purpose: it NEVER constructs a trusted agentMode, it sends
@@ -2549,6 +3668,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           agentId: request.agentId,
           resolveWorkspaceRoot: () => workspaceDir,
         })
+        if (job.cancelRequested) return
         if (!preStart.ok) {
           await appendEvent(job.id, { type: 'error', error: preStart.error })
           await appendEvent(job.id, { type: 'done' })
@@ -2584,6 +3704,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           agentId: request.agentId,
           resolveWorkspaceRoot: () => workspaceDir,
         })
+        if (job.cancelRequested) return
         if (!authoritative.ok) {
           await appendEvent(job.id, { type: 'error', error: authoritative.error })
           await appendEvent(job.id, { type: 'done' })
@@ -2592,15 +3713,35 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         request = { ...request, agentMode: authoritative.agentMode }
       }
 
+      // Treat every caller-provided context field as untrusted at the daemon
+      // boundary. Main-process validation is useful UX, but remote callers and
+      // older clients can bypass it; provider builders only see this copy.
+      const contextValidation = revalidateDaemonContextRequest(request)
+      request = contextValidation.request
+
       const memoryContext = await loadMemoryContext({
         homeDir,
         workspaceDir,
         projectPaths: [workspaceDir],
         executionTarget: request.executionTarget ?? 'local',
       })
+      if (job.cancelRequested) return
       const instructionPrompt = String(request.memoryPrompt ?? '').trim() || buildMemoryPrompt(memoryContext)
-      const contextBuckets = buildContextBucketBundle(request.contextBuckets ?? memoryContext, instructionPrompt)
-      const memorySummary = summarizeMemoryContext(contextBuckets, instructionPrompt)
+      const suppliedContext = request.contextBuckets ?? memoryContext
+      const contextBuckets = buildContextBucketBundle(suppliedContext, instructionPrompt)
+      const suppliedContextSummary = String(suppliedContext?.inspect?.summary ?? '').trim()
+      if (suppliedContextSummary && contextBuckets.inspect) {
+        contextBuckets.inspect.summary = suppliedContextSummary
+      }
+      const baseMemorySummary = summarizeMemoryContext(contextBuckets, instructionPrompt)
+      const unboundedMemorySummary = contextValidation.metadata.memoryPrompt.truncated
+        ? `${baseMemorySummary || 'Loaded workspace instructions for this run.'}; caller-provided prompt was truncated by the daemon context budget`
+        : baseMemorySummary
+      const memorySummary = unboundedMemorySummary
+        ? truncateUtf8(unboundedMemorySummary, MAX_SKILLS_SUMMARY_BYTES, {
+            reason: `maximum context summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+          }).text
+        : undefined
       const memoryInput = buildMemoryContextInput(contextBuckets, instructionPrompt)
       if (memorySummary) {
         await appendEvent(job.id, {
@@ -2609,10 +3750,11 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           toolName: 'Workspace Instructions',
         })
         if (memoryInput) {
+          const preview = previewContextToolInput(memoryInput)
           await appendEvent(job.id, {
             type: 'tool_input',
             toolId: 'codesurf-memory-context',
-            text: memoryInput,
+            text: preview.text,
           })
         }
         await appendEvent(job.id, {
@@ -2623,8 +3765,16 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         })
       }
 
-      const skillsSummary = String(request.skillsSummary ?? '').trim()
+      const baseSkillsSummary = String(request.skillsSummary ?? '').trim()
       const skillsPrompt = String(request.skillsPrompt ?? '').trim()
+      const unboundedSkillsSummary = contextValidation.metadata.skillsPrompt.truncated
+        ? `${baseSkillsSummary || 'Included skills context for this run.'}; caller-provided prompt was truncated by the daemon context budget`
+        : baseSkillsSummary || (skillsPrompt ? 'Included skills context for this run.' : '')
+      const skillsSummary = unboundedSkillsSummary
+        ? truncateUtf8(unboundedSkillsSummary, MAX_SKILLS_SUMMARY_BYTES, {
+            reason: `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
+          }).text
+        : ''
       if (skillsSummary) {
         await appendEvent(job.id, {
           type: 'tool_start',
@@ -2632,10 +3782,11 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
           toolName: 'Included Skills',
         })
         if (skillsPrompt) {
+          const preview = previewContextToolInput(skillsPrompt)
           await appendEvent(job.id, {
             type: 'tool_input',
             toolId: 'codesurf-skills-context',
-            text: skillsPrompt,
+            text: preview.text,
           })
         }
         await appendEvent(job.id, {
@@ -2661,10 +3812,12 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       // conversation — see the predicate's comment for the full rationale.
       if (shouldUseHarness(request)) {
         const { runHarnessJob } = await getHarnessRunner()
+        if (job.cancelRequested) return
         await runHarnessJob(job, request, workspaceDir, instructionPrompt, {
           appendEvent,
           createCheckpoint: (toolName, filePaths) => createDaemonCheckpoint(job, request, toolName, filePaths),
           awaitToolPermission: (toolUseID, permissionRequest) => awaitToolPermissionAnswer(job, toolUseID, permissionRequest),
+          contextPrompt: contextPromptForRequest(request),
         })
       } else if (request.provider === 'claude') {
         await runClaudeJob(job, request, workspaceDir, instructionPrompt)
@@ -2676,6 +3829,9 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         await runHermesJob(job, request, workspaceDir, instructionPrompt)
       } else if (request.provider === 'omnigent') {
         await runOmnigentJob(job, request, workspaceDir, instructionPrompt)
+      } else if (request.provider === 'pi') {
+        await appendEvent(job.id, { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR })
+        await appendEvent(job.id, { type: 'done' })
       } else {
         await appendEvent(job.id, { type: 'error', error: `Daemon execution is only implemented for Claude, Codex, OpenCode, Hermes, and Omnigent right now. Requested: ${request.provider}` })
         await appendEvent(job.id, { type: 'done' })
@@ -2684,6 +3840,12 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       // Contain the failure to this job: emit terminal events so the client is
       // not left hanging, then let the finally block free the concurrency slot.
       console.error(`[chat-jobs] runJob error for job ${job.id}:`, err)
+      if (isTimelinePersistenceError(err) || timelinePersistence.get(job.id)?.failed) {
+        // failTimelinePersistence already stopped the provider and emitted one
+        // bounded in-memory terminal pair. Retrying through appendEvent here
+        // would only feed a known-bad persistence queue.
+        return
+      }
       try {
         await appendEvent(job.id, { type: 'error', error: err instanceof Error ? err.message : String(err) })
         await appendEvent(job.id, { type: 'done' })
@@ -2691,8 +3853,18 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         console.error(`[chat-jobs] failed to emit terminal events for job ${job.id}:`, appendErr)
       }
     } finally {
-      liveJobs.delete(job.id)
-      clearMetadataFlush(job.id)
+      job.runnerFinished = true
+      // A failed tree termination is not a completed lifecycle. Retain the
+      // owned PID/group so cancel or shutdown can retry instead of orphaning it.
+      if (!job.cancelRequested && !job.terminationFailed) {
+        liveJobs.delete(job.id)
+        clearMetadataFlush(job.id)
+      }
+      const failedPersistence = timelinePersistence.get(job.id)
+      if (failedPersistence?.failed) {
+        void scheduleFailedRecordFinalization(failedPersistence)
+      }
+      enforceFailedTimelineRecordLimit()
       activeJobCount = Math.max(0, activeJobCount - 1)
       pumpJobQueue()
     }
@@ -2710,7 +3882,9 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
         next.live.metadata.updatedAt = new Date().toISOString()
         void writeJobMetadata(next.live.metadata).catch(() => {})
       }
-      void runJob(next.live, next.request, next.workspaceDir)
+      const runPromise = runJob(next.live, next.request, next.workspaceDir)
+      next.live.runPromise = runPromise
+      void runPromise
     }
   }
 
@@ -2747,10 +3921,28 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       sessionId: typeof request.sessionId === 'string' ? request.sessionId : null,
       error: null,
     }
-    await writeJobMetadata(metadata)
-    await fs.writeFile(jobTimelinePath(id), '', 'utf8')
-    const live = { id, metadata, cancel: null, proc: null, query: null }
+    const live = {
+      id,
+      metadata,
+      cancel: null,
+      cancelPromise: null,
+      cancelRequested: false,
+      proc: null,
+      processTerminationPromise: null,
+      processTerminationResult: null,
+      query: null,
+      runnerFinished: false,
+      runPromise: null,
+      terminationFailed: false,
+    }
     liveJobs.set(id, live)
+    try {
+      await writeJobMetadata(metadata)
+      await fs.writeFile(jobTimelinePath(id), '', 'utf8')
+    } catch (error) {
+      liveJobs.delete(id)
+      throw error
+    }
     jobQueue.push({ live, request, workspaceDir })
     pumpJobQueue()
     return metadata
@@ -2764,93 +3956,496 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     const queueIdx = jobQueue.findIndex(item => item.live?.id === jobId)
     if (queueIdx !== -1) {
       jobQueue.splice(queueIdx, 1)
-      liveJobs.delete(jobId)
-      await appendEvent(jobId, { type: 'error', error: 'Job cancelled' })
-      await appendEvent(jobId, { type: 'done' })
+      try {
+        await appendEvent(jobId, { type: 'error', error: 'Job cancelled' })
+        await appendEvent(jobId, { type: 'done' })
+      } catch (error) {
+        if (!isTimelinePersistenceError(error)) throw error
+      } finally {
+        liveJobs.delete(jobId)
+        clearMetadataFlush(jobId)
+        const failedPersistence = timelinePersistence.get(jobId)
+        if (failedPersistence?.failed) {
+          void scheduleFailedRecordFinalization(failedPersistence)
+        }
+        enforceFailedTimelineRecordLimit()
+      }
       return { ok: true }
     }
     if (live?.cancel) {
-      live.cancel()
-      await appendEvent(jobId, { type: 'error', error: 'Job cancelled' })
-      await appendEvent(jobId, { type: 'done' })
-      return { ok: true }
+      if (live.cancelPromise) return await live.cancelPromise
+      live.cancelRequested = true
+      const cancelPromise = (async () => {
+        let termination
+        try {
+          termination = await live.cancel()
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          live.terminationFailed = true
+          await appendEvent(jobId, {
+            type: 'error',
+            error: `Job cancellation failed: ${detail}`,
+          }, { allowDuringCancellation: true })
+          return { ok: false, error: `Job cancellation failed: ${detail}` }
+        }
+        if (termination && termination.confirmed === false) {
+          live.terminationFailed = true
+          const error = `Job cancellation failed: ${termination.detail}`
+          await appendEvent(jobId, { type: 'error', error }, { allowDuringCancellation: true })
+          return { ok: false, error }
+        }
+
+        const runnerSettled = await waitForJobRunnerSettlement(live)
+        if (!runnerSettled) {
+          live.terminationFailed = true
+          const error = 'Job cancellation failed: provider runner did not settle after cancellation'
+          await appendEvent(jobId, { type: 'error', error }, { allowDuringCancellation: true })
+          return { ok: false, error }
+        }
+
+        live.terminationFailed = false
+        await appendEvent(
+          jobId,
+          { type: 'error', error: 'Job cancelled' },
+          { allowDuringCancellation: true },
+        )
+        await appendEvent(jobId, { type: 'done' }, { allowDuringCancellation: true })
+        return { ok: true }
+      })()
+      live.cancelPromise = cancelPromise
+      const result = await cancelPromise
+      if (!result.ok && live.cancelPromise === cancelPromise) {
+        live.cancelPromise = null
+      }
+      if (result.ok && live.runnerFinished && liveJobs.get(jobId) === live) {
+        liveJobs.delete(jobId)
+        clearMetadataFlush(jobId)
+      }
+      return result
+    }
+    if (live) {
+      if (live.cancelPromise) return await live.cancelPromise
+      live.cancelRequested = true
+      const cancelPromise = (async () => {
+        const runnerSettled = await waitForJobRunnerSettlement(live)
+        if (!runnerSettled) {
+          live.terminationFailed = true
+          const error = 'Job cancellation failed: provider preparation did not settle after cancellation'
+          await appendEvent(jobId, { type: 'error', error }, { allowDuringCancellation: true })
+          return { ok: false, error }
+        }
+        live.terminationFailed = false
+        await appendEvent(
+          jobId,
+          { type: 'error', error: 'Job cancelled' },
+          { allowDuringCancellation: true },
+        )
+        await appendEvent(jobId, { type: 'done' }, { allowDuringCancellation: true })
+        return { ok: true }
+      })()
+      live.cancelPromise = cancelPromise
+      const result = await cancelPromise
+      if (!result.ok && live.cancelPromise === cancelPromise) {
+        live.cancelPromise = null
+      }
+      if (result.ok && live.runnerFinished && liveJobs.get(jobId) === live) {
+        liveJobs.delete(jobId)
+        clearMetadataFlush(jobId)
+      }
+      return result
     }
     return { ok: false, error: 'Job not running' }
   }
 
   async function getJobState(jobId) {
+    const failedPersistence = timelinePersistence.get(jobId)
+    const failedState = failedPersistence?.durableFailureMetadata
+      ?? failedPersistence?.failureMetadata
+    if (failedState) {
+      return { ...failedState }
+    }
     return await readJobMetadata(jobId)
   }
 
+  function getPersistenceState(jobId) {
+    const record = timelinePersistence.get(jobId)
+    if (!record) {
+      return {
+        failed: false,
+        queuedEvents: 0,
+        queuedBytes: 0,
+      }
+    }
+    return {
+      failed: record.failed,
+      queuedEvents: record.entries.length,
+      queuedBytes: record.queuedBytes,
+      ...(record.error ? { error: record.error.message } : {}),
+    }
+  }
+
+  const INTERRUPTED_JOB_ERROR = 'Job was interrupted (the daemon restarted)'
+
+  async function scanTimeline(jobId, {
+    expectedSerialized = null,
+    expectedSequence = null,
+    onRecord = null,
+  } = {}) {
+    const timelinePath = jobTimelinePath(jobId)
+    if (!existsSync(timelinePath)) {
+      return {
+        maxSequence: 0,
+        terminalSeen: false,
+        terminalSequence: null,
+        terminalStartByte: null,
+        lastEventType: null,
+        lastError: null,
+        contiguousByteLength: 0,
+        integrityError: null,
+        exactRecordCommitted: false,
+      }
+    }
+
+    const input = timelineReadStream(timelinePath)
+    let buffered = Buffer.alloc(0)
+    let fileOffset = 0
+    let lineNumber = 0
+    let stopped = false
+    let maxSequence = 0
+    let terminalSeen = false
+    let terminalSequence = null
+    let terminalStartByte = null
+    let lastEventType = null
+    let lastError = null
+    let contiguousByteLength = 0
+    let integrityError = null
+    let exactRecordCommitted = false
+
+    const markIntegrityError = (detail) => {
+      if (!integrityError) {
+        integrityError = `Timeline integrity check failed for job ${jobId} at line ${lineNumber}: ${detail}`
+      }
+    }
+
+    const processLine = async (fullLine) => {
+      lineNumber += 1
+      const recordStartByte = fileOffset
+      fileOffset += fullLine.length
+      let content = fullLine.subarray(0, fullLine.length - 1)
+      if (content.at(-1) === 0x0d) content = content.subarray(0, content.length - 1)
+      const rawLine = content.toString('utf8')
+      if (!rawLine.trim()) {
+        markIntegrityError('empty JSONL record')
+        return
+      }
+
+      let payload
+      try {
+        payload = JSON.parse(rawLine)
+      } catch {
+        markIntegrityError('malformed JSONL record')
+        return
+      }
+
+      const sequence = Number(payload?.sequence ?? 0)
+      if (integrityError) return
+      if (!Number.isInteger(sequence) || sequence <= 0) {
+        markIntegrityError('invalid event sequence')
+        return
+      }
+      if (payload?.jobId !== jobId) {
+        markIntegrityError('event job identity does not match its timeline')
+        return
+      }
+      if (terminalSeen) {
+        markIntegrityError(`event sequence ${sequence} appears after terminal sequence ${terminalSequence}`)
+        return
+      }
+      const nextSequence = maxSequence + 1
+      if (sequence !== nextSequence) {
+        markIntegrityError(`expected sequence ${nextSequence}, received ${sequence}`)
+        return
+      }
+      if (
+        expectedSerialized !== null
+        && sequence === expectedSequence
+        && rawLine !== expectedSerialized
+      ) {
+        markIntegrityError(`sequence ${sequence} contains different event content`)
+        return
+      }
+
+      maxSequence = sequence
+      lastEventType = payload.type ?? null
+      if (payload.type === 'error') {
+        lastError = typeof payload.error === 'string' ? payload.error : 'Unknown error'
+      }
+      if (payload.type === 'done') {
+        terminalSeen = true
+        terminalSequence = sequence
+        terminalStartByte = recordStartByte
+      }
+      if (
+        expectedSerialized !== null
+        && sequence === expectedSequence
+        && rawLine === expectedSerialized
+      ) {
+        exactRecordCommitted = true
+      }
+      contiguousByteLength = fileOffset
+      if (onRecord && await onRecord(payload) === false) stopped = true
+    }
+
+    try {
+      for await (const chunk of input) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        buffered = buffered.length === 0
+          ? bytes
+          : Buffer.concat([buffered, bytes])
+        let newlineIndex = buffered.indexOf(0x0a)
+        while (newlineIndex !== -1) {
+          const fullLine = buffered.subarray(0, newlineIndex + 1)
+          buffered = buffered.subarray(newlineIndex + 1)
+          await processLine(fullLine)
+          if (stopped) break
+          newlineIndex = buffered.indexOf(0x0a)
+        }
+        if (stopped) break
+      }
+      if (!stopped && buffered.length > 0) {
+        lineNumber += 1
+        markIntegrityError('incomplete JSONL record without a trailing newline')
+      }
+    } finally {
+      input.destroy()
+    }
+    return {
+      maxSequence,
+      terminalSeen,
+      terminalSequence,
+      terminalStartByte,
+      lastEventType,
+      lastError,
+      contiguousByteLength,
+      integrityError,
+      exactRecordCommitted,
+    }
+  }
+
+  async function inspectTimeline(jobId, options) {
+    return await scanTimeline(jobId, options)
+  }
+
+  async function appendReconciliationEvent(jobId, event) {
+    const line = `${JSON.stringify(event)}\n`
+    let lastError = null
+    for (let attempt = 1; attempt <= TIMELINE_APPEND_ATTEMPTS; attempt += 1) {
+      try {
+        await timelineAppend(jobTimelinePath(jobId), line)
+        return
+      } catch (error) {
+        lastError = error
+        try {
+          const inspected = await inspectTimeline(jobId, {
+            expectedSerialized: line.slice(0, -1),
+            expectedSequence: Number(event.sequence ?? 0),
+          })
+          if (!inspected.integrityError && inspected.exactRecordCommitted) return
+          if (
+            inspected.integrityError
+            || inspected.maxSequence >= Number(event.sequence ?? 0)
+          ) {
+            await fs.truncate(jobTimelinePath(jobId), inspected.contiguousByteLength)
+            lastError = new Error(
+              inspected.integrityError
+                ?? `timeline sequence ${event.sequence} contains different event content`,
+            )
+          }
+        } catch {}
+        if (attempt < TIMELINE_APPEND_ATTEMPTS) await waitBeforeTimelineRetry(attempt)
+      }
+    }
+    throw new TimelinePersistenceError(jobId, lastError ?? new Error('timeline append failed'))
+  }
+
+  async function reconcileInterruptedJob(jobId) {
+    const existing = reconciliationLocks.get(jobId)
+    if (existing) return await existing
+
+    const reconciliation = (async () => {
+      const metadata = await readJobMetadata(jobId)
+      if (!metadata || liveJobs.has(jobId)) return metadata
+      const active = metadata.status === 'running' || metadata.status === 'queued'
+      const persistenceFailed = metadata.timelinePersistenceFailed === true
+      const terminalMetadata = metadata.status === 'completed' || metadata.status === 'failed'
+      let inspected = await inspectTimeline(jobId)
+      const metadataLastSequence = Math.max(0, Number(metadata.lastSequence) || 0)
+      const terminalConsistent = (
+        !inspected.integrityError
+        && inspected.terminalSeen
+        && inspected.lastEventType === 'done'
+        && inspected.maxSequence === metadataLastSequence
+        && (
+          (metadata.status === 'completed' && !inspected.lastError)
+          || (metadata.status === 'failed' && Boolean(inspected.lastError))
+        )
+      )
+      if (!active && !persistenceFailed && (!terminalMetadata || terminalConsistent)) {
+        return metadata
+      }
+
+      let integrityDetail = inspected.integrityError
+      if (inspected.integrityError) {
+        await fs.truncate(jobTimelinePath(jobId), inspected.contiguousByteLength)
+        inspected = await inspectTimeline(jobId)
+      }
+
+      // A durable failure terminal is safe to adopt after a metadata-write
+      // failure. A success terminal paired with still-active metadata is not:
+      // remove that uncommitted terminal before appending failure semantics so
+      // replay can never stop on the stale success `done`.
+      if (inspected.terminalSeen && !inspected.lastError) {
+        integrityDetail ??= (
+          `Timeline integrity check failed for job ${jobId}: `
+          + 'terminal event was not committed by terminal metadata'
+        )
+        await fs.truncate(jobTimelinePath(jobId), inspected.terminalStartByte)
+        inspected = await inspectTimeline(jobId)
+      }
+
+      const now = new Date().toISOString()
+      const recoveryError = persistenceFailed
+        ? String(metadata.error ?? 'Timeline persistence failed')
+        : integrityDetail
+          ? integrityDetail
+          : terminalMetadata
+            ? `Timeline integrity check failed for job ${jobId}: terminal metadata does not match the durable timeline`
+            : INTERRUPTED_JOB_ERROR
+
+      if (!inspected.terminalSeen) {
+        if (inspected.lastEventType !== 'error') {
+          const errorEvent = {
+            jobId,
+            sequence: inspected.maxSequence + 1,
+            timestamp: Date.now(),
+            type: 'error',
+            error: recoveryError,
+          }
+          await appendReconciliationEvent(jobId, errorEvent)
+          inspected = await inspectTimeline(jobId)
+        }
+        const doneEvent = {
+          jobId,
+          sequence: inspected.maxSequence + 1,
+          timestamp: Date.now(),
+          type: 'done',
+        }
+        await appendReconciliationEvent(jobId, doneEvent)
+        inspected = await inspectTimeline(jobId)
+      }
+
+      const reconciledMetadata = {
+        ...metadata,
+        status: 'failed',
+        error: inspected.lastError ?? recoveryError,
+        updatedAt: now,
+        completedAt: metadata.completedAt
+          ?? metadata.updatedAt
+          ?? metadata.requestedAt
+          ?? now,
+        lastSequence: inspected.maxSequence,
+        timelinePersistenceFailed: false,
+      }
+      // Strict ordering: both timeline terminal records are durable before the
+      // metadata status and high-water mark advance.
+      await writeJobMetadata(reconciledMetadata)
+      return reconciledMetadata
+    })()
+    reconciliationLocks.set(jobId, reconciliation)
+    try {
+      return await reconciliation
+    } finally {
+      if (reconciliationLocks.get(jobId) === reconciliation) {
+        reconciliationLocks.delete(jobId)
+      }
+    }
+  }
+
+  async function replayTimeline(record, jobId, sinceSequence, throughSequence = Number.POSITIVE_INFINITY) {
+    return await scanTimeline(jobId, {
+      onRecord: async payload => {
+        const sequence = Number(payload.sequence)
+        if (sequence <= sinceSequence || sequence > throughSequence) return true
+        return await subscriberRegistry.sendReplay(record, payload)
+      },
+    })
+  }
+
   async function streamJob(jobId, sinceSequence, res) {
-    const metadata = await readJobMetadata(jobId)
+    let persistedMetadata = await readJobMetadata(jobId)
+    const live = liveJobs.get(jobId)
+    const persistenceFailure = timelinePersistence.get(jobId)?.failureMetadata
+    if (!live && !persistenceFailure && persistedMetadata) {
+      persistedMetadata = await reconcileInterruptedJob(jobId)
+    }
+    const metadata = live?.metadata ?? persistenceFailure ?? persistedMetadata
     if (!metadata) return false
 
-    const raw = existsSync(jobTimelinePath(jobId))
-      ? readFileSync(jobTimelinePath(jobId), 'utf8')
-      : ''
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      try {
-        const payload = JSON.parse(trimmed)
-        if (Number(payload.sequence ?? 0) > sinceSequence) {
-          writeSseEvent(res, payload)
-        }
-      } catch {
-        // ignore corrupt lines
-      }
-    }
-
-    // Post-crash wedge guard: metadata may say 'running'/'queued' for a job
-    // that is no longer live (daemon crashed/restarted). Registering a
-    // subscriber would hang the client forever on a stream that never fires.
-    // Emit a terminal pair and close instead.
+    const normalizedSince = Math.max(0, Number(sinceSequence) || 0)
     const statusActive = metadata.status === 'running' || metadata.status === 'queued'
-    if (statusActive && !liveJobs.has(jobId)) {
-      // Derive baseSeq from the actual max sequence in the timeline file to avoid
-      // duplicate sequence numbers when metadata.lastSequence is stale after a crash.
-      let baseSeq = Number(metadata.lastSequence ?? 0)
-      for (const line of raw.split('\n')) {
-        const t = line.trim()
-        if (!t) continue
-        try {
-          const seq = Number(JSON.parse(t).sequence ?? 0)
-          if (seq > baseSeq) baseSeq = seq
-        } catch { /* ignore */ }
-      }
-      writeSseEvent(res, { jobId, sequence: baseSeq + 1, timestamp: Date.now(), type: 'error', error: 'Job was interrupted (the daemon restarted)' })
-      writeSseEvent(res, { jobId, sequence: baseSeq + 2, timestamp: Date.now(), type: 'done' })
+    const liveAtRegistration = statusActive && Boolean(live)
+    const replayThrough = liveAtRegistration
+      ? Math.max(normalizedSince, Number(metadata.lastSequence ?? 0))
+      : Number.POSITIVE_INFINITY
+    const pendingAtRegistration = snapshotPendingTimelineEvents(
+      jobId,
+      normalizedSince,
+      replayThrough,
+    )
+
+    // Register synchronously before the first replay await. Live events emitted
+    // while disk history is streaming are buffered on this subscriber, then
+    // reconciled by sequence after the replay high-water mark.
+    const subscriber = subscriberRegistry.register(jobId, res, {
+      sinceSequence: normalizedSince,
+      replaying: true,
+    })
+    subscriberRegistry.sendComment(subscriber, ': connected\n\n')
+
+    const replayed = await replayTimeline(
+      subscriber,
+      jobId,
+      normalizedSince,
+      replayThrough,
+    )
+    if (replayed.integrityError) {
+      subscriberRegistry.close(subscriber)
       return false
     }
-
-    // Hold the stream open for live jobs that are running OR still queued
-    // (daemon-01): a queued job has no events yet, but it is live and will emit
-    // once a concurrency slot frees, so the subscriber must wait, not close.
-    if (metadata.status === 'running' || metadata.status === 'queued') {
-      const listeners = subscribers.get(jobId) ?? new Set()
-      listeners.add(res)
-      subscribers.set(jobId, listeners)
-      const cleanup = () => {
-        const current = subscribers.get(jobId)
-        if (!current) return
-        current.delete(res)
-        if (current.size === 0) subscribers.delete(jobId)
-      }
-      res.on('close', cleanup)
-      res.on('error', cleanup)
-      return true
+    for (const payload of pendingAtRegistration.events) {
+      if (!await subscriberRegistry.sendReplay(subscriber, payload)) break
     }
 
+    if (liveAtRegistration) {
+      return subscriberRegistry.finishReplay(subscriber)
+    }
+
+    // A terminal replay can itself hit socket backpressure. In that case
+    // writeEntry has already called end() and retained a bounded destroy
+    // deadline. Do not clear that deadline/listeners here.
+    if (!subscriber.blocked && !subscriber.terminalEnding) {
+      subscriberRegistry.close(subscriber, { end: false })
+    }
     return false
   }
 
   // daemon-05 (core): prune terminal job metadata + timeline jsonl past a TTL
   // so ~/.codesurf/jobs and /timelines do not grow without bound. Keeps the
   // newest `keepRecent` terminal jobs regardless of age, then deletes terminal
-  // jobs older than `maxAgeMs`. Never touches live or active-status
-  // (running/queued) jobs. Checkpoint-record retention is deliberately out of
-  // scope here — it crosses into checkpoints.mjs + per-workspace dirs.
+  // jobs older than `maxAgeMs`. Never touches live jobs; stale active-status
+  // records from a prior process are reconciled first. Checkpoint-record
+  // retention is deliberately out of scope here — it crosses into
+  // checkpoints.mjs + per-workspace dirs.
   async function sweepJobRetention({ maxAgeMs = 30 * 24 * 60 * 60 * 1000, keepRecent = 200 } = {}) {
     let entries
     try {
@@ -2870,10 +4465,42 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       } catch {
         continue
       }
-      // Only genuinely terminal jobs are prunable; running/queued (and any
-      // crashed-but-still-'running' record daemon-04 will reconcile) are left.
-      if (meta?.status !== 'completed' && meta?.status !== 'failed') continue
-      terminal.push({ id, completedAt: Date.parse(meta?.completedAt ?? '') || 0 })
+      const activeStatus = meta?.status === 'running' || meta?.status === 'queued'
+      const wasTerminalStatus = meta?.status === 'completed' || meta?.status === 'failed'
+      const metadataLastSequence = Number(meta?.lastSequence)
+      const metadataLooksInconsistent = wasTerminalStatus && (
+        !Number.isInteger(metadataLastSequence)
+        || metadataLastSequence <= 0
+      )
+      if (
+        activeStatus
+        || meta?.timelinePersistenceFailed === true
+        || metadataLooksInconsistent
+      ) {
+        try {
+          // The daemon invokes this sweep once on startup. Any active-status
+          // record without a matching live job belongs to the prior process and
+          // must be reconciled here, rather than remaining permanently exempt
+          // until somebody happens to reopen its SSE endpoint.
+          meta = await reconcileInterruptedJob(id) ?? meta
+        } catch {
+          // If storage remains unavailable, the record is still not truly live.
+          // Include old interrupted artifacts in retention using their last
+          // durable activity time so repeated finalization failures stay bounded.
+        }
+      }
+      const terminalStatus = meta?.status === 'completed' || meta?.status === 'failed'
+      const interruptedStatus = meta?.status === 'running' || meta?.status === 'queued'
+      if (!terminalStatus && !interruptedStatus && meta?.timelinePersistenceFailed !== true) continue
+      terminal.push({
+        id,
+        completedAt: Date.parse(
+          meta?.completedAt
+          ?? meta?.updatedAt
+          ?? meta?.requestedAt
+          ?? '',
+        ) || 0,
+      })
     }
     terminal.sort((a, b) => b.completedAt - a.completedAt)
     let pruned = 0
@@ -2882,6 +4509,8 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
       try {
         await fs.rm(jobMetaPath(id), { force: true })
         await fs.rm(jobTimelinePath(id), { force: true })
+        timelinePersistence.delete(id)
+        timelineWriteTails.delete(id)
         pruned += 1
       } catch { /* best effort */ }
     }
@@ -2893,40 +4522,39 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
   // queries or spawned codex/opencode/hermes CLI children (which run with
   // file-write access and would otherwise keep running, reparented to init).
   async function shutdown() {
-    clearInterval(heartbeatTimer)
-    for (const timer of metadataFlushTimers.values()) clearTimeout(timer)
-    metadataFlushTimers.clear()
     const jobs = Array.from(liveJobs.values())
-    const procsWithPid = []
-    for (const live of jobs) {
-      try { live.cancel?.() } catch { /* already gone */ }
-      const proc = live.proc
-      if (!proc) continue
-      // Attempt to kill the entire process group (detached spawn)
-      try { process.kill(-proc.pid, 'SIGTERM') } catch {
-        try { proc.kill('SIGTERM') } catch { /* already gone */ }
-      }
-      procsWithPid.push(proc)
-    }
-    if (procsWithPid.length > 0) {
-      // Wait for each process to exit (up to 3s total) before escalating to SIGKILL
-      const exitPromises = procsWithPid.map(proc =>
-        new Promise((resolve) => {
-          if (proc.exitCode !== null) { resolve(undefined); return }
-          proc.once('exit', resolve)
-          proc.once('error', resolve)
-        })
-      )
-      await Promise.race([
-        Promise.all(exitPromises),
-        new Promise((r) => setTimeout(r, 3000)),
-      ])
-      for (const proc of procsWithPid) {
-        if (proc.exitCode !== null || proc.killed) continue
-        try { process.kill(-proc.pid, 'SIGKILL') } catch {
-          try { proc.kill('SIGKILL') } catch { /* already gone */ }
+    const cancellationResults = await Promise.all(jobs.map(async live => {
+      try {
+        return await cancelJob(live.id)
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
         }
       }
+    }))
+    const runPromises = jobs
+      .map(live => live.runPromise)
+      .filter(Boolean)
+    let runnersSettled = true
+    if (runPromises.length > 0) {
+      runnersSettled = await Promise.race([
+        Promise.allSettled(runPromises).then(() => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 3_000)),
+      ])
+    }
+    subscriberRegistry.shutdown()
+    for (const timer of metadataFlushTimers.values()) clearTimeout(timer)
+    metadataFlushTimers.clear()
+    if (failedCleanupTasks.size > 0) {
+      await Promise.allSettled(Array.from(failedCleanupTasks))
+    }
+    const failures = cancellationResults
+      .filter(result => !result?.ok)
+      .map(result => result?.error || 'job cancellation was not confirmed')
+    if (!runnersSettled) failures.push('one or more job runners did not settle after cancellation')
+    if (failures.length > 0) {
+      throw new Error(`Daemon chat shutdown incomplete: ${failures.join('; ')}`)
     }
   }
 
@@ -2935,6 +4563,7 @@ export function createChatJobManager({ homeDir, checkpointStore = null, claudeQu
     cancelJob,
     answerToolPermission,
     getJobState,
+    getPersistenceState,
     streamJob,
     shutdown,
     sweepJobRetention,

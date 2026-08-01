@@ -4,14 +4,14 @@
 
 The relay system now has comprehensive test coverage across multiple layers:
 
-| Test File | Tests | Type | Coverage |
-|-----------|-------|------|----------|
-| `markdown.test.ts` | 9 | Unit | Message serialization/parsing |
-| `validation.test.ts` | 12 | Unit | Input validation, sanitization |
-| `runtime.test.ts` | 6 | Unit/Mock | Agent lifecycle, error handling |
-| `integration.test.ts` | 15 | Integration | Full system with real filesystem |
-
-**Total: 40 passing tests + 2 planned**
+| Test File | Type | Coverage |
+|-----------|------|----------|
+| `markdown.test.ts` | Unit | Message serialization/parsing |
+| `validation.test.ts` | Unit | Production input validation, prompt sanitization, and slugging exports |
+| `atomicFileWrites.test.ts` | Unit | Transactional file replacement and rollback |
+| `runtime.test.ts` | Unit/Mock | Agent lifecycle, cancellation, scheduling, and error handling |
+| `integration.test.ts` | Integration | Full system with real filesystem |
+| `app-shutdown.integration.test.ts` | Integration | Provider process-tree teardown during application shutdown |
 
 ## Running Tests
 
@@ -35,7 +35,7 @@ npm run test:watch # Watch mode
 **`validation.test.ts`**
 - Path traversal protection
 - Prompt injection sanitization
-- ID validation
+- Participant ID validation at exact length and runtime-type boundaries
 - Safe slug generation
 
 ### 2. Runtime Behavior Tests (Mocked)

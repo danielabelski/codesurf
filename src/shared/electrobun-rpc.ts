@@ -16,9 +16,14 @@ export type CodeSurfElectrobunLogMessage = {
 
 export type CodeSurfElectrobunBridgeReadyMessage = {
   platform: string
+  homedir: string
   hasElectronFacade: boolean
   hasElectrobunWebviewTag?: boolean
   userAgent?: string
+  selfCheck?: {
+    ok: boolean
+    checks: Array<{ name: string; ok: boolean; error?: string }>
+  }
 }
 
 export type CodeSurfRPCSide<Requests extends Record<string, unknown>, Messages extends Record<string, unknown>> = {

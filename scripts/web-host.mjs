@@ -19,6 +19,12 @@ import {
   renameSync,
   readdirSync,
   statSync,
+  lstatSync,
+  openSync,
+  readSync,
+  closeSync,
+  fstatSync,
+  constants as fsConstants,
   rmSync,
 } from 'node:fs'
 import { dirname, join, resolve, basename, extname, normalize, relative, isAbsolute } from 'node:path'
@@ -40,6 +46,11 @@ const TERMINAL_ENDPOINT = process.env.CODESURF_TERMINAL_GATEWAY_URL?.trim()
   || null
 const TERMINAL_TOKEN = process.env.CODESURF_TERMINAL_TOKEN?.trim() || null
 const HOST_TOKEN = process.env.CODESURF_WEB_HOST_TOKEN?.trim() || randomBytes(32).toString('base64url')
+const HOST_UI_STATE_PATHS = new Map([
+  // Renderer compatibility path. Keep this an exact allow-list rather than
+  // exposing the CodeSurf home, which also contains daemon credentials.
+  ['~/.codesurf/layout-templates.json', join(HOME, 'layout-templates.json')],
+])
 const DEFAULT_CORS_ORIGINS = [
   'http://127.0.0.1:5173',
   'http://localhost:5173',
@@ -220,8 +231,12 @@ async function readBuffer(req, maxBytes = MAX_BODY_BYTES) {
   return Buffer.concat(chunks, size)
 }
 
+export function projectRegistryPath(homePath = HOME) {
+  return join(homePath, 'projects', 'projects.json')
+}
+
 function configuredProjectRoots() {
-  const projectDoc = readJson(join(HOME, 'projects.json'), { projects: [] })
+  const projectDoc = readJson(projectRegistryPath(), { projects: [] })
   const projectRoots = Array.isArray(projectDoc?.projects)
     ? projectDoc.projects
       .map(project => typeof project?.path === 'string' ? project.path.trim() : '')
@@ -257,10 +272,185 @@ function realPathIfPresent(value) {
   }
 }
 
+export function assertNoSymlinkPath(rootPath, targetPath, { allowMissing = true } = {}) {
+  const root = resolve(rootPath)
+  const target = resolve(targetPath)
+  if (!pathIsInside(root, target)) throw new Error('Collab path escape blocked')
+
+  const rootStat = lstatIfPresent(root)
+  if (!rootStat) throw new Error('Collab workspace root does not exist')
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error('Collab workspace root must be a non-symlink directory')
+  }
+  const rootReal = realpathSync(root)
+
+  let current = root
+  const rel = relative(root, target)
+  const parts = rel ? rel.split(/[\\/]+/).filter(Boolean) : []
+  for (const part of parts) {
+    current = join(current, part)
+    const currentStat = lstatIfPresent(current)
+    if (!currentStat) {
+      if (!allowMissing) throw new Error('Collab path does not exist')
+      break
+    }
+    if (currentStat.isSymbolicLink()) {
+      throw new Error('Collab symlink or junction escape blocked')
+    }
+    const currentReal = realpathSync(current)
+    if (!pathIsInside(rootReal, currentReal)) {
+      throw new Error('Collab canonical path escape blocked')
+    }
+  }
+
+  if (!allowMissing && !lstatIfPresent(target)) throw new Error('Collab path does not exist')
+  return { root, rootReal, target }
+}
+
+function lstatIfPresent(value) {
+  try {
+    return lstatSync(value)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function ensureDirectoryTreeNoFollow(rootPath, targetPath) {
+  const authorized = assertNoSymlinkPath(rootPath, targetPath)
+  let current = authorized.root
+  const rel = relative(authorized.root, authorized.target)
+  const parts = rel ? rel.split(/[\\/]+/).filter(Boolean) : []
+
+  for (const part of parts) {
+    current = join(current, part)
+    let currentStat = lstatIfPresent(current)
+    if (!currentStat) {
+      try {
+        mkdirSync(current, { mode: 0o700 })
+      } catch (error) {
+        if (error?.code !== 'EEXIST') throw error
+      }
+      currentStat = lstatIfPresent(current)
+    }
+    if (!currentStat || currentStat.isSymbolicLink() || !currentStat.isDirectory()) {
+      throw new Error('Collab directory path contains a symlink, junction, or non-directory')
+    }
+    const currentReal = realpathSync(current)
+    if (!pathIsInside(authorized.rootReal, currentReal)) {
+      throw new Error('Collab canonical directory escape blocked')
+    }
+  }
+
+  return authorized.target
+}
+
+function sameFileIdentity(left, right) {
+  return left?.dev === right?.dev && left?.ino === right?.ino
+}
+
+function assertCanonicalCollabTarget(authorized, targetPath, expectedCanonical) {
+  const canonical = realPathIfPresent(targetPath)
+  if (!canonical || !pathIsInside(authorized.rootReal, canonical)) {
+    throw new Error('Collab canonical path changed during access')
+  }
+  if (expectedCanonical && canonical !== expectedCanonical) {
+    throw new Error('Collab canonical path changed during access')
+  }
+  return canonical
+}
+
+function readCollabFileNoFollow(rootPath, filePath) {
+  const authorized = assertNoSymlinkPath(rootPath, filePath, { allowMissing: false })
+  const pathStat = lstatSync(filePath)
+  if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
+    throw new Error('Collab read target must be a non-symlink regular file')
+  }
+  // O_NOFOLLOW protects only the final component. Retain the canonical target
+  // and re-check it after opening so an ancestor swap cannot redirect a read
+  // between lexical authorization and the file-handle operation.
+  const canonicalTarget = assertCanonicalCollabTarget(authorized, filePath)
+
+  const fd = openSync(filePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+  try {
+    const openedStat = fstatSync(fd)
+    if (
+      !openedStat.isFile()
+      || !sameFileIdentity(openedStat, pathStat)
+    ) {
+      throw new Error('Collab read target changed during access')
+    }
+    assertCanonicalCollabTarget(authorized, filePath, canonicalTarget)
+    return readFileSync(fd, 'utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function writeCollabFileNoFollow(rootPath, filePath, content) {
+  const parentPath = dirname(filePath)
+  ensureDirectoryTreeNoFollow(rootPath, parentPath)
+  const authorized = assertNoSymlinkPath(rootPath, filePath)
+  const canonicalParent = assertCanonicalCollabTarget(authorized, parentPath)
+  const pathStat = lstatIfPresent(filePath)
+  if (pathStat && (pathStat.isSymbolicLink() || !pathStat.isFile())) {
+    throw new Error('Collab write target must be a non-symlink regular file')
+  }
+  const canonicalTarget = pathStat
+    ? assertCanonicalCollabTarget(authorized, filePath)
+    : null
+
+  const flags = fsConstants.O_WRONLY
+    | fsConstants.O_CREAT
+    | fsConstants.O_TRUNC
+    | (fsConstants.O_NOFOLLOW ?? 0)
+  const fd = openSync(filePath, flags, 0o600)
+  try {
+    const openedStat = fstatSync(fd)
+    if (
+      !openedStat.isFile()
+      || (pathStat && !sameFileIdentity(openedStat, pathStat))
+    ) {
+      throw new Error('Collab write target changed during access')
+    }
+    // Revalidate both the parent and the final path after open. This closes
+    // the common ancestor-replacement window while retaining a handle for the
+    // actual write. A platform-native openat/unlinkat capability would be
+    // required to eliminate every same-user race on Node-supported targets.
+    assertCanonicalCollabTarget(authorized, parentPath, canonicalParent)
+    assertCanonicalCollabTarget(authorized, filePath, canonicalTarget)
+    writeFileSync(fd, content, { encoding: 'utf8' })
+  } finally {
+    closeSync(fd)
+  }
+}
+
 function resolveAllowedFsPath(input, { allowMissing = true } = {}) {
   if (typeof input !== 'string' || !input.trim()) throw new HttpError(400, 'path required')
-  const candidate = resolve(input)
+  const normalizedInput = input.trim()
+  const uiStatePath = HOST_UI_STATE_PATHS.get(normalizedInput)
+  const candidate = resolve(uiStatePath ?? normalizedInput)
   const candidateReal = realPathIfPresent(candidate)
+
+  if (uiStatePath) {
+    const homeRoot = resolve(HOME)
+    const homeRootReal = realPathIfPresent(homeRoot)
+    if (!homeRootReal) throw new HttpError(503, 'CodeSurf home is unavailable')
+    if (candidateReal && !pathIsInside(homeRootReal, candidateReal)) {
+      throw new HttpError(403, 'UI state path escapes the CodeSurf home')
+    }
+    let parent = candidate
+    while (!existsSync(parent)) {
+      const next = dirname(parent)
+      if (next === parent) break
+      parent = next
+    }
+    const parentReal = realPathIfPresent(parent)
+    if (!parentReal || !pathIsInside(homeRootReal, parentReal)) {
+      throw new HttpError(403, 'UI state parent escapes the CodeSurf home')
+    }
+    return candidate
+  }
 
   for (const root of configuredProjectRoots()) {
     const rootReal = realPathIfPresent(root)
@@ -599,6 +789,40 @@ async function handleHost(req, res, url) {
     }
   }
 
+  if (method === 'GET' && path === '/host/fs/readFilePrefix') {
+    const filePath = url.searchParams.get('path')
+    const maxBytes = Number(url.searchParams.get('maxBytes'))
+    if (!filePath) return sendJson(res, 400, { error: 'path required' })
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
+      return sendJson(res, 400, { error: 'maxBytes must be an integer between 1 and 65536' })
+    }
+    let fd = null
+    try {
+      const abs = resolveAllowedFsPath(filePath)
+      if (!existsSync(abs)) return sendJson(res, 200, { content: null, missing: true })
+      const pathStat = lstatSync(abs)
+      if (pathStat.isSymbolicLink() || !pathStat.isFile()) throw new HttpError(400, 'path must be a regular non-symbolic file')
+      fd = openSync(abs, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+      const openedStat = fstatSync(fd)
+      if (openedStat.dev !== pathStat.dev || openedStat.ino !== pathStat.ino) throw new HttpError(400, 'path changed during access')
+      const allocation = Math.min(openedStat.size, maxBytes)
+      const buffer = Buffer.allocUnsafe(allocation)
+      let offset = 0
+      while (offset < allocation) {
+        const bytesRead = readSync(fd, buffer, offset, allocation - offset, offset)
+        if (bytesRead === 0) break
+        offset += bytesRead
+      }
+      return sendJson(res, 200, { content: buffer.subarray(0, offset).toString('utf8'), missing: false })
+    } catch (err) {
+      const code = err?.code || ''
+      if (code === 'ENOENT') return sendJson(res, 200, { content: null, missing: true })
+      return sendJson(res, err?.status || 400, { error: String(err?.message || err), code })
+    } finally {
+      if (fd !== null) closeSync(fd)
+    }
+  }
+
   if (method === 'POST' && path === '/host/fs/writeFile') {
     const body = await readBody(req)
     if (!body?.path || typeof body.content !== 'string') {
@@ -659,30 +883,33 @@ async function handleHost(req, res, url) {
   }
 
   // ── Collab protocol (matches Electron tile dirs under .codesurf/{tileId}) ──
-  function collabTileDir(workspacePath, tileId) {
+  function collabTileTarget(workspacePath, tileId) {
     const safeTile = String(tileId || '').trim()
     if (!safeTile || /[\/\\]|\.\./.test(safeTile)) throw new Error(`Unsafe tileId: ${tileId}`)
-    const root = resolveAllowedFsPath(String(workspacePath || ''), { allowMissing: false })
-    return join(root, '.codesurf', safeTile)
+    const workspaceRoot = resolveAllowedFsPath(String(workspacePath || ''), { allowMissing: false })
+    const tileDir = join(workspaceRoot, '.codesurf', safeTile)
+    assertNoSymlinkPath(workspaceRoot, tileDir)
+    return { workspaceRoot, tileDir }
   }
 
-  function collabFilePath(workspacePath, tileId, relativeFile) {
-    const tileDir = collabTileDir(workspacePath, tileId)
+  function collabFileTarget(workspacePath, tileId, relativeFile) {
+    const target = collabTileTarget(workspacePath, tileId)
     const rel = String(relativeFile || '').replace(/^\/+/, '')
     if (!rel || rel.includes('..')) throw new Error(`Unsafe file path: ${relativeFile}`)
-    const abs = normalize(join(tileDir, rel))
-    if (!pathIsInside(tileDir, abs)) throw new Error('Path escape blocked')
-    return abs
+    const filePath = normalize(join(target.tileDir, rel))
+    if (!pathIsInside(target.tileDir, filePath)) throw new Error('Path escape blocked')
+    assertNoSymlinkPath(target.workspaceRoot, filePath)
+    return { ...target, filePath }
   }
 
   if (method === 'POST' && path === '/host/collab/ensureDir') {
     const body = await readBody(req)
     try {
-      const tileDir = collabTileDir(body?.workspacePath, body?.tileId)
-      ensureDir(tileDir)
-      ensureDir(join(tileDir, 'context'))
+      const { workspaceRoot, tileDir } = collabTileTarget(body?.workspacePath, body?.tileId)
+      ensureDirectoryTreeNoFollow(workspaceRoot, tileDir)
+      ensureDirectoryTreeNoFollow(workspaceRoot, join(tileDir, 'context'))
       for (const mailbox of ['inbox', 'sent', 'memory', 'bin']) {
-        ensureDir(join(tileDir, 'messages', mailbox))
+        ensureDirectoryTreeNoFollow(workspaceRoot, join(tileDir, 'messages', mailbox))
       }
       return sendJson(res, 200, { ok: true, path: tileDir })
     } catch (err) {
@@ -693,9 +920,8 @@ async function handleHost(req, res, url) {
   if (method === 'POST' && path === '/host/collab/write') {
     const body = await readBody(req)
     try {
-      const filePath = collabFilePath(body?.workspacePath, body?.tileId, body?.file)
-      ensureDir(dirname(filePath))
-      writeFileSync(filePath, String(body?.content ?? ''), 'utf8')
+      const { workspaceRoot, filePath } = collabFileTarget(body?.workspacePath, body?.tileId, body?.file)
+      writeCollabFileNoFollow(workspaceRoot, filePath, String(body?.content ?? ''))
       return sendJson(res, 200, { ok: true })
     } catch (err) {
       return sendJson(res, 400, { error: String(err?.message || err) })
@@ -705,9 +931,9 @@ async function handleHost(req, res, url) {
   if (method === 'POST' && path === '/host/collab/read') {
     const body = await readBody(req)
     try {
-      const filePath = collabFilePath(body?.workspacePath, body?.tileId, body?.file)
+      const { workspaceRoot, filePath } = collabFileTarget(body?.workspacePath, body?.tileId, body?.file)
       if (!existsSync(filePath)) return sendJson(res, 200, { content: null })
-      return sendJson(res, 200, { content: readFileSync(filePath, 'utf8') })
+      return sendJson(res, 200, { content: readCollabFileNoFollow(workspaceRoot, filePath) })
     } catch (err) {
       return sendJson(res, 400, { error: String(err?.message || err) })
     }
@@ -716,8 +942,13 @@ async function handleHost(req, res, url) {
   if (method === 'POST' && path === '/host/collab/list') {
     const body = await readBody(req)
     try {
-      const dirPath = collabFilePath(body?.workspacePath, body?.tileId, body?.dir || '.')
+      const { workspaceRoot, filePath: dirPath } = collabFileTarget(body?.workspacePath, body?.tileId, body?.dir || '.')
       if (!existsSync(dirPath)) return sendJson(res, 200, { entries: [] })
+      assertNoSymlinkPath(workspaceRoot, dirPath, { allowMissing: false })
+      const dirStat = lstatSync(dirPath)
+      if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+        throw new Error('Collab list target must be a non-symlink directory')
+      }
       const entries = readdirSync(dirPath, { withFileTypes: true }).map(entry => ({
         name: entry.name,
         path: join(dirPath, entry.name),
@@ -732,7 +963,8 @@ async function handleHost(req, res, url) {
   if (method === 'POST' && path === '/host/collab/remove') {
     const body = await readBody(req)
     try {
-      const filePath = collabFilePath(body?.workspacePath, body?.tileId, body?.file)
+      const { workspaceRoot, filePath } = collabFileTarget(body?.workspacePath, body?.tileId, body?.file)
+      if (existsSync(filePath)) assertNoSymlinkPath(workspaceRoot, filePath, { allowMissing: false })
       rmSync(filePath, { force: true })
       return sendJson(res, 200, { ok: true })
     } catch (err) {
@@ -743,7 +975,8 @@ async function handleHost(req, res, url) {
   if (method === 'POST' && path === '/host/collab/removeDir') {
     const body = await readBody(req)
     try {
-      const tileDir = collabTileDir(body?.workspacePath, body?.tileId)
+      const { workspaceRoot, tileDir } = collabTileTarget(body?.workspacePath, body?.tileId)
+      if (existsSync(tileDir)) assertNoSymlinkPath(workspaceRoot, tileDir, { allowMissing: false })
       rmSync(tileDir, { recursive: true, force: true })
       return sendJson(res, 200, { ok: true })
     } catch (err) {
@@ -1010,10 +1243,12 @@ async function main() {
   console.log('[web-host] daemon proxy: /d/*  host APIs: /host/*  loopback-only')
 }
 
-main().catch((err) => {
-  console.error('[web-host] failed to start', err)
-  if (ownedDaemon && !ownedDaemon.killed) {
-    try { ownedDaemon.kill('SIGTERM') } catch { /* best effort */ }
-  }
-  process.exit(1)
-})
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((err) => {
+    console.error('[web-host] failed to start', err)
+    if (ownedDaemon && !ownedDaemon.killed) {
+      try { ownedDaemon.kill('SIGTERM') } catch { /* best effort */ }
+    }
+    process.exit(1)
+  })
+}

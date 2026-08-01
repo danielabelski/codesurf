@@ -6,6 +6,16 @@
   "author": "contex",
   "tier": "power",
   "ui": { "mode": "native" },
+  "capabilities": [
+    {
+      "name": "microphone",
+      "reason": "Publish your microphone audio when you join a LiveKit room."
+    },
+    {
+      "name": "camera",
+      "reason": "Publish camera video when you enable video in a LiveKit room."
+    }
+  ],
   "main": "main.js",
   "contributes": {
     "tiles": [

@@ -2,7 +2,13 @@ import { ipcMain } from 'electron'
 import type { TileContextEntry } from '../../shared/types'
 import { bus } from '../event-bus'
 import { broadcastToRenderer } from '../utils/broadcast'
-import { loadWorkspaceTileState, saveWorkspaceTileState } from '../storage/workspaceArtifacts'
+import {
+  loadWorkspaceTileState,
+  saveWorkspaceTileState,
+  SKIP_WORKSPACE_TILE_STATE_WRITE,
+  updateWorkspaceTileState,
+} from '../storage/workspaceArtifacts'
+import { tileContextChannel } from '../../shared/tileContextScope.ts'
 
 interface TileContextState {
   _context?: Record<string, TileContextEntry>
@@ -17,15 +23,15 @@ async function saveTileState(workspaceId: string, tileId: string, state: TileCon
   await saveWorkspaceTileState(workspaceId, tileId, state)
 }
 
-function publishContextChanged(tileId: string, key: string, value: unknown): void {
+function publishContextChanged(workspaceId: string, tileId: string, key: string, value: unknown): void {
   void bus.publish({
-    channel: `ctx:${tileId}`,
+    channel: tileContextChannel(workspaceId, tileId),
     type: 'data',
-    source: `tile:${tileId}`,
-    payload: { action: 'context_changed', key, value, tileId },
+    source: `tile:${workspaceId}:${tileId}`,
+    payload: { action: 'context_changed', key, value, workspaceId, tileId },
   })
   // Forward to renderer
-  broadcastToRenderer('tileContext:changed', { tileId, key, value })
+  broadcastToRenderer('tileContext:changed', { workspaceId, tileId, key, value })
 }
 
 export function registerTileContextIPC(): void {
@@ -47,22 +53,34 @@ export function registerTileContextIPC(): void {
 
   // Set a context entry
   ipcMain.handle('tileContext:set', async (_, workspaceId: string, tileId: string, key: string, value: unknown) => {
-    const state = await loadTileState(workspaceId, tileId)
-    if (!state._context) state._context = {}
-    state._context[key] = { key, value, updatedAt: Date.now(), source: tileId }
-    await saveTileState(workspaceId, tileId, state)
-    publishContextChanged(tileId, key, value)
+    // Persist only the context entry being changed. Passing a full state loaded
+    // before the save lane would let a stale context write overwrite newer tile
+    // fields (for example BrowserTile's currentUrl during navigation).
+    await saveTileState(workspaceId, tileId, {
+      _context: {
+        [key]: { key, value, updatedAt: Date.now(), source: tileId },
+      },
+    })
+    publishContextChanged(workspaceId, tileId, key, value)
     return true
   })
 
   // Delete a context entry
   ipcMain.handle('tileContext:delete', async (_, workspaceId: string, tileId: string, key: string) => {
-    const state = await loadTileState(workspaceId, tileId)
-    if (state._context) {
-      delete state._context[key]
-      await saveTileState(workspaceId, tileId, state)
-      publishContextChanged(tileId, key, null)
-    }
+    let deleted = false
+    await updateWorkspaceTileState(workspaceId, tileId, existing => {
+      const state = existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? existing as TileContextState
+        : {}
+      if (!state._context || !Object.prototype.hasOwnProperty.call(state._context, key)) {
+        return SKIP_WORKSPACE_TILE_STATE_WRITE
+      }
+      const nextContext = { ...state._context }
+      delete nextContext[key]
+      deleted = true
+      return { ...state, _context: nextContext }
+    })
+    if (deleted) publishContextChanged(workspaceId, tileId, key, null)
     return true
   })
 }

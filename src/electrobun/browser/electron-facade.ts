@@ -1,4 +1,8 @@
-import { type AppSettings, withFreshInstallDefaults } from '../../shared/types.ts'
+import type { TileContextEntry } from '../../shared/types.ts'
+import {
+  isTileContextChangeForScope,
+  type TileContextChangedPayload,
+} from '../../shared/tileContextScope.ts'
 
 export type ElectrobunInvokeArgs = unknown[]
 
@@ -28,6 +32,10 @@ type FacadeOptions = {
   eventHub?: ElectrobunEventHub
 }
 
+type HostBackedFacadeOptions = Omit<FacadeOptions, 'homedir'> & {
+  hostHomedir: unknown
+}
+
 export function createElectrobunEventHub(): ElectrobunEventHub {
   const handlers = new Map<string, Set<ElectrobunEventHandler>>()
 
@@ -48,19 +56,33 @@ export function createElectrobunEventHub(): ElectrobunEventHub {
   }
 }
 
-function cloneDefaultSettings(): AppSettings {
-  const defaults = withFreshInstallDefaults()
-  if (typeof structuredClone === 'function') {
-    return structuredClone(defaults)
+export function withElectrobunHostBootstrap(
+  preloadSource: string,
+  hostHomedir: string,
+  selfCheck = false,
+): string {
+  if (!hostHomedir.trim()) throw new Error('Electrobun host home directory is empty')
+  if (!preloadSource.trim()) throw new Error('Electrobun bridge preload source is empty')
+  const bootstrap = JSON.stringify({ homedir: hostHomedir, selfCheck: selfCheck === true })
+  return `Object.defineProperty(globalThis, '__codesurfElectrobunHostBootstrap', { value: Object.freeze(${bootstrap}), configurable: false, enumerable: false, writable: false });\n${preloadSource}`
+}
+
+export function createHostBackedElectrobunElectronFacade(
+  options: HostBackedFacadeOptions,
+): any {
+  const { hostHomedir: rawHostHomedir, ...facadeOptions } = options
+  const hostHomedir = typeof rawHostHomedir === 'string' ? rawHostHomedir.trim() : ''
+  if (!hostHomedir) {
+    throw new Error('Electrobun host did not provide a valid home directory')
   }
-  return JSON.parse(JSON.stringify(defaults)) as AppSettings
+  return createElectrobunElectronFacade({ ...facadeOptions, homedir: hostHomedir })
 }
 
 export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
-  if (channel === 'settings:get') return cloneDefaultSettings()
-  if (channel === 'settings:set') return cloneDefaultSettings()
-  if (channel === 'settings:getRawJson') return JSON.stringify({ version: 1, settings: cloneDefaultSettings() }, null, 2)
-  if (channel === 'settings:setRawJson') return { ok: true, settings: cloneDefaultSettings() }
+  if (channel === 'activity:health') return { available: false, status: 'unavailable' }
+  if (channel.startsWith('activity:')) {
+    throw new Error('Activity persistence is unavailable in the Electrobun host')
+  }
   if (channel === 'settings:validateGenerationProvider') {
     return { ok: false, message: 'Electrobun runtime did not respond to provider validation.', models: [], imageModels: [], videoModels: [] }
   }
@@ -68,12 +90,7 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   if (channel === 'ext:list-sidebar') return { entries: [], tiles: [] }
 
   if (
-    channel === 'workspace:list'
-    || channel === 'workspace:listProjects'
-    || channel === 'canvas:listSessions'
-    || channel === 'canvas:listCheckpoints'
-    || channel === 'canvas:queuedMessages:listActive'
-    || channel === 'chat:opencodeModels'
+    channel === 'chat:opencodeModels'
     || channel === 'chat:openclawAgents'
     || channel === 'execution:listHosts'
     || channel === 'dreaming:listRuns'
@@ -86,14 +103,7 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   ) return []
 
   if (
-    channel === 'workspace:getActive'
-    || channel === 'workspace:openFolder'
-    || channel === 'canvas:load'
-    || channel === 'canvas:loadTileState'
-    || channel === 'canvas:getSessionState'
-    || channel === 'mcp:getConfig'
-    || channel === 'mcp:getMergedConfig'
-    || channel === 'extensions:tileEntry'
+    channel === 'extensions:tileEntry'
     || channel === 'extensions:chatSurfaceEntry'
     || channel === 'ext:tile-entry'
     || channel === 'ext:chat-surface-entry'
@@ -107,38 +117,35 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   if (channel === 'mcp:getPort') return null
   if (channel === 'mcp:getToken') return ''
   if (channel === 'mcp:getWorkspaceServers') return {}
-  if (channel === 'mcp:saveWorkspaceServers') return {}
   if (channel === 'system:memStats') return { heapUsed: 0, heapTotal: 0, rss: 0 }
   if (channel === 'system:daemonStatus') return null
   if (channel === 'system:daemonSummary') return null
   if (channel === 'db:status') return { ok: false, runtime: 'electrobun-fallback', message: 'Electrobun runtime DB handler was unavailable.' }
   if (channel === 'jobs:recent') return { jobs: [], total: 0, limit: 50, offset: 0 }
   if (channel === 'updater:check') return { ok: true, status: 'disabled-electrobun-runtime', updateAvailable: false }
-  if (channel === 'chat:send') return { ok: false, error: 'Electrobun runtime chat handler was unavailable.' }
   if (channel === 'chat:writeTempAttachment') return { ok: false, error: 'Electrobun runtime attachment handler was unavailable.' }
-  if (channel === 'chat:disposeCard') return true
   if (channel === 'chat:csagentModels') return []
   if (channel === 'transcribe:run') return { ok: false, error: 'Electrobun runtime transcribe handler was unavailable.' }
   if (channel === 'tts:synthesize') return { ok: false, error: 'Electrobun runtime TTS handler was unavailable.' }
   if (channel === 'spokify:run') return { ok: false, error: 'Electrobun runtime spokify handler was unavailable.' }
-  if (channel === 'secrets:set' || channel === 'secrets:delete') return { ok: true }
-  if (channel === 'secrets:list') return { ok: true, names: [] }
-  if (channel === 'secrets:has') return { ok: true, has: false }
+  if (channel === 'secrets:set' || channel === 'secrets:delete') {
+    return { ok: false, error: 'Electrobun secure secret storage is unavailable.' }
+  }
+  if (channel === 'secrets:list') return { ok: false, names: [], error: 'Electrobun secure secret storage is unavailable.' }
+  if (channel === 'secrets:has') return { ok: false, has: false, error: 'Electrobun secure secret storage is unavailable.' }
   if (channel === 'ext:capability-gate') return { ok: false, reason: 'Electrobun runtime extension gate unavailable.' }
   if (channel === 'ext:install-from-file') return null
   if (channel === 'ext:contributions') return []
   if (channel === 'ext:surface-html') return ''
-  if (channel === 'ext:store-get' || channel === 'ext:store-replace') return {}
-  if (channel === 'ext:store-set') return {}
-  if (channel === 'window:newWorkspaceTab') return true
+  if (channel === 'ext:store-get') return {}
+  if (channel === 'ext:store-replace' || channel === 'ext:store-set') {
+    return { ok: false, error: 'Electrobun extension state persistence is unavailable.' }
+  }
   if (channel === 'localProxy:getStatus') return { running: false }
   if (channel === 'localProxy:probeBackends') return []
   if (channel === 'dreaming:status') return { running: false, auto: null, lastRun: null }
-  if (channel === 'fs:stat') return null
   if (channel === 'fs:probeDir') return { ok: false, code: 'ENOENT' }
   if (channel === 'fs:isProbablyTextFile') return false
-  if (channel === 'fs:readDir') return []
-  if (channel === 'fs:readFile') return ''
   if (channel === 'git:status') return { isRepo: false, root: '', files: [] }
   if (channel === 'git:branches') return { current: null, branches: [] }
   if (channel === 'agents:detect') return []
@@ -150,37 +157,19 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   if (channel === 'pets:list' || channel === 'pets:gallery' || channel === 'pets:gallery-local') return []
   if (channel === 'pets:install' || channel === 'pets:remove') return { ok: false, error: 'Electrobun pets handler unavailable.' }
   if (channel === 'pets:thumbnail' || channel === 'pets:thumbnailData' || channel === 'pets:spritesheetData' || channel === 'pets:getManifest') return null
-  if (channel === 'webview:setFrameRate') return { ok: true, runtime: 'electrobun-fallback' }
+  if (channel === 'webview:setFrameRate') {
+    return { ok: false, runtime: 'electrobun-fallback', error: 'Electrobun frame-rate control is unavailable.' }
+  }
 
-  if (
-    channel.startsWith('bus:')
-    || channel.startsWith('terminal:')
-    || channel.startsWith('canvas:')
-    || channel.startsWith('workspace:')
-    || channel.startsWith('fs:')
-    || channel.startsWith('collab:')
-    || channel.startsWith('relay:')
-    || channel.startsWith('ext:')
-    || channel.startsWith('extensions:')
-    || channel.startsWith('tileContext:')
-    || channel.startsWith('activity:')
-    || channel.startsWith('permissions:')
-    || channel.startsWith('execution:')
-    || channel.startsWith('dreaming:')
-    || channel.startsWith('system:')
-    || channel.startsWith('window:')
-    || channel.startsWith('appearance:')
-    || channel.startsWith('mcp:')
-    || channel.startsWith('ui:')
-    || channel.startsWith('transcribe:')
-    || channel.startsWith('tts:')
-    || channel.startsWith('spokify:')
-    || channel.startsWith('secrets:')
-    || channel.startsWith('chat:')
-    || channel.startsWith('pets:')
-  ) return true
+  throw new Error(`Electrobun host did not provide a safe fallback for ${channel}`)
+}
 
-  return null
+export async function invokeElectrobunWithFallback(
+  channel: string,
+  request: () => Promise<unknown>,
+): Promise<unknown> {
+  const result = await request()
+  return result === undefined ? getDefaultElectrobunInvokeResponse(channel) : result
 }
 
 function channelMatches(pattern: string, channel: string): boolean {
@@ -208,8 +197,22 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
   const eventHub = options.eventHub ?? createElectrobunEventHub()
   const invoke = options.invoke
   let zoomLevel = 0
+  const resolveWorkspaceScope = async (workspaceId?: string): Promise<string> => {
+    const explicit = typeof workspaceId === 'string' ? workspaceId.trim() : ''
+    if (explicit) return explicit
+    const active = await invoke('workspace:getActive', []) as { id?: unknown } | null
+    const activeId = typeof active?.id === 'string' ? active.id.trim() : ''
+    if (!activeId) throw new Error('No active workspace is available for the filesystem request')
+    return activeId
+  }
+  const invokeFs = async (
+    channel: string,
+    args: ElectrobunInvokeArgs,
+    workspaceId?: string,
+  ): Promise<unknown> => invoke(channel, [...args, await resolveWorkspaceScope(workspaceId)])
 
   return {
+    __codesurfHostKind: 'electrobun',
     appearance: {
       shouldUseDark: makeInvoker(invoke, 'appearance:shouldUseDark'),
       setThemeSource: makeInvoker(invoke, 'appearance:setThemeSource'),
@@ -231,27 +234,31 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       getActive: makeInvoker(invoke, 'workspace:getActive'),
     },
     fs: {
-      readDir: makeInvoker(invoke, 'fs:readDir'),
-      readFile: makeInvoker(invoke, 'fs:readFile'),
-      writeFile: makeInvoker(invoke, 'fs:writeFile'),
-      createFile: makeInvoker(invoke, 'fs:createFile'),
-      createDir: makeInvoker(invoke, 'fs:createDir'),
-      deleteFile: makeInvoker(invoke, 'fs:deleteFile'),
-      renameFile: makeInvoker(invoke, 'fs:renameFile'),
+      readDir: (path: string, workspaceId?: string) => invokeFs('fs:readDir', [path], workspaceId),
+      readFile: (path: string, workspaceId?: string) => invokeFs('fs:readFile', [path], workspaceId),
+      readFilePrefix: (path: string, maxBytes: number, workspaceId?: string) => invokeFs('fs:readFilePrefix', [path, maxBytes], workspaceId),
+      writeFile: (path: string, content: string, workspaceId?: string) => invokeFs('fs:writeFile', [path, content], workspaceId),
+      createFile: (path: string, workspaceId?: string) => invokeFs('fs:createFile', [path], workspaceId),
+      createDir: (path: string, workspaceId?: string) => invokeFs('fs:createDir', [path], workspaceId),
+      deleteFile: (path: string, workspaceId?: string) => invokeFs('fs:deleteFile', [path], workspaceId),
+      renameFile: (oldPath: string, newPath: string, workspaceId?: string) => invokeFs('fs:renameFile', [oldPath, newPath], workspaceId),
       watch: (dirPath: string, callback: () => void, workspaceId?: string) => {
-        void invoke('fs:watchStart', [dirPath, workspaceId])
+        const start = resolveWorkspaceScope(workspaceId).then(async resolvedWorkspaceId => {
+          await invoke('fs:watchStart', [dirPath, resolvedWorkspaceId])
+          return resolvedWorkspaceId
+        })
         const off = eventHub.on(`fs:watch:${dirPath}`, () => callback())
         return () => {
           off()
-          void invoke('fs:watchStop', [dirPath, workspaceId])
+          void start.then(resolvedWorkspaceId => invoke('fs:watchStop', [dirPath, resolvedWorkspaceId]))
         }
       },
-      revealInFinder: makeInvoker(invoke, 'fs:revealInFinder'),
+      revealInFinder: (path: string, workspaceId?: string) => invokeFs('fs:revealInFinder', [path], workspaceId),
       writeBrief: makeInvoker(invoke, 'fs:writeBrief'),
-      stat: makeInvoker(invoke, 'fs:stat'),
-      probeDir: makeInvoker(invoke, 'fs:probeDir'),
-      isProbablyTextFile: makeInvoker(invoke, 'fs:isProbablyTextFile'),
-      copyIntoDir: makeInvoker(invoke, 'fs:copyIntoDir'),
+      stat: (path: string, workspaceId?: string) => invokeFs('fs:stat', [path], workspaceId),
+      probeDir: (path: string, workspaceId?: string) => invokeFs('fs:probeDir', [path], workspaceId),
+      isProbablyTextFile: (path: string, workspaceId?: string) => invokeFs('fs:isProbablyTextFile', [path], workspaceId),
+      copyIntoDir: (sourcePath: string, destDir: string, workspaceId?: string) => invokeFs('fs:copyIntoDir', [sourcePath, destDir], workspaceId),
       selectDir: makeInvoker(invoke, 'workspace:openFolder'),
     },
     skills: {
@@ -262,13 +269,20 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       onFileOpened: makeEventListener(eventHub, 'skill:file-opened'),
     },
     tileContext: {
-      get: makeInvoker(invoke, 'tileContext:get'),
-      getAll: makeInvoker(invoke, 'tileContext:getAll'),
-      set: makeInvoker(invoke, 'tileContext:set'),
-      delete: makeInvoker(invoke, 'tileContext:delete'),
-      onChanged: (tileId: string, callback: (data: any) => void) => eventHub.on('tileContext:changed', payload => {
-        const data = payload as { tileId?: string }
-        if (data?.tileId === tileId) callback(data)
+      get: (workspaceId: string, tileId: string, key?: string) => (
+        invoke('tileContext:get', [workspaceId, tileId, key]) as Promise<TileContextEntry | Record<string, TileContextEntry> | null>
+      ),
+      getAll: (workspaceId: string, tileId: string, tagPrefix?: string) => (
+        invoke('tileContext:getAll', [workspaceId, tileId, tagPrefix]) as Promise<TileContextEntry[]>
+      ),
+      set: (workspaceId: string, tileId: string, key: string, value: unknown) => (
+        invoke('tileContext:set', [workspaceId, tileId, key, value]) as Promise<boolean>
+      ),
+      delete: (workspaceId: string, tileId: string, key: string) => (
+        invoke('tileContext:delete', [workspaceId, tileId, key]) as Promise<boolean>
+      ),
+      onChanged: (workspaceId: string, tileId: string, callback: (data: TileContextChangedPayload) => void) => eventHub.on('tileContext:changed', payload => {
+        if (isTileContextChangeForScope(payload, workspaceId, tileId)) callback(payload)
       }),
     },
     image: {
@@ -308,7 +322,18 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       save: makeInvoker(invoke, 'kanban:save'),
     },
     terminal: {
-      create: makeInvoker(invoke, 'terminal:create'),
+      // Bun's terminal host authorizes workspaceDir (not the renderer's
+      // workspace id) and accepts the shared Electron six-argument contract.
+      // Keep this as an explicit adapter so provider CLI handoff reaches the
+      // PTY with the correct cwd, executable, and resume args.
+      create: (
+        tileId: string,
+        workspaceId: string,
+        workspaceDir: string,
+        launchBin?: string,
+        launchArgs?: string[],
+        options?: { cols?: number; rows?: number },
+      ) => invoke('terminal:create', [tileId, workspaceId, workspaceDir, launchBin, launchArgs, options]),
       write: makeInvoker(invoke, 'terminal:write'),
       cd: makeInvoker(invoke, 'terminal:cd'),
       resize: makeInvoker(invoke, 'terminal:resize'),
@@ -341,7 +366,12 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       openclawAgents: makeInvoker(invoke, 'chat:openclawAgents'),
       csagentModels: makeInvoker(invoke, 'chat:csagentModels'),
       selectFiles: makeInvoker(invoke, 'chat:selectFiles'),
+      // The browser bridge cannot prove that a renderer-supplied File carries
+      // a native path. Fail closed and let the UI direct users to the
+      // host-owned picker, which issues scoped one-shot capabilities.
+      authorizeDroppedFiles: async () => [],
       writeTempAttachment: makeInvoker(invoke, 'chat:writeTempAttachment'),
+      revokeAttachmentSelections: makeInvoker(invoke, 'chat:revokeAttachmentSelections'),
       answerUserQuestion: makeInvoker(invoke, 'chat:answerUserQuestion'),
       answerToolPermission: makeInvoker(invoke, 'chat:answerToolPermission'),
       setPermissionMode: makeInvoker(invoke, 'chat:setPermissionMode'),
@@ -470,6 +500,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       delete: makeInvoker(invoke, 'activity:delete'),
       clearTile: makeInvoker(invoke, 'activity:clearTile'),
       byAgent: makeInvoker(invoke, 'activity:byAgent'),
+      health: makeInvoker(invoke, 'activity:health'),
     },
     collab: {
       ensureDir: makeInvoker(invoke, 'collab:ensureDir'),

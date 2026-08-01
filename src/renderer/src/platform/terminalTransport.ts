@@ -46,6 +46,8 @@ export interface TerminalSessionRequest {
   workspaceId?: string
   cols?: number
   rows?: number
+  launchBin?: string
+  launchArgs?: string[]
 }
 
 export interface TerminalSessionResult {
@@ -268,7 +270,13 @@ export class TerminalTransport {
         // session cookie. Cross-origin local/native gateways use the explicit
         // bearer header instead, so never trigger credentialed CORS requests.
         credentials: 'same-origin',
-        body: JSON.stringify({ cwd, workspaceId, cols, rows }),
+        body: JSON.stringify({
+          cwd,
+          workspaceId,
+          cols,
+          rows,
+          ...(request.launchBin ? { launchBin: request.launchBin, launchArgs: request.launchArgs ?? [] } : {}),
+        }),
       })
     } catch (error) {
       throw unavailableFrom(error, 'Terminal service could not be reached')

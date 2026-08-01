@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest'
-
-// Import the functions we want to test
-// Note: These are currently private, so we need to test them via the public API
-// or export them for testing
+import {
+  MAX_RELAY_STORAGE_ID_LENGTH,
+  safeSlug,
+  sanitizeForPrompt,
+  validateParticipantId,
+} from './validation'
 
 describe('validation', () => {
   describe('path traversal protection', () => {
@@ -12,7 +14,7 @@ describe('validation', () => {
       'my.agent',
       'CamelCase',
       'a',
-      'agent'.repeat(16), // 128 chars
+      'a'.repeat(MAX_RELAY_STORAGE_ID_LENGTH),
     ]
 
     const INVALID_IDS = [
@@ -24,31 +26,39 @@ describe('validation', () => {
       '..',
       'agent\0null',
       '',
-      'a'.repeat(129), // 129 chars
+      'a'.repeat(MAX_RELAY_STORAGE_ID_LENGTH + 1),
     ]
 
-    it.todo('should accept valid participant IDs', () => {
-      for (const _id of VALID_IDS) {
-        // Should not throw
+    it('accepts valid participant IDs including the exact length limit', () => {
+      for (const id of VALID_IDS) {
+        expect(() => validateParticipantId(id)).not.toThrow()
       }
     })
 
-    it.todo('should reject invalid participant IDs', () => {
-      for (const _id of INVALID_IDS) {
-        // Should throw
+    it('rejects traversal, hidden paths, separators, nulls, and overlong IDs', () => {
+      for (const id of INVALID_IDS) {
+        expect(() => validateParticipantId(id)).toThrow()
+      }
+    })
+
+    it('preserves distinct required, invalid, and length error contracts', () => {
+      expect(() => validateParticipantId('')).toThrow('Participant ID is required')
+      expect(() => validateParticipantId('../agent')).toThrow('Invalid participant ID')
+      expect(() => validateParticipantId(
+        'a'.repeat(MAX_RELAY_STORAGE_ID_LENGTH + 1),
+      )).toThrow(`Participant ID too long (max ${MAX_RELAY_STORAGE_ID_LENGTH} chars)`)
+    })
+
+    it('rejects non-string runtime inputs', () => {
+      for (const id of [null, undefined, 0, {}, []]) {
+        expect(() => validateParticipantId(id as unknown as string)).toThrow(
+          'Participant ID is required',
+        )
       }
     })
   })
 
   describe('prompt sanitization', () => {
-    const sanitizeForPrompt = (text: string, maxLength = 4000): string => {
-      return text
-        .replace(/```/g, '\\`\\`\\`')
-        .replace(/<\|/g, '\\<\\|')
-        .replace(/\|>/g, '\\|\\>')
-        .slice(0, maxLength)
-    }
-
     it('should escape code fences', () => {
       const input = 'Here is code: ```console.log("test")```'
       const result = sanitizeForPrompt(input)
@@ -92,15 +102,6 @@ describe('validation', () => {
   })
 
   describe('safeSlug', () => {
-    const safeSlug = (value: string): string => {
-      return value
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 48) || 'message'
-    }
-
     it('should convert to lowercase', () => {
       expect(safeSlug('HelloWorld')).toBe('helloworld')
     })

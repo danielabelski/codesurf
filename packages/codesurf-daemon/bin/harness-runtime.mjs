@@ -21,7 +21,7 @@ import { isAbsolute, join, dirname } from 'node:path'
 import { HarnessAgent } from '@ai-sdk/harness/agent'
 import { claudeCode } from '@ai-sdk/harness-claude-code'
 import { codex } from '@ai-sdk/harness-codex'
-import { pi } from '@ai-sdk/harness-pi'
+import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   createSessionWorktree,
   changedFiles,
@@ -35,13 +35,15 @@ import {
   harnessReadsUnenforceable,
   HARNESS_READS_UNENFORCEABLE_ERROR,
 } from './agent-mode-tools.mjs'
+import { CHAT_CONTEXT_LIMITS } from './context-composer.mjs'
 
 // Re-exported so existing importers (test/daemon/chat-jobs-agent-mode.test.mjs)
 // keep resolving `isToolAllowedByAgent` from here. Source of truth and the
 // null/[]/names semantics live in agent-mode-tools.mjs.
 export { isToolAllowedByAgent } from './agent-mode-tools.mjs'
+export { PI_HARNESS_UNAVAILABLE_ERROR }
 
-export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex', 'pi'])
+export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex'])
 
 // Auth strategy: KEEP the real $HOME (inherited) so the Claude/Codex CLI finds
 // the user's existing OAuth login / keychain credentials. The harness adapter's
@@ -54,8 +56,7 @@ export const HARNESS_SUPPORTED_PROVIDERS = new Set(['claude', 'codex', 'pi'])
 // stays out of the user's repo) and pre-create that composed child as a SYMLINK
 // to the real workspace — so the agent's cwd IS the project and relative file
 // ops land in the user's actual files, by filesystem construction rather than by
-// trusting the model to follow a path instruction. The absolute-path instruction
-// below is kept as a belt-and-suspenders backup.
+// trusting the model to follow a path instruction.
 function sanitizeSessionId(id) {
   return String(id || 'session').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80) || 'session'
 }
@@ -65,9 +66,8 @@ function bindWorkspace(sandboxBaseDir, harnessId, sessionId, workspaceDir) {
   try {
     if (existsSync(composed) || isSymlink(composed)) rmSync(composed, { recursive: true, force: true })
     symlinkSync(workspaceDir, composed)
-  } catch {
-    // If the symlink can't be created the agent falls back to the absolute-path
-    // instruction; worst case it operates in a real composed dir (contained).
+  } catch (error) {
+    throw new Error(`Failed to bind the harness workspace: ${errText(error)}`)
   }
   return composed
 }
@@ -76,18 +76,9 @@ function isSymlink(p) {
   try { return lstatSync(p).isSymbolicLink() } catch { return false }
 }
 
-function workdirInstruction(workspaceDir) {
-  return (
-    `Your project workspace is the directory at this absolute path: ${workspaceDir}\n` +
-    `Read, create, and edit the project's files under that absolute path. ` +
-    `Do not write files into the home directory or anywhere outside the workspace.`
-  )
-}
-
 function resolveHarness(provider) {
   if (provider === 'claude') return claudeCode
   if (provider === 'codex') return codex
-  if (provider === 'pi') return pi
   return null
 }
 
@@ -370,7 +361,7 @@ async function commitWorktree(job, worktree, appendEvent, createCheckpoint) {
   }
 }
 
-export function createHarnessRunner({ homeDir, createAgent } = {}) {
+export function createHarnessRunner({ homeDir, createAgent, bindWorkspace: bindWorkspaceImpl = bindWorkspace } = {}) {
   const baseDir = join(homeDir, 'harness', 'sessions')
   const worktreeRoot = join(homeDir, 'harness', 'worktrees')
   mkdirSync(baseDir, { recursive: true })
@@ -379,7 +370,13 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
   // sandbox/bridge/model. Defaults to the real HarnessAgent.
   const makeAgent = createAgent || (opts => new HarnessAgent(opts))
 
-  async function runHarnessJob(job, request, workspaceDir, instructionPrompt, { appendEvent, createCheckpoint, awaitToolPermission } = {}) {
+  async function runHarnessJob(job, request, workspaceDir, _instructionPrompt, { appendEvent, createCheckpoint, awaitToolPermission, contextPrompt } = {}) {
+    if (request.provider === 'pi') {
+      await appendEvent(job.id, { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR })
+      await appendEvent(job.id, { type: 'done' })
+      return
+    }
+
     const lastUserMsg = [...(request.messages ?? [])].reverse().find(m => m.role === 'user')
     if (!lastUserMsg) {
       await appendEvent(job.id, { type: 'error', error: 'No user message' })
@@ -432,7 +429,16 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
       try { worktree = createSessionWorktree({ workspaceDir, worktreeRoot, sessionId }) } catch { worktree = null }
     }
     const bindTarget = worktree ? worktree.path : (hasWorkspace ? workspaceDir : null)
-    if (bindTarget) bindWorkspace(sandboxBaseDir, harness.harnessId, sessionId, bindTarget)
+    if (bindTarget) {
+      try {
+        bindWorkspaceImpl(sandboxBaseDir, harness.harnessId, sessionId, bindTarget)
+      } catch (error) {
+        try { removeWorktree(worktree) } catch {}
+        await appendEvent(job.id, { type: 'error', error: errText(error) })
+        await appendEvent(job.id, { type: 'done' })
+        return
+      }
+    }
 
     // Agent-definition tools allow-list (AgentMode.tools).
     //   null/absent → unrestricted     []  → deny-all     [names] → restricted
@@ -488,16 +494,20 @@ export function createHarnessRunner({ homeDir, createAgent } = {}) {
       permissionMode = 'allow-reads'
     }
 
-    // AgentMode.systemPrompt frames the turn for the harness runtime. Prepend it
-    // to the workdir instruction + memory prompt so the persona leads, matching
-    // how the Claude/Codex paths place it ahead of memory/skills.
-    const agentPrompt = String(request.agentMode?.systemPrompt ?? '').trim()
-    const baseInstructions = bindTarget
-      ? `${workdirInstruction(bindTarget)}${instructionPrompt ? `\n\n${instructionPrompt}` : ''}`
-      : (instructionPrompt || '')
-    const instructions = agentPrompt
-      ? `${agentPrompt}${baseInstructions ? `\n\n${baseInstructions}` : ''}`
-      : baseInstructions
+    // The job boundary already composed persona, memory, skills, conventions,
+    // async guidance, and peers. Harness must consume that one prompt exactly
+    // once rather than rebuilding a partial variant from legacy fields. The
+    // sandbox binds cwd structurally, so no workspace path is model-visible.
+    const instructions = typeof contextPrompt === 'string' ? contextPrompt.trim() : ''
+    if (Buffer.byteLength(instructions, 'utf8') > CHAT_CONTEXT_LIMITS.aggregateBytes) {
+      try { removeWorktree(worktree) } catch {}
+      await appendEvent(job.id, {
+        type: 'error',
+        error: `Harness context exceeds ${CHAT_CONTEXT_LIMITS.aggregateBytes} UTF-8 bytes`,
+      })
+      await appendEvent(job.id, { type: 'done' })
+      return
+    }
     const agent = makeAgent({
       harness,
       sandbox: new LocalHostSandboxProvider({ baseDir: sandboxBaseDir }),

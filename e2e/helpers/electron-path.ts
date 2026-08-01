@@ -1,10 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const REPO_ROOT = join(__dirname, '../..')
-
-export function resolveElectronExecutable(): string {
-  const electronDir = join(REPO_ROOT, 'node_modules/electron')
+export function resolveElectronExecutable(repoRoot = process.cwd()): string {
+  const electronDir = join(repoRoot, 'node_modules/electron')
   const pathFile = join(electronDir, 'path.txt')
 
   if (!existsSync(pathFile)) {

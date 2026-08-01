@@ -14,6 +14,7 @@ import { useChatTileSendPath } from '../hooks/useChatTileSendPath'
 import { ChatTileTranscriptColumn } from './chat/ChatTileTranscriptColumn'
 import { PlanPane } from './chat/PlanPane'
 import { ChatTileComposer } from './chat/ChatTileComposer'
+import { resolveChatTerminalLaunch } from './chat/chatTerminalLaunch'
 import { ToolPermissionProvider } from './ai-elements/ToolPermission'
 import {
   AskUserQuestionContext,
@@ -425,17 +426,40 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   // terminal tiles, so the embedded terminal matches the standalone one.
   const terminalFontFamily = settings?.terminalFontFamily || settings?.fonts?.mono?.family || MONO_DEFAULT
   const terminalFontSize = settings?.terminalFontSize || settings?.fonts?.mono?.size || 13
+  const terminalSessionId = sessionIdsByProvider[provider] ?? sessionId
+  const terminalLaunch = useMemo(
+    () => resolveChatTerminalLaunch(provider, terminalSessionId),
+    [provider, terminalSessionId],
+  )
   const embeddedTerminal = terminalMounted ? (
-    <Suspense fallback={null}>
-      <LazyTerminalTile
-        tileId={`${tileId}-terminal`}
-        workspaceDir={_workspaceDir}
-        width={width}
-        height={height}
-        fontSize={terminalFontSize}
-        fontFamily={terminalFontFamily}
-      />
-    </Suspense>
+    terminalLaunch.supported ? (
+      <Suspense fallback={null}>
+        <LazyTerminalTile
+          tileId={`${tileId}-terminal`}
+          workspaceId={workspaceId ?? ''}
+          workspaceDir={_workspaceDir}
+          width={width}
+          height={height}
+          fontSize={terminalFontSize}
+          fontFamily={terminalFontFamily}
+          launchBin={terminalLaunch.launchBin}
+          launchArgs={terminalLaunch.launchArgs}
+        />
+      </Suspense>
+    ) : (
+      <div style={{
+        height: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+        color: theme.chat.muted,
+        fontSize: 12,
+        textAlign: 'center',
+      }}>
+        This provider has no local terminal CLI that can resume this conversation.
+      </div>
+    )
   ) : null
 
   const openMiniChat = useCallback(() => {
@@ -459,7 +483,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     <ChatDispatchProvider value={chatDispatchValue}>
     <FontCtx.Provider value={fontCtxValue}>
     <AskUserQuestionFontsContext.Provider value={fontCtxValue}>
-    <AskUserQuestionContext.Provider value={{ cardId: tileId }}>
+    <AskUserQuestionContext.Provider value={{ workspaceId, cardId: tileId }}>
     <CheckpointRestoreContext.Provider value={checkpointRestoreContextValue}>
     <ToolPermissionProvider
       cardId={tileId}
@@ -491,6 +515,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         minWidth: 0,
       }}>
       <ChatTileTranscriptColumn
+        workspaceId={workspaceId}
         tileId={tileId}
         isStartScreen={isStartScreen}
         messagesRef={messagesRef}

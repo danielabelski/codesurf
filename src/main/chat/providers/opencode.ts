@@ -2,9 +2,8 @@
  * OpenCode provider — uses @opencode-ai/sdk against a local `opencode serve` process.
  */
 
-import { spawn, ChildProcess, execFileSync } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
 import * as net from 'net'
-import { randomUUID } from 'node:crypto'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
@@ -12,9 +11,32 @@ import { broadcastToRenderer } from '../../utils/broadcast'
 import { errorMessage } from '../../../shared/errors.ts'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import { buildPeerAwareTurnPrompt } from '../prompt-builders'
+import {
+  bindStableContextSession,
+  clearStableSessionContext,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from '../stable-session-context'
 import type { ChatRequest } from '../types'
-import { log, sendStream, getPreparedMessages } from '../runtime'
+import {
+  chatRequestScope,
+  chatStreamScopeKey,
+  log,
+  sendStream,
+  getPreparedMessages,
+  markRoomPromptAccepted,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+  type ChatStreamScope,
+} from '../runtime'
+import { createAuthenticatedOpenCodeClient, OpenCodeClientCache } from './opencode-client'
+import { OpenCodeServerManager as HardenedOpenCodeServerManager } from './opencode-server-manager.ts'
+import {
+  awaitGuardedPreparation,
+  providerLaunchIsCurrent,
+  type ProviderLaunchGuard,
+} from '../provider-launch-guard.ts'
 
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
 // externalizeDepsPlugin converts dynamic import() to require() which can't
@@ -65,121 +87,29 @@ function resolveOpenCodeBinary(): string | null {
   }
 }
 
-class OpenCodeServerManager {
-  private static instance: OpenCodeServerManager | null = null
-  private server: ChildProcess | null = null
-  private port: number | null = null
-  private startPromise: Promise<{ port: number; url: string }> | null = null
-  // `opencode serve` listens on 127.0.0.1 but otherwise has no auth — any
-  // local process could drive agent sessions with the user's permissions.
-  // The server honors OPENCODE_SERVER_PASSWORD (basic auth, user "opencode"),
-  // so generate one per app run and pass it to the server + every client.
-  private readonly serverPassword = randomUUID()
+const openCodeServerManager = new HardenedOpenCodeServerManager({
+  resolveBinary: resolveOpenCodeBinary,
+  findAvailablePort,
+  spawnServer: (binary, port, password) => {
+    const shellPath = getShellEnvPath()
+    return spawn(binary, ['serve', '--port', String(port)], processTreeSpawnOptions({
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildSafeSpawnEnv({
+        ...(shellPath && { PATH: shellPath }),
+        OPENCODE_SERVER_PASSWORD: password,
+      }),
+    }))
+  },
+  terminateProcessTree,
+  log,
+})
 
-  static getInstance(): OpenCodeServerManager {
-    if (!OpenCodeServerManager.instance) {
-      OpenCodeServerManager.instance = new OpenCodeServerManager()
-    }
-    return OpenCodeServerManager.instance
-  }
-
-  getAuthHeaders(): Record<string, string> {
-    return {
-      Authorization: `Basic ${Buffer.from(`opencode:${this.serverPassword}`).toString('base64')}`,
-    }
-  }
-
-  async ensureRunning(): Promise<{ port: number; url: string }> {
-    if (this.server && this.port && !this.server.killed) {
-      return { port: this.port, url: `http://127.0.0.1:${this.port}` }
-    }
-
-    if (!this.startPromise) {
-      this.startPromise = this.startServer().catch((err) => {
-        this.startPromise = null
-        throw err
-      })
-    }
-
-    return this.startPromise
-  }
-
-  private async startServer(): Promise<{ port: number; url: string }> {
-    const binary = resolveOpenCodeBinary()
-    if (!binary) throw new Error('opencode CLI not found. Install: go install github.com/opencodeco/opencode@latest')
-
-    this.port = await findAvailablePort()
-    const url = `http://127.0.0.1:${this.port}`
-
-    return new Promise((resolve, reject) => {
-      const shellPath = getShellEnvPath()
-      this.server = spawn(binary, ['serve', '--port', String(this.port)], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: buildSafeSpawnEnv({
-          ...(shellPath && { PATH: shellPath }),
-          OPENCODE_SERVER_PASSWORD: this.serverPassword,
-        }),
-      })
-
-      let started = false
-      const timeout = setTimeout(() => {
-        if (!started) reject(new Error('OpenCode server startup timeout (30s)'))
-      }, 30_000)
-
-      this.server.stdout?.on('data', (data: Buffer) => {
-        const output = data.toString()
-        log('opencode stdout:', output.trim().slice(0, 200))
-        if (output.includes('listening on') && !started) {
-          started = true
-          clearTimeout(timeout)
-          resolve({ port: this.port!, url })
-        }
-      })
-
-      this.server.stderr?.on('data', (data: Buffer) => {
-        log('opencode stderr:', data.toString().trim().slice(0, 200))
-      })
-
-      this.server.on('error', (err) => {
-        clearTimeout(timeout)
-        reject(err)
-      })
-
-      this.server.on('exit', (code) => {
-        if (!started) {
-          clearTimeout(timeout)
-          reject(new Error(`OpenCode server exited with code ${code}`))
-        }
-        this.server = null
-        this.port = null
-        // H-10: clear startPromise so the next ensureRunning() call triggers
-        // a fresh startServer() rather than returning the stale resolved
-        // promise that still points at the now-dead port.
-        this.startPromise = null
-      })
-    })
-  }
-
-  async shutdown(): Promise<void> {
-    if (this.server && !this.server.killed) {
-      this.server.kill('SIGTERM')
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(() => { this.server?.kill('SIGKILL'); resolve() }, 5000)
-        this.server?.on('exit', () => { clearTimeout(t); resolve() })
-      })
-    }
-    this.server = null
-    this.port = null
-    this.startPromise = null
-  }
-
-  isRunning(): boolean {
-    return !!(this.server && this.port && !this.server.killed)
-  }
+function getOpenCodeServerManager(): HardenedOpenCodeServerManager {
+  return openCodeServerManager
 }
 
-export function shutdownOpenCodeServer(): void {
-  void OpenCodeServerManager.getInstance().shutdown()
+export async function shutdownOpenCodeServer(): Promise<void> {
+  await openCodeServerManager.shutdown()
 }
 
 // Cached model list
@@ -324,20 +254,22 @@ function normalizeOpenCodePermissionMode(mode?: string | null): string {
   return mode === 'plan' || mode === 'bypassPermissions' ? mode : 'default'
 }
 
-export function clearOpenCodeSession(cardId: string): void {
-  opencodeSessionIds.delete(cardId)
-  opencodeSessionPermissionModes.delete(cardId)
+export function clearOpenCodeSession(scope: ChatStreamScope): void {
+  const key = chatStreamScopeKey(scope)
+  opencodeSessionIds.delete(key)
+  opencodeSessionPermissionModes.delete(key)
+  clearStableSessionContext(scope, 'opencode')
 }
 
-export async function abortOpenCodeSession(cardId: string): Promise<void> {
-  const ocSessionId = opencodeSessionIds.get(cardId)
+export async function abortOpenCodeSession(scope: ChatStreamScope): Promise<void> {
+  const ocSessionId = opencodeSessionIds.get(chatStreamScopeKey(scope))
   if (!ocSessionId) return
   try {
-    const mgr = OpenCodeServerManager.getInstance()
+    const mgr = getOpenCodeServerManager()
     if (mgr.isRunning()) {
       const createClient = await getOpencodeClient()
       const { url } = await mgr.ensureRunning()
-      const client = createClient({ baseUrl: url, headers: mgr.getAuthHeaders() })
+      const client = createAuthenticatedOpenCodeClient<any>(createClient, url, mgr.getAuthHeaders())
       await client.session.abort({ sessionID: ocSessionId })
       log('opencode session aborted:', ocSessionId)
     }
@@ -348,30 +280,29 @@ export async function abortOpenCodeSession(cardId: string): Promise<void> {
 
 // Cached SDK client — avoid re-creating on every message
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _cachedOpencodeClient: any = null
-let _cachedClientUrl: string | null = null
+const opencodeClientCache = new OpenCodeClientCache<any>()
 
 async function getOrCreateOpencodeClient(): Promise<{ client: any; url: string }> {
-  const mgr = OpenCodeServerManager.getInstance()
+  const mgr = getOpenCodeServerManager()
   const { url } = await mgr.ensureRunning()
-
-  // Reuse client if server URL hasn't changed
-  if (_cachedOpencodeClient && _cachedClientUrl === url) {
-    return { client: _cachedOpencodeClient, url }
-  }
-
   const createClient = await getOpencodeClient()
-  _cachedOpencodeClient = createClient({ baseUrl: url })
-  _cachedClientUrl = url
-  return { client: _cachedOpencodeClient, url }
+  const client = opencodeClientCache.getOrCreate(url, createClient, mgr.getAuthHeaders())
+  return { client, url }
 }
 
-export function chatOpencode(req: ChatRequest): void {
+export function chatOpencode(
+  req: ChatRequest,
+  launchGuard?: ProviderLaunchGuard,
+): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
+  const launchIsCurrent = (): boolean => providerLaunchIsCurrent(launchGuard)
+  if (!launchIsCurrent()) return
 
   // Parse model string like "anthropic/claude-sonnet-4-6" into providerID + modelID
   const slashIdx = req.model.indexOf('/')
@@ -379,13 +310,13 @@ export function chatOpencode(req: ChatRequest): void {
   const modelID = slashIdx > 0 ? req.model.slice(slashIdx + 1) : req.model
 
   const requestedPermissionMode = normalizeOpenCodePermissionMode(req.mode)
-  if (req.sessionId && !opencodeSessionIds.has(req.cardId)) {
-    opencodeSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !opencodeSessionIds.has(scopeKey)) {
+    opencodeSessionIds.set(scopeKey, req.sessionId)
   }
-  const recordedPermissionMode = opencodeSessionPermissionModes.get(req.cardId)
+  const recordedPermissionMode = opencodeSessionPermissionModes.get(scopeKey)
   const sessionPermissionModeMatches = recordedPermissionMode === requestedPermissionMode
-  const existingSessionId = sessionPermissionModeMatches ? opencodeSessionIds.get(req.cardId) : undefined
-  if (!sessionPermissionModeMatches && opencodeSessionIds.has(req.cardId)) {
+  const existingSessionId = sessionPermissionModeMatches ? opencodeSessionIds.get(scopeKey) : undefined
+  if (!sessionPermissionModeMatches && opencodeSessionIds.has(scopeKey)) {
     // OpenCode permissions are fixed at session creation. If the mode is unknown
     // after process restart, fail closed by creating a fresh session.
     log('opencode session permission mode changed; creating new session', {
@@ -393,8 +324,8 @@ export function chatOpencode(req: ChatRequest): void {
       from: recordedPermissionMode ?? 'unknown',
       to: requestedPermissionMode,
     })
-    opencodeSessionIds.delete(req.cardId)
-    opencodeSessionPermissionModes.delete(req.cardId)
+    opencodeSessionIds.delete(scopeKey)
+    opencodeSessionPermissionModes.delete(scopeKey)
   }
   log('chatOpencode starting', {
     model: req.model,
@@ -403,11 +334,17 @@ export function chatOpencode(req: ChatRequest): void {
     prompt: lastUserMsg.content.slice(0, 100),
     resuming: !!existingSessionId,
   })
+  let stableContext: ReturnType<typeof selectStableContextForTurn> | null = null
 
   ;(async () => {
     try {
       // 1. Get cached client (server already warm from model list fetch)
-      const { client } = await getOrCreateOpencodeClient()
+      const preparedClient = await awaitGuardedPreparation(
+        launchGuard,
+        getOrCreateOpencodeClient(),
+      )
+      if (!preparedClient.ok) return
+      const { client } = preparedClient.value
 
       // 2. Create or reuse session
       let sessionID = existingSessionId
@@ -423,8 +360,12 @@ export function chatOpencode(req: ChatRequest): void {
         if (!sessionID) {
           throw new Error('Failed to create OpenCode session — no session ID returned')
         }
-        opencodeSessionIds.set(req.cardId, sessionID)
-        opencodeSessionPermissionModes.set(req.cardId, requestedPermissionMode)
+        if (!launchIsCurrent()) {
+          try { await client.session.abort({ sessionID }) } catch { /* incomplete session */ }
+          return
+        }
+        opencodeSessionIds.set(scopeKey, sessionID)
+        opencodeSessionPermissionModes.set(scopeKey, requestedPermissionMode)
         log('opencode session created:', sessionID, req.mode === 'plan'
           ? '(plan mode)'
           : req.mode === 'bypassPermissions'
@@ -435,6 +376,10 @@ export function chatOpencode(req: ChatRequest): void {
       // 3. Subscribe to SSE + send prompt concurrently
       const sseResult = await client.event.subscribe()
       const stream = (sseResult as any).stream
+      if (!launchIsCurrent()) {
+        try { await stream?.return?.() } catch { /* stream not yet active */ }
+        return
+      }
 
       // Track state for this response
       let assistantMessageId: string | null = null
@@ -444,23 +389,37 @@ export function chatOpencode(req: ChatRequest): void {
       const userMessageIds = new Set<string>() // message IDs that are user messages
 
       // Fire prompt without waiting — response arrives via SSE.
-      // On the first turn of a fresh session we prepend the CodeSurf output
-      // convention so OpenCode matches the structured-summary behaviour of
-      // Claude/Codex. On subsequent turns the session already carries the
-      // convention in its running history.
-      const isFirstTurn = !existingSessionId
-      const promptConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
-      const promptText = isFirstTurn
-        ? `${promptConvention}\n\n---\n\n${lastUserMsg.content}`
-        : lastUserMsg.content
+      // OpenCode has no separate system channel in this call. Install stable
+      // host context once per session/version; volatile context remains in the
+      // latest prepared user message on every turn.
+      stableContext = selectStableContextForTurn({
+        scope,
+        provider: req.provider,
+        sessionId: sessionID,
+        contextPrompt: req.contextPrompt,
+      })
+      const promptText = buildPeerAwareTurnPrompt(
+        lastUserMsg.content,
+        stableContext.contextPrompt,
+      )
+      if (!launchIsCurrent()) {
+        invalidateStableContextSelection(stableContext)
+        try { await stream?.return?.() } catch { /* stream not yet active */ }
+        return
+      }
       const promptPromise = client.session.prompt({
         sessionID,
         model: { providerID, modelID },
         parts: [{ type: 'text', text: promptText }],
+      }).then(() => {
+        if (!launchIsCurrent()) return
+        if (stableContext) bindStableContextSession(stableContext, sessionID)
+        markRoomPromptAccepted(scope)
       }).catch((err: any) => {
-        if (!isDone) {
+        if (stableContext) invalidateStableContextSelection(stableContext)
+        if (!isDone && launchIsCurrent()) {
           log('opencode prompt error:', err.message)
-          sendStream(req.cardId, { type: 'error', error: err.message ?? String(err) })
+          sendStream(scope, { type: 'error', error: err.message ?? String(err) })
         }
       })
 
@@ -477,8 +436,8 @@ export function chatOpencode(req: ChatRequest): void {
             log('opencode SSE inactivity timeout (5min)')
             isDone = true
             // Best-effort server-side abort before closing the iterator.
-            void abortOpenCodeSession(req.cardId).catch(() => {})
-            sendStream(req.cardId, { type: 'done' })
+            void abortOpenCodeSession(scope).catch(() => {})
+            sendStream(scope, { type: 'done' })
           }
         }, INACTIVITY_MS)
       }
@@ -489,6 +448,7 @@ export function chatOpencode(req: ChatRequest): void {
 
       try {
         for await (const event of stream) {
+          if (!launchIsCurrent()) break
           resetStreamTimeout()
           if (isDone) break
           const evt = event as any
@@ -517,7 +477,7 @@ export function chatOpencode(req: ChatRequest): void {
                 assistantMessageId = info.id
                 // Report cost/token info when message completes
                 if (info.finish) {
-                  sendStream(req.cardId, {
+                  sendStream(scope, {
                     type: 'done',
                     cost: info.cost,
                     tokens: info.tokens,
@@ -544,7 +504,7 @@ export function chatOpencode(req: ChatRequest): void {
                 if (part.text && part.text.length > prev.length) {
                   const newText = part.text.slice(prev.length)
                   seenParts.set(part.id, part.text)
-                  sendStream(req.cardId, { type: 'text', text: newText })
+                  sendStream(scope, { type: 'text', text: newText })
                 }
               } else if (part.type === 'tool') {
                 const toolId = part.callID ?? part.id
@@ -555,26 +515,26 @@ export function chatOpencode(req: ChatRequest): void {
 
                 if (!prevStatus) {
                   // First time seeing this tool — send tool_start
-                  sendStream(req.cardId, { type: 'tool_start', toolId, toolName })
+                  sendStream(scope, { type: 'tool_start', toolId, toolName })
                   if (state?.input) {
                     const inputStr = typeof state.input === 'string' ? state.input : JSON.stringify(state.input, null, 2)
-                    sendStream(req.cardId, { type: 'tool_input', text: inputStr })
+                    sendStream(scope, { type: 'tool_input', text: inputStr })
                   }
                 }
 
                 if (state?.status === 'running' && prevStatus !== 'running') {
                   // Tool started running — update with title if available
                   if (state.title) {
-                    sendStream(req.cardId, { type: 'tool_use', toolName, toolInput: state.title })
+                    sendStream(scope, { type: 'tool_use', toolName, toolInput: state.title })
                   }
                 } else if (state?.status === 'completed') {
                   // Tool finished — send summary with output
                   const summary = state.title
                     ? `${state.title}${state.output ? '\n' + state.output.slice(0, 500) : ''}`
                     : state.output?.slice(0, 500) ?? 'Done'
-                  sendStream(req.cardId, { type: 'tool_summary', text: summary, toolName })
+                  sendStream(scope, { type: 'tool_summary', text: summary, toolName })
                 } else if (state?.status === 'error') {
-                  sendStream(req.cardId, { type: 'tool_summary', text: `Error: ${state.error}`, toolName })
+                  sendStream(scope, { type: 'tool_summary', text: `Error: ${state.error}`, toolName })
                 }
 
                 seenParts.set(seenKey, state?.status ?? 'unknown')
@@ -583,10 +543,10 @@ export function chatOpencode(req: ChatRequest): void {
                 if (part.text && part.text.length > prev.length) {
                   const newText = part.text.slice(prev.length)
                   seenParts.set(part.id, part.text)
-                  sendStream(req.cardId, { type: 'reasoning', text: newText })
+                  sendStream(scope, { type: 'reasoning', text: newText })
                 }
               } else if (part.type === 'step-finish') {
-                sendStream(req.cardId, {
+                sendStream(scope, {
                   type: 'step_finish',
                   cost: part.cost,
                   tokens: part.tokens,
@@ -610,7 +570,7 @@ export function chatOpencode(req: ChatRequest): void {
               if (field === 'text' && delta) {
                 const prev = seenParts.get(partID) ?? ''
                 seenParts.set(partID, prev + delta)
-                sendStream(req.cardId, { type: 'text', text: delta })
+                sendStream(scope, { type: 'text', text: delta })
               }
               break
             }
@@ -619,7 +579,7 @@ export function chatOpencode(req: ChatRequest): void {
               if (props.status?.type === 'idle' && assistantMessageId) {
                 if (!isDone) {
                   isDone = true
-                  sendStream(req.cardId, { type: 'done', sessionId: sessionID })
+                  sendStream(scope, { type: 'done', sessionId: sessionID })
                 }
               }
               break
@@ -627,7 +587,7 @@ export function chatOpencode(req: ChatRequest): void {
 
             case 'session.error': {
               isDone = true
-              sendStream(req.cardId, {
+              sendStream(scope, {
                 type: 'error',
                 error: props.error ?? 'OpenCode session error',
               })
@@ -650,7 +610,7 @@ export function chatOpencode(req: ChatRequest): void {
                 }
 
                 const toolUseIDHint = typeof permReq.id === 'string' ? permReq.id : null
-                const result = await resolveInlineToolPermission(req.cardId, permissionRequest, toolUseIDHint)
+                const result = await resolveInlineToolPermission(scope, permissionRequest, toolUseIDHint)
 
                 if ('error' in result) {
                   log('opencode permission error:', result.error)
@@ -709,10 +669,12 @@ export function chatOpencode(req: ChatRequest): void {
 
       await promptPromise
 
-      if (!isDone) {
-        sendStream(req.cardId, { type: 'done', sessionId: sessionID })
+      if (!isDone && launchIsCurrent()) {
+        sendStream(scope, { type: 'done', sessionId: sessionID })
       }
     } catch (err) {
+      if (stableContext) invalidateStableContextSelection(stableContext)
+      if (!launchIsCurrent()) return
       const msg = errorMessage(err)
       log('chatOpencode error:', msg)
       const errorMsg = msg.includes('opencode CLI not found')
@@ -720,8 +682,8 @@ export function chatOpencode(req: ChatRequest): void {
         : msg.includes('ESM/CJS')
           ? 'OpenCode SDK could not be loaded. Check @opencode-ai/sdk compatibility.'
           : msg
-      sendStream(req.cardId, { type: 'error', error: errorMsg })
-      sendStream(req.cardId, { type: 'done' })
+      sendStream(scope, { type: 'error', error: errorMsg })
+      sendStream(scope, { type: 'done' })
     }
   })()
 }

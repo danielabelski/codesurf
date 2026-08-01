@@ -1,4 +1,4 @@
-import type { DaemonStatusInfo } from './manager'
+import type { DaemonStatusInfo } from './manager.js'
 import type {
   AggregatedSessionEntry,
   DaemonChatJobEvent,
@@ -18,8 +18,14 @@ import type {
   ExecutionHostRecord,
   ProjectRecord,
   Workspace,
-} from './types'
-import { parseSseJsonBuffer } from './sse.ts'
+} from './types.js'
+import {
+  BoundedSseJsonDecoder,
+  DaemonChatEventBudget,
+  DaemonSseLimitError,
+  readBoundedResponseDiagnostic,
+  type ParsedSseJsonBuffer,
+} from './sse.js'
 
 export interface DaemonClientHooks {
   /**
@@ -44,58 +50,195 @@ export interface RequestOptions {
   body?: unknown
   /** Per-request override of the request timeout (ms). */
   timeoutMs?: number
+  /** Cancels the request and any read-only retry immediately. */
+  signal?: AbortSignal
+}
+
+type RequestRetryPolicy = 'read-only' | 'none'
+
+interface InternalRequestOptions extends RequestOptions {
+  retryPolicy: RequestRetryPolicy
+}
+
+const RETRYABLE_RESPONSE_STATUSES = new Set([401, 408, 502, 503, 504])
+
+class DaemonResponseError extends Error {
+  readonly retryable: boolean
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'DaemonResponseError'
+    this.status = status
+    this.retryable = RETRYABLE_RESPONSE_STATUSES.has(status)
+  }
+}
+
+class DaemonMutationOutcomeUnknownError extends Error {
+  readonly status: number | undefined
+
+  constructor(path: string, cause: Error) {
+    super(
+      `Daemon mutation outcome is unknown for ${path}: ${cause.message}. Check daemon state before retrying.`,
+    )
+    this.name = 'DaemonMutationOutcomeUnknownError'
+    this.status = cause instanceof DaemonResponseError ? cause.status : undefined
+    this.cause = cause
+  }
 }
 
 export interface StreamJobEventsOptions {
   jobId: string
   since?: number
   signal?: AbortSignal
+  /** Maximum reconnects after the initial stream. Defaults to 3, capped at 10. */
+  maxReconnectAttempts?: number
+  /** Initial reconnect delay in milliseconds. Doubles per retry, capped at 30s. */
+  reconnectDelayMs?: number
   onEvent: (event: DaemonChatJobEvent) => void | Promise<void>
   onParseError?: (error: Error) => void | Promise<void>
 }
 
 export type DaemonClient = ReturnType<typeof createDaemonClient>
 
+class DaemonStreamConsumerError extends Error {
+  readonly original: unknown
+
+  constructor(original: unknown) {
+    super(original instanceof Error ? original.message : String(original))
+    this.name = 'DaemonStreamConsumerError'
+    this.original = original
+  }
+}
+
+class DaemonStreamSequenceGapError extends Error {
+  constructor(jobId: string, expected: number, received: number) {
+    super(
+      `Daemon event stream sequence gap for job ${jobId}: expected ${expected}, received ${received}`,
+    )
+    this.name = 'DaemonStreamSequenceGapError'
+  }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortReason(signal)
+}
+
+function awaitAbortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation
+  throwIfAborted(signal)
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      callback()
+    }
+    const onAbort = () => {
+      finish(() => reject(abortReason(signal)))
+    }
+
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
+    )
+  })
+}
+
+async function waitForReconnect(delayMs: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal)
+  if (delayMs <= 0) return
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, delayMs)
+    const onAbort = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      reject(signal ? abortReason(signal) : new DOMException('The operation was aborted', 'AbortError'))
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function isActiveJobState(state: DaemonChatJobState | null): boolean {
+  return state?.status === 'queued' || state?.status === 'running'
+}
+
 export function createDaemonClient(hooks: DaemonClientHooks) {
   const defaultTimeoutMs = hooks.requestTimeoutMs ?? 5_000
 
-  async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+  async function requestWithPolicy<T>(path: string, options: InternalRequestOptions): Promise<T> {
     let lastError: Error | null = null
+    const method = options.method ?? (options.body == null ? 'GET' : 'POST')
+    const maxAttempts = options.retryPolicy === 'read-only' ? 2 : 1
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const daemon = await hooks.ensureRunning()
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      throwIfAborted(options.signal)
 
       try {
+        const daemon = await awaitAbortable(hooks.ensureRunning(), options.signal)
+        throwIfAborted(options.signal)
+        const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? defaultTimeoutMs)
         const response = await fetch(`http://127.0.0.1:${daemon.port}${path}`, {
-          method: options?.method ?? (options?.body == null ? 'GET' : 'POST'),
+          method,
           headers: {
             Authorization: `Bearer ${daemon.token}`,
-            ...(options?.body == null ? {} : { 'Content-Type': 'application/json' }),
+            ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
           },
-          body: options?.body == null ? undefined : JSON.stringify(options.body),
-          signal: AbortSignal.timeout(options?.timeoutMs ?? defaultTimeoutMs),
+          body: options.body == null ? undefined : JSON.stringify(options.body),
+          signal: options.signal
+            ? AbortSignal.any([options.signal, timeoutSignal])
+            : timeoutSignal,
         })
 
         if (!response.ok) {
           const text = await response.text()
-          const error = new Error(text || `Daemon request failed: ${response.status}`)
-          lastError = error
-          if (attempt === 0 && (response.status === 401 || response.status === 408 || response.status === 502 || response.status === 503 || response.status === 504)) {
-            hooks.invalidate()
-            continue
-          }
-          throw error
+          throw new DaemonResponseError(
+            text || `Daemon request failed: ${response.status}`,
+            response.status,
+          )
         }
 
         return await response.json() as T
       } catch (error) {
+        if (options.signal?.aborted) throw abortReason(options.signal)
         lastError = error instanceof Error ? error : new Error(String(error))
-        if (attempt === 0) {
-          const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
-          if (!status.running) {
+        const canRetry = attempt + 1 < maxAttempts
+
+        if (lastError instanceof DaemonResponseError) {
+          if (lastError.retryable) {
             hooks.invalidate()
+            if (canRetry) continue
           }
+          if (method !== 'GET' && lastError.status === 408) {
+            throw new DaemonMutationOutcomeUnknownError(path, lastError)
+          }
+          throw lastError
+        }
+
+        const status = await awaitAbortable(
+          hooks.getStatus().catch(() => ({ running: false as const, info: null })),
+          options.signal,
+        )
+        if (!status.running) {
+          hooks.invalidate()
+        }
+        if (canRetry) {
           continue
+        }
+
+        if (method !== 'GET') {
+          throw new DaemonMutationOutcomeUnknownError(path, lastError)
         }
         throw lastError
       }
@@ -104,20 +247,89 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     throw (lastError ?? new Error('Daemon request failed'))
   }
 
+  async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+    const method = options?.method ?? (options?.body == null ? 'GET' : 'POST')
+    return await requestWithPolicy<T>(path, {
+      ...options,
+      retryPolicy: method === 'GET' ? 'read-only' : 'none',
+    })
+  }
+
   async function streamJobEvents(options: StreamJobEventsOptions): Promise<void> {
-    let lastError: Error | null = null
     const jobId = String(options.jobId ?? '').trim()
     if (!jobId) throw new Error('jobId is required')
     const since = Number.isFinite(options.since) ? Number(options.since) : 0
-    const query = new URLSearchParams({
-      jobId,
-      since: String(Math.max(0, since)),
-    })
+    let lastDeliveredSequence = Math.max(0, since)
+    let terminalEventSeen = false
+    let terminalCatchupAttempted = false
+    let reconnectCount = 0
+    const maxReconnectAttempts = Math.min(
+      10,
+      Math.max(0, Math.trunc(Number(options.maxReconnectAttempts ?? 3) || 0)),
+    )
+    const reconnectDelayMs = Math.min(
+      30_000,
+      Math.max(0, Number(options.reconnectDelayMs ?? 250) || 0),
+    )
+    const eventBudget = new DaemonChatEventBudget({ expectedJobId: jobId })
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const daemon = await hooks.ensureRunning()
+    async function deliverParsed(
+      parsed: ParsedSseJsonBuffer<unknown>,
+    ): Promise<{ terminal: boolean }> {
+      for (const error of parsed.errors) {
+        try {
+          await options.onParseError?.(error)
+        } catch (consumerError) {
+          throw new DaemonStreamConsumerError(consumerError)
+        }
+      }
+      for (const payload of parsed.events) {
+        let event: DaemonChatJobEvent
+        try {
+          event = eventBudget.sanitize(payload)
+        } catch (error) {
+          if (error instanceof DaemonSseLimitError) throw error
+          try {
+            await options.onParseError?.(error instanceof Error ? error : new Error(String(error)))
+          } catch (consumerError) {
+            throw new DaemonStreamConsumerError(consumerError)
+          }
+          continue
+        }
+        const sequence = Number(event?.sequence)
+        if (sequence <= lastDeliveredSequence) continue
+        const expectedSequence = lastDeliveredSequence + 1
+        if (sequence !== expectedSequence) {
+          throw new DaemonStreamSequenceGapError(jobId, expectedSequence, sequence)
+        }
+        eventBudget.consume(event)
+        try {
+          await options.onEvent(event)
+        } catch (consumerError) {
+          throw new DaemonStreamConsumerError(consumerError)
+        }
+        lastDeliveredSequence = sequence
+        if (event.type === 'done') {
+          terminalEventSeen = true
+          return { terminal: true }
+        }
+      }
+      return { terminal: false }
+    }
+
+    while (true) {
+      throwIfAborted(options.signal)
+      const isTerminalCatchupAttempt = terminalCatchupAttempted
+      let disconnectError: Error | null = null
+      let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
 
       try {
+        const daemon = await awaitAbortable(hooks.ensureRunning(), options.signal)
+        throwIfAborted(options.signal)
+        const query = new URLSearchParams({
+          jobId,
+          since: String(lastDeliveredSequence),
+        })
         const response = await fetch(`http://127.0.0.1:${daemon.port}/chat/job/events?${query.toString()}`, {
           headers: {
             Accept: 'text/event-stream',
@@ -127,50 +339,107 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         })
 
         if (!response.ok || !response.body) {
-          const text = await response.text().catch(() => '')
-          const error = new Error(text || `Daemon event stream failed: ${response.status}`)
-          lastError = error
-          if (attempt === 0 && (response.status === 401 || response.status === 408 || response.status === 502 || response.status === 503 || response.status === 504)) {
-            hooks.invalidate()
-            continue
-          }
-          throw error
+          const text = await readBoundedResponseDiagnostic(response).catch(() => '')
+          if (RETRYABLE_RESPONSE_STATUSES.has(response.status)) hooks.invalidate()
+          throw new DaemonResponseError(
+            text || `Daemon event stream failed: ${response.status}`,
+            response.status,
+          )
         }
 
-        const reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
+        reader = response.body.getReader()
+        const decoder = new BoundedSseJsonDecoder<unknown>()
 
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const parsed = parseSseJsonBuffer<DaemonChatJobEvent>(buffer)
-          buffer = parsed.remaining
-          for (const error of parsed.errors) {
-            await options.onParseError?.(error)
-          }
-          for (const event of parsed.events) {
-            await options.onEvent(event)
-          }
+          const delivered = await deliverParsed(decoder.push(value))
+          if (delivered.terminal) return
         }
 
-        return
+        const delivered = await deliverParsed(decoder.finish())
+        if (delivered.terminal) return
       } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        if (options.signal?.aborted) throw lastError
-        if (attempt === 0) {
-          const status = await hooks.getStatus().catch(() => ({ running: false as const, info: null }))
-          if (!status.running) {
-            hooks.invalidate()
-          }
+        if (error instanceof DaemonStreamConsumerError) {
+          if (error.original instanceof Error) throw error.original
+          throw new Error(String(error.original))
+        }
+        if (error instanceof DaemonSseLimitError) throw error
+        if (options.signal?.aborted) throw abortReason(options.signal)
+        disconnectError = error instanceof Error ? error : new Error(String(error))
+      } finally {
+        if (reader) {
+          try {
+            // Cancellation is cleanup, not part of successful delivery or
+            // consumer-error settlement. Observe a late rejection without
+            // allowing a non-cooperative underlying stream to hang this call.
+            void reader.cancel().catch(() => {})
+          } catch {}
+          try { reader.releaseLock() } catch {}
+        }
+      }
+
+      if (terminalEventSeen) return
+      if (isTerminalCatchupAttempt) {
+        if (disconnectError instanceof DaemonStreamSequenceGapError) {
+          throw disconnectError
+        }
+        throw new Error(
+          `Daemon terminal replay ended before delivering the terminal event for job ${jobId}`,
+          { cause: disconnectError ?? undefined },
+        )
+      }
+      if (disconnectError instanceof DaemonResponseError && !disconnectError.retryable) {
+        throw disconnectError
+      }
+
+      let state: DaemonChatJobState | null = null
+      try {
+        state = await request<DaemonChatJobState>(
+          `/chat/job/state?jobId=${encodeURIComponent(jobId)}`,
+          { signal: options.signal },
+        )
+      } catch (stateError) {
+        if (options.signal?.aborted) throw abortReason(options.signal)
+        const daemonStatus = await awaitAbortable(
+          hooks.getStatus().catch(() => ({ running: false as const, info: null })),
+          options.signal,
+        )
+        if (!daemonStatus.running) hooks.invalidate()
+        if (reconnectCount >= maxReconnectAttempts) {
+          throw (disconnectError ?? (stateError instanceof Error ? stateError : new Error(String(stateError))))
+        }
+      }
+
+      if (state && !isActiveJobState(state)) {
+        const terminalLastSequence = Math.max(0, Number(state.lastSequence) || 0)
+        if (!terminalCatchupAttempted && terminalLastSequence > lastDeliveredSequence) {
+          terminalCatchupAttempted = true
+          await waitForReconnect(reconnectDelayMs, options.signal)
           continue
         }
-        throw lastError
+        if (disconnectError instanceof DaemonStreamSequenceGapError) {
+          throw disconnectError
+        }
+        return
       }
-    }
+      if (reconnectCount >= maxReconnectAttempts) {
+        if (state && isActiveJobState(state)) {
+          throw new Error(
+            `Daemon event stream ended unexpectedly while job ${jobId} remains active`,
+            { cause: disconnectError ?? undefined },
+          )
+        }
+        throw (disconnectError ?? new Error(`Daemon event stream ended unexpectedly for job ${jobId}`))
+      }
 
-    throw (lastError ?? new Error('Daemon event stream failed'))
+      reconnectCount += 1
+      const delay = Math.min(
+        30_000,
+        reconnectDelayMs * (2 ** (reconnectCount - 1)),
+      )
+      await waitForReconnect(delay, options.signal)
+    }
   }
 
   return {
@@ -317,6 +586,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     },
     upsertRuntimeSession(workspaceId: string, cardId: string, state: unknown): Promise<{ ok: boolean; summary?: unknown; error?: string }> {
       return request('/session/runtime/upsert', { body: { workspaceId, cardId, state } })
+    },
+    clearRuntimeSession(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }> {
+      return request('/session/runtime/clear', { body: { workspaceId, cardId } })
     },
     getLocalSessionState(workspaceId: string, sessionEntryId: string): Promise<unknown | null> {
       return request(`/session/local/state?workspaceId=${encodeURIComponent(workspaceId)}&sessionEntryId=${encodeURIComponent(sessionEntryId)}`)
@@ -494,11 +766,15 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     expandFileReferences(payload: {
       message: string
       workspaceId?: string | null
+      cardId?: string | null
       workspaceDir?: string | null
       executionTarget?: 'local' | 'cloud'
+      supportedImageMediaTypes?: string[]
     }): Promise<{
       changed: boolean
       message: string
+      bodyText: string
+      contextText?: string
       references: Array<{
         source: string
         displayPath: string
@@ -507,6 +783,23 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         binary?: boolean
         mediaType?: string
         resolvedPath?: string
+        device?: string
+        inode?: string
+        mtimeMs?: number
+        ctimeMs?: number
+        ownedTemporary?: boolean
+      }>
+      ownedTemporaryAttachments?: Array<{
+        capability: string
+        path: string
+        mediaType?: string
+        displayPath: string
+        byteCount: number
+        device: string
+        inode: string
+        mtimeMs: number
+        ctimeMs: number
+        ownedTemporary: true
       }>
       summaryText?: string
       inputText?: string
@@ -515,10 +808,29 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         body: {
           message: payload.message,
           workspaceId: String(payload.workspaceId ?? '').trim() || null,
+          cardId: String(payload.cardId ?? '').trim() || null,
           workspaceDir: String(payload.workspaceDir ?? '').trim() || null,
           executionTarget: payload.executionTarget === 'cloud' ? 'cloud' : 'local',
+          supportedImageMediaTypes: payload.supportedImageMediaTypes,
         },
       })
+    },
+
+    issueAttachmentCapabilities(payload: {
+      workspaceId: string
+      cardId: string
+      paths: string[]
+      ownedTemporary?: boolean
+    }): Promise<{ attachments: Array<{ capability: string; displayName: string }> }> {
+      return request('/file-references/capabilities/issue', { body: payload })
+    },
+
+    inspectAttachmentCapabilities(payload: {
+      workspaceId: string
+      cardId: string
+      capabilities: string[]
+    }): Promise<{ hasAttachments: boolean }> {
+      return request('/file-references/capabilities/inspect', { body: payload })
     },
 
     getSettings<T = DaemonAppSettings>(): Promise<T> {

@@ -1,5 +1,11 @@
 # Full Code Review — 2026-07-30
 
+> **Historical snapshot.** This report records the original blocked review at
+> `bc2d0a94`. It is superseded by the integrated remediation report at
+> [`2026-07-31-full-review-remediation.md`](2026-07-31-full-review-remediation.md).
+> Findings and branch statuses below are preserved as they were observed; do
+> not use them as current release status.
+
 ## Verdict
 
 **BLOCK**

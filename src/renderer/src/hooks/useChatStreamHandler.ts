@@ -6,6 +6,7 @@ import { subscribeChatStream } from '../components/chat/chatStreamHub'
 import { applyChatStreamEvent, mergeToolBlockDuplicate } from './chatStreamReducer'
 
 export interface ChatStreamHandlerArgs {
+  workspaceId: string
   tileId: string
   setMessagesSafe: (fn: (prev: ChatMessage[]) => ChatMessage[]) => void
   setSessionId: (id: string) => void
@@ -20,6 +21,7 @@ export interface ChatStreamHandlerArgs {
 }
 
 export function useChatStreamHandler({
+  workspaceId,
   tileId,
   setMessagesSafe,
   setSessionId,
@@ -35,7 +37,7 @@ export function useChatStreamHandler({
 
   useEffect(() => {
     const publishActivity = (message: string, details?: Record<string, unknown>) => {
-      window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+      window.electron?.bus?.publish(`tile:${workspaceId}:${tileId}`, 'activity', `chat:${workspaceId}:${tileId}`, {
         message,
         role: 'assistant',
         ...(details ?? {}),
@@ -66,8 +68,8 @@ export function useChatStreamHandler({
         return prev
       })
 
-    // Demux: one global IPC subscription, fan-out by cardId (see chatStreamHub).
-    const cleanup = subscribeChatStream(tileId, (event) => {
+    // Demux: one global IPC subscription, fan-out by workspace/card identity.
+    const cleanup = subscribeChatStream(workspaceId, tileId, (event) => {
       if (typeof event.sequence === 'number') {
         if (event.sequence <= lastJobSequenceRef.current) return
         lastJobSequenceRef.current = event.sequence
@@ -249,6 +251,7 @@ export function useChatStreamHandler({
     })
     return cleanup
   }, [
+    workspaceId,
     tileId,
     flushPendingStreamText,
     queueStreamText,

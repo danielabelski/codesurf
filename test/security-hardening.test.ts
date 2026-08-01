@@ -80,6 +80,29 @@ describe('bus channel authorization', () => {
     )
   })
 
+  test('binds workspace-qualified channels to the matching source identity', () => {
+    assert.doesNotThrow(() => {
+      assertBusPublishScope(
+        'tile:workspace-a:tile-1',
+        'chat:workspace-a:tile-1',
+      )
+    })
+    assert.throws(
+      () => assertBusPublishScope(
+        'tile:workspace-b:tile-1',
+        'chat:workspace-a:tile-1',
+      ),
+      /outside source scope/,
+    )
+    assert.throws(
+      () => assertBusPublishScope(
+        'tile:workspace-a:tile-2',
+        'chat:workspace-a:tile-1',
+      ),
+      /outside source scope/,
+    )
+  })
+
   test('allows wildcard subscribe channels', () => {
     const validated = assertBusSubscribeAllowed('tile:*', 'chat:tile-1:mcp')
     assert.equal(validated.channel, 'tile:*')

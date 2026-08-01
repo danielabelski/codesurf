@@ -3,7 +3,7 @@
 /// <reference types="vite-plugin-pwa/react" />
 
  import type { AggregatedSessionEntry, SessionEntryHint } from '../../shared/session-types'
- import type { ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
+ import type { ActivityHealthSnapshot, ActivityQuery, ActivityRecord, ActivityUpsertInput, ExecutionHostRecord, ExecutionPreference, Workspace, ProjectRecord, DashboardDreamingSummary } from '../../shared/types'
 
 interface ElectronAPI {
   appearance: {
@@ -29,20 +29,19 @@ interface ElectronAPI {
   fs: {
     readDir(path: string, workspaceId?: string): Promise<Array<{ name: string; path: string; isDir: boolean; ext: string }>>
     readFile(path: string, workspaceId?: string): Promise<string>
+    readFilePrefix(path: string, maxBytes: number, workspaceId?: string): Promise<string>
     writeFile(path: string, content: string, workspaceId?: string): Promise<void>
     createFile(path: string, workspaceId?: string): Promise<void>
     createDir(path: string, workspaceId?: string): Promise<void>
     deleteFile(path: string, workspaceId?: string): Promise<void>
-    delete(path: string, workspaceId?: string): Promise<void>
-    rename(oldPath: string, newPath: string, workspaceId?: string): Promise<void>
     renameFile(oldPath: string, newPath: string, workspaceId?: string): Promise<void>
-    basename(path: string): Promise<string>
     revealInFinder?(path: string, workspaceId?: string): Promise<void>
     writeBrief(cardId: string, content: string): Promise<string>
     stat(path: string, workspaceId?: string): Promise<{ size: number; mtimeMs: number; isFile: boolean; isDir: boolean } | null>
     probeDir(path: string, workspaceId?: string): Promise<{ ok: true } | { ok: false, code: string }>
     isProbablyTextFile(path: string, workspaceId?: string): Promise<boolean>
     copyIntoDir(sourcePath: string, destDir: string, workspaceId?: string): Promise<{ path: string }>
+    selectDir(): Promise<string | null>
     watch(dirPath: string, callback: () => void, workspaceId?: string): () => void
   }
   git?: {
@@ -55,6 +54,7 @@ interface ElectronAPI {
     start(req: { cardId: string; agentId: string; url: string; method?: string; headers?: Record<string, string>; body?: string }): Promise<void>
     stop(cardId: string): Promise<void>
     onChunk(cb: (event: {
+      workspaceId: string
       cardId: string
       jobId?: string
       sequence?: number
@@ -74,7 +74,7 @@ interface ElectronAPI {
     saveWorkspaceServers(workspaceId: string, servers: Record<string, unknown>): Promise<void>
     getMergedConfig(workspaceId: string): Promise<unknown>
     onKanban(cb: (event: string, data: unknown) => void): () => void
-    onInject(cb: (cardId: string, message: string, appendNewline: boolean) => void): () => void
+    onInject(cb: (workspaceId: string, cardId: string, message: string, appendNewline: boolean) => void): () => void
     inject(cardId: string, message: string): Promise<void>
   }
   tileContext?: {
@@ -82,37 +82,40 @@ interface ElectronAPI {
     getAll(workspaceId: string, tileId: string, tagPrefix?: string): Promise<Array<{ key: string; value: unknown; updatedAt?: number; source?: string }>>
     set(workspaceId: string, tileId: string, key: string, value: unknown): Promise<boolean>
     delete(workspaceId: string, tileId: string, key: string): Promise<boolean>
-    onChanged?(tileId: string, cb: (data: { tileId: string; key: string; value: unknown }) => void): () => void
+    onChanged?(workspaceId: string, tileId: string, cb: (data: { workspaceId: string; tileId: string; key: string; value: unknown }) => void): () => void
   }
   image?: {
-    edit(req: { tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>
+    edit(req: { workspaceId: string; tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>
   }
   chat?: {
     send(req: unknown): Promise<{ ok: boolean; jobId?: string; detached?: boolean }>
     resumeJob?(req: unknown): Promise<{ ok: boolean; resumed?: boolean; jobId?: string | null }>
-    steer?(payload: { cardId: string; message: string }): Promise<{ ok: boolean; error?: string }>
-    stop(cardId: string): Promise<void>
-    clearSession(cardId: string): Promise<{ ok: boolean }>
-    disposeCard(cardId: string): Promise<{ ok: boolean }>
+    steer?(payload: { workspaceId: string; cardId: string; message: string }): Promise<{ ok: boolean; error?: string }>
+    stop(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }>
+    clearSession(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }>
+    disposeCard(workspaceId: string, cardId: string): Promise<{ ok: boolean }>
     opencodeModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }>; source?: string; loading?: boolean }>
     onOpencodeModelsUpdated(cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void): () => void
     openclawAgents(): Promise<{ agents: Array<{ id: string; label: string; description?: string }> }>
     csagentModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }> }>
-    selectFiles(): Promise<string[]>
-    writeTempAttachment(payload: { data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; path: string } | { ok: false; error: string }>
+    selectFiles(workspaceId: string, cardId: string): Promise<Array<{ capability: string; displayName: string }>>
+    authorizeDroppedFiles(workspaceId: string, cardId: string, files: File[]): Promise<Array<{ capability: string; displayName: string }>>
+    writeTempAttachment(payload: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }>
     answerUserQuestion(payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       answers: Record<string, string>
       annotations?: Record<string, { notes?: string; preview?: string }>
     }): Promise<{ ok: boolean; error?: string }>
     answerToolPermission(payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       // `never` persists a deny-grant so subsequent calls auto-reject.
       decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
     }): Promise<{ ok: boolean; error?: string }>
-    setPermissionMode(payload: { cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
+    setPermissionMode(payload: { workspaceId: string; cardId: string; mode: string }): Promise<{ ok: boolean; error?: string }>
     loadSessionHistory(payload: {
       workspaceId?: string
       sessionEntryId?: string
@@ -261,6 +264,12 @@ interface ElectronAPI {
     closeById(id: number): Promise<void>
     openMiniChat(opts: { workspaceId: string; tileId: string; title?: string }): Promise<{ ok: boolean; id?: number; error?: string }>
     setSidebarCollapsed(collapsed: boolean): Promise<boolean>
+    onPersistenceRequest?(callback: (request: {
+      nonce: string
+      reason: 'close' | 'quit' | 'reload' | 'force-reload'
+      canvasOwner: boolean
+    }) => void): () => void
+    persistenceReady?(nonce: string): void
     onListChanged(cb: (list: { id: number; title: string; focused: boolean }[]) => void): () => void
     onNewTab(cb: () => void): () => void
   }
@@ -293,12 +302,12 @@ interface ElectronAPI {
     save(workspaceId: string, tileId: string, state: { columns: Array<{ id: string; title: string }>; cards: import('./components/KanbanCard').KanbanCardData[] }): Promise<void>
   }
   terminal: {
-    create(tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number; rows: number; buffer?: string }>
+    create(tileId: string, workspaceId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[], options?: { cols?: number; rows?: number }): Promise<{ cols: number; rows: number; buffer?: string }>
     write(tileId: string, data: string): Promise<void>
     resize(tileId: string, cols: number, rows: number): Promise<void>
-    destroy(tileId: string): Promise<void>
+    destroy(tileId: string, workspaceId: string): Promise<void>
     detach(tileId: string): Promise<void>
-    updatePeers(tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>): Promise<void>
+    updatePeers(tileId: string, workspaceId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>): Promise<void>
     onData(tileId: string, cb: (data: string) => void): () => void
     onActive(tileId: string, cb: () => void): () => void
     onExit(tileId: string, cb: (exitCode: number) => void): () => void
@@ -361,28 +370,13 @@ interface ElectronAPI {
     clearAll(): Promise<{ path: string; grants: import('../../shared/types').ToolPermissionGrant[] }>
   }
   activity: {
-    upsert(workspaceId: string, data: {
-      id?: string
-      tileId: string
-      type: 'task' | 'tool' | 'skill' | 'context'
-      status?: 'pending' | 'running' | 'done' | 'error' | 'paused'
-      title: string
-      detail?: string
-      metadata?: Record<string, unknown>
-      agent?: string
-    }): Promise<unknown>
-    query(query: {
-      workspaceId: string
-      tileId?: string
-      type?: string
-      status?: string
-      agent?: string
-      limit?: number
-    }): Promise<unknown[]>
-    byTile(workspaceId: string, tileId: string): Promise<unknown[]>
-    delete(workspaceId: string, id: string): Promise<boolean>
+    upsert(workspaceId: string, data: ActivityUpsertInput): Promise<ActivityRecord>
+    query(query: ActivityQuery): Promise<ActivityRecord[]>
+    byTile(workspaceId: string, tileId: string): Promise<ActivityRecord[]>
+    delete(workspaceId: string, tileId: string, id: string): Promise<boolean>
     clearTile(workspaceId: string, tileId: string): Promise<number>
-    byAgent(workspaceId: string): Promise<Record<string, unknown[]>>
+    byAgent(workspaceId: string): Promise<Record<string, ActivityRecord[]>>
+    health(workspaceId: string): Promise<ActivityHealthSnapshot>
   }
   collab: {
     ensureDir(workspacePath: string, tileId: string): Promise<boolean>
@@ -588,7 +582,7 @@ interface ElectronAPI {
     onIndexUpdated(callback: (payload: { workspacePath: string | null; count: number; tombstoned: number; durationMs: number }) => void): () => void
   }
   system: {
-    cleanupTile(tileId: string): Promise<{ ok: boolean; channelsDropped?: number }>
+    cleanupTile(workspaceId: string, tileId: string): Promise<{ ok: boolean; channelsDropped?: number }>
     gc(): Promise<{ ok: boolean; exposed: boolean }>
     memStats(): Promise<{
       rss: number

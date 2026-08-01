@@ -65,7 +65,8 @@ B is feasible (omnigent runs fully local on SQLite, loopback, single-user header
   `session-repair.ts:44-200`).
 - External-CLI session scanner (the claude-compat storage boundary).
 - Canvas/tile model, relay/peer protocol, worktree checkpoints, multi-provider dispatch
-  (claude/codex/pi/opencode/hermes — `chat-jobs.mjs:1736-1753`).
+  (Claude/Codex/OpenCode/Hermes/Omnigent; Pi is explicitly fail-closed until its
+  published harness adapter dependency chain is safe — `chat-jobs.mjs:2808-2822`).
 
 ## Compatibility baseline — the stated principle + the discriminating check
 

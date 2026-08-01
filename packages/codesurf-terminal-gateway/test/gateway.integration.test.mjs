@@ -50,6 +50,73 @@ function waitForMessage(socket) {
   return once(socket, 'message').then(([payload]) => JSON.parse(String(payload)))
 }
 
+function withTimeout(promise, label, timeoutMs = 5_000) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out waiting for ${label}`)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
+function createMessageReader(socket, timeoutMs = 5_000) {
+  const messages = []
+  let pending = null
+  let failure = null
+
+  const settlePending = (method, value) => {
+    if (!pending) return
+    const current = pending
+    pending = null
+    clearTimeout(current.timer)
+    current[method](value)
+  }
+  const onMessage = (payload) => {
+    let message
+    try {
+      message = JSON.parse(String(payload))
+    } catch (error) {
+      failure = error
+      settlePending('reject', error)
+      return
+    }
+    if (pending) settlePending('resolve', message)
+    else messages.push(message)
+  }
+  const onError = (error) => {
+    failure = error
+    settlePending('reject', error)
+  }
+  const onClose = () => {
+    failure ??= new Error('terminal websocket closed before the next expected message')
+    settlePending('reject', failure)
+  }
+  socket.on('message', onMessage)
+  socket.on('error', onError)
+  socket.on('close', onClose)
+
+  return {
+    next(label) {
+      if (messages.length > 0) return Promise.resolve(messages.shift())
+      if (failure) return Promise.reject(failure)
+      if (pending) return Promise.reject(new Error('terminal message reader already has a pending read'))
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (pending?.timer !== timer) return
+          pending = null
+          reject(new Error(`timed out waiting for terminal ${label}`))
+        }, timeoutMs)
+        pending = { resolve, reject, timer }
+      })
+    },
+    dispose() {
+      socket.off('message', onMessage)
+      socket.off('error', onError)
+      socket.off('close', onClose)
+      settlePending('reject', new Error('terminal message reader disposed'))
+    },
+  }
+}
+
 async function waitFor(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
@@ -242,14 +309,19 @@ test('the local adapter runs a real node-pty process and emits ready, data, then
 
   const created = await (await sessionRequest(endpoint)).json()
   const socket = new WebSocket(created.websocketUrl, { origin: 'https://app.example.test' })
-  await once(socket, 'open')
+  const messages = createMessageReader(socket)
+  const opened = once(socket, 'open')
+  const closed = once(socket, 'close')
+  t.after(() => messages.dispose())
+
+  await withTimeout(opened, 'real PTY websocket open')
   socket.send(JSON.stringify({ type: 'attach', attachToken: created.attachToken }))
-  const events = [await waitForMessage(socket), await waitForMessage(socket), await waitForMessage(socket)]
-  assert.equal(events[0].type, 'ready')
-  assert.deepEqual(events[1], { type: 'data', data: 'local-pty-ok' })
-  assert.equal(events[2].type, 'exit')
-  assert.equal(events[2].exitCode, 0)
-  await once(socket, 'close')
+  assert.equal((await messages.next('ready frame')).type, 'ready')
+  assert.deepEqual(await messages.next('data frame'), { type: 'data', data: 'local-pty-ok' })
+  const exit = await messages.next('exit frame')
+  assert.equal(exit.type, 'exit')
+  assert.equal(exit.exitCode, 0)
+  await withTimeout(closed, 'real PTY websocket close')
 })
 
 test('native aliases require tenant roots and publish a 0600 runtime endpoint/token atomically', async (t) => {
@@ -346,4 +418,71 @@ test('output backpressure terminates a PTY instead of buffering unbounded data',
   assert.equal((await waitForMessage(socket)).type, 'exit')
   await once(socket, 'close')
   assert.equal(gateway.getSnapshot().sessions, 0)
+})
+
+test('validates and forwards a provider CLI resume launch to the adapter', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'codesurf-terminal-gateway-resume-'))
+  const launches = []
+  const gateway = createTerminalGateway({
+    config: {
+      bindHost: '127.0.0.1',
+      port: 0,
+      allowedOrigins: ['https://app.example.test'],
+      tenants: [{ id: 'acme', bearerToken: 'test-bearer-token', roots: [root], workspaces: { demo: root } }],
+    },
+    adapter: {
+      async spawn(options) {
+        launches.push(options)
+        return new FakeTerminal()
+      },
+    },
+  })
+  const endpoint = await gateway.listen()
+  t.after(async () => {
+    await gateway.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const response = await sessionRequest(endpoint, {
+    body: {
+      workspaceId: 'demo',
+      cwd: '.',
+      cols: 100,
+      rows: 30,
+      launchBin: 'claude',
+      launchArgs: ['--resume', 'session-42'],
+    },
+  })
+  assert.equal(response.status, 201)
+  const created = await response.json()
+  const socket = new WebSocket(created.websocketUrl, { origin: 'https://app.example.test' })
+  await once(socket, 'open')
+  socket.send(JSON.stringify({ type: 'attach', attachToken: created.attachToken }))
+  assert.equal((await waitForMessage(socket)).type, 'ready')
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launchBin, 'claude')
+  assert.deepEqual(launches[0].launchArgs, ['--resume', 'session-42'])
+  socket.send(JSON.stringify({ type: 'close' }))
+  await waitForMessage(socket)
+  await once(socket, 'close')
+})
+
+test('rejects arbitrary terminal executables and argument injection', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'codesurf-terminal-gateway-launch-policy-'))
+  const { gateway, endpoint } = await startGateway(root)
+  t.after(async () => {
+    await gateway.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  for (const launch of [
+    { launchBin: '/bin/sh', launchArgs: ['-c', 'touch /tmp/pwned'] },
+    { launchBin: 'claude', launchArgs: ['--resume', '../escape'] },
+    { launchBin: 'codex', launchArgs: ['resume', 'session', '--dangerous'] },
+  ]) {
+    const response = await sessionRequest(endpoint, {
+      body: { workspaceId: 'demo', cwd: '.', cols: 100, rows: 30, ...launch },
+    })
+    assert.equal(response.status, 400)
+  }
 })

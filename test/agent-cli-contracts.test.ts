@@ -11,6 +11,7 @@ import {
   buildKiloRunArgs,
   buildOpenClawAgentArgs,
   buildOpenCodeRunArgs,
+  parseBoundedOpenClawOutput,
   parseHermesOutput,
   parseOpenClawOutput,
   parseOpenCodeRunOutput,
@@ -120,6 +121,32 @@ describe('agent CLI contract builders', () => {
 
     expect(parsed.text).toBe('Hello\n\n world')
     expect(parsed.sessionId).toBe('oc-session-2')
+  })
+
+  test('rejects truncated OpenClaw envelopes instead of exposing a malformed JSON suffix', () => {
+    const parsed = parseBoundedOpenClawOutput(
+      '{"payloads":[{"text":"malformed suffix"}],"sessionId":"lost-session"}',
+      true,
+    )
+
+    assert.equal(parsed.ok, false)
+    if (!parsed.ok) {
+      assert.match(parsed.error, /exceeded/i)
+    }
+    assert.equal('output' in parsed, false)
+  })
+
+  test('preserves OpenClaw session metadata for complete bounded envelopes', () => {
+    const parsed = parseBoundedOpenClawOutput(JSON.stringify({
+      meta: { sessionId: 'oc-session-meta' },
+      payloads: [{ text: 'Complete answer' }],
+    }), false)
+
+    assert.equal(parsed.ok, true)
+    if (parsed.ok) {
+      assert.equal(parsed.output.text, 'Complete answer')
+      assert.equal(parsed.output.sessionId, 'oc-session-meta')
+    }
   })
 
   test('builds OpenCode run args using current json format and explicit bypass only', () => {
@@ -306,8 +333,10 @@ describe('agent CLI contract builders', () => {
     expect(source).toContain('buildHermesChatArgs')
     expect(source).toContain('buildOpenClawAgentArgs')
     expect(source).toContain('buildOpenCodeRunArgs')
-    expect(source).toContain('sanitizeAgentCliDiagnostic(stderr.trim() || `Codex exited with ${code}`)')
+    expect(source).toContain('runRelayProviderCli({')
+    expect(source).toContain('sanitizeAgentCliDiagnostic(result.stderr.trim() || `Codex exited with ${result.code}`)')
     expect(source).toContain('OPENCLAW_AGENT_LIST_TIMEOUT_MS')
+    expect(source).toContain('OPENCLAW_AGENT_LIST_MAX_BUFFER_BYTES')
     expect(source).not.toContain("'--approval-mode', approvalMode")
     expect(source).not.toContain('OpenCode approval mode')
     expect(source).not.toContain("bypassPermissions: spawnRequest.mode === 'bypassPermissions' || spawnRequest.mode === 'full-auto'")

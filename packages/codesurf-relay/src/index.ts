@@ -1,4 +1,5 @@
 export * from './types'
 export * from './relay'
 export * from './runtime'
+export * from './validation'
 export { RelayTimeoutError } from './runtime'

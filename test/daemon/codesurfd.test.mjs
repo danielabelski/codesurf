@@ -1,24 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
+import {
+  makeDaemonTestTempDir as makeTestTempDir,
+  spawnDaemon,
+  spawnManagedChild,
+  waitFor,
+} from './helpers/spawn-daemon.mjs'
 
-const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
-const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
-const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
-
-async function waitFor(check, timeoutMs = 5_000, intervalMs = 50) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    const value = await check()
-    if (value) return value
-    await new Promise(resolve => setTimeout(resolve, intervalMs))
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms`)
-}
+const TEST_MAX_REQUEST_BODY_BYTES = 1024 * 1024
 
 async function readJson(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'))
@@ -27,11 +21,6 @@ async function readJson(filePath) {
 async function writeJson(filePath, value) {
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-async function makeTestTempDir(prefix) {
-  await mkdir(TEST_TMP_ROOT, { recursive: true })
-  return await mkdtemp(join(TEST_TMP_ROOT, prefix))
 }
 
 function git(args, cwd) {
@@ -49,75 +38,102 @@ function git(args, cwd) {
 }
 
 async function startDaemon(options = {}) {
-  const homeDir = await makeTestTempDir('codesurfd-test-')
-  const pidPath = join(homeDir, 'daemon', 'pid.json')
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
+  return await spawnDaemon({
+    homePrefix: 'codesurfd-test-',
+    appVersion: 'test-suite',
+    env: options.env,
+  })
+}
+
+async function registerChatWorkspace(daemon, projectPath = daemon.homeDir, name = 'Chat Test') {
+  const response = await daemon.request('/workspace/create-with-path', {
+    body: { name, projectPath },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(typeof response.payload?.id, 'string')
+  return response.payload
+}
+
+function makeJsonBodyAtSize(name, size) {
+  const empty = JSON.stringify({ name, padding: '' })
+  const paddingBytes = size - Buffer.byteLength(empty)
+  assert.ok(paddingBytes >= 0)
+  const body = JSON.stringify({ name, padding: 'x'.repeat(paddingBytes) })
+  assert.equal(Buffer.byteLength(body), size)
+  return body
+}
+
+async function requestChunkedBeforeEnd(daemon, path, chunks) {
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      request.destroy()
+      reject(new Error('Daemon did not reject a chunked oversized body before request end'))
+    }, 3_000)
+    timeout.unref()
+    const request = httpRequest({
+      hostname: '127.0.0.1',
+      port: daemon.pidInfo.port,
+      path,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${daemon.pidInfo.token}`,
+        'Content-Type': 'application/json',
+      },
+    }, response => {
+      const responseChunks = []
+      response.on('data', chunk => responseChunks.push(Buffer.from(chunk)))
+      response.on('end', () => {
+        settled = true
+        clearTimeout(timeout)
+        request.end()
+        const body = Buffer.concat(responseChunks).toString('utf8')
+        resolve({
+          status: response.statusCode,
+          payload: body.trim() ? JSON.parse(body) : null,
+        })
+      })
+    })
+    request.on('error', error => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timeout)
+        reject(error)
+      }
+    })
+
+    for (const chunk of chunks) request.write(chunk)
+  })
+}
+
+async function runDaemonEntrypointOnce(daemon, appVersion) {
+  const managed = spawnManagedChild({
+    command: process.execPath,
+    args: [daemon.daemonEntry],
     env: {
       ...process.env,
-      HOME: homeDir,
-      CODESURF_HOME: homeDir,
-      CODESURF_DAEMON_PID_PATH: pidPath,
-      CODESURF_APP_VERSION: 'test-suite',
-      ...(options.env ?? {}),
+      HOME: daemon.homeDir,
+      CODESURF_HOME: daemon.homeDir,
+      CODESURF_DAEMON_PID_PATH: join(daemon.homeDir, 'daemon', 'pid.json'),
+      CODESURF_APP_VERSION: appVersion,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
   })
-
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-
-  const pidInfo = await waitFor(async () => {
-    if (!existsSync(pidPath)) return null
-    return await readJson(pidPath)
-  })
-
-  const request = async (path, options = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: options.method ?? (options.body == null ? 'GET' : 'POST'),
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
-      },
-      body: options.body == null ? undefined : JSON.stringify(options.body),
-    })
-    const text = await response.text()
-    const payload = text.trim() ? JSON.parse(text) : null
-    return { status: response.status, payload }
+  try {
+    return await managed.waitForExit()
+  } catch (error) {
+    await managed.stop()
+    throw error
   }
-
-  const requestText = async (path, options = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: options.method ?? 'GET',
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        ...(options.headers ?? {}),
-      },
-    })
-    return {
-      status: response.status,
-      body: await response.text(),
-      contentType: response.headers.get('content-type') ?? '',
-    }
-  }
-
-  const stop = async () => {
-    if (!child.killed) child.kill('SIGTERM')
-    await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await rm(homeDir, { recursive: true, force: true })
-    if (stderr.trim()) {
-      assert.fail(`daemon stderr was not empty:\n${stderr}`)
-    }
-  }
-
-  return { child, homeDir, pidInfo, request, requestText, stop }
 }
 
 test('daemon health endpoint requires auth and returns metadata', async t => {
-  const daemon = await startDaemon()
+  const daemon = await startDaemon({
+    env: {
+      NODE_ENV: 'test',
+      CODESURF_TEST_SHUTDOWN_DELAY_MS: '350',
+    },
+  })
   t.after(async () => {
     await daemon.stop()
   })
@@ -130,6 +146,192 @@ test('daemon health endpoint requires auth and returns metadata', async t => {
   assert.equal(payload.ok, true)
   assert.equal(payload.protocolVersion, 1)
   assert.equal(payload.appVersion, 'test-suite')
+
+  const pidPath = join(daemon.homeDir, 'daemon', 'pid.json')
+  const lockPath = join(daemon.homeDir, 'daemon', 'daemon.lock')
+  daemon.child.kill('SIGTERM')
+
+  const shutdownHealth = await waitFor(async () => {
+    try {
+      const result = await daemon.request('/health')
+      return result.payload?.shuttingDown === true ? result : null
+    } catch {
+      return null
+    }
+  })
+  assert.equal(shutdownHealth.status, 200)
+  assert.equal(shutdownHealth.payload.pid, daemon.pidInfo.pid)
+  assert.equal(existsSync(pidPath), true)
+  assert.equal(existsSync(lockPath), true)
+  assert.equal(Number((await readFile(lockPath, 'utf8')).trim()), daemon.pidInfo.pid)
+
+  await waitFor(() => daemon.child.exitCode !== null || daemon.child.signalCode !== null)
+  assert.equal(existsSync(pidPath), false)
+  assert.equal(existsSync(lockPath), false)
+})
+
+test('daemon startup selectively sweeps stale strict owned attachments', async t => {
+  const homeDir = await makeTestTempDir('codesurfd-owned-attachment-sweep-')
+  const attachmentDir = join(homeDir, 'chat-attachments')
+  await mkdir(attachmentDir, { mode: 0o700 })
+  const staleTime = Date.now() - 6 * 60 * 1000
+  const stale = join(
+    attachmentDir,
+    `codesurf-owned-v1-${staleTime}-00000000-0000-4000-8000-000000000000-stale.txt`,
+  )
+  const ordinary = join(attachmentDir, 'user-owned-note.txt')
+  await writeFile(stale, 'STALE\n', { mode: 0o600 })
+  await writeFile(ordinary, 'USER\n', { mode: 0o600 })
+  const staleDate = new Date(staleTime)
+  await utimes(stale, staleDate, staleDate)
+
+  const daemon = await spawnDaemon({ homeDir })
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  assert.equal(existsSync(stale), false)
+  assert.equal(await readFile(ordinary, 'utf8'), 'USER\n')
+})
+
+test('daemon owned attachment flag deletes generated bytes but preserves picker files', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+  const projectDir = join(daemon.homeDir, 'workspace-project')
+  const pickedDir = join(daemon.homeDir, 'picked')
+  const attachmentDir = join(daemon.homeDir, 'chat-attachments')
+  await mkdir(projectDir, { recursive: true })
+  await mkdir(pickedDir, { recursive: true })
+  await mkdir(attachmentDir, { recursive: true, mode: 0o700 })
+  const workspace = await registerChatWorkspace(daemon, projectDir, 'Attachment Workspace')
+  const picked = join(pickedDir, 'picked.txt')
+  const owned = join(
+    attachmentDir,
+    `codesurf-owned-v1-${Date.now()}-11111111-1111-4111-8111-111111111111-generated.txt`,
+  )
+  await writeFile(picked, 'PICKED\n', { mode: 0o600 })
+  await writeFile(owned, 'GENERATED\n', { mode: 0o600 })
+
+  const pickedIssue = await daemon.request('/file-references/capabilities/issue', {
+    body: {
+      workspaceId: workspace.id,
+      cardId: 'card-a',
+      paths: [picked],
+    },
+  })
+  assert.equal(pickedIssue.status, 200)
+  const ownedIssue = await daemon.request('/file-references/capabilities/issue', {
+    body: {
+      workspaceId: workspace.id,
+      cardId: 'card-a',
+      paths: [owned],
+      ownedTemporary: true,
+    },
+  })
+  assert.equal(ownedIssue.status, 200)
+
+  const inspection = await daemon.request('/file-references/capabilities/inspect', {
+    body: {
+      workspaceId: workspace.id,
+      cardId: 'card-a',
+      capabilities: [
+        pickedIssue.payload.attachments[0].capability,
+        ownedIssue.payload.attachments[0].capability,
+      ],
+    },
+  })
+  assert.deepEqual(inspection, { status: 200, payload: { hasAttachments: true } })
+
+  const message = `Attached file capabilities:\n${pickedIssue.payload.attachments[0].capability}\tpicked.txt\n${ownedIssue.payload.attachments[0].capability}\tgenerated.txt`
+  const expanded = await daemon.request('/file-references/expand', {
+    body: {
+      workspaceId: workspace.id,
+      cardId: 'card-a',
+      workspaceDir: projectDir,
+      message,
+    },
+  })
+  assert.equal(expanded.status, 200)
+  assert.match(expanded.payload.contextText, /PICKED/)
+  assert.match(expanded.payload.contextText, /GENERATED/)
+  assert.equal(await readFile(picked, 'utf8'), 'PICKED\n')
+  assert.equal(existsSync(owned), false)
+})
+
+test('daemon child reuse requires a matching configured app version', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const sameVersion = await runDaemonEntrypointOnce(daemon, 'test-suite')
+  assert.equal(sameVersion.exitCode, 0)
+  assert.equal(sameVersion.stderr, '')
+
+  const mismatchedVersion = await runDaemonEntrypointOnce(daemon, 'next-version')
+  assert.equal(mismatchedVersion.exitCode, 0)
+  assert.match(mismatchedVersion.stderr, /Another daemon is starting up/)
+
+  const currentPid = await readJson(join(daemon.homeDir, 'daemon', 'pid.json'))
+  assert.equal(currentPid.pid, daemon.pidInfo.pid)
+})
+
+test('daemon request bodies enforce the 1 MiB limit and deterministic JSON errors', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const exactBody = makeJsonBodyAtSize('Exact limit workspace', TEST_MAX_REQUEST_BODY_BYTES)
+  const exact = await daemon.requestRaw('/workspace/create', { body: exactBody })
+  assert.equal(exact.status, 200)
+  assert.equal(exact.payload.name, 'Exact limit workspace')
+
+  const oversizedBody = makeJsonBodyAtSize('Oversized workspace', TEST_MAX_REQUEST_BODY_BYTES + 1)
+  const oversized = await daemon.requestRaw('/workspace/create', { body: oversizedBody })
+  assert.equal(oversized.status, 413)
+  assert.deepEqual(oversized.payload, {
+    error: 'Request body too large',
+    code: 'REQUEST_BODY_TOO_LARGE',
+    maxBytes: TEST_MAX_REQUEST_BODY_BYTES,
+  })
+
+  const malformed = await daemon.requestRaw('/workspace/create', { body: '{"name":' })
+  assert.equal(malformed.status, 400)
+  assert.deepEqual(malformed.payload, {
+    error: 'Malformed JSON request body',
+    code: 'INVALID_JSON',
+  })
+
+  const empty = await daemon.requestRaw('/session/external/invalidate')
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.payload, { ok: true })
+
+  const workspaces = await daemon.request('/workspace/list')
+  assert.equal(workspaces.payload.some(workspace => workspace.name === 'Oversized workspace'), false)
+})
+
+test('daemon rejects chunked oversized bodies before the request stream ends', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const prefix = Buffer.from('{"name":"Chunked oversized workspace","padding":"')
+  const overflow = Buffer.alloc(TEST_MAX_REQUEST_BODY_BYTES + 1 - prefix.byteLength, 'x')
+  const response = await requestChunkedBeforeEnd(
+    daemon,
+    '/workspace/create',
+    [prefix, overflow],
+  )
+
+  assert.equal(response.status, 413)
+  assert.equal(response.payload.code, 'REQUEST_BODY_TOO_LARGE')
+
+  const workspaces = await daemon.request('/workspace/list')
+  assert.equal(workspaces.payload.some(workspace => workspace.name === 'Chunked oversized workspace'), false)
 })
 
 test('daemon dashboard serves html and query-token auth works', async t => {
@@ -557,6 +759,50 @@ test('daemon lists, reads, and deletes local session state while maintaining sum
   assert.equal(existsSync(join(contexDir, 'deleted', `tile-state-${tileId}.json`)), true)
 })
 
+test('daemon runtime clear is idempotent and removes the authoritative runtime session file', async t => {
+  const daemon = await startDaemon()
+  t.after(async () => {
+    await daemon.stop()
+  })
+
+  const workspaceId = 'ws-runtime-clear'
+  const cardId = 'card-runtime-clear'
+  const runtimeFile = join(
+    daemon.homeDir,
+    'workspaces',
+    workspaceId,
+    '.codesurf',
+    `runtime-session-${cardId}.json`,
+  )
+  let response = await daemon.request('/session/runtime/upsert', {
+    body: {
+      workspaceId,
+      cardId,
+      state: {
+        provider: 'codex',
+        sessionId: 'session-runtime-clear',
+        messages: [{ role: 'user', content: 'persist me briefly' }],
+      },
+    },
+  })
+  assert.equal(response.status, 200)
+  assert.equal(response.payload.ok, true)
+  assert.equal(existsSync(runtimeFile), true)
+
+  response = await daemon.request('/session/runtime/clear', {
+    body: { workspaceId, cardId },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.payload, { ok: true })
+  assert.equal(existsSync(runtimeFile), false)
+
+  response = await daemon.request('/session/runtime/clear', {
+    body: { workspaceId, cardId },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.payload, { ok: true })
+})
+
 test('daemon hides local tile sessions for tiles no longer present on the canvas', async t => {
   const daemon = await startDaemon()
   t.after(async () => {
@@ -740,44 +986,18 @@ test('daemon migrates legacy config.json into split workspace, project, and sett
     ],
   })
 
-  const pidPath = join(homeDir, 'daemon', 'pid.json')
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      CODESURF_HOME: homeDir,
-      CODESURF_DAEMON_PID_PATH: pidPath,
-      CODESURF_APP_VERSION: 'test-suite',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-
-  const pidInfo = await waitFor(async () => {
-    if (!existsSync(pidPath)) return null
-    return await readJson(pidPath)
+  const daemon = await spawnDaemon({
+    homeDir,
+    appVersion: 'test-suite',
   })
 
   t.after(async () => {
-    if (!child.killed) child.kill('SIGTERM')
-    await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await rm(homeDir, { recursive: true, force: true })
-    if (stderr.trim()) {
-      assert.fail(`daemon stderr was not empty:\n${stderr}`)
-    }
+    await daemon.stop()
   })
 
-  const response = await fetch(`http://127.0.0.1:${pidInfo.port}/workspace/projects`, {
-    headers: { Authorization: `Bearer ${pidInfo.token}` },
-  })
+  const response = await daemon.request('/workspace/projects')
   assert.equal(response.status, 200)
-  const projects = await response.json()
+  const projects = response.payload
   assert.equal(projects.length, 2)
   assert.deepEqual(projects.map(project => project.name), ['one', 'two'])
 
@@ -799,10 +1019,12 @@ test('daemon chat jobs persist detached background mode in job metadata', async 
     await daemon.stop()
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const response = await daemon.request('/chat/job/start', {
     body: {
       request: {
         cardId: 'chat-1',
+        workspaceId: workspace.id,
         provider: 'unsupported-provider',
         model: 'test-model',
         runMode: 'background',
@@ -1022,9 +1244,11 @@ test('daemon runs a persisted chat job timeline and replays events for completed
     await daemon.stop()
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'unsupported-provider',
         model: 'test-model',
         workspaceDir: daemon.homeDir,
@@ -1110,9 +1334,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: daemon.homeDir,
@@ -1229,9 +1455,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'hermes',
         model: 'openai-codex/gpt-5.5',
         mode: 'terminal',
@@ -1288,9 +1516,11 @@ exit 7
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'hermes',
         model: 'openai-codex/gpt-5.5',
         mode: 'terminal',
@@ -1358,9 +1588,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'opencode',
         model: 'anthropic/claude-sonnet-4-6',
         cardId: 'chat-opencode-daemon',
@@ -1437,7 +1669,11 @@ exit 0
   await writeFile(targetFile, 'before daemon codex\n', 'utf8')
 
   let response = null
-  const workspaceId = 'remote-checkpoint-workspace'
+  const workspaceId = (await registerChatWorkspace(
+    daemon,
+    projectDir,
+    'Remote checkpoint workspace',
+  )).id
   const cardId = 'chat-codex-checkpoint'
   const sessionEntryId = `codesurf-runtime:${cardId}`
 
@@ -1539,11 +1775,16 @@ exit 0
   await mkdir(projectDir, { recursive: true })
   await writeFile(targetFile, 'before missing path\n', 'utf8')
 
+  const workspaceId = (await registerChatWorkspace(
+    daemon,
+    projectDir,
+    'Remote missing-path workspace',
+  )).id
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
         cardId: 'chat-codex-missing-path',
-        workspaceId: 'remote-missing-path-workspace',
+        workspaceId,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: projectDir,
@@ -1593,9 +1834,11 @@ exit 0
     await rm(fakeBinDir, { recursive: true, force: true })
   })
 
+  const workspace = await registerChatWorkspace(daemon)
   const start = await daemon.request('/chat/job/start', {
     body: {
       request: {
+        workspaceId: workspace.id,
         provider: 'codex',
         model: 'gpt-5.4',
         workspaceDir: daemon.homeDir,

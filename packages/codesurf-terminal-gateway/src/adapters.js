@@ -1,6 +1,8 @@
 import path from 'node:path'
 import pty from 'node-pty'
 
+import { validateTerminalLaunch } from './launch-contract.js'
+
 function defaultShell() {
   if (process.platform === 'win32') return process.env.ComSpec || 'cmd.exe'
   return process.env.SHELL || '/bin/sh'
@@ -31,8 +33,11 @@ export class LocalPtyAdapter {
     this.config = config
   }
 
-  async spawn({ cwd, cols, rows }) {
-    return pty.spawn(this.config.shell || defaultShell(), this.config.shellArgs || defaultShellArgs(), {
+  async spawn({ cwd, cols, rows, launchBin, launchArgs }) {
+    const launch = validateTerminalLaunch(launchBin, launchArgs)
+    const program = launch.launchBin || this.config.shell || defaultShell()
+    const args = launch.launchBin ? launch.launchArgs : this.config.shellArgs || defaultShellArgs()
+    return pty.spawn(program, args, {
       name: 'xterm-256color',
       cols,
       rows,
@@ -51,7 +56,8 @@ export class DockerSandboxAdapter {
     this.config = config
   }
 
-  async spawn({ cwd, mountRoot, cols, rows }) {
+  async spawn({ cwd, mountRoot, cols, rows, launchBin, launchArgs }) {
+    const launch = validateTerminalLaunch(launchBin, launchArgs)
     const relative = path.relative(mountRoot, cwd)
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
       throw new Error('resolved terminal directory is outside its Docker mount root')
@@ -79,8 +85,8 @@ export class DockerSandboxAdapter {
       '--env', 'HOME=/tmp',
       '--user', user,
       this.config.image,
-      this.config.shell,
-      ...this.config.shellArgs,
+      launch.launchBin || this.config.shell,
+      ...(launch.launchBin ? launch.launchArgs : this.config.shellArgs),
     ]
 
     return pty.spawn(this.config.binary, args, {

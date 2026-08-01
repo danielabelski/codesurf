@@ -31,9 +31,9 @@
     <div id="root">
       <div id="__bootstrap" style="width:100vw;height:100vh;background:#1e1e1e;color:#aaa;display:grid;place-items:center;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;font-size:12px;">Loading…</div>
     </div>
-    <!-- Supplied at request time by web-preview, Native, or a hosted gateway.
-         It is intentionally excluded from the production bundle and must be
-         served with Cache-Control: no-store. A missing file is harmless. -->
+    <!-- Packaged targets ship an inert fallback for this path. Web-preview,
+         Native, or a hosted gateway replaces it at request time and must serve
+         the response with Cache-Control: no-store. -->
     <script src="/codesurf-runtime-config.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

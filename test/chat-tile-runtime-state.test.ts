@@ -12,15 +12,16 @@ import {
 } from '../src/renderer/src/components/chat/chatMessagesStore.ts'
 
 test('disposing a chat tile releases both runtime state and transcript messages', () => {
+  const workspaceId = 'chat-dispose-workspace'
   const tileId = 'chat-dispose-test'
-  reviveChatTileRuntimeState(tileId)
-  setChatTileRuntimeState(tileId, { input: 'draft' })
-  replaceTileMessages(tileId, [
+  reviveChatTileRuntimeState(workspaceId, tileId)
+  setChatTileRuntimeState(workspaceId, tileId, { input: 'draft' })
+  replaceTileMessages(workspaceId, tileId, [
     { id: 'm1', role: 'assistant', content: 'retained transcript', timestamp: 1 },
   ])
 
-  disposeChatTileRuntimeState(tileId)
+  disposeChatTileRuntimeState(workspaceId, tileId)
 
-  assert.equal(getChatTileRuntimeState(tileId), null)
-  assert.deepEqual(getTileMessages(tileId), [])
+  assert.equal(getChatTileRuntimeState(workspaceId, tileId), null)
+  assert.deepEqual(getTileMessages(workspaceId, tileId), [])
 })

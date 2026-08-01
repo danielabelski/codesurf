@@ -30,10 +30,23 @@ bin/
 vendor/
   dreaming.mjs          # autonomous research runner (was @codesurf/dreaming)
 src/
-  manager.ts            # createDaemonManager(config) — Electron-free supervisor
-  client.ts             # createDaemonClient({getInfo}) — typed REST client
-  paths.ts              # CODESURF_HOME constant
-  index.ts              # re-exports
+  *.ts                  # TypeScript authoring sources (not published)
+dist/
+  *.js                  # committed NodeNext runtime modules
+  *.d.ts                # generated public declarations
+```
+
+Production consumers import the package exports, which resolve to `dist/`.
+The committed build is verified byte-for-byte before packaging, so stale
+generated output fails closed instead of silently shipping.
+
+## Development
+
+```bash
+npm run build          # regenerate dist/ from src/
+npm run typecheck      # check the NodeNext source graph without emitting
+npm run verify:dist    # prove committed dist/ matches a clean compilation
+npm test               # verify the package contract and packaged runtime
 ```
 
 ## Usage (host adapter)

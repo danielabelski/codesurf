@@ -2,6 +2,11 @@ import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 import { homedir } from 'os'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../shared/session-types'
 import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
+import type { ActivityQuery, ActivityUpsertInput } from '../shared/activity-types'
+import {
+  isTileContextChangeForScope,
+  type TileContextChangedPayload,
+} from '../shared/tileContextScope'
 
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true
@@ -81,6 +86,7 @@ const electronApi = {
   fs: {
     readDir: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:readDir', path, workspaceId),
     readFile: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:readFile', path, workspaceId),
+    readFilePrefix: (path: string, maxBytes: number, workspaceId?: string) => ipcRenderer.invoke('fs:readFilePrefix', path, maxBytes, workspaceId),
     writeFile: (path: string, content: string, workspaceId?: string) => ipcRenderer.invoke('fs:writeFile', path, content, workspaceId),
     createFile: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:createFile', path, workspaceId),
     createDir: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:createDir', path, workspaceId),
@@ -130,15 +136,17 @@ const electronApi = {
     getAll: (workspaceId: string, tileId: string, tagPrefix?: string) => ipcRenderer.invoke('tileContext:getAll', workspaceId, tileId, tagPrefix),
     set: (workspaceId: string, tileId: string, key: string, value: unknown) => ipcRenderer.invoke('tileContext:set', workspaceId, tileId, key, value),
     delete: (workspaceId: string, tileId: string, key: string) => ipcRenderer.invoke('tileContext:delete', workspaceId, tileId, key),
-    onChanged: (tileId: string, callback: (data: { tileId: string; key: string; value: unknown }) => void) => {
-      const handler = (_: unknown, data: { tileId: string; key: string; value: unknown }) => { if (data.tileId === tileId) callback(data) }
+    onChanged: (workspaceId: string, tileId: string, callback: (data: TileContextChangedPayload) => void) => {
+      const handler = (_: unknown, data: TileContextChangedPayload) => {
+        if (isTileContextChangeForScope(data, workspaceId, tileId)) callback(data)
+      }
       ipcRenderer.on('tileContext:changed', handler)
       return () => ipcRenderer.removeListener('tileContext:changed', handler)
     },
   },
 
   image: {
-    edit: (req: { tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }) =>
+    edit: (req: { workspaceId: string; tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }) =>
       ipcRenderer.invoke('image:edit', req),
   },
 
@@ -204,13 +212,13 @@ const electronApi = {
 
   // Terminal operations (stub for now)
   terminal: {
-    create: (tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]) => ipcRenderer.invoke('terminal:create', tileId, workspaceDir, launchBin, launchArgs),
+    create: (tileId: string, workspaceId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]) => ipcRenderer.invoke('terminal:create', tileId, workspaceId, workspaceDir, launchBin, launchArgs),
     write: (tileId: string, data: string) => ipcRenderer.invoke('terminal:write', tileId, data),
     cd: (tileId: string, dirPath: string) => ipcRenderer.invoke('terminal:cd', tileId, dirPath),
     resize: (tileId: string, cols: number, rows: number) => ipcRenderer.invoke('terminal:resize', tileId, cols, rows),
-    destroy: (tileId: string) => ipcRenderer.invoke('terminal:destroy', tileId),
+    destroy: (tileId: string, workspaceId: string) => ipcRenderer.invoke('terminal:destroy', tileId, workspaceId),
     detach: (tileId: string) => ipcRenderer.invoke('terminal:detach', tileId),
-    updatePeers: (tileId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>) => ipcRenderer.invoke('terminal:update-peers', tileId, workspaceDir, peers),
+    updatePeers: (tileId: string, workspaceId: string, workspaceDir: string, peers: Array<{ peerId: string; peerType: string; tools: string[] }>) => ipcRenderer.invoke('terminal:update-peers', tileId, workspaceId, workspaceDir, peers),
     onData: (tileId: string, callback: (data: string) => void) => {
       const channel = `terminal:data:${tileId}`
       const handler = (_: unknown, data: string) => callback(data)
@@ -248,6 +256,7 @@ const electronApi = {
   // Chat — send messages to LLM providers (Claude, Codex, OpenCode, OpenClaw, Hermes)
   chat: {
     send: (req: {
+      workspaceId: string
       cardId: string
       provider: string
       model: string
@@ -257,11 +266,14 @@ const electronApi = {
       negotiatedTools?: string[]
       peers?: { peerId: string; peerType: string; tools: string[]; actions?: Array<{ name: string; description: string }>; context?: Record<string, unknown> }[]
       providerTransport?: import('../shared/types').ExtensionChatTransportConfig | null
+      recentEditContext?: string
+      blockNotesContext?: string
       agentId?: string | null
       agentMode?: import('../shared/types').AgentMode | null
     }) =>
       ipcRenderer.invoke('chat:send', req),
     resumeJob: (req: {
+      workspaceId: string
       cardId: string
       provider: string
       model: string
@@ -272,11 +284,13 @@ const electronApi = {
       jobId?: string | null
       jobSequence?: number
     }) => ipcRenderer.invoke('chat:resumeJob', req),
-    steer: (payload: { cardId: string; message: string }) =>
+    steer: (payload: { workspaceId: string; cardId: string; message: string }) =>
       ipcRenderer.invoke('chat:steer', payload) as Promise<{ ok: boolean; error?: string }>,
-    stop: (cardId: string) => ipcRenderer.invoke('chat:stop', cardId),
-    clearSession: (cardId: string) => ipcRenderer.invoke('chat:clearSession', cardId),
-    disposeCard: (cardId: string) => ipcRenderer.invoke('chat:disposeCard', cardId),
+    stop: (workspaceId: string, cardId: string) =>
+      ipcRenderer.invoke('chat:stop', { workspaceId, cardId }),
+    clearSession: (workspaceId: string, cardId: string) =>
+      ipcRenderer.invoke('chat:clearSession', { workspaceId, cardId }),
+    disposeCard: (workspaceId: string, cardId: string) => ipcRenderer.invoke('chat:disposeCard', { workspaceId, cardId }),
     opencodeModels: () => ipcRenderer.invoke('chat:opencodeModels'),
     onOpencodeModelsUpdated: (cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void) => {
       const handler = (_: unknown, payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => cb(payload)
@@ -285,22 +299,33 @@ const electronApi = {
     },
     openclawAgents: () => ipcRenderer.invoke('chat:openclawAgents'),
     csagentModels: () => ipcRenderer.invoke('chat:csagentModels'),
-    selectFiles: () => ipcRenderer.invoke('chat:selectFiles') as Promise<string[]>,
-    writeTempAttachment: (payload: { data: string; mime?: string; ext?: string; filenameHint?: string }) =>
-      ipcRenderer.invoke('chat:writeTempAttachment', payload) as Promise<{ ok: true; path: string } | { ok: false; error: string }>,
+    selectFiles: (workspaceId: string, cardId: string) => ipcRenderer.invoke('chat:selectFiles', workspaceId, cardId) as Promise<Array<{ capability: string; displayName: string }>>,
+    authorizeDroppedFiles: (workspaceId: string, cardId: string, files: File[]) => {
+      const paths = Array.from(files ?? [])
+        .map(file => {
+          try { return webUtils.getPathForFile(file) } catch { return '' }
+        })
+        .filter(Boolean)
+      if (paths.length === 0) return Promise.resolve([])
+      return ipcRenderer.invoke('chat:authorizeDroppedFiles', workspaceId, cardId, paths) as Promise<Array<{ capability: string; displayName: string }>>
+    },
+    writeTempAttachment: (payload: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }) =>
+      ipcRenderer.invoke('chat:writeTempAttachment', payload) as Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }>,
     answerUserQuestion: (payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       answers: Record<string, string>
       annotations?: Record<string, { notes?: string; preview?: string }>
     }) => ipcRenderer.invoke('chat:answerUserQuestion', payload) as Promise<{ ok: boolean; error?: string }>,
     answerToolPermission: (payload: {
+      workspaceId: string
       cardId: string
       toolId: string | null
       // `never` persists a deny-grant so subsequent calls auto-reject.
       decision: 'deny' | 'never' | 'once' | 'session' | 'today' | 'forever'
     }) => ipcRenderer.invoke('chat:answerToolPermission', payload) as Promise<{ ok: boolean; error?: string }>,
-    setPermissionMode: (payload: { cardId: string; mode: string }) =>
+    setPermissionMode: (payload: { workspaceId: string; cardId: string; mode: string }) =>
       ipcRenderer.invoke('chat:setPermissionMode', payload) as Promise<{ ok: boolean; error?: string }>,
     loadSessionHistory: (payload: {
       workspaceId?: string
@@ -326,8 +351,8 @@ const electronApi = {
     start: (req: { cardId: string; agentId: string; url: string; method?: string; headers?: Record<string, string>; body?: string }) =>
       ipcRenderer.invoke('stream:start', req),
     stop: (cardId: string) => ipcRenderer.invoke('stream:stop', cardId),
-    onChunk: (cb: (event: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => void) => {
-      const handler = (_: unknown, evt: { cardId: string; type: string; text?: string; toolName?: string; error?: string }) => cb(evt)
+    onChunk: (cb: (event: { workspaceId: string; cardId: string; type: string; text?: string; toolName?: string; error?: string }) => void) => {
+      const handler = (_: unknown, evt: { workspaceId: string; cardId: string; type: string; text?: string; toolName?: string; error?: string }) => cb(evt)
       ipcRenderer.on('agent:stream', handler)
       return () => { ipcRenderer.removeListener('agent:stream', handler) }
     }
@@ -354,6 +379,42 @@ const electronApi = {
     closeById: (id: number) => ipcRenderer.invoke('window:closeById', id),
     openMiniChat: (opts: { workspaceId: string; tileId: string; title?: string }) => ipcRenderer.invoke('window:openMiniChat', opts),
     setSidebarCollapsed: (collapsed: boolean) => ipcRenderer.invoke('window:setSidebarCollapsed', collapsed),
+    onPersistenceRequest: (callback: (request: {
+      nonce: string
+      reason: 'close' | 'quit' | 'reload' | 'force-reload'
+      canvasOwner: boolean
+    }) => void) => {
+      const handler = (_: unknown, request: {
+        nonce?: unknown
+        reason?: unknown
+        canvasOwner?: unknown
+      }) => {
+        const reason = request?.reason
+        const validReason = reason === 'close'
+          || reason === 'quit'
+          || reason === 'reload'
+          || reason === 'force-reload'
+        if (
+          typeof request?.nonce === 'string'
+          && request.nonce.length > 0
+          && validReason
+          && typeof request.canvasOwner === 'boolean'
+        ) {
+          callback({
+            nonce: request.nonce,
+            reason,
+            canvasOwner: request.canvasOwner,
+          })
+        }
+      }
+      ipcRenderer.on('window:persistence-request', handler)
+      return () => ipcRenderer.removeListener('window:persistence-request', handler)
+    },
+    persistenceReady: (nonce: string) => {
+      if (typeof nonce === 'string' && nonce.length > 0) {
+        ipcRenderer.send('window:persistence-ready', { nonce })
+      }
+    },
     onListChanged: (cb: (list: { id: number; title: string; focused: boolean }[]) => void) => {
       const handler = (_: unknown, list: { id: number; title: string; focused: boolean }[]) => cb(list)
       ipcRenderer.on('window:list-changed', handler)
@@ -497,38 +558,24 @@ const electronApi = {
       ipcRenderer.on('mcp:kanban', handler)
       return () => { ipcRenderer.removeListener('mcp:kanban', handler) }
     },
-    onInject: (cb: (cardId: string, message: string, appendNewline: boolean) => void) => {
-      const handler = (_: unknown, payload: { cardId: string; message: string; appendNewline: boolean }) => cb(payload.cardId, payload.message, payload.appendNewline)
+    onInject: (cb: (workspaceId: string, cardId: string, message: string, appendNewline: boolean) => void) => {
+      const handler = (_: unknown, payload: { workspaceId: string; cardId: string; message: string; appendNewline: boolean }) => cb(payload.workspaceId, payload.cardId, payload.message, payload.appendNewline)
       ipcRenderer.on('mcp:inject', handler)
       return () => { ipcRenderer.removeListener('mcp:inject', handler) }
     },
-    inject: (cardId: string, message: string) => ipcRenderer.invoke('terminal:write', cardId, message + '\r')
+    inject: (cardId: string, message: string) =>
+      ipcRenderer.invoke('terminal:write', cardId, message + '\r')
   },
 
   // Activity store (persisted per-workspace)
   activity: {
-    upsert: (workspaceId: string, data: {
-      id?: string
-      tileId: string
-      type: 'task' | 'tool' | 'skill' | 'context'
-      status?: 'pending' | 'running' | 'done' | 'error' | 'paused'
-      title: string
-      detail?: string
-      metadata?: Record<string, unknown>
-      agent?: string
-    }) => ipcRenderer.invoke('activity:upsert', workspaceId, data),
-    query: (query: {
-      workspaceId: string
-      tileId?: string
-      type?: string
-      status?: string
-      agent?: string
-      limit?: number
-    }) => ipcRenderer.invoke('activity:query', query),
+    upsert: (workspaceId: string, data: ActivityUpsertInput) => ipcRenderer.invoke('activity:upsert', workspaceId, data),
+    query: (query: ActivityQuery) => ipcRenderer.invoke('activity:query', query),
     byTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('activity:byTile', workspaceId, tileId),
-    delete: (workspaceId: string, id: string) => ipcRenderer.invoke('activity:delete', workspaceId, id),
+    delete: (workspaceId: string, tileId: string, id: string) => ipcRenderer.invoke('activity:delete', workspaceId, tileId, id),
     clearTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('activity:clearTile', workspaceId, tileId),
     byAgent: (workspaceId: string) => ipcRenderer.invoke('activity:byAgent', workspaceId),
+    health: (workspaceId: string) => ipcRenderer.invoke('activity:health', workspaceId),
   },
 
   // CodeSurf protocol (.codesurf folder)
@@ -657,7 +704,7 @@ const electronApi = {
 
   // System memory + lifecycle
   system: {
-    cleanupTile: (tileId: string) => ipcRenderer.invoke('system:cleanupTile', tileId),
+    cleanupTile: (workspaceId: string, tileId: string) => ipcRenderer.invoke('system:cleanupTile', workspaceId, tileId),
     gc: () => ipcRenderer.invoke('system:gc'),
     memStats: () => ipcRenderer.invoke('system:memStats'),
     daemonStatus: () => ipcRenderer.invoke('system:daemonStatus'),

@@ -1,38 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { chmodSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { chmodSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { buildSkillSelectionPrompt, createSkillsIndex } from '../../bin/skills-index.mjs'
-
-const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
-const DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
-const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
-
-async function waitFor(check, timeoutMs = 5_000, intervalMs = 50) {
-  const started = Date.now()
-  while (Date.now() - started < timeoutMs) {
-    const value = await check()
-    if (value) return value
-    await new Promise(resolve => setTimeout(resolve, intervalMs))
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms`)
-}
-
-async function readJson(filePath) {
-  return JSON.parse(await readFile(filePath, 'utf8'))
-}
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_SELECTED_SKILLS,
+  MAX_SKILL_DESCRIPTION_BYTES,
+  MAX_SKILLS_PROMPT_BYTES,
+} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
+import {
+  makeDaemonTestTempDir as makeTestTempDir,
+  spawnDaemon,
+} from './helpers/spawn-daemon.mjs'
 
 async function writeJson(filePath, value) {
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-}
-
-async function makeTestTempDir(prefix) {
-  await mkdir(TEST_TMP_ROOT, { recursive: true })
-  return await mkdtemp(join(TEST_TMP_ROOT, prefix))
 }
 
 function execPython(script, args, input = '') {
@@ -69,55 +55,10 @@ function createSkillArchive(zipPath, topFolder, skillMd) {
 }
 
 async function startDaemon() {
-  const homeDir = await makeTestTempDir('codesurfd-skills-index-')
-  const pidPath = join(homeDir, 'daemon', 'pid.json')
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-      CODESURF_HOME: homeDir,
-      CODESURF_DAEMON_PID_PATH: pidPath,
-      CODESURF_APP_VERSION: 'skills-index-test',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  return await spawnDaemon({
+    homePrefix: 'codesurfd-skills-index-',
+    appVersion: 'skills-index-test',
   })
-
-  let stderr = ''
-  child.stderr.on('data', chunk => {
-    stderr += String(chunk)
-  })
-
-  const pidInfo = await waitFor(async () => {
-    if (!existsSync(pidPath)) return null
-    return await readJson(pidPath)
-  })
-
-  const request = async (path, { body, method } = {}) => {
-    const response = await fetch(`http://127.0.0.1:${pidInfo.port}${path}`, {
-      method: method ?? (body == null ? 'GET' : 'POST'),
-      headers: {
-        Authorization: `Bearer ${pidInfo.token}`,
-        ...(body == null ? {} : { 'Content-Type': 'application/json' }),
-      },
-      body: body == null ? undefined : JSON.stringify(body),
-    })
-    const text = await response.text()
-    const payload = text.trim() ? JSON.parse(text) : null
-    return { status: response.status, payload }
-  }
-
-  const stop = async () => {
-    if (!child.killed) child.kill('SIGTERM')
-    await waitFor(async () => child.exitCode !== null || child.signalCode !== null, 5_000, 50).catch(() => null)
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
-    await rm(homeDir, { recursive: true, force: true })
-    if (stderr.trim()) {
-      assert.fail(`daemon stderr was not empty:\n${stderr}`)
-    }
-  }
-
-  return { homeDir, request, stop }
 }
 
 test('buildSkillSelectionPrompt summarizes selected workspace, global, and command entries', () => {
@@ -160,6 +101,117 @@ test('buildSkillSelectionPrompt summarizes selected workspace, global, and comma
   assert.match(result.prompt, /@lint-fix \[workspace\] — Fix lint failures before commit\./)
   assert.match(result.prompt, /@\/compact \[command\] — Compact conversation\./)
   assert.match(result.prompt, /@release-notes \[global\] — Write concise release notes\./)
+})
+
+test('selected skills cap count and UTF-8 description bytes with visible omission markers', () => {
+  const skills = Array.from({ length: 30 }, (_, index) => ({
+    id: `skill-${index}`,
+    name: `skill-${index}`,
+    description: index === 0
+      ? 'é'.repeat(MAX_SKILL_DESCRIPTION_BYTES)
+      : `Description ${index}.`,
+    scope: 'workspace',
+    kind: 'skill',
+    displayPath: `.codesurf/skills/skill-${index}/SKILL.md`,
+  }))
+  const result = buildSkillSelectionPrompt({
+    skills,
+    selection: {
+      enabledIds: skills.map(skill => skill.id),
+      disabledIds: [],
+    },
+  })
+
+  assert.equal(result.resolved.length, MAX_SELECTED_SKILLS)
+  assert.equal(result.omittedCount, 30 - MAX_SELECTED_SKILLS)
+  assert.equal(result.omittedIds[0], `skill-${MAX_SELECTED_SKILLS}`)
+  assert.match(result.summary, /omitted 6 selected skills/)
+  assert.match(result.prompt, /maximum selected skills/)
+  assert.doesNotMatch(result.prompt, /@skill-29 /)
+  assert.match(result.resolved[0].description, /maximum skill description bytes/)
+  assert.match(result.summary, /1 skill description truncated by maximum skill description bytes/)
+  assert.match(result.summary, /omitted 6 selected skills by maximum selected skills/)
+  assert.ok(Buffer.byteLength(result.resolved[0].description, 'utf8') <= MAX_SKILL_DESCRIPTION_BYTES)
+  assert.equal(result.metadata[0].truncated, true)
+  assert.ok(Buffer.byteLength(result.prompt, 'utf8') <= MAX_SKILLS_PROMPT_BYTES)
+})
+
+test('skill selection summary reports aggregate prompt truncation', () => {
+  const hugeName = 'n'.repeat(MAX_SKILLS_PROMPT_BYTES)
+  const result = buildSkillSelectionPrompt({
+    skills: [{
+      id: 'huge-summary-skill',
+      name: hugeName,
+      description: 'é'.repeat(MAX_SKILL_DESCRIPTION_BYTES),
+      scope: 'workspace',
+      kind: 'skill',
+      displayPath: '.codesurf/skills/huge-summary-skill/SKILL.md',
+    }],
+    selection: {
+      enabledIds: ['huge-summary-skill'],
+      disabledIds: [],
+    },
+  })
+
+  assert.equal(result.promptMetadata.truncated, true)
+  assert.match(result.summary, /^Included 1 skill \(1 skill description truncated/)
+  assert.match(result.summary, /aggregate skill prompt truncated by maximum skills prompt bytes/)
+})
+
+test('skill list and detail reads share the bounded context-file contract', async t => {
+  const homeDir = await makeTestTempDir('skills-index-byte-budget-')
+  const workspaceDir = join(homeDir, 'project')
+  const skillDir = join(workspaceDir, '.codesurf', 'skills', 'large-skill')
+  await mkdir(skillDir, { recursive: true })
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const skillPath = join(skillDir, 'SKILL.md')
+  await writeFile(
+    skillPath,
+    `---\nname: Large Skill\ndescription: Large but bounded.\n---\n${'é'.repeat(MAX_CONTEXT_FILE_BYTES)}`,
+    'utf8',
+  )
+  const index = createSkillsIndex({ homeDir, userHomeDir: homeDir })
+  const listed = await index.listSkills({ workspaceDir })
+  const listedSkill = listed.skills.find(skill => skill.id === `discovered-${skillPath}`)
+  assert.ok(listedSkill)
+  assert.equal(listedSkill.contextMetadata.truncated, true)
+  assert.ok(listedSkill.contextMetadata.includedBytes <= MAX_CONTEXT_FILE_BYTES)
+  assert.equal(Object.prototype.hasOwnProperty.call(listedSkill, 'content'), false)
+
+  const detailed = await index.getSkill({
+    workspaceDir,
+    skillId: `discovered-${skillPath}`,
+  })
+  assert.ok(detailed)
+  assert.equal(detailed.contextMetadata.truncated, true)
+  assert.ok(Buffer.byteLength(detailed.content, 'utf8') <= MAX_CONTEXT_FILE_BYTES)
+  assert.match(detailed.content, /maximum context file bytes/)
+  assert.doesNotMatch(detailed.content, /\uFFFD/)
+})
+
+test('oversized saved-skill metadata is reported visibly without a full-file read', async t => {
+  const homeDir = await makeTestTempDir('skills-index-saved-budget-')
+  const workspaceDir = join(homeDir, 'project')
+  const savedSkillsFile = join(workspaceDir, '.codesurf', 'customisation', 'skills.json')
+  await writeJson(savedSkillsFile, [{
+    id: 'custom:oversized',
+    name: 'Oversized',
+    description: 'Saved skill with oversized metadata.',
+    content: 'x'.repeat(MAX_CONTEXT_FILE_BYTES),
+  }])
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
+
+  const index = createSkillsIndex({ homeDir, userHomeDir: homeDir })
+  const result = await index.listSkills({ workspaceDir })
+  assert.ok(result.skippedLocations.some(entry =>
+    entry.path === savedSkillsFile && entry.code === 'CONTEXT_FILE_LIMIT',
+  ))
+  assert.equal(result.skills.some(skill => skill.id === 'custom:oversized'), false)
 })
 
 test('daemon skills list/get/install merge global and workspace roots with inspectable selection summaries', async t => {
@@ -292,12 +344,20 @@ test('daemon skills list/get/install merge global and workspace roots with inspe
   assert.equal(response.payload.content, archiveSkillMd)
 })
 
-test('listSkills skips unreadable custom skill directories without failing', async () => {
+test('listSkills skips unreadable custom skill directories without failing', async t => {
   const homeDir = await makeTestTempDir('skills-index-unreadable-')
   const workspaceDir = join(homeDir, 'project')
   const blockedDir = join(workspaceDir, 'codesurf', 'skills')
   const goodSkillDir = join(workspaceDir, '.codesurf', 'skills', 'good-skill')
   const locationsFile = join(workspaceDir, '.codesurf', 'customisation', 'locations-skills.json')
+  t.after(async () => {
+    try {
+      chmodSync(blockedDir, 0o755)
+    } catch {
+      // The fixture may not have reached chmod before an earlier failure.
+    }
+    await rm(homeDir, { recursive: true, force: true })
+  })
 
   await mkdir(blockedDir, { recursive: true })
   await writeFile(join(blockedDir, 'SKILL.md'), '---\nname: Blocked Skill\ndescription: hidden\n---\n', 'utf8')
@@ -321,8 +381,11 @@ test('listSkills skips unreadable custom skill directories without failing', asy
   }
 })
 
-test('listSkills treats a skill location file path as unreadable and continues', async () => {
+test('listSkills treats a skill location file path as unreadable and continues', async t => {
   const homeDir = await makeTestTempDir('skills-index-enotdir-')
+  t.after(async () => {
+    await rm(homeDir, { recursive: true, force: true })
+  })
   const workspaceDir = join(homeDir, 'project')
   const blockedFile = join(workspaceDir, 'codesurf', 'skills')
   const locationsFile = join(workspaceDir, '.codesurf', 'customisation', 'locations-skills.json')

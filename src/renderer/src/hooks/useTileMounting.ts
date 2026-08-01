@@ -82,23 +82,27 @@ export function useTileMounting({
 }: UseTileMountingOptions) {
   const cleanupTileResources = useCallback((tileId: string) => {
     const tile = tilesRef.current.find(candidate => candidate.id === tileId)
-    if (tile?.type === 'terminal') {
-      window.electron.terminal.destroy(tileId)
+    if (tile?.type === 'terminal' && workspace?.id) {
+      window.electron.terminal.destroy(tileId, workspace.id)
     }
     if (tile?.type === 'chat') {
-      disposeChatTileRuntimeState(tileId)
-      void window.electron.chat?.disposeCard?.(tileId)
+      if (workspace?.id) {
+        disposeChatTileRuntimeState(workspace.id, tileId)
+        void window.electron.chat?.disposeCard?.(workspace.id, tileId)
+      }
       // The chat tile can embed a terminal under a deterministic derived id
       // (`${tileId}-terminal`). Tear down its PTY too, since that backend is
       // keyed by tileId and would otherwise leak when the chat tile closes.
-      window.electron.terminal.destroy(`${tileId}-terminal`)
+      if (workspace?.id) {
+        window.electron.terminal.destroy(`${tileId}-terminal`, workspace.id)
+      }
     }
     if (tile?.type === 'media') {
       disposeMediaTile(tileId)
     }
-    void window.electron?.system?.cleanupTile?.(tileId)
     if (workspace?.id) {
       void Promise.allSettled([
+        window.electron?.system?.cleanupTile?.(workspace.id, tileId),
         window.electron.canvas.deleteTileArtifacts(workspace.id, tileId),
         window.electron.activity.clearTile(workspace.id, tileId),
         workspace.path ? window.electron?.collab?.removeTileDir?.(workspace.path, tileId) : Promise.resolve(true),

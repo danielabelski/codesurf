@@ -14,6 +14,11 @@ export function ResizeHandle({ dir, onMouseDown }: {
   if (dir === 'sw') Object.assign(style, { left: 0, bottom: 0, width: S, height: S, cursor: 'sw-resize' })
   if (dir === 'ne') Object.assign(style, { right: 0, top: 0, width: S, height: S, cursor: 'ne-resize' })
   if (dir === 'nw') Object.assign(style, { left: 0, top: 0, width: S, height: S, cursor: 'nw-resize' })
-  return <div style={style} onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onMouseDown(e) }} />
+  return (
+    <div
+      data-resize-dir={dir}
+      style={style}
+      onMouseDown={e => { e.stopPropagation(); e.preventDefault(); onMouseDown(e) }}
+    />
+  )
 }
-

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -9,6 +9,16 @@ import process from 'node:process'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const OUT_ROOT = join(ROOT, 'release', 'npm')
 const PACKAGE_DIR = join(OUT_ROOT, 'package')
+const DAEMON_DIR = join(ROOT, 'packages', 'codesurf-daemon')
+const DAEMON_DIST_ENTRIES = [
+  'index.js',
+  'manager.js',
+  'client.js',
+  'sse.js',
+  'chat-cli.js',
+  'chat-session-store.js',
+  'paths.js',
+]
 
 const args = new Set(process.argv.slice(2))
 const skipAppBuild = args.has('--skip-app-build')
@@ -56,17 +66,33 @@ function copyResources() {
 }
 
 function copyDaemonPackage() {
-  const source = join(ROOT, 'packages', 'codesurf-daemon')
-  if (!existsSync(source)) return
-
   const destination = join(PACKAGE_DIR, 'packages', 'codesurf-daemon')
   mkdirSync(destination, { recursive: true })
 
-  for (const entry of ['bin', 'src', 'vendor', 'README.md', 'package.json']) {
-    const entrySource = join(source, entry)
-    if (!existsSync(entrySource)) continue
+  for (const entry of ['bin', 'dist', 'vendor', 'README.md', 'package.json']) {
+    const entrySource = join(DAEMON_DIR, entry)
+    if (!existsSync(entrySource)) fail(`Missing required daemon package entry: ${entry}`)
     cpSync(entrySource, join(destination, entry), { recursive: true, force: true })
   }
+
+  if (existsSync(join(destination, 'src'))) {
+    fail('Daemon source TypeScript must not be copied into the npm package')
+  }
+}
+
+function assertStagedDaemonImports() {
+  const stagedDaemon = join(PACKAGE_DIR, 'packages', 'codesurf-daemon')
+  const importTargets = DAEMON_DIST_ENTRIES.map(entry => join(stagedDaemon, 'dist', entry))
+  const probe = [
+    "import { pathToFileURL } from 'node:url'",
+    `const targets = ${JSON.stringify(importTargets)}`,
+    'await Promise.all(targets.map(target => import(pathToFileURL(target).href)))',
+  ].join(';')
+  run(
+    process.execPath,
+    ['--no-experimental-strip-types', '--input-type=module', '-e', probe],
+    { cwd: PACKAGE_DIR },
+  )
 }
 
 function assertExists(relativePath) {
@@ -98,9 +124,7 @@ function sanitizeManifest(rootManifest) {
     ...(Object.keys(filteredOptionalDependencies).length > 0
       ? { optionalDependencies: filteredOptionalDependencies }
       : {}),
-    engines: {
-      node: '>=20.0.0',
-    },
+    engines: { ...(rootManifest.engines ?? {}) },
   }
 }
 
@@ -109,16 +133,27 @@ function main() {
 
   if (!skipAppBuild) {
     log('Building Electron app...')
-    run(process.platform === 'win32' ? 'bun.exe' : 'bun', ['run', 'build'])
+    run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'])
   } else {
     log('Skipping app build')
+    run(
+      process.platform === 'win32' ? 'npm.cmd' : 'npm',
+      ['--prefix', 'packages/codesurf-daemon', 'run', 'build'],
+    )
   }
+  run(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['--prefix', 'packages/codesurf-daemon', 'run', 'verify:dist'],
+  )
 
   assertExists('dist-electron/main/index.js')
   assertExists('dist-electron/renderer/index.html')
   assertExists('dist-electron/preload/index.js')
   assertExists('bin/codesurf.cjs')
   assertExists('bin/codesurfd.mjs')
+  for (const entry of DAEMON_DIST_ENTRIES) {
+    assertExists(`packages/codesurf-daemon/dist/${entry}`)
+  }
 
   rmSync(OUT_ROOT, { recursive: true, force: true })
   mkdirSync(PACKAGE_DIR, { recursive: true })
@@ -131,6 +166,7 @@ function main() {
   copyIfExists('packages/codesurf-relay/dist')
   copyIfExists('README.md')
   copyIfExists('LICENSE')
+  assertStagedDaemonImports()
 
   const publishManifest = sanitizeManifest(rootManifest)
   writeFileSync(

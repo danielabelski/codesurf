@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { CodesurfRelay } from './relay'
 import { RelayRuntime } from './runtime'
-import type { RelayAgentExecutor } from './types'
+import type { RelayAgentExecutor, RelayTurnInput } from './types'
 
 /**
  * Integration tests for the relay system.
@@ -372,6 +372,59 @@ describe('integration', () => {
       expect(memories.length).toBe(1)
       expect(memories[0].meta.subject).toBe('Important decision')
     })
+
+    it('should cancel relay waits and release their event subscription', async () => {
+      await relay.init()
+      const controller = new AbortController()
+      const cancellation = new Error('relay generation stopped')
+      let active = true
+      const listenerCountBeforeWait = relay.events.listenerCount('event')
+
+      const waiting = relay.waitForReady(
+        ['never-ready'],
+        { timeoutMs: 60_000 },
+        {
+          signal: controller.signal,
+          assertActive() {
+            if (!active) throw cancellation
+          },
+        },
+      )
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait + 1,
+      )
+
+      active = false
+      controller.abort()
+      await expect(waiting).rejects.toBe(cancellation)
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait,
+      )
+
+      const anyController = new AbortController()
+      const anyCancellation = new Error('relay generation stopped again')
+      let anyActive = true
+      const waitingForAny = relay.waitForAny(
+        ['never-done'],
+        { timeoutMs: 60_000 },
+        {
+          signal: anyController.signal,
+          assertActive() {
+            if (!anyActive) throw anyCancellation
+          },
+        },
+      )
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait + 1,
+      )
+
+      anyActive = false
+      anyController.abort()
+      await expect(waitingForAny).rejects.toBe(anyCancellation)
+      expect(relay.events.listenerCount('event')).toBe(
+        listenerCountBeforeWait,
+      )
+    })
   })
 
   describe('RelayRuntime with real relay', () => {
@@ -410,10 +463,11 @@ describe('integration', () => {
     it('should trigger agent on direct message via event', async () => {
       await relay.init()
 
+      const runTurn = vi.fn().mockImplementation(async () => {
+        return JSON.stringify({ ready: true, status: 'ready' })
+      })
       const mockExecutor: RelayAgentExecutor = {
-        runTurn: vi.fn().mockImplementation(async () => {
-          return JSON.stringify({ ready: true, status: 'ready' })
-        }),
+        runTurn,
       }
 
       const runtime = new RelayRuntime(relay, {
@@ -445,6 +499,7 @@ describe('integration', () => {
         task: 'Listen for messages',
         channels: [],
       })
+      expect(runTurn).toHaveBeenCalledTimes(1)
 
       // Alice sends message to Bob
       await relay.sendDirectMessage('alice', {
@@ -453,15 +508,18 @@ describe('integration', () => {
         body: 'Hi Bob!',
       })
 
-      // Wait for event processing
-      await new Promise(r => setTimeout(r, 50))
+      await vi.waitFor(() => {
+        expect(runTurn).toHaveBeenCalledTimes(2)
+      })
+      const secondTurn = runTurn.mock.calls[1][0] as RelayTurnInput
+      expect(secondTurn.unreadDirectMessages).toHaveLength(1)
+      expect(secondTurn.unreadDirectMessages[0].meta.from).toBe('alice')
+      expect(secondTurn.unreadDirectMessages[0].body).toBe('Hi Bob!')
+      await vi.waitFor(async () => {
+        expect(await relay.listUnreadDirectMessages('bob')).toHaveLength(0)
+      })
 
-      // Verify Bob got the message
-      const bobInbox = await relay.listUnreadDirectMessages('bob')
-      expect(bobInbox.length).toBe(1)
-      expect(bobInbox[0].meta.from).toBe('alice')
-
-      runtime.destroy()
+      await runtime.destroy()
     })
   })
 })

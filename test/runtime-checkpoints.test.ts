@@ -134,12 +134,12 @@ describe('runtime-checkpoints pure helpers', () => {
       },
     ]])
     assert.deepEqual(streamCalls, [
-      ['card-1', {
+      [{ workspaceId: 'workspace-1', cardId: 'card-1' }, {
         type: 'tool_start',
         toolId: 'codesurf-checkpoint-checkpoint-1',
         toolName: 'Checkpoint saved',
       }],
-      ['card-1', {
+      [{ workspaceId: 'workspace-1', cardId: 'card-1' }, {
         type: 'tool_summary',
         toolId: 'codesurf-checkpoint-checkpoint-1',
         toolName: 'Checkpoint saved',

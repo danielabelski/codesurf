@@ -1,6 +1,14 @@
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import { basename, extname, join, relative, resolve, sep } from 'node:path'
+import {
+  MAX_CONTEXT_FILE_BYTES,
+  MAX_SELECTED_SKILLS,
+  MAX_SKILL_DESCRIPTION_BYTES,
+  MAX_SKILLS_PROMPT_BYTES,
+  truncateUtf8,
+  truncateUtf8Buffer,
+} from './context-budget.mjs'
 
 export const BUILTIN_COMMAND_SKILLS = [
   { id: 'command:/compact', name: '/compact', description: 'Compact conversation.', scope: 'command', kind: 'command', rootKind: 'builtin-command', displayPath: 'builtin:/compact' },
@@ -65,11 +73,21 @@ async function pathExists(path) {
   }
 }
 
-async function readJson(filePath, fallback) {
+async function readJson(filePath, fallback, { contextFile = false } = {}) {
   try {
-    const raw = await fs.readFile(filePath, 'utf8')
-    return JSON.parse(raw)
-  } catch {
+    if (!contextFile) {
+      const raw = await fs.readFile(filePath, 'utf8')
+      return JSON.parse(raw)
+    }
+    const loaded = await readBoundedContextFile(filePath)
+    if (loaded.truncated) {
+      const error = new Error(`Context metadata file ${filePath} exceeds maximum context file bytes (${MAX_CONTEXT_FILE_BYTES})`)
+      error.code = 'CODESURF_CONTEXT_FILE_LIMIT'
+      throw error
+    }
+    return JSON.parse(loaded.content)
+  } catch (error) {
+    if (error?.code === 'CODESURF_CONTEXT_FILE_LIMIT') throw error
     return fallback
   }
 }
@@ -192,7 +210,7 @@ async function readCustomLocationText(filePath) {
 
 async function loadSavedCustomSkills(filePath, context, includeContent) {
   const skills = []
-  const entries = await readJson(filePath, [])
+  const entries = await readJson(filePath, [], { contextFile: true })
   if (!Array.isArray(entries)) return skills
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue
@@ -200,7 +218,21 @@ async function loadSavedCustomSkills(filePath, context, includeContent) {
     const name = typeof entry.name === 'string' ? entry.name.trim() : ''
     if (!id || !name) continue
     const description = normalizeText(entry.description) ?? 'Saved workspace skill.'
-    const content = typeof entry.content === 'string' ? entry.content : String(entry.content ?? '')
+    const rawContent = typeof entry.content === 'string' ? entry.content : String(entry.content ?? '')
+    const content = truncateUtf8(rawContent, MAX_CONTEXT_FILE_BYTES, {
+      reason: `maximum context file bytes (${MAX_CONTEXT_FILE_BYTES})`,
+    })
+    const contextMetadata = {
+      source: filePath,
+      displayPath: displayPath(filePath, context),
+      scope: 'workspace',
+      bucket: 'selected-skills',
+      precedence: skills.length,
+      originalBytes: content.originalBytes,
+      includedBytes: content.includedBytes,
+      truncated: content.truncated,
+      truncationReason: content.truncationReason,
+    }
     skills.push({
       id,
       name,
@@ -211,13 +243,25 @@ async function loadSavedCustomSkills(filePath, context, includeContent) {
       path: filePath,
       displayPath: displayPath(filePath, context),
       sourcePath: filePath,
-      ...(includeContent ? { content } : {}),
+      contextMetadata,
+      ...(includeContent ? { content: content.text } : {}),
     })
   }
   return skills
 }
 
-function buildDiscoveredSkill(filePath, content, dirPath, metadata, includeContent) {
+function buildDiscoveredSkill(filePath, loaded, metadata, includeContent) {
+  const contextMetadata = {
+    source: filePath,
+    displayPath: metadata.displayPath,
+    scope: metadata.scope,
+    bucket: 'selected-skills',
+    precedence: 0,
+    originalBytes: loaded.originalBytes,
+    includedBytes: loaded.includedBytes,
+    truncated: loaded.truncated,
+    truncationReason: loaded.truncationReason,
+  }
   return {
     id: `discovered-${filePath}`,
     name: metadata.name,
@@ -228,7 +272,8 @@ function buildDiscoveredSkill(filePath, content, dirPath, metadata, includeConte
     path: filePath,
     displayPath: metadata.displayPath,
     sourcePath: filePath,
-    ...(includeContent ? { content } : {}),
+    contextMetadata,
+    ...(includeContent ? { content: loaded.content } : {}),
   }
 }
 
@@ -256,9 +301,9 @@ async function scanSkillDirectory(rootPath, metadata, includeContent) {
       const skillFile = subEntries.find(item => !item.isDirectory() && SKILL_FILE_PATTERNS.some(pattern => pattern.test(item.name)))
       if (!skillFile) continue
       const skillPath = join(entryPath, skillFile.name)
-      const content = await fs.readFile(skillPath, 'utf8').catch(() => '')
-      const parsed = parseSkillFrontmatter(content, entry.name, `From ${displayPath(rootPath, metadata)}`)
-      skills.push(buildDiscoveredSkill(skillPath, content, rootPath, {
+      const loaded = await readSkillFile(skillPath)
+      const parsed = parseSkillFrontmatter(loaded.content, entry.name, `From ${displayPath(rootPath, metadata)}`)
+      skills.push(buildDiscoveredSkill(skillPath, loaded, {
         ...metadata,
         displayPath: displayPath(skillPath, metadata),
         name: parsed.name,
@@ -269,9 +314,9 @@ async function scanSkillDirectory(rootPath, metadata, includeContent) {
     if (!entry.isFile()) continue
     const extension = extname(entry.name).toLowerCase()
     if (!TOP_LEVEL_SKILL_EXTENSIONS.has(extension)) continue
-    const content = await fs.readFile(entryPath, 'utf8').catch(() => '')
-    const parsed = parseSkillFrontmatter(content, basenameWithoutKnownExtension(entry.name), `From ${displayPath(rootPath, metadata)}`)
-    skills.push(buildDiscoveredSkill(entryPath, content, rootPath, {
+    const loaded = await readSkillFile(entryPath)
+    const parsed = parseSkillFrontmatter(loaded.content, basenameWithoutKnownExtension(entry.name), `From ${displayPath(rootPath, metadata)}`)
+    skills.push(buildDiscoveredSkill(entryPath, loaded, {
       ...metadata,
       displayPath: displayPath(entryPath, metadata),
       name: parsed.name,
@@ -279,6 +324,48 @@ async function scanSkillDirectory(rootPath, metadata, includeContent) {
     }, includeContent))
   }
   return { skills, skipped: null }
+}
+
+async function readBoundedContextFile(filePath) {
+  let handle
+  try {
+    handle = await fs.open(filePath, 'r')
+    const stat = await handle.stat()
+    const buffer = Buffer.allocUnsafe(MAX_CONTEXT_FILE_BYTES + 1)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    const bounded = truncateUtf8Buffer(buffer.subarray(0, offset), MAX_CONTEXT_FILE_BYTES, {
+      reason: `maximum context file bytes (${MAX_CONTEXT_FILE_BYTES})`,
+      originalBytes: stat.size,
+    })
+    return {
+      content: bounded.text,
+      originalBytes: bounded.originalBytes,
+      includedBytes: bounded.includedBytes,
+      truncated: bounded.truncated,
+      truncationReason: bounded.truncationReason,
+    }
+  } finally {
+    await handle?.close().catch(() => {})
+  }
+}
+
+async function readSkillFile(filePath) {
+  try {
+    return await readBoundedContextFile(filePath)
+  } catch {
+    return {
+      content: '',
+      originalBytes: 0,
+      includedBytes: 0,
+      truncated: false,
+      truncationReason: null,
+    }
+  }
 }
 
 async function readTileSkillSelection(workspaceDir, cardId) {
@@ -292,7 +379,19 @@ async function readTileSkillSelection(workspaceDir, cardId) {
     join(normalizedWorkspace, '.collab', normalizedCardId, 'skills.json'),
   ]
   for (const candidate of candidates) {
-    const parsed = await readJson(candidate, null)
+    let parsed
+    try {
+      parsed = await readJson(candidate, null, { contextFile: true })
+    } catch (error) {
+      if (error?.code === 'CODESURF_CONTEXT_FILE_LIMIT') {
+        return {
+          enabledIds: [],
+          disabledIds: [],
+          skipped: { path: candidate, code: 'CONTEXT_FILE_LIMIT' },
+        }
+      }
+      throw error
+    }
     if (!parsed || typeof parsed !== 'object') continue
     return {
       enabledIds: uniqueStrings(parsed.enabled),
@@ -310,6 +409,8 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
   const byId = new Map(availableSkills.map(skill => [skill.id, stripSkillContent(skill)]))
   const resolved = []
   const unresolvedIds = []
+  const omittedIds = []
+  const metadata = []
   for (const id of enabledIds) {
     if (disabledSet.has(id)) continue
     const skill = byId.get(id)
@@ -317,7 +418,30 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
       unresolvedIds.push(id)
       continue
     }
-    resolved.push(skill)
+    if (resolved.length >= MAX_SELECTED_SKILLS) {
+      omittedIds.push(id)
+      continue
+    }
+    const description = truncateUtf8(skill.description, MAX_SKILL_DESCRIPTION_BYTES, {
+      reason: `maximum skill description bytes (${MAX_SKILL_DESCRIPTION_BYTES})`,
+    })
+    const fragmentMetadata = {
+      source: String(skill.sourcePath ?? skill.path ?? skill.id),
+      displayPath: String(skill.displayPath ?? skill.id),
+      scope: String(skill.scope ?? 'workspace'),
+      bucket: 'selected-skills',
+      precedence: resolved.length,
+      originalBytes: description.originalBytes,
+      includedBytes: description.includedBytes,
+      truncated: description.truncated,
+      truncationReason: description.truncationReason,
+    }
+    resolved.push({
+      ...skill,
+      description: description.text,
+      contextMetadata: fragmentMetadata,
+    })
+    metadata.push(fragmentMetadata)
   }
   if (resolved.length === 0) {
     return {
@@ -325,24 +449,64 @@ export function buildSkillSelectionPrompt({ skills, selection }) {
       disabledIds,
       resolved: [],
       unresolvedIds,
+      omittedIds,
+      omittedCount: omittedIds.length,
+      metadata,
       summary: undefined,
       prompt: undefined,
     }
   }
   const previewNames = resolved.slice(0, 4).map(skill => skill.name)
   const suffix = resolved.length > 4 ? ` +${resolved.length - 4} more` : ''
+  const omissionMarker = omittedIds.length > 0
+    ? `[Skill selection limited: ${omittedIds.length} selected skill${omittedIds.length === 1 ? '' : 's'} omitted by maximum selected skills (${MAX_SELECTED_SKILLS}).]`
+    : null
+  const prompt = [
+    '## Included Skills',
+    'Use these selected skills/tools when relevant. They are metadata summaries sourced by the daemon.',
+    '',
+    ...(omissionMarker ? [omissionMarker, ''] : []),
+    ...resolved.map(skill => `- @${skill.name} [${skill.scope}] — ${skill.description}`),
+  ].join('\n').trim()
+  const boundedPrompt = truncateUtf8(prompt, MAX_SKILLS_PROMPT_BYTES, {
+    reason: `maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`,
+  })
+  const truncatedDescriptionCount = metadata.filter(item => item.truncated).length
+  const summaryNotices = [
+    ...(truncatedDescriptionCount > 0
+      ? [`${truncatedDescriptionCount} skill description${truncatedDescriptionCount === 1 ? '' : 's'} truncated by maximum skill description bytes (${MAX_SKILL_DESCRIPTION_BYTES})`]
+      : []),
+    ...(omittedIds.length > 0
+      ? [`omitted ${omittedIds.length} selected skill${omittedIds.length === 1 ? '' : 's'} by maximum selected skills (${MAX_SELECTED_SKILLS})`]
+      : []),
+    ...(boundedPrompt.truncated
+      ? [`aggregate skill prompt truncated by maximum skills prompt bytes (${MAX_SKILLS_PROMPT_BYTES})`]
+      : []),
+  ]
+  const summaryNotice = summaryNotices.length > 0
+    ? ` (${summaryNotices.join('; ')})`
+    : ''
   return {
     enabledIds,
     disabledIds,
     resolved,
     unresolvedIds,
-    summary: `Included ${resolved.length} skill${resolved.length === 1 ? '' : 's'}: ${previewNames.join(', ')}${suffix}`,
-    prompt: [
-      '## Included Skills',
-      'Use these selected skills/tools when relevant. They are metadata summaries sourced by the daemon.',
-      '',
-      ...resolved.map(skill => `- @${skill.name} [${skill.scope}] — ${skill.description}`),
-    ].join('\n').trim(),
+    omittedIds,
+    omittedCount: omittedIds.length,
+    metadata,
+    summary: `Included ${resolved.length} skill${resolved.length === 1 ? '' : 's'}${summaryNotice}: ${previewNames.join(', ')}${suffix}`,
+    prompt: boundedPrompt.text,
+    promptMetadata: {
+      source: 'selected-skills',
+      displayPath: 'selected skills prompt',
+      scope: 'selection',
+      bucket: 'selected-skills',
+      precedence: 0,
+      originalBytes: boundedPrompt.originalBytes,
+      includedBytes: boundedPrompt.includedBytes,
+      truncated: boundedPrompt.truncated,
+      truncationReason: boundedPrompt.truncationReason,
+    },
   }
 }
 
@@ -474,7 +638,15 @@ export function createSkillsIndex({ homeDir, userHomeDir }) {
         sourceType: 'file',
         ...context,
       }))
-      skills.push(...await loadSavedCustomSkills(savedSkillsFile, context, includeContent))
+      try {
+        skills.push(...await loadSavedCustomSkills(savedSkillsFile, context, includeContent))
+      } catch (error) {
+        if (error?.code === 'CODESURF_CONTEXT_FILE_LIMIT') {
+          skippedLocations.push({ path: savedSkillsFile, code: 'CONTEXT_FILE_LIMIT' })
+        } else {
+          throw error
+        }
+      }
 
       const skillsLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.codesurf', 'customisation', 'locations-skills.json'))
       const promptLocationsText = await readCustomLocationText(join(normalizedWorkspace, '.codesurf', 'customisation', 'locations-prompts.json'))
@@ -504,9 +676,11 @@ export function createSkillsIndex({ homeDir, userHomeDir }) {
       skills.push(command)
     }
 
+    const tileSelection = await readTileSkillSelection(normalizedWorkspace, cardId)
+    if (tileSelection.skipped) skippedLocations.push(tileSelection.skipped)
     const selection = buildSkillSelectionPrompt({
       skills,
-      selection: await readTileSkillSelection(normalizedWorkspace, cardId),
+      selection: tileSelection,
     })
 
     return {

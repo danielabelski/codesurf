@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { bearerMatchesTenant, normalizeGatewayConfig, normalizeOrigin } from './config.js'
 import { createConfiguredAdapter } from './adapters.js'
 import { removeRuntimeConfig, writeRuntimeConfig } from './runtime-config.js'
+import { TerminalLaunchContractError, validateTerminalLaunch } from './launch-contract.js'
 
 const SESSION_PATH = '/v1/terminal/sessions'
 const ATTACH_PATH = '/v1/terminal/attach'
@@ -116,7 +117,7 @@ function validateInteger(value, name, min, max) {
 }
 
 function validateSessionRequest(body, limits) {
-  const allowed = new Set(['cwd', 'workspaceId', 'cols', 'rows'])
+  const allowed = new Set(['cwd', 'workspaceId', 'cols', 'rows', 'launchBin', 'launchArgs'])
   for (const key of Object.keys(body)) {
     if (!allowed.has(key)) throw new HttpError(400, 'invalid_request', `unsupported terminal session field: ${key}`)
   }
@@ -126,11 +127,21 @@ function validateSessionRequest(body, limits) {
   if (body.workspaceId !== undefined && (typeof body.workspaceId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.workspaceId))) {
     throw new HttpError(400, 'invalid_request', 'workspaceId must be a CodeSurf workspace identifier')
   }
+  let launch
+  try {
+    launch = validateTerminalLaunch(body.launchBin, body.launchArgs)
+  } catch (error) {
+    if (error instanceof TerminalLaunchContractError) {
+      throw new HttpError(400, 'invalid_request', error.message)
+    }
+    throw error
+  }
   return {
     cwd: body.cwd,
     workspaceId: body.workspaceId,
     cols: validateInteger(body.cols, 'cols', limits.minCols, limits.maxCols),
     rows: validateInteger(body.rows, 'rows', limits.minRows, limits.maxRows),
+    ...launch,
   }
 }
 
@@ -410,6 +421,8 @@ export class TerminalGateway {
       workspaceId: target.workspaceId,
       cols: request.cols,
       rows: request.rows,
+      launchBin: request.launchBin,
+      launchArgs: request.launchArgs,
       attachTokenHash: tokenHash(attachToken),
       state: 'pending',
       terminal: null,
@@ -541,6 +554,8 @@ export class TerminalGateway {
         cols: session.cols,
         rows: session.rows,
         sessionId: session.id,
+        launchBin: session.launchBin,
+        launchArgs: session.launchArgs,
       })
       if (!terminal || typeof terminal.write !== 'function' || typeof terminal.resize !== 'function' || typeof terminal.kill !== 'function' || typeof terminal.onData !== 'function' || typeof terminal.onExit !== 'function') {
         throw new Error('terminal adapter returned an invalid PTY handle')

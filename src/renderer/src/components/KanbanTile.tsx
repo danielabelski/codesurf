@@ -2,9 +2,10 @@ import React, { useState, useCallback, useEffect, useRef } from 'react'
 import { KanbanCard, KanbanCardData } from './KanbanCard'
 import { buildAgentBrief } from '../utils/agentBrief'
 import { ActivityFeed, ActivityEvent } from './ActivityFeed'
-import type { ActivityRecord } from '../../../shared/types'
+import type { ActivityHealthSnapshot, ActivityRecord } from '../../../shared/types'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
+import { hasCapability } from '../platform/capabilities'
 
 interface KanbanColumn { id: string; title: string }
 
@@ -92,16 +93,27 @@ function AgentOverview({ workspaceId, onFocusTile }: {
   const theme = useTheme()
   const fonts = useAppFonts()
   const [groups, setGroups] = useState<Record<string, ActivityRecord[]>>({})
-  const [loading, setLoading] = useState(true)
+  const [viewState, setViewState] = useState<'loading' | 'ready' | 'unavailable' | 'error'>('loading')
+  const [health, setHealth] = useState<ActivityHealthSnapshot | null>(null)
   const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refresh = useCallback(() => {
-    if (!workspaceId || !window.electron?.activity) return
-    window.electron.activity.byAgent(workspaceId).then((result) => {
-      const groups = result as Record<string, ActivityRecord[]>
-      setGroups(groups)
-      setLoading(false)
-    }).catch(() => setLoading(false))
+    if (!workspaceId || !window.electron?.activity || !hasCapability('activity')) {
+      setGroups({})
+      setViewState('unavailable')
+      return
+    }
+    Promise.all([
+      window.electron.activity.byAgent(workspaceId),
+      window.electron.activity.health(workspaceId),
+    ]).then(([result, nextHealth]) => {
+      setGroups(result)
+      setHealth(nextHealth)
+      setViewState(nextHealth.available ? 'ready' : 'unavailable')
+    }).catch(() => {
+      setGroups({})
+      setViewState('error')
+    })
   }, [workspaceId])
 
   useEffect(() => {
@@ -118,8 +130,18 @@ function AgentOverview({ workspaceId, onFocusTile }: {
     return a.localeCompare(b)
   })
 
-  if (loading) {
+  if (viewState === 'loading') {
     return <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.disabled, fontSize: fonts.secondarySize }}>Loading activity...</div>
+  }
+
+  if (viewState === 'unavailable' || viewState === 'error') {
+    return (
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.text.muted, fontSize: fonts.secondarySize, textAlign: 'center', padding: 16 }}>
+        {viewState === 'unavailable'
+          ? 'Activity persistence is unavailable on this host'
+          : 'Activity storage could not be loaded'}
+      </div>
+    )
   }
 
   if (agentKeys.length === 0) {
@@ -129,9 +151,13 @@ function AgentOverview({ workspaceId, onFocusTile }: {
           <rect x="3" y="3" width="18" height="18" rx="4" />
           <path d="M9 12h6M12 9v6" strokeLinecap="round" />
         </svg>
-        <span style={{ fontSize: fonts.secondarySize }}>No activity yet</span>
+        <span style={{ fontSize: fonts.secondarySize }}>
+          {health?.status === 'degraded' ? 'Activity storage is degraded' : 'No activity yet'}
+        </span>
         <span style={{ fontSize: 10, color: theme.text.disabled, maxWidth: 200, textAlign: 'center', lineHeight: 1.4 }}>
-          Activity from terminals and chats will appear here automatically, grouped by agent
+          {health?.status === 'degraded'
+            ? 'Recent activity may not have been saved. Retry after storage recovers.'
+            : 'Activity from terminals and chats will appear here automatically, grouped by agent'}
         </span>
       </div>
     )
@@ -441,6 +467,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
   logActivityRef.current = logActivity
 
   const handleKanbanEvent = useCallback((event: string, data: any) => {
+    if (data?.workspaceId && data.workspaceId !== workspaceId) return
     if (data?.boardTileId && data.boardTileId !== tileIdRef.current) return
 
     const columns = columnsRef.current
@@ -556,7 +583,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       const port = await window.electron?.mcp?.getPort?.()
       if (!port) return
       const { openMcpEventSource } = await import('../utils/mcpHttp')
-      es = await openMcpEventSource(port, 'global')
+      es = await openMcpEventSource(port, 'global', workspaceId)
       if (!es) return
       const handle = (e: MessageEvent) => {
         try {
@@ -569,7 +596,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       })
     })()
     return () => es?.close()
-  }, [dispatchKanbanEvent])
+  }, [dispatchKanbanEvent, workspaceId])
 
   // Also listen via IPC (fallback for same-process events)
   useEffect(() => {
@@ -581,9 +608,9 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
 
   // Listen for peer MCP commands from connected chat/tiles
   useEffect(() => {
-    if (!tileId || !window.electron?.bus) return
-    const channel = `tile:${tileId}`
-    const subscriberId = `kanban:${tileId}:mcp`
+    if (!workspaceId || !tileId || !window.electron?.bus) return
+    const channel = `tile:${workspaceId}:${tileId}`
+    const subscriberId = `kanban:${workspaceId}:${tileId}:mcp`
     const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (evt) => {
       if (!evt?.type?.startsWith('mcp_') && !String(evt.source || '').startsWith('mcp:')) return
       const payload = (evt.payload as Record<string, unknown>) || {}
@@ -671,7 +698,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
       }
     })
     return () => unsubscribe?.()
-  }, [tileId])
+  }, [workspaceId, tileId])
 
   // Streaming handled by pty/xterm — no separate stream listener needed
 
@@ -739,9 +766,11 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
 
   const removeCard = useCallback((id: string) => {
     const card = cards.find(c => c.id === id)
-    if (card?.linkedTileId) window.electron?.terminal?.destroy?.(card.linkedTileId)
+    if (card?.linkedTileId) {
+      window.electron?.terminal?.destroy?.(card.linkedTileId, workspaceId)
+    }
     setCards(prev => prev.filter(c => c.id !== id))
-  }, [cards])
+  }, [cards, workspaceId])
 
   const dropOnCol = useCallback((colId: string, e: React.DragEvent) => {
     e.preventDefault()
@@ -918,7 +947,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
                 >+
                 </button>
                 <span style={{ fontSize: fonts.size, color: theme.text.primary, background: theme.surface.panelElevated, borderRadius: 10, minWidth: 24, height: 24, padding: '0 8px', border: `1px solid ${theme.border.default}`, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{colCards.length}</span>
-                <button onClick={() => { cards.filter(c => c.columnId === col.id).forEach(c => c.linkedTileId && window.electron?.terminal?.destroy?.(c.linkedTileId)); setCards(p => p.filter(c => c.columnId !== col.id)); setColumns(p => p.filter(c => c.id !== col.id)) }}
+                <button onClick={() => { cards.filter(c => c.columnId === col.id).forEach(c => c.linkedTileId && window.electron?.terminal?.destroy?.(c.linkedTileId, workspaceId)); setCards(p => p.filter(c => c.columnId !== col.id)); setColumns(p => p.filter(c => c.id !== col.id)) }}
                   style={{ fontSize: fonts.size, lineHeight: 1, color: theme.text.primary, background: 'none', border: 'none', cursor: 'pointer', padding: '0 3px', fontWeight: 800, fontFamily: 'inherit' }}
                   onMouseEnter={e => (e.currentTarget.style.opacity = '0.72')}
                   onMouseLeave={e => (e.currentTarget.style.opacity = '1')}
@@ -931,6 +960,7 @@ export function KanbanTile({ tileId, workspaceId, workspaceDir, width: _width, h
                   <div key={card.id} data-card-id={card.id}>
                     <KanbanCard
                       card={card}
+                      workspaceId={workspaceId}
                       workspaceDir={workspaceDir}
                       active={isActive(card.linkedTileId)}
                       dragging={dragging === card.id}

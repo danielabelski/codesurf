@@ -197,14 +197,24 @@ describe('terminal transport', () => {
       const api = daemonBridge.createDaemonBackedElectronApi()
       const events = []
       const unsubscribe = api.stream.onChunk(event => events.push(event))
-      const result = await api.chat.send({ cardId: 'card-1', runMode: 'foreground' })
+      const result = await api.chat.send({
+        workspaceId: 'workspace-1',
+        cardId: 'card-1',
+        runMode: 'foreground',
+      })
       await new Promise(resolve => setTimeout(resolve, 0))
       unsubscribe()
 
       assert.deepEqual(result, { ok: true, jobId: 'job-1', detached: false })
-      assert.deepEqual(events.map(event => ({ cardId: event.cardId, jobId: event.jobId, type: event.type, text: event.text })), [
-        { cardId: 'card-1', jobId: 'job-1', type: 'text', text: 'hello' },
-        { cardId: 'card-1', jobId: 'job-1', type: 'done', text: undefined },
+      assert.deepEqual(events.map(event => ({
+        workspaceId: event.workspaceId,
+        cardId: event.cardId,
+        jobId: event.jobId,
+        type: event.type,
+        text: event.text,
+      })), [
+        { workspaceId: 'workspace-1', cardId: 'card-1', jobId: 'job-1', type: 'text', text: 'hello' },
+        { workspaceId: 'workspace-1', cardId: 'card-1', jobId: 'job-1', type: 'done', text: undefined },
       ])
       assert.equal(calls[0].init.headers.get('X-Codesurf-Host'), 'host-capability-token')
       assert.equal(calls[1].init.headers.get('X-Codesurf-Host'), 'host-capability-token')
@@ -214,5 +224,216 @@ describe('terminal transport', () => {
       else globalThis.window = priorWindow
       globalThis.fetch = priorFetch
     }
+  })
+
+  test('isolates daemon job replacement, resume, events, and stop by workspace and card', async () => {
+    const priorWindow = globalThis.window
+    const priorFetch = globalThis.fetch
+    const encoder = new TextEncoder()
+    const streams = new Map()
+    const cancelledJobIds = []
+    let nextJob = 0
+    globalThis.window = {
+      __CODESURF_HOST__: 'https://bridge.example.test',
+      __CODESURF_HOST_TOKEN__: 'host-capability-token',
+      location: { origin: 'https://bridge.example.test', protocol: 'https:', port: '' },
+    }
+    globalThis.fetch = async (url, init) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/d/chat/job/start') {
+        const { request } = JSON.parse(init.body)
+        nextJob += 1
+        return new Response(JSON.stringify({
+          id: `job-${request.workspaceId}-${nextJob}`,
+        }), { status: 200 })
+      }
+      if (parsed.pathname === '/d/chat/job/state') {
+        const jobId = parsed.searchParams.get('jobId')
+        return new Response(JSON.stringify({
+          id: jobId,
+          status: 'running',
+          lastSequence: 0,
+          workspaceId: jobId === 'job-workspace-a-mismatch' ? 'workspace-a' : 'workspace-b',
+          cardId: jobId === 'job-card-mismatch' ? 'other-card' : 'shared-card',
+        }), { status: 200 })
+      }
+      if (parsed.pathname === '/d/chat/job/events') {
+        const jobId = parsed.searchParams.get('jobId')
+        const record = {
+          aborted: false,
+          controller: null,
+        }
+        const body = new ReadableStream({
+          start(controller) {
+            record.controller = controller
+          },
+        })
+        init.signal.addEventListener('abort', () => {
+          record.aborted = true
+          try {
+            record.controller.error(new DOMException('Aborted', 'AbortError'))
+          } catch {
+            // The reader may already have observed the abort.
+          }
+        }, { once: true })
+        streams.set(jobId, record)
+        return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (parsed.pathname === '/d/chat/job/cancel') {
+        cancelledJobIds.push(JSON.parse(init.body).jobId)
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch ${url}`)
+    }
+
+    try {
+      const api = daemonBridge.createDaemonBackedElectronApi()
+      const events = []
+      const unsubscribe = api.stream.onChunk(event => events.push(event))
+
+      const firstA = await api.chat.send({
+        workspaceId: 'workspace-a',
+        cardId: 'shared-card',
+        runMode: 'foreground',
+      })
+      const firstB = await api.chat.send({
+        workspaceId: 'workspace-b',
+        cardId: 'shared-card',
+        runMode: 'foreground',
+      })
+      const otherCardA = await api.chat.send({
+        workspaceId: 'workspace-a',
+        cardId: 'other-card',
+        runMode: 'foreground',
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      assert.equal(streams.get(firstA.jobId).aborted, false)
+      assert.equal(streams.get(firstB.jobId).aborted, false)
+      assert.equal(streams.get(otherCardA.jobId).aborted, false)
+
+      streams.get(firstA.jobId).controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ jobId: firstA.jobId, sequence: 1, type: 'text', text: 'from a' })}\n\n`,
+      ))
+      streams.get(firstB.jobId).controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ jobId: firstB.jobId, sequence: 1, type: 'text', text: 'from b' })}\n\n`,
+      ))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      assert.deepEqual(events.map(event => ({
+        workspaceId: event.workspaceId,
+        cardId: event.cardId,
+        text: event.text,
+      })), [
+        { workspaceId: 'workspace-a', cardId: 'shared-card', text: 'from a' },
+        { workspaceId: 'workspace-b', cardId: 'shared-card', text: 'from b' },
+      ])
+
+      const replacementA = await api.chat.send({
+        workspaceId: 'workspace-a',
+        cardId: 'shared-card',
+        runMode: 'foreground',
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      assert.equal(streams.get(firstA.jobId).aborted, true)
+      assert.equal(streams.get(firstB.jobId).aborted, false)
+      assert.equal(streams.get(replacementA.jobId).aborted, false)
+      assert.equal(streams.get(otherCardA.jobId).aborted, false)
+
+      const resumedB = 'job-workspace-b-resumed'
+      const resumeResult = await api.chat.resumeJob({
+        workspaceId: 'workspace-b',
+        cardId: 'shared-card',
+        jobId: resumedB,
+        jobSequence: 0,
+      })
+      await new Promise(resolve => setTimeout(resolve, 0))
+      assert.deepEqual(resumeResult, { ok: true, resumed: true, jobId: resumedB })
+      assert.equal(streams.get(firstB.jobId).aborted, true)
+      assert.equal(streams.get(replacementA.jobId).aborted, false)
+      assert.equal(streams.get(resumedB).aborted, false)
+      assert.equal(streams.get(otherCardA.jobId).aborted, false)
+
+      const mismatchedJobId = 'job-workspace-a-mismatch'
+      assert.deepEqual(
+        await api.chat.resumeJob({
+          workspaceId: 'workspace-b',
+          cardId: 'shared-card',
+          jobId: mismatchedJobId,
+          jobSequence: 0,
+        }),
+        { ok: false, resumed: false, jobId: mismatchedJobId },
+      )
+      assert.equal(streams.has(mismatchedJobId), false)
+      assert.equal(streams.get(replacementA.jobId).aborted, false)
+      assert.equal(streams.get(resumedB).aborted, false)
+
+      const cardMismatchedJobId = 'job-card-mismatch'
+      assert.deepEqual(
+        await api.chat.resumeJob({
+          workspaceId: 'workspace-b',
+          cardId: 'shared-card',
+          jobId: cardMismatchedJobId,
+          jobSequence: 0,
+        }),
+        { ok: false, resumed: false, jobId: cardMismatchedJobId },
+      )
+      assert.equal(streams.has(cardMismatchedJobId), false)
+      assert.equal(streams.get(replacementA.jobId).aborted, false)
+      assert.equal(streams.get(resumedB).aborted, false)
+      assert.equal(streams.get(otherCardA.jobId).aborted, false)
+
+      assert.deepEqual(
+        await api.chat.stop('workspace-a', 'shared-card'),
+        { ok: true },
+      )
+      assert.equal(streams.get(replacementA.jobId).aborted, true)
+      assert.equal(streams.get(resumedB).aborted, false)
+      assert.equal(streams.get(otherCardA.jobId).aborted, false)
+      assert.deepEqual(cancelledJobIds, [replacementA.jobId])
+
+      assert.deepEqual(
+        await api.chat.stop('workspace-b', 'shared-card'),
+        { ok: true },
+      )
+      assert.equal(streams.get(resumedB).aborted, true)
+      assert.deepEqual(cancelledJobIds, [replacementA.jobId, resumedB])
+
+      assert.deepEqual(
+        await api.chat.stop('workspace-a', 'other-card'),
+        { ok: true },
+      )
+      assert.equal(streams.get(otherCardA.jobId).aborted, true)
+      assert.deepEqual(cancelledJobIds, [replacementA.jobId, resumedB, otherCardA.jobId])
+      unsubscribe()
+    } finally {
+      if (priorWindow === undefined) delete globalThis.window
+      else globalThis.window = priorWindow
+      globalThis.fetch = priorFetch
+    }
+  })
+})
+
+test('forwards the provider CLI resume contract to the remote gateway', async () => {
+  FakeWebSocket.instances.length = 0
+  const calls = []
+  const client = new transport.TerminalTransport({
+    endpoint: 'https://gateway.example.test',
+    token: 'runtime-token',
+    fetchImpl: makeFetch(calls),
+    webSocketConstructor: FakeWebSocket,
+  })
+  await client.create('tile-resume', {
+    cwd: '/workspace/demo',
+    workspaceId: 'workspace-a',
+    launchBin: 'claude',
+    launchArgs: ['--resume', 'session-42'],
+  })
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    cwd: '/workspace/demo',
+    workspaceId: 'workspace-a',
+    cols: 80,
+    rows: 24,
+    launchBin: 'claude',
+    launchArgs: ['--resume', 'session-42'],
   })
 })

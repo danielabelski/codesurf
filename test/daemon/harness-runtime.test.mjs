@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   createHarnessRunner,
   pumpHarnessStream,
+  PI_HARNESS_UNAVAILABLE_ERROR,
   HARNESS_SUPPORTED_PROVIDERS,
 } from '../../packages/codesurf-daemon/bin/harness-runtime.mjs'
 
@@ -139,6 +140,23 @@ test('unsupported provider is rejected with error then done', async () => {
   assert.match(events[0].error, /does not support provider/)
 })
 
+test('an explicit Pi harness request fails closed with a stable remediation message', async () => {
+  const captured = {}
+  const { runner, events, appendEvent } = collectRunner([], captured)
+  await runner.runHarnessJob(
+    { id: 'job-pi-unavailable' },
+    { provider: 'pi', messages: [{ role: 'user', content: 'hi' }] },
+    mkdtempSync(join(tmpdir(), 'codesurf-harness-ws-')),
+    '',
+    { appendEvent },
+  )
+  assert.deepEqual(events, [
+    { type: 'error', error: PI_HARNESS_UNAVAILABLE_ERROR },
+    { type: 'done' },
+  ])
+  assert.equal(captured.opts, undefined, 'the vulnerable Pi adapter must never launch')
+})
+
 test('pumpHarnessStream maps an error part to an error event', async () => {
   const events = []
   const appendEvent = async (_j, e) => { events.push(e) }
@@ -214,8 +232,8 @@ test('without an approval handler, pending approvals are denied and the turn sti
   assert.ok(events.some(e => e.type === 'done'))
 })
 
-test('HARNESS_SUPPORTED_PROVIDERS contains exactly claude, codex and pi', () => {
-  assert.deepEqual([...HARNESS_SUPPORTED_PROVIDERS].sort(), ['claude', 'codex', 'pi'])
+test('HARNESS_SUPPORTED_PROVIDERS excludes Pi until its dependency chain is safe', () => {
+  assert.deepEqual([...HARNESS_SUPPORTED_PROVIDERS].sort(), ['claude', 'codex'])
 })
 
 // A fake agent whose stream() writes files into the bound worktree (the path is

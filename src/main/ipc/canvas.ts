@@ -16,6 +16,7 @@ import {
   tileStatePath,
 } from '../storage/workspaceArtifacts'
 import { writeJsonArtifactAtomic } from '../storage/jsonArtifacts'
+import { WorkspaceSaveArbiter } from '../storage/workspaceSaveArbiter'
 import {
   appendQueuedMessageEvent,
   listActiveQueuedMessages,
@@ -24,8 +25,10 @@ import {
 import { getWorkspacePathById } from './workspace'
 import { deleteFileIfExists } from '../utils/fs'
 import { broadcastToRenderer } from '../utils/broadcast'
-import { isRelayHostActive } from '../relay/registration'
-import { syncWorkspaceRelayParticipants } from '../relay/service'
+import {
+  captureCanvasRelayProjectionToken,
+  scheduleCanvasRelayProjection,
+} from '../relay/canvasProjection'
 import { daemonClient } from '../daemon/client'
 import { getIndexerStatus, indexAllSources, listThreadsFromDb, renameIndexedThread } from '../db/thread-indexer'
 import { getExternalSessionChatState } from '../session-sources'
@@ -33,7 +36,6 @@ import { mutateArchivedSessionIds, readArchivedSessionIds } from '../storage/ses
 import { getAgentPath } from '../agent-paths'
 import { log } from '../utils/logger.ts'
 
-const sessionsLog = log.scope('sessions')
 import {
   GENERATED_TITLE_MAX_CHARS,
   GENERATED_TITLE_MODEL,
@@ -49,6 +51,9 @@ import {
   sanitizeGeneratedSessionTitle,
   type SessionTitleModelCandidate,
 } from './session-title-generation'
+
+const sessionsLog = log.scope('sessions')
+const canvasSaveArbiter = new WorkspaceSaveArbiter()
 
 interface TileSessionSummary {
   version: 1
@@ -754,21 +759,36 @@ export function registerCanvasIPC(): void {
   handleTyped('canvas:save', {
     args: [ipcSchemas.boundedString(), ipcSchemas.passthroughObject] as const,
     handler: async (_evt, workspaceId, state) => {
-    const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
-    const storageId = storageIds[0] ?? workspaceId
-    const path = canvasStatePath(storageId)
-    await fs.mkdir(dirname(path), { recursive: true })
-    await writeJsonArtifactAtomic(path, state)
+    // Capture relay lifecycle ownership before the save awaits its FIFO lane.
+    // Shutdown/deactivation invalidates this token even if the disk write
+    // completes later.
+    const relayProjectionToken = captureCanvasRelayProjectionToken()
+    // Reserve the per-workspace lane before any async migration or path
+    // resolution. Otherwise a later handler can resolve first and let an older
+    // request overwrite it.
+    await canvasSaveArbiter.run(workspaceId, async () => {
+      const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
+      const storageId = storageIds[0] ?? workspaceId
+      const path = canvasStatePath(storageId)
+      await fs.mkdir(dirname(path), { recursive: true })
+      await writeJsonArtifactAtomic(path, state)
 
-    if (isRelayHostActive() && state && typeof state === 'object' && Array.isArray(state.tiles)) {
-      const tiles = state.tiles
-      const wsPath = await getWorkspacePathById(workspaceId)
-      if (wsPath) {
-        void syncWorkspaceRelayParticipants(workspaceId, wsPath, tiles).catch(err => {
-          console.warn('[Canvas] relay participant sync skipped:', err)
-        })
+      // Queue the derived relay projection at the same point as its durable
+      // source state. The detached lane serializes by workspace and coalesces
+      // pending work, so an older slow sync cannot become the final projection.
+      if (
+        relayProjectionToken
+        && state
+        && typeof state === 'object'
+        && Array.isArray(state.tiles)
+      ) {
+        scheduleCanvasRelayProjection(
+          workspaceId,
+          relayProjectionToken,
+          state.tiles,
+        )
       }
-    }
+    })
     },
   })
 

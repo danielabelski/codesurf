@@ -9,10 +9,13 @@ import {
   hasCapability,
   type PlatformCapabilities,
 } from '../src/renderer/src/platform/capabilities.ts'
+import { detectPlatform } from '../src/renderer/src/platform/detect.ts'
 
 const ROOT = process.cwd()
 const INSTALL = readFileSync(join(ROOT, 'src/renderer/src/platform/installHostBridge.ts'), 'utf8')
 const INDEX = readFileSync(join(ROOT, 'src/renderer/src/platform/index.ts'), 'utf8')
+const DAEMON_BRIDGE = readFileSync(join(ROOT, 'src/renderer/src/platform/daemonBridge.ts'), 'utf8')
+const KANBAN = readFileSync(join(ROOT, 'src/renderer/src/components/KanbanTile.tsx'), 'utf8')
 
 describe('platform capability matrix', () => {
   test('electron is full-fidelity', () => {
@@ -27,6 +30,7 @@ describe('platform capability matrix', () => {
     assert.equal(caps.workspace, true)
     assert.equal(caps.canvas, true)
     assert.equal(caps.chatJobs, true)
+    assert.equal(caps.activity, false)
     assert.equal(caps.terminal, false)
     assert.equal(caps.extensions, false)
     assert.equal(caps.nodePty, false)
@@ -40,6 +44,7 @@ describe('platform capability matrix', () => {
     assert.equal(without.shell, true)
     assert.equal(without.nativeDialogs, true)
     assert.equal(without.terminal, false)
+    assert.equal(without.activity, false)
 
     const withTerm = defaultCapabilitiesFor('native', { terminalAvailable: true })
     assert.equal(withTerm.terminal, true)
@@ -68,5 +73,26 @@ describe('platform capability matrix', () => {
     assert.match(INSTALL, /terminalAvailable:\s*isTerminalTransportAvailable\(\)/)
     assert.match(INDEX, /defaultCapabilitiesFor/)
     assert.match(INDEX, /hasCapability/)
+  })
+
+  test('alternate hosts expose Activity as unavailable and callers gate before use', () => {
+    assert.match(DAEMON_BRIDGE, /upsert:\s*notAvailable\('activity\.upsert'\)/)
+    assert.match(DAEMON_BRIDGE, /status:\s*'unavailable'/)
+    assert.match(KANBAN, /hasCapability\('activity'\)/)
+    assert.match(KANBAN, /Activity persistence is unavailable on this host/)
+  })
+
+  test('Electrobun facade marker is detected as an alternate native host', () => {
+    const previousWindow = globalThis.window
+    Object.assign(globalThis, {
+      window: {
+        electron: { __codesurfHostKind: 'electrobun' },
+      },
+    })
+    try {
+      assert.equal(detectPlatform(), 'native')
+    } finally {
+      Object.assign(globalThis, { window: previousWindow })
+    }
   })
 })

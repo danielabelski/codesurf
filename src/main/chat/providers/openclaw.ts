@@ -5,17 +5,40 @@
 import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
-import { normalizeOpenClawThinking } from '../../agents/agent-cli-contracts'
-import { buildCodeSurfActivityConvention, buildCodeSurfInsightConvention, buildCodeSurfOutputConvention, joinPromptSections } from '../prompt-conventions'
+import {
+  normalizeOpenClawThinking,
+  parseBoundedOpenClawOutput,
+} from '../../agents/agent-cli-contracts'
+import {
+  BoundedTextAccumulator,
+  MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES,
+  MAX_PROVIDER_DIAGNOSTIC_BYTES,
+  boundProviderHistoryText,
+} from '../bounded-output'
 import type { ChatRequest } from '../types'
 import {
   log,
+  markRoomPromptAccepted,
   sendStream,
   getPreparedMessages,
-  activeProcesses,
+  chatRequestScope,
+  chatStreamScopeKey,
+  isCurrentChatProcess,
+  processTreeSpawnOptions,
+  registerActiveChatProcess,
+  stopActiveChatProcess,
+  terminateProcessTree,
+  type ChatStreamScope,
 } from '../runtime'
+import {
+  clearStableSessionContext,
+  completeStableContextCliTurn,
+  hasNonEmptyProviderResult,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from '../stable-session-context'
 
-// Store openclaw session IDs (keyed by cardId) for multi-turn resume
+// Store OpenClaw session IDs by workspace/card for multi-turn resume.
 const openclawSessionIds = new Map<string, string>()
 
 function resolveOpenClawBinary(): string | null {
@@ -75,23 +98,9 @@ function selectOpenClawAgentId(openclawBin: string, shellPath?: string | null, p
   return agents.find(agent => agent.isDefault)?.id ?? agents[0]?.id ?? 'main'
 }
 
-function extractOpenClawTextPayload(payload: any): string {
-  if (!payload || typeof payload !== 'object') return ''
-  if (typeof payload.text === 'string') return payload.text
-  if (typeof payload.content === 'string') return payload.content
-  if (typeof payload.message === 'string') return payload.message
-  if (typeof payload.summary === 'string') return payload.summary
-  if (Array.isArray(payload.parts)) {
-    return payload.parts
-      .map((part: { text?: string }) => typeof part?.text === 'string' ? part.text : '')
-      .filter(Boolean)
-      .join('')
-  }
-  return ''
-}
-
-export function clearOpenclawSession(cardId: string): void {
-  openclawSessionIds.delete(cardId)
+export function clearOpenclawSession(scope: ChatStreamScope): void {
+  openclawSessionIds.delete(chatStreamScopeKey(scope))
+  clearStableSessionContext(scope, 'openclaw')
 }
 
 export function listOpenclawAgents(): { agents: Array<{ id: string; label: string; description: string }> } {
@@ -111,23 +120,25 @@ export function listOpenclawAgents(): { agents: Array<{ id: string; label: strin
 }
 
 export function chatOpenclaw(req: ChatRequest): void {
+  const scope = chatRequestScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
-    sendStream(req.cardId, { type: 'error', error: 'No user message' })
+    sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
 
   const openclawBin = resolveOpenClawBinary()
   if (!openclawBin) {
-    sendStream(req.cardId, { type: 'error', error: 'OpenClaw CLI not found. Install: npm install -g openclaw' })
+    sendStream(scope, { type: 'error', error: 'OpenClaw CLI not found. Install: npm install -g openclaw' })
     return
   }
 
   const shellPath = getShellEnvPath()
-  if (req.sessionId && !openclawSessionIds.has(req.cardId)) {
-    openclawSessionIds.set(req.cardId, req.sessionId)
+  if (req.sessionId && !openclawSessionIds.has(scopeKey)) {
+    openclawSessionIds.set(scopeKey, req.sessionId)
   }
-  const existingSessionId = openclawSessionIds.get(req.cardId)
+  const existingSessionId = openclawSessionIds.get(scopeKey)
   const selectedAgentId = existingSessionId ? null : selectOpenClawAgentId(openclawBin, shellPath, req.model)
 
   if (!existingSessionId && req.model && !selectedAgentId) {
@@ -136,10 +147,17 @@ export function chatOpenclaw(req: ChatRequest): void {
       .map(agent => agent.model || agent.id)
       .filter((value, index, all): value is string => typeof value === 'string' && value.trim().length > 0 && all.indexOf(value) === index)
     const details = available.length > 0 ? ` Available: ${available.join(', ')}` : ''
-    sendStream(req.cardId, { type: 'error', error: `OpenClaw model must match exactly: ${req.model}.${details}` })
-    sendStream(req.cardId, { type: 'done' })
+    sendStream(scope, { type: 'error', error: `OpenClaw model must match exactly: ${req.model}.${details}` })
+    sendStream(scope, { type: 'done' })
     return
   }
+
+  const stableContext = selectStableContextForTurn({
+    scope,
+    provider: req.provider,
+    sessionId: existingSessionId,
+    contextPrompt: req.contextPrompt,
+  })
 
   log('chatOpenclaw starting', {
     model: req.model,
@@ -160,84 +178,124 @@ export function chatOpenclaw(req: ChatRequest): void {
     args.push('--thinking', thinking)
   }
 
-  // First-turn injection: OpenClaw has no system-prompt channel on the CLI,
-  // so the CodeSurf output convention rides along with the first user message.
-  // Session history carries it forward on subsequent turns.
-  const openClawIsFirstTurn = !existingSessionId
-  const openClawConvention = joinPromptSections(buildCodeSurfOutputConvention(), buildCodeSurfInsightConvention(), buildCodeSurfActivityConvention())
-  const openClawMessage = openClawIsFirstTurn
-    ? `${openClawConvention}\n\n---\n\n${lastUserMsg.content}`
+  // OpenClaw has no system channel. Install stable host context once per
+  // session/version; volatile user/room/file context is already in this turn.
+  const contextPrompt = stableContext.contextPrompt
+  const openClawMessage = contextPrompt
+    ? `${contextPrompt}\n\n---\n\n${lastUserMsg.content}`
     : lastUserMsg.content
   args.push('--message', openClawMessage)
 
-  const proc = spawn(openclawBin, args, {
+  const proc = spawn(openclawBin, args, processTreeSpawnOptions({
     stdio: ['ignore', 'pipe', 'pipe'],
     env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
     ...(req.workspaceDir && { cwd: req.workspaceDir }),
-  })
+  }))
 
-  activeProcesses.set(req.cardId, proc)
+  if (!registerActiveChatProcess(scopeKey, proc)) {
+    void terminateProcessTree(proc).then(termination => {
+      sendStream(scope, {
+        type: 'error',
+        error: termination.confirmed
+          ? 'OpenClaw launch refused because the previous chat process is still active'
+          : `Duplicate OpenClaw process could not be terminated: ${termination.detail}`,
+      })
+      if (termination.confirmed) sendStream(scope, { type: 'done' })
+    })
+    return
+  }
 
   // H-9: identity-guard — only clean up / emit done|error if this proc is
   // still the active one for this card. A rapid re-send replaces the map
   // entry before the old proc's close handler fires, so we must check first.
-  const isCurrent = (): boolean => activeProcesses.get(req.cardId) === proc
+  const isCurrent = (): boolean => isCurrentChatProcess(scopeKey, proc)
 
-  let stdoutBuf = ''
-  proc.stdout?.on('data', (chunk: Buffer) => { stdoutBuf += chunk.toString() })
+  const stdoutBuf = new BoundedTextAccumulator(MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES)
+  proc.stdout?.on('data', (chunk: Buffer) => { stdoutBuf.append(chunk.toString()) })
 
-  let stderrBuf = ''
-  proc.stderr?.on('data', (chunk: Buffer) => { stderrBuf += chunk.toString() })
+  const stderrBuf = new BoundedTextAccumulator(MAX_PROVIDER_DIAGNOSTIC_BYTES)
+  proc.stderr?.on('data', (chunk: Buffer) => { stderrBuf.append(chunk.toString()) })
 
   proc.on('close', (code) => {
     if (!isCurrent()) return // superseded by a new turn — suppress stale done/error
-    activeProcesses.delete(req.cardId)
-    if (code !== 0) {
-      sendStream(req.cardId, { type: 'error', error: stderrBuf.trim() || stdoutBuf.trim() || `OpenClaw exited with ${code}` })
-      sendStream(req.cardId, { type: 'done' })
-      return
-    }
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      if (!termination?.confirmed) {
+        invalidateStableContextSelection(stableContext)
+        sendStream(scope, {
+          type: 'error',
+          error: `OpenClaw process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      if (code !== 0) {
+        invalidateStableContextSelection(stableContext)
+        sendStream(scope, {
+          type: 'error',
+          error: stderrBuf.value.trim() || stdoutBuf.value.trim() || `OpenClaw exited with ${code}`,
+        })
+        sendStream(scope, { type: 'done' })
+        return
+      }
 
-    let sessionId: string | undefined
-    let resultText = stdoutBuf.trim()
-    try {
-      const parsed = JSON.parse(stdoutBuf)
-      const meta = parsed?.meta ?? parsed?.result?.meta
-      const payloads = Array.isArray(parsed?.payloads)
-        ? parsed.payloads
-        : Array.isArray(parsed?.result?.payloads)
-          ? parsed.result.payloads
-          : []
-      sessionId = meta?.sessionId ?? meta?.session_id ?? parsed?.sessionId ?? parsed?.session_id
-      resultText = payloads
-        .map((payload: any) => extractOpenClawTextPayload(payload))
-        .filter(Boolean)
-        .join('\n\n')
-        || parsed?.summary
-        || parsed?.result?.summary
-        || resultText
-    } catch {
-      // Fall back to plain stdout
-    }
+      const parsed = parseBoundedOpenClawOutput(stdoutBuf.value, stdoutBuf.truncated)
+      if (!parsed.ok) {
+        invalidateStableContextSelection(stableContext)
+        sendStream(scope, { type: 'error', error: parsed.error })
+        sendStream(scope, { type: 'done' })
+        return
+      }
 
-    if (sessionId) {
-      openclawSessionIds.set(req.cardId, sessionId)
-      sendStream(req.cardId, { type: 'session', sessionId })
-    }
-    if (resultText) {
-      sendStream(req.cardId, { type: 'text', text: resultText })
-    }
-    sendStream(req.cardId, { type: 'done', sessionId })
+      const sessionId = parsed.output.sessionId ?? undefined
+      const resultText = parsed.output.text
+      const hasRealResult = hasNonEmptyProviderResult(resultText)
+      if (sessionId) {
+        openclawSessionIds.set(scopeKey, sessionId)
+        sendStream(scope, { type: 'session', sessionId })
+      }
+      completeStableContextCliTurn(stableContext, {
+        exitCode: code,
+        sawProviderAcceptance: hasRealResult,
+        sessionId: sessionId ?? existingSessionId,
+      })
+      if (hasRealResult) {
+        markRoomPromptAccepted(scope)
+        sendStream(scope, { type: 'text', text: boundProviderHistoryText(resultText) })
+      }
+      sendStream(scope, { type: 'done', sessionId })
+    })().catch(error => {
+      invalidateStableContextSelection(stableContext)
+      sendStream(scope, {
+        type: 'error',
+        error: `OpenClaw process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    })
   })
 
   proc.on('error', (err) => {
     if (!isCurrent()) return // superseded — new turn owns the slot
-    activeProcesses.delete(req.cardId)
-    sendStream(req.cardId, {
-      type: 'error',
-      error: err.message.includes('ENOENT')
-        ? 'OpenClaw CLI not found. Install: npm install -g openclaw'
-        : err.message,
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      invalidateStableContextSelection(stableContext)
+      sendStream(scope, {
+        type: 'error',
+        error: err.message.includes('ENOENT')
+          ? 'OpenClaw CLI not found. Install: npm install -g openclaw'
+          : err.message,
+      })
+      if (!termination?.confirmed) {
+        sendStream(scope, {
+          type: 'error',
+          error: `OpenClaw process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      sendStream(scope, { type: 'done' })
+    })().catch(error => {
+      sendStream(scope, {
+        type: 'error',
+        error: `OpenClaw process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
     })
   })
 }

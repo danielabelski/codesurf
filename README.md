@@ -35,8 +35,12 @@ Electron is pinned to `41.3.0` in `package.json` / `package-lock.json`.
 
 ```bash
 npm install
-# CI: npm ci --omit=optional
+# Reproducible clean install (CI/release): npm ci
 ```
+
+Keep optional dependencies enabled: TypeScript, Rollup, and Lightning CSS use
+platform-specific optional packages that are required by the build and test
+toolchain.
 
 Run in development:
 
@@ -49,6 +53,16 @@ Build:
 ```bash
 npm run build
 ```
+
+Run the authoritative unit gate:
+
+```bash
+npm run test:unit
+```
+
+The unit gate builds the Electron main process first. Pure tests retain normal
+runner concurrency; Electron broker/OWL host fixtures run in a separate,
+single-process lane because the app hosts share OS-level Electron resources.
 
 Platform packaging:
 
@@ -108,7 +122,7 @@ CodeSurf stores app data under `~/.codesurf`.
 Default app-created workspaces go under:
 
 ```text
-~/codesurf/workspaces/
+~/.codesurf/workspaces/
 ```
 
 Project-backed workspaces can point at any folder you open.

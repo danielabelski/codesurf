@@ -4,20 +4,57 @@ import { getCurvierBlockRadius } from '../../../shared/types'
 import { stripCapabilityPrefix } from '../../../shared/nodeTools'
 import { toFileUrl } from '../utils/dnd'
 import type { DiscoveryCapabilityLink } from '../lib/discoveryRuntime'
+import { createLoadableModuleTile } from '../lib/loadableTile'
 import type { ExtensionAction } from '../components/ExtensionTile'
 
-const LazyTerminalTile = React.lazy(() => import('../components/TerminalTile').then(m => ({ default: m.TerminalTile })))
-const LazyCodeTile = React.lazy(() => import('../components/CodeTile').then(m => ({ default: m.CodeTile })))
-const LazyNoteTile = React.lazy(() => import('../components/NoteTile').then(m => ({ default: m.NoteTile })))
-const LazyImageTile = React.lazy(() => import('../components/ImageTile').then(m => ({ default: m.ImageTile })))
-const LazyMediaTile = React.lazy(() => import('../components/MediaTile').then(m => ({ default: m.MediaTile })))
-const LazyFileTile = React.lazy(() => import('../components/FileTile').then(m => ({ default: m.FileTile })))
-const LazyBrowserTile = React.lazy(() => import('../components/BrowserTile').then(m => ({ default: m.BrowserTile })))
-const LazyKanbanTile = React.lazy(() => import('../components/KanbanTile').then(m => ({ default: m.KanbanTile })))
-const LazyChatTile = React.lazy(() => import('../components/ChatTile').then(m => ({ default: m.ChatTile })))
-const LazyChatTileWebview = React.lazy(() => import('../components/ChatTileWebview').then(m => ({ default: m.ChatTileWebview })))
-const LazyFileExplorerTile = React.lazy(() => import('../components/FileExplorerTile'))
-const LazyExtensionTile = React.lazy(() => import('../components/ExtensionTile').then(m => ({ default: m.ExtensionTile })))
+const LazyTerminalTile = createLoadableModuleTile(
+  () => import('../components/TerminalTile'),
+  module => module.TerminalTile,
+)
+const LazyCodeTile = createLoadableModuleTile(
+  () => import('../components/CodeTile'),
+  module => module.CodeTile,
+)
+const LazyNoteTile = createLoadableModuleTile(
+  () => import('../components/NoteTile'),
+  module => module.NoteTile,
+)
+const LazyImageTile = createLoadableModuleTile(
+  () => import('../components/ImageTile'),
+  module => module.ImageTile,
+)
+const LazyMediaTile = createLoadableModuleTile(
+  () => import('../components/MediaTile'),
+  module => module.MediaTile,
+)
+const LazyFileTile = createLoadableModuleTile(
+  () => import('../components/FileTile'),
+  module => module.FileTile,
+)
+const LazyBrowserTile = createLoadableModuleTile(
+  () => import('../components/BrowserTile'),
+  module => module.BrowserTile,
+)
+const LazyKanbanTile = createLoadableModuleTile(
+  () => import('../components/KanbanTile'),
+  module => module.KanbanTile,
+)
+const LazyChatTile = createLoadableModuleTile(
+  () => import('../components/ChatTile'),
+  module => module.ChatTile,
+)
+const LazyChatTileWebview = createLoadableModuleTile(
+  () => import('../components/ChatTileWebview'),
+  module => module.ChatTileWebview,
+)
+const LazyFileExplorerTile = createLoadableModuleTile(
+  () => import('../components/FileExplorerTile'),
+  module => module.default,
+)
+const LazyExtensionTile = createLoadableModuleTile(
+  () => import('../components/ExtensionTile'),
+  module => module.ExtensionTile,
+)
 
 export type RenderTileBodyOptions = {
   isInteracting?: boolean
@@ -133,7 +170,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
         return (
           <LazyTerminalTile
             tileId={tile.id}
-            workspaceId={workspace?.id}
+            workspaceId={workspace?.id ?? ''}
             workspaceDir={workspace?.path ?? ''}
             width={tile.width}
             height={tile.height}
@@ -146,7 +183,7 @@ export function useRenderTileBody(params: UseRenderTileBodyParams): (
       case 'code':
         return <LazyCodeTile filePath={tile.filePath} />
       case 'note':
-        return <LazyNoteTile tileId={tile.id} filePath={tile.filePath} workspacePath={workspace?.path} />
+        return <LazyNoteTile tileId={tile.id} workspaceId={workspace?.id} filePath={tile.filePath} workspacePath={workspace?.path} />
       case 'image':
         return tile.filePath ? (
           <LazyImageTile

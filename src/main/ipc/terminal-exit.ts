@@ -11,6 +11,7 @@ export interface ExitListener {
 
 /** Minimal session shape terminal.ts's `TerminalSession` satisfies. */
 export interface ExitableSession {
+  workspaceId: string
   pty: unknown
   listeners: Set<ExitListener>
   /** When set, the PTY was attached to a named tmux session that should die with it. */
@@ -69,9 +70,9 @@ export function handlePtyExit<TSession extends ExitableSession>(
   }
 
   deps.publish({
-    channel: `tile:${tileId}`,
+    channel: `tile:${current.workspaceId}:${tileId}`,
     type: 'system',
     source: `terminal:${tileId}`,
-    payload: { action: 'exited', exitCode }
+    payload: { action: 'exited', workspaceId: current.workspaceId, exitCode }
   })
 }

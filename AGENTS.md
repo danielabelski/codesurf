@@ -19,7 +19,7 @@ src/
     index.ts     — Context bridge exposures (workspace, fs, canvas, terminal, chat, bus, mcp...)
   renderer/
     src/
-      App.tsx    — React SPA; contains the entire canvas engine (~1944 LOC)
+      App.tsx    — React SPA; top-level canvas orchestration
       components/— Tile components (lazy-loaded)
       hooks/     — useDetectedAgents, useMCPServers
   shared/
@@ -33,11 +33,11 @@ src/
 | Electron | ^41.3.0 |
 | React | 19.2.4 |
 | TypeScript | 5.9.3 |
-| Vite / electron-vite | 7.3.1 / 5.0.0 |
+| Vite / electron-vite | 7.3.6 / 5.0.0 |
 | Tailwind CSS | 4.0.0 |
 | xterm + node-pty | terminal emulation |
 | Monaco editor | code tiles |
-| @anthropic-ai/claude-agent-sdk | 0.2.79 |
+| @anthropic-ai/claude-agent-sdk | 0.2.141 |
 | @opencode-ai/sdk | 1.2.27 |
 | chokidar | filesystem watch |
 
@@ -58,8 +58,10 @@ src/
 **Refs for cross-effect sync** — Heavy use of `useRef` to keep mutable state accessible inside event handlers without stale closure issues.
 
 **Persistence** — File-based only, no cloud sync:
-- `~/.codesurf/workspaces/{id}/canvas.json` — canvas state (auto-saved, 500ms debounce)
-- `~/.codesurf/workspaces/{id}/tiles/{tileId}.json` — kanban tile state
+- `~/.codesurf/workspaces/{storageId}/.codesurf/canvas-state.json` — canvas state
+- `~/.codesurf/workspaces/{storageId}/.codesurf/tile-state-{tileId}.json` — tile state
+- `~/.codesurf/workspaces/{storageId}/.codesurf/kanban-{tileId}.json` — kanban state
+- `<project>/.codesurf/{tileId}/` — project-backed collaboration protocol state
 - `~/.codesurf/mcp-server.json` — MCP server config
 
 ## Chat Providers
@@ -110,7 +112,7 @@ Every chip component has a deliberate chrome decision. Before touching any chip 
 
 | Component | Chrome |
 |---|---|
-| `ThinkingBlockView` (individual 🧠 in transcript) | **Full chip** — background + border + shadow |
+| `ThinkingBlockView` (individual thinking block in transcript) | **Full chip** — background + border + shadow |
 | `WorkingChipView` (live WORKING indicator) | **Full chip** — background + border + shadow |
 | `ToolBlockView` (individual tool chip) | **Full chip** — the canonical reference |
 | `CollationSummaryChip` / group chips | **Accent chip** — coloured background/border, still bordered |

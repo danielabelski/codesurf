@@ -3,7 +3,7 @@
  *
  * When CODESURF_BROKER_TEST=1, src/main/index.ts skips normal app startup and
  * runs this stdin/stdout JSON-RPC server instead. The integration test
- * (test/broker-host-integration.test.mjs) drives this harness to exercise:
+ * (test/hosts/broker-host-integration.test.mjs) drives this harness to exercise:
  *   - activate/deactivate lifecycle
  *   - capability-deny assertions (chat-only ext cannot use fs/shell)
  *   - crash recovery (killing the child does not crash main)
@@ -17,6 +17,7 @@ import { ExtensionBrokerHost } from './host'
 import { JsonRpcPeer, type JsonValue, type JsonObject } from './json-rpc'
 import { bus } from '../../event-bus'
 import type { ExtensionManifest } from '../../../shared/types'
+import { isValidExtensionCapabilityRequests } from '../../../shared/extension-types'
 
 // Fake registry — only provides getCapabilityGate and registerMCPTool
 class TestRegistry {
@@ -67,10 +68,22 @@ export async function runBrokerTestHost(): Promise<void> {
 async function handleHarnessCall(method: string, params: JsonObject): Promise<JsonValue> {
   switch (method) {
     case 'health':
-      return { ok: true, pid: process.pid }
+      return {
+        ok: true,
+        pid: process.pid,
+        userData: app.getPath('userData'),
+      }
 
     case 'activateFixture': {
-      const { extDir, capabilities } = params as { extDir: string; capabilities?: Array<{ name: string }> }
+      const { extDir } = params as { extDir: string }
+      const rawCapabilities = params.capabilities
+      if (
+        rawCapabilities !== undefined
+        && !isValidExtensionCapabilityRequests(rawCapabilities)
+      ) {
+        throw new Error('Invalid fixture capabilities')
+      }
+      const capabilities = rawCapabilities
 
       // Build a minimal manifest
       const manifest: ExtensionManifest = {

@@ -12,6 +12,8 @@ import {
   sendWorkspaceDirectRelayMessage,
   setWorkspaceRelayWorkContext,
   spawnWorkspaceRelayAgent,
+  startRelayServices,
+  stopAllRelayServices,
   stopWorkspaceRelayAgent,
   syncWorkspaceRelayParticipants,
   updateWorkspaceRelayMessageStatus,
@@ -20,6 +22,16 @@ import {
 } from '../relay/service'
 import type { TileState } from '../../shared/types'
 import { setRelayHostActive } from '../relay/registration'
+import {
+  activateCanvasRelayProjectionSync,
+  deactivateCanvasRelayProjectionSync,
+} from '../relay/canvasProjection'
+import {
+  isRelayChannelMessageDraft,
+  isRelayDirectMessageDraft,
+  isRelaySpawnRequest,
+  isRelayWorkContext,
+} from '../relay/ipc-validation'
 
 const RELAY_CHANNELS = [
   'relay:init',
@@ -42,8 +54,10 @@ const RELAY_CHANNELS = [
 ] as const
 
 export function registerRelayIPC(): void {
-  unregisterRelayIPC()
+  removeRelayIPCHandlers()
+  startRelayServices()
   setRelayHostActive(true)
+  activateCanvasRelayProjectionSync()
 
   ipcMain.handle('relay:init', async (_, workspacePath: string) => {
     await getWorkspaceRelay(workspacePath)
@@ -74,17 +88,23 @@ export function registerRelayIPC(): void {
     return readWorkspaceRelayMessage(workspacePath, participantId, mailbox, filename)
   })
 
-  ipcMain.handle('relay:sendDirectMessage', async (_, workspacePath: string, from: string, draft: any) => {
+  ipcMain.handle('relay:sendDirectMessage', async (_, workspacePath: string, from: string, draft: unknown) => {
     if (
       typeof workspacePath !== 'string' || typeof from !== 'string' ||
-      !draft || typeof draft !== 'object' || typeof draft.toParticipantId !== 'string'
+      !isRelayDirectMessageDraft(draft)
     ) {
-      return { ok: false, error: 'Invalid sendDirectMessage payload' }
+      throw new TypeError('Invalid sendDirectMessage payload')
     }
     return sendWorkspaceDirectRelayMessage(workspacePath, from, draft)
   })
 
-  ipcMain.handle('relay:sendChannelMessage', async (_, workspacePath: string, from: string, draft: any) => {
+  ipcMain.handle('relay:sendChannelMessage', async (_, workspacePath: string, from: string, draft: unknown) => {
+    if (
+      typeof workspacePath !== 'string' || typeof from !== 'string' ||
+      !isRelayChannelMessageDraft(draft)
+    ) {
+      throw new TypeError('Invalid sendChannelMessage payload')
+    }
     return sendWorkspaceChannelRelayMessage(workspacePath, from, draft)
   })
 
@@ -96,7 +116,14 @@ export function registerRelayIPC(): void {
     return moveWorkspaceRelayMessage(workspacePath, participantId, fromMailbox, toMailbox, filename)
   })
 
-  ipcMain.handle('relay:setWorkContext', async (_, workspacePath: string, participantId: string, work: any) => {
+  ipcMain.handle('relay:setWorkContext', async (_, workspacePath: string, participantId: string, work: unknown) => {
+    if (
+      typeof workspacePath !== 'string' ||
+      typeof participantId !== 'string' ||
+      !isRelayWorkContext(work)
+    ) {
+      throw new TypeError('Invalid setWorkContext payload')
+    }
     return setWorkspaceRelayWorkContext(workspacePath, participantId, work)
   })
 
@@ -104,12 +131,12 @@ export function registerRelayIPC(): void {
     return analyzeWorkspaceRelayRelationships(workspacePath)
   })
 
-  ipcMain.handle('relay:spawnAgent', async (_, workspacePath: string, request: any) => {
+  ipcMain.handle('relay:spawnAgent', async (_, workspacePath: string, request: unknown) => {
     if (
       typeof workspacePath !== 'string' ||
-      !request || typeof request !== 'object' || typeof request.participantId !== 'string'
+      !isRelaySpawnRequest(request)
     ) {
-      return { ok: false, error: 'Invalid spawnAgent payload' }
+      throw new TypeError('Invalid spawnAgent payload')
     }
     return spawnWorkspaceRelayAgent(workspacePath, request)
   })
@@ -128,7 +155,9 @@ export function registerRelayIPC(): void {
   })
 }
 
-export function unregisterRelayIPC(): void {
+function removeRelayIPCHandlers(): void {
+  deactivateCanvasRelayProjectionSync()
+  setRelayHostActive(false)
   for (const ch of RELAY_CHANNELS) {
     try {
       ipcMain.removeHandler(ch)
@@ -136,5 +165,12 @@ export function unregisterRelayIPC(): void {
       /* ignore */
     }
   }
-  setRelayHostActive(false)
+}
+
+export async function unregisterRelayIPC(): Promise<void> {
+  removeRelayIPCHandlers()
+  // Removing the ordinary entry points and invalidating the service generation
+  // are one lifecycle operation. Any handler already suspended in init/spawn
+  // observes the inactive generation before it can publish fresh resources.
+  await stopAllRelayServices()
 }

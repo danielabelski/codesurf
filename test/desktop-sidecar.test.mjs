@@ -19,6 +19,7 @@ import {
   installSidecarIntoPackage,
   stageNativePackageFrontend,
   stageFrontend,
+  stageRuntimeDependencies,
 } from '../scripts/desktop-sidecar.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -61,6 +62,63 @@ after(() => {
 })
 
 describe('Native desktop sidecar staging', () => {
+  it('copies compiled daemon package files to both sidecar locations without source', () => {
+    const fixture = makeTemp('codesurf-native-daemon-dist-')
+    const rootDir = join(fixture, 'repo')
+    const appRoot = join(fixture, 'sidecar-app')
+    const daemonDir = join(rootDir, 'packages', 'codesurf-daemon')
+    const gatewayDir = join(rootDir, 'packages', 'codesurf-terminal-gateway')
+    const exports = Object.fromEntries(
+      [
+        ['.', 'index'],
+        ['./manager', 'manager'],
+        ['./client', 'client'],
+        ['./sse', 'sse'],
+        ['./chat-cli', 'chat-cli'],
+        ['./chat-session-store', 'chat-session-store'],
+        ['./paths', 'paths'],
+      ].map(([subpath, stem]) => [
+        subpath,
+        {
+          types: `./dist/${stem}.d.ts`,
+          import: `./dist/${stem}.js`,
+          default: `./dist/${stem}.js`,
+        },
+      ]),
+    )
+    mkdirSync(join(daemonDir, 'src'), { recursive: true })
+    mkdirSync(join(daemonDir, 'bin'), { recursive: true })
+    mkdirSync(join(daemonDir, 'vendor'), { recursive: true })
+    for (const target of Object.values(exports)) {
+      mkdirSync(dirname(join(daemonDir, target.import)), { recursive: true })
+      writeFileSync(join(daemonDir, target.import), 'export {}\n')
+      writeFileSync(join(daemonDir, target.types), 'export {}\n')
+    }
+    writeFileSync(join(daemonDir, 'src', 'index.ts'), 'export {}\n')
+    writeFileSync(join(daemonDir, 'bin', 'codesurfd.mjs'), 'export {}\n')
+    writeFileSync(join(daemonDir, 'vendor', 'dreaming.mjs'), 'export {}\n')
+    writeFileSync(join(daemonDir, 'README.md'), '# daemon\n')
+    writeFileSync(
+      join(daemonDir, 'package.json'),
+      `${JSON.stringify({ name: '@codesurf/daemon', version: '0.1.0', exports })}\n`,
+    )
+    mkdirSync(gatewayDir, { recursive: true })
+    writeFileSync(
+      join(gatewayDir, 'package.json'),
+      `${JSON.stringify({ name: '@codesurf/terminal-gateway', version: '0.1.0' })}\n`,
+    )
+
+    stageRuntimeDependencies({ root: rootDir, appRoot })
+
+    for (const packageRoot of [
+      join(appRoot, 'packages', 'codesurf-daemon'),
+      join(appRoot, 'node_modules', '@codesurf', 'daemon'),
+    ]) {
+      assert.ok(existsSync(join(packageRoot, 'dist', 'index.js')))
+      assert.equal(existsSync(join(packageRoot, 'src')), false)
+    }
+  })
+
   it('stages the root web build under the manifest-safe frontend path', () => {
     const fixture = makeTemp('codesurf-native-frontend-')
     const rootDir = join(fixture, 'repo')
@@ -86,10 +144,13 @@ describe('Native desktop sidecar staging', () => {
     writeExecutable(join(stage, 'bin', 'node'), '#!/bin/sh\nexit 0\n')
     mkdirSync(join(stage, 'app', 'scripts'), { recursive: true })
     mkdirSync(join(stage, 'app', 'packages', 'codesurf-daemon', 'bin'), { recursive: true })
+    mkdirSync(join(stage, 'app', 'packages', 'codesurf-daemon', 'dist'), { recursive: true })
     mkdirSync(join(stage, 'app', 'packages', 'codesurf-terminal-gateway', 'bin'), { recursive: true })
     writeFileSync(join(stage, 'supervisor.mjs'), 'export {}\n')
     writeFileSync(join(stage, 'app', 'scripts', 'web-host.mjs'), 'export {}\n')
     writeFileSync(join(stage, 'app', 'packages', 'codesurf-daemon', 'bin', 'codesurfd.mjs'), 'export {}\n')
+    writeFileSync(join(stage, 'app', 'packages', 'codesurf-daemon', 'dist', 'index.js'), 'export {}\n')
+    writeFileSync(join(stage, 'app', 'packages', 'codesurf-daemon', 'dist', 'chat-cli.js'), 'export {}\n')
     writeFileSync(join(stage, 'app', 'packages', 'codesurf-terminal-gateway', 'bin', 'codesurf-terminal-gateway.mjs'), 'export {}\n')
 
     assert.throws(

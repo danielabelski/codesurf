@@ -149,7 +149,6 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     hasEarlierMessages,
     connectedPeers,
     peerContextRef,
-    peerToolNames,
     providerEntryById,
     currentProviderEntry,
     activeCloudHost,
@@ -330,26 +329,29 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     latestStateRef.current = optimisticState
     persistLatestState(optimisticState)
 
-    window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+    window.electron?.bus?.publish(`tile:${workspaceId}:${tileId}`, 'activity', `chat:${workspaceId}:${tileId}`, {
       message: `User: ${userMsg.content.slice(0, 100)}`, role: 'user',
     })
 
     try {
-      const recentEditContext = await buildRecentEditContext(activeMessages, workspaceDir, userBodyText)
+      const recentEditContext = await buildRecentEditContext(
+        activeMessages,
+        workspaceDir,
+        userBodyText,
+        workspaceId,
+        {
+          workspaceId,
+          cardId: tileId,
+          provider: activeProvider,
+          executionTarget,
+          sessionId: activeSessionId,
+        },
+      )
       const blockNotesContext = buildBlockNotesContext(activeMessages)
-      const requestMessages = [...activeMessages, userMsg].map((message, index, allMessages) => {
-        const isNewestUserMessage = index === allMessages.length - 1 && message.id === userMsg.id
-        if (!isNewestUserMessage || (!recentEditContext && !blockNotesContext)) {
-          return { role: message.role, content: message.content }
-        }
-        const parts = [message.content]
-        if (recentEditContext) parts.push(`---\nRecent edit context:\n${recentEditContext}`)
-        if (blockNotesContext) parts.push(`---\n${blockNotesContext}`)
-        return {
-          role: message.role,
-          content: parts.join('\n\n').trim(),
-        }
-      })
+      const requestMessages = [...activeMessages, userMsg].map(message => ({
+        role: message.role,
+        content: message.content,
+      }))
 
       const peers = activeMcpEnabled ? connectedPeers.map(p => ({
         peerId: p.peerId,
@@ -364,7 +366,6 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
         workspaceId,
         provider: activeProvider,
         model: activeModel,
-        providerTransport: activeProviderEntry?.transport ?? null,
         mode: activeMode,
         thinking: activeThinking,
         agentId: agentId ?? null,
@@ -375,7 +376,8 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
         cloudHostId: nextCloudHostId,
         executionPreference: settings?.execution ?? null,
         messages: requestMessages,
-        negotiatedTools: activeMcpEnabled ? peerToolNames : undefined,
+        recentEditContext: recentEditContext || undefined,
+        blockNotesContext: blockNotesContext || undefined,
         peers: peers.length > 0 ? peers : undefined,
         sessionId: activeSessionId,
       })
@@ -418,7 +420,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
   }, [
     provider, model, mode, thinking, sessionId, mcpEnabled, messages, providerEntryById, currentProviderEntry,
     tileId, workspaceId, workspaceDir, connectedPeers, peerContextRef, executionTarget, cloudHostId, activeCloudHost,
-    settings?.execution, settings?.chatProviderModes, peerToolNames, focusComposer, setMessagesSafe, queuedTurns,
+    settings?.execution, settings?.chatProviderModes, focusComposer, setMessagesSafe, queuedTurns,
     agentId, resolvedAgentMode, agentModesLoaded,
     effectiveAgentMode, autoAgentMode, linkedSessionEntryId, linkedSessionHint, hasEarlierMessages,
     latestStateRef, persistLatestState, lastJobSequenceRef, resumedJobKeyRef, stickToBottomRef,
@@ -555,21 +557,34 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
       const payload = latest?.payload
       if (payload?.data) {
         try {
-          const chatApi = (window.electron as unknown as { chat?: { writeTempAttachment?: (p: { data: string; mime?: string; ext?: string; filenameHint?: string }) => Promise<{ ok: true; path: string } | { ok: false; error: string }> } }).chat
-          if (chatApi?.writeTempAttachment) {
-            const attachmentData = payload.kind === 'text' ? encodeUtf8Base64(payload.data) : payload.data
-            const attachmentKind: PendingAttachment['kind'] = payload.kind === 'text' ? 'file' : 'image'
-            const r = await chatApi.writeTempAttachment({
-              data: attachmentData,
-              mime: payload.kind === 'text' ? (payload.mime ?? 'text/html') : payload.mime,
-              ext: payload.kind === 'text' ? (payload.ext ?? 'html') : payload.ext,
-              filenameHint: surface.label.toLowerCase().replace(/\s+/g, '-'),
-            })
-            if (r.ok) {
-              flushedAttachments = mergeAttachments(flushedAttachments, [{ path: r.path, kind: attachmentKind }])
-            }
-          }
-        } catch { /* best-effort */ }
+          const chatApi = (window.electron as unknown as { chat?: { writeTempAttachment?: (p: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }) => Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }> } }).chat
+          if (!chatApi?.writeTempAttachment) throw new Error('Attachment service is unavailable')
+          const attachmentData = payload.kind === 'text' ? encodeUtf8Base64(payload.data) : payload.data
+          const attachmentKind: PendingAttachment['kind'] = payload.kind === 'text' ? 'file' : 'image'
+          const r = await chatApi.writeTempAttachment({
+            workspaceId,
+            cardId: tileId,
+            data: attachmentData,
+            mime: payload.kind === 'text' ? (payload.mime ?? 'text/html') : payload.mime,
+            ext: payload.kind === 'text' ? (payload.ext ?? 'html') : payload.ext,
+            filenameHint: surface.label.toLowerCase().replace(/\s+/g, '-'),
+          })
+          if (!r.ok) throw new Error(r.error)
+          flushedAttachments = mergeAttachments(flushedAttachments, [{
+            path: r.attachment.displayName,
+            capability: r.attachment.capability,
+            kind: attachmentKind,
+          }])
+        } catch (error) {
+          setMessagesSafe(prev => [...prev, {
+            id: `msg-attachment-error-${Date.now()}`,
+            role: 'assistant',
+            content: `Attachment failed: ${error instanceof Error ? error.message : String(error)}. Your draft was not sent.`,
+            timestamp: Date.now(),
+            isStreaming: false,
+          }])
+          return
+        }
       }
     }
 
@@ -619,7 +634,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
     isStreaming, input, attachments, implicitPeerImageAttachments, queueCurrentDraft, dispatchMessageContent,
     exportNotesToClipboard, getChatSurfaceIframe, postToChatSurface, pluginCommands, activeChatSurfaceRef,
     openChatSurfacesRef, setInput, setAcType, setAcQuery, setAttachments, setOpenChatSurfaces, setActiveChatSurfaceId,
-    textareaRef, tileId, sessionId, linkedSessionEntryId,
+    textareaRef, tileId, workspaceId, sessionId, linkedSessionEntryId, setMessagesSafe,
   ])
 
   const insertSteerMessageIntoStream = useCallback((content: string) => {
@@ -641,26 +656,30 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
       ]
     })
     stickToBottomRef.current = true
-    window.electron?.bus?.publish(`tile:${tileId}`, 'activity', `chat:${tileId}`, {
+    window.electron?.bus?.publish(`tile:${workspaceId}:${tileId}`, 'activity', `chat:${workspaceId}:${tileId}`, {
       message: `User steered: ${trimmed.slice(0, 100)}`,
       role: 'user',
     })
-  }, [setMessagesSafe, tileId, stickToBottomRef])
+  }, [setMessagesSafe, workspaceId, tileId, stickToBottomRef])
 
   const stopStreaming = useCallback(() => {
-    window.electron?.chat?.stop?.(tileId)
+    window.electron?.chat?.stop?.(workspaceId, tileId)
     setIsStreaming(false)
     setJobId(null)
     setMessagesSafe(prev => prev.map(m => m.isStreaming ? { ...m, isStreaming: false } : m))
     focusComposer()
-  }, [tileId, focusComposer, setIsStreaming, setJobId, setMessagesSafe])
+  }, [workspaceId, tileId, focusComposer, setIsStreaming, setJobId, setMessagesSafe])
 
   const handleQueuedTurnSteer = useCallback(async (turn: QueuedChatTurn) => {
     const content = turn.content.trim()
     if (!content) return
 
     if (isStreaming) {
-      const result = await window.electron?.chat?.steer?.({ cardId: tileId, message: content })
+      const result = await window.electron?.chat?.steer?.({
+        workspaceId,
+        cardId: tileId,
+        message: content,
+      })
       if (!result?.ok) {
         setMessagesSafe(prev => [...prev, {
           id: `msg-steer-error-${Date.now()}`,
@@ -689,7 +708,7 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
       setInput(current => current.trim() ? current : content)
     }
   }, [
-    isStreaming, tileId, queuedTurns, flushQueueStateNow, logQueueEvent, insertSteerMessageIntoStream,
+    isStreaming, workspaceId, tileId, queuedTurns, flushQueueStateNow, logQueueEvent, insertSteerMessageIntoStream,
     dispatchMessageContent, setMessagesSafe, setQueuedTurns, setInput,
   ])
 

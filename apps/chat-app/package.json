@@ -8,6 +8,10 @@
     "build": "vite build",
     "preview": "vite preview --port 5174"
   },
+  "packageManager": "npm@10.9.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "dependencies": {
     "@assistant-ui/react": "^0.12.28",
     "@assistant-ui/react-markdown": "^0.12.11",
@@ -19,12 +23,20 @@
     "tw-shimmer": "^0.4.11"
   },
   "devDependencies": {
+    "@babel/core": "7.29.7",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@vitejs/plugin-react": "5.2.0",
+    "esbuild": "0.28.1",
+    "postcss": "8.5.25",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.9.3",
-    "vite": "^7.0.0"
+    "vite": "7.3.6"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7",
+    "esbuild": "0.28.1",
+    "postcss": "8.5.25"
   }
 }

@@ -1,5 +1,20 @@
 # CodeSurf — Backlog Remediation Plan
 
+> **Archived review backlog.** This document preserves the 2026-06/07 planning
+> snapshot and its original line references. Current remediation status lives in
+> [`plans/2026-07-31-full-review-remediation.md`](../plans/2026-07-31-full-review-remediation.md).
+> Items here may already be fixed; do not treat this file as the active queue.
+
+The current integration supersedes the historical provider-streaming, daemon,
+context, peer, attachment, local-proxy, and Electrobun lifecycle items below.
+It adds bounded daemon SSE decoding; strict host-validated provider/peer
+authority with untrusted bounded observations; provenance-gated recent-edit
+reads; authoritative clear and preparation leases; local-proxy resource and
+terminal fencing; attested attachment capabilities; and process/session-safe
+Electrobun turns. Final exact-tip clean-checkout verification is still pending,
+so implementation status and proof status are intentionally reported
+separately in the current remediation plan.
+
 Executable plan for the items left after the Critical/High/Medium remediation (see `docs/REMEDIATION_PLAN.md`). Findings reference `docs/CODE_REVIEW.md`. Each item is scoped to be dispatchable as a single focused agent task.
 
 Phases are ordered by value × risk. Phase 1 is the one deferred Critical (the plugin broker); Phases 2–3 are remaining Mediums; Phase 4 is the Low hardening sweep. Items within a phase are grouped by **disjoint file sets** so they can be parallelized safely.
@@ -24,7 +39,7 @@ Effort key: **S** ≤ ~30 min · **M** ~1–3 h · **L** ~half-day+ · **XL** mu
 
 4. **1d · Migrate + retire the special-case (M).** Move the bundled `codesurf-relay-suite` (the hardcoded `id === 'codesurf-relay-suite'` relay bridge mentioned in §6) onto the broker as the first real consumer. Once green, flip the default so new power extensions run brokered; leave a documented escape hatch for trusted bundled extensions if needed during transition.
 
-**Risk:** High — touches every power extension's runtime. Mitigate: keep the raw-`require` path behind a feature flag until 1d is proven; migrate one extension at a time; add an integration test mirroring `test/owl-host-integration.test.mjs` (lifecycle, capability-deny, crash-recovery, PNG/asset round-trip).
+**Risk:** High — touches every power extension's runtime. Mitigate: keep the raw-`require` path behind a feature flag until 1d is proven; migrate one extension at a time; add an integration test mirroring `test/hosts/owl-host-integration.test.mjs` (lifecycle, capability-deny, crash-recovery, PNG/asset round-trip).
 
 **Acceptance:** A power extension granted only `chat` is provably unable to read `~/.ssh` (test asserts the `fs` capability call is rejected in main); killing the child process does not crash main; `codesurf-relay-suite` works through the broker.
 

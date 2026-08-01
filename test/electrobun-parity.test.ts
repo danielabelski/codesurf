@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -20,8 +21,22 @@ const PRELOAD_SOURCE = readFileSync(
   join(__dirname, '../src/preload/index.ts'),
   'utf8',
 )
+const AMBIENT_API_SOURCE = readFileSync(
+  join(__dirname, '../src/renderer/src/env.d.ts'),
+  'utf8',
+)
 
 const PRELOAD_PATHS = extractPreloadBridgePaths(PRELOAD_SOURCE)
+const AMBIENT_FS_PATHS = (() => {
+  const block = AMBIENT_API_SOURCE.match(/^  fs:\s*\{([\s\S]*?)^  \}/m)?.[1] ?? ''
+  return [...block.matchAll(/^    (\w+)\??\s*\(/gm)]
+    .map(match => `fs.${match[1]}`)
+    .sort()
+})()
+const ELECTROBUN_UNAVAILABLE_PRELOAD_PATHS = [
+  'window.onPersistenceRequest',
+  'window.persistenceReady',
+]
 
 function createProbeFacade() {
   return createElectrobunElectronFacade({
@@ -39,10 +54,23 @@ describe('Electrobun preload parity checklist', () => {
     expect(PRELOAD_PATHS).toContain('secrets.has')
   })
 
-  test('facade exposes every preload callable', () => {
-    const facadePaths = new Set(collectBridgePaths(createProbeFacade()))
+  test('facade omits only Electron lifecycle APIs that Electrobun cannot honor', () => {
+    const facade = createProbeFacade()
+    const facadePaths = new Set(collectBridgePaths(facade))
     const missing = PRELOAD_PATHS.filter(path => !facadePaths.has(path))
-    expect(missing).toEqual([])
+    expect(missing).toEqual(ELECTROBUN_UNAVAILABLE_PRELOAD_PATHS)
+    expect('onPersistenceRequest' in facade.window).toBe(false)
+    expect('persistenceReady' in facade.window).toBe(false)
+  })
+
+  test('ambient filesystem methods exactly match the preload and Electrobun facade', () => {
+    const preloadFsPaths = PRELOAD_PATHS.filter(path => path.startsWith('fs.')).sort()
+    const facadeFsPaths = collectBridgePaths(createProbeFacade())
+      .filter(path => path.startsWith('fs.'))
+      .sort()
+
+    expect(AMBIENT_FS_PATHS).toEqual(preloadFsPaths)
+    expect(AMBIENT_FS_PATHS).toEqual(facadeFsPaths)
   })
 
   test('every facade leaf maps to a default invoke response or channel family', () => {
@@ -107,12 +135,8 @@ describe('Electrobun preload parity checklist', () => {
 })
 
 describe('Electrobun security defaults parity', () => {
-  test('fallback settings match fresh-install FS scoping defaults', () => {
-    const settings = getDefaultElectrobunInvokeResponse('settings:get') as {
-      security?: { restrictFsToWorkspaceRoots?: boolean, fsScopingMigrated?: boolean }
-    }
-    expect(settings.security?.restrictFsToWorkspaceRoots).toBe(true)
-    expect(settings.security?.fsScopingMigrated).toBe(true)
+  test('settings failure does not masquerade as a successful fresh install', () => {
+    assert.throws(() => getDefaultElectrobunInvokeResponse('settings:get'))
   })
 
   test('guest webview tag preferences align with main-process enforcement', () => {

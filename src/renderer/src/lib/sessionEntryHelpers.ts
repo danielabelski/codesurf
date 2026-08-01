@@ -25,6 +25,7 @@ export function buildSessionEntryHint(session: AggregatedSessionEntry): SessionE
 export type ChatTileSessionMatch = { entryId: string | null; sessionId: string | null }
 
 export function findMatchingChatTileIdForSession(
+  workspaceId: string,
   tiles: TileState[],
   session: AggregatedSessionEntry,
   chatTileSessionMatches: Record<string, ChatTileSessionMatch>,
@@ -33,7 +34,10 @@ export function findMatchingChatTileIdForSession(
     if (tile.type !== 'chat') return false
     if (session.tileId && tile.id === session.tileId) return true
     const remembered = chatTileSessionMatches[tile.id]
-    const runtimeState = getChatTileRuntimeState<{ linkedSessionEntryId?: string | null }>(tile.id)
+    const runtimeState = getChatTileRuntimeState<{ linkedSessionEntryId?: string | null }>(
+      workspaceId,
+      tile.id,
+    )
     return remembered?.entryId === session.id || runtimeState?.linkedSessionEntryId === session.id
   })?.id ?? null
 }

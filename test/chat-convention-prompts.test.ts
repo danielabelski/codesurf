@@ -12,6 +12,8 @@ import {
   buildCodeSurfActivityConvention,
   joinPromptSections,
 } from '../src/main/chat/prompt-conventions.ts'
+import { buildPeerAwareTurnPrompt } from '../src/main/chat/prompt-builders.ts'
+import { composeChatContext } from '../src/main/chat/context-composer.ts'
 
 /**
  * Contract tests for the CodeSurf prompt conventions injected into every chat
@@ -24,28 +26,52 @@ import {
  */
 
 const CHAT_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/ipc/chat.ts'), 'utf8')
-const CLAUDE_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/claude.ts'), 'utf8')
-const CODEX_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/agent-mode-payloads.ts'), 'utf8')
-const HERMES_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/hermes.ts'), 'utf8')
-const PI_RUNTIME_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/pi-runtime.ts'), 'utf8')
-const OPENCLAW_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/openclaw.ts'), 'utf8')
-const OPENCODE_SOURCE = readFileSync(resolve(process.cwd(), 'src/main/chat/providers/opencode.ts'), 'utf8')
+const CLAUDE_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/providers/claude.ts'),
+  'utf8',
+)
+const CODEX_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/providers/agent-mode-payloads.ts'),
+  'utf8',
+)
+const HERMES_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/providers/hermes.ts'),
+  'utf8',
+)
+const PI_RUNTIME_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/pi-runtime.ts'),
+  'utf8',
+)
+const OPENCLAW_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/providers/openclaw.ts'),
+  'utf8',
+)
+const OPENCODE_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/main/chat/providers/opencode.ts'),
+  'utf8',
+)
 
 describe('CodeSurf prompt conventions — values', () => {
   test('CODESURF_OUTPUT_CONVENTION contains all three required sections', () => {
     expect(CODESURF_OUTPUT_CONVENTION).toContain('Default to a short natural-language completion')
-    expect(CODESURF_OUTPUT_CONVENTION).toContain('Do NOT use the structured card for trivial changes')
+    expect(CODESURF_OUTPUT_CONVENTION).toContain(
+      'Do NOT use the structured card for trivial changes',
+    )
     expect(CODESURF_OUTPUT_CONVENTION).toContain('CHANGES MADE:')
     expect(CODESURF_OUTPUT_CONVENTION).toContain("DIDN'T TOUCH:")
     expect(CODESURF_OUTPUT_CONVENTION).toContain('CONCERNS:')
   })
 
   test('CODESURF_INSIGHT_CONVENTION is provider-ready and keeps the literal star-framed container', () => {
-    expect(CODESURF_INSIGHT_CONVENTION).toContain('Use an Insight block when you notice a non-obvious constraint')
+    expect(CODESURF_INSIGHT_CONVENTION).toContain(
+      'Use an Insight block when you notice a non-obvious constraint',
+    )
     // The exact framing must survive — the chat renderer matches on these
     // characters. Changing the framing means updating the renderer too.
     expect(CODESURF_INSIGHT_CONVENTION).toContain('★ Insight ─────────────────────────────────────')
-    expect(CODESURF_INSIGHT_CONVENTION).toContain('─────────────────────────────────────────────────')
+    expect(CODESURF_INSIGHT_CONVENTION).toContain(
+      '─────────────────────────────────────────────────',
+    )
   })
 
   test('builder helpers return their respective constants', () => {
@@ -55,7 +81,9 @@ describe('CodeSurf prompt conventions — values', () => {
   })
 
   test('CODESURF_ACTIVITY_CONVENTION preserves native agent behavior while standardizing UI activity', () => {
-    expect(CODESURF_ACTIVITY_CONVENTION).toContain('Keep your native agent instructions, tools, and strengths')
+    expect(CODESURF_ACTIVITY_CONVENTION).toContain(
+      'Keep your native agent instructions, tools, and strengths',
+    )
     expect(CODESURF_ACTIVITY_CONVENTION).toContain('keep a visible task plan current')
     expect(CODESURF_ACTIVITY_CONVENTION).toContain('does not expose a todo/plan tool')
   })
@@ -68,55 +96,33 @@ describe('CodeSurf prompt conventions — values', () => {
 })
 
 describe('CodeSurf prompt conventions — provider wiring', () => {
-  function extractFunction(source: string, sourceLabel: string, name: string): string {
-    const re = new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}`)
-    const match = source.match(re)
-    assert.ok(match, `expected to find function ${name}(...) in ${sourceLabel}`)
-    return match![0]
-  }
-
-  test('Claude prompt builder injects output and insight conventions', () => {
-    const block = extractFunction(CLAUDE_SOURCE, 'claude.ts', 'buildClaudeAgentPrompt')
-    expect(block).toContain('buildCodeSurfOutputConvention')
-    expect(block).toContain('buildCodeSurfInsightConvention')
-    expect(block).toContain('buildCodeSurfActivityConvention')
-    expect(block).toContain('joinPromptSections')
+  test('central composition owns all three conventions in stable order', () => {
+    const context = composeChatContext({
+      outputConvention: buildCodeSurfOutputConvention(),
+      insightConvention: buildCodeSurfInsightConvention(),
+      activityConvention: buildCodeSurfActivityConvention(),
+    })
+    assert.deepEqual(context.fragments.map(fragment => fragment.kind), [
+      'output-convention',
+      'insight-convention',
+      'activity-convention',
+    ])
+    assert.match(context.systemPrompt ?? '', /Task-Completion[\s\S]*Insight[\s\S]*Activity/)
   })
 
-  test('Codex prompt builder injects output and insight conventions', () => {
-    const block = extractFunction(CODEX_SOURCE, 'agent-mode-payloads.ts', 'buildCodexPrompt')
-    expect(block).toContain('buildCodeSurfOutputConvention')
-    expect(block).toContain('buildCodeSurfInsightConvention')
-    expect(block).toContain('buildCodeSurfActivityConvention')
-    expect(block).toContain('joinPromptSections')
+  test('every Electron provider consumes the one host-composed context', () => {
+    expect(CHAT_SOURCE).toContain('composeHostChatContext(req)')
+    expect(CLAUDE_SOURCE).toContain('req.contextPrompt?.trim()')
+    expect(CODEX_SOURCE).toContain('input.contextPrompt')
+    expect(OPENCODE_SOURCE).toContain('req.contextPrompt')
+    expect(OPENCLAW_SOURCE).toContain('contextPrompt: req.contextPrompt')
+    expect(HERMES_SOURCE).toContain('contextPrompt: req.contextPrompt')
+    expect(PI_RUNTIME_SOURCE).toContain('req.contextPrompt?.trim()')
   })
 
-  test('OpenCode prepends output and insight conventions on the first turn of a fresh session', () => {
-    assert.match(
-      OPENCODE_SOURCE,
-      /const promptConvention = joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\), buildCodeSurfActivityConvention\(\)\)[\s\S]{0,180}---/,
-    )
-  })
-
-  test('OpenClaw prepends output and insight conventions on the first turn', () => {
-    assert.match(
-      OPENCLAW_SOURCE,
-      /const openClawConvention = joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\), buildCodeSurfActivityConvention\(\)\)[\s\S]{0,180}---/,
-    )
-  })
-
-  test('Hermes receives output and insight conventions on the first turn', () => {
-    assert.match(
-      CODEX_SOURCE,
-      /outputConvention: joinPromptSections\(buildCodeSurfOutputConvention\(\), buildCodeSurfInsightConvention\(\), buildCodeSurfActivityConvention\(\)\)/,
-    )
-  })
-
-  test('Pi runtime prepends output, insight, and activity conventions when context is injected', () => {
-    assert.match(
-      PI_RUNTIME_SOURCE,
-      /buildCsagentContextPreamble[\s\S]*buildCodeSurfOutputConvention\(\)[\s\S]*buildCodeSurfInsightConvention\(\)[\s\S]*buildCodeSurfActivityConvention\(\)/,
-    )
+  test('turn transport prepends a composed context once', () => {
+    const turn = buildPeerAwareTurnPrompt('user request', 'composed context')
+    assert.equal(turn, 'composed context\n\n---\n\nuser request')
   })
 })
 
@@ -125,7 +131,10 @@ describe('CodeSurf prompt conventions — token budget guardrails', () => {
     // Rough budget: the two convention strings together should stay under
     // ~6000 chars (~1500 tokens). Going above hints at prompt bloat that will
     // hurt every turn across every provider.
-    const combined = CODESURF_OUTPUT_CONVENTION.length + CODESURF_INSIGHT_CONVENTION.length + CODESURF_ACTIVITY_CONVENTION.length
+    const combined =
+      CODESURF_OUTPUT_CONVENTION.length +
+      CODESURF_INSIGHT_CONVENTION.length +
+      CODESURF_ACTIVITY_CONVENTION.length
     assert.ok(
       combined < 6000,
       `combined convention text is ${combined} chars — over the 6000 soft ceiling`,

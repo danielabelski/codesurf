@@ -26,13 +26,24 @@
 import { createRequire } from 'node:module'
 import { z, type ZodType } from 'zod'
 
-const requireElectron = createRequire(import.meta.url)
+let requireElectron: ReturnType<typeof createRequire> | null = null
+
+function getElectronRequire(): ReturnType<typeof createRequire> {
+  if (requireElectron) return requireElectron
+  // Some security tests bundle main-process modules to CommonJS, where
+  // esbuild intentionally replaces `import.meta` with an empty object. Use
+  // the native CommonJS loader there and construct one only in real ESM.
+  requireElectron = typeof require === 'function'
+    ? require
+    : createRequire(import.meta.url)
+  return requireElectron
+}
 
 // Lazy electron require — the ipc/ modules are imported by unit tests that run
 // in plain node (no Electron runtime). A static `import { ipcMain } from
 // 'electron'` throws at link time there. Mirrors the pattern in fs.ts.
 function getIpcMain(): typeof import('electron')['ipcMain'] {
-  return requireElectron('electron').ipcMain
+  return getElectronRequire()('electron').ipcMain
 }
 
 export type TypedHandler<Spec extends readonly ZodType[]> = (
@@ -64,9 +75,11 @@ class IpcValidationError extends Error {
 export function handleTyped<Spec extends readonly ZodType[]>(
   channel: string,
   options: HandleTypedOptions<Spec>,
+  ipcMainOverride?: Pick<typeof import('electron')['ipcMain'], 'handle'>,
 ): void {
   const { args: schemas, handler } = options
-  getIpcMain().handle(channel, async (event, ...rawArgs) => {
+  const ipcMain = ipcMainOverride ?? getIpcMain()
+  ipcMain.handle(channel, async (event, ...rawArgs) => {
     if (rawArgs.length > schemas.length) {
       throw new IpcValidationError(channel, {
         message: `too many arguments: expected ${schemas.length}, got ${rawArgs.length}`,

@@ -5,12 +5,19 @@ import { CHAT_STREAM_FLUSH_INTERVAL_MS } from '../components/chat/largeContent'
 import { appendStreamingAssistantText } from '../components/chat/chatMessagesStore'
 
 export function useChatTileStreamBuffer(options: {
+  workspaceId: string
   tileId: string
   setMessages: Dispatch<SetStateAction<ChatMessage[]>>
   pagedLinkedHistoryEnabled: boolean
   isStreaming: boolean
 }) {
-  const { tileId, setMessages, pagedLinkedHistoryEnabled, isStreaming } = options
+  const {
+    workspaceId,
+    tileId,
+    setMessages,
+    pagedLinkedHistoryEnabled,
+    isStreaming,
+  } = options
   const pagedLinkedHistoryEnabledRef = useRef(pagedLinkedHistoryEnabled)
   pagedLinkedHistoryEnabledRef.current = pagedLinkedHistoryEnabled
   const isStreamingRef = useRef(false)
@@ -36,8 +43,8 @@ export function useChatTileStreamBuffer(options: {
     pendingStreamTextRef.current = ''
     // Pure-text flush goes through the isolation store so chrome snapshots stay
     // stable; setMessages is the same store-backed updater from core state.
-    appendStreamingAssistantText(tileId, text)
-  }, [tileId])
+    appendStreamingAssistantText(workspaceId, tileId, text)
+  }, [workspaceId, tileId])
 
   const queueStreamText = useCallback((text: string) => {
     if (!text) return

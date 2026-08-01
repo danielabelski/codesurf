@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Menu, nativeImage, session, systemPreferences, desktopCapturer, screen, webContents as electronWebContents, type WebContents } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, screen } from 'electron'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
@@ -7,12 +7,13 @@ import { initWorkspaces, registerWorkspaceIPC, migrateFsScopingIfNeeded, migrate
 import { registerFsIPC } from './ipc/fs'
 import { registerCanvasIPC } from './ipc/canvas'
 import { registerTerminalIPC } from './ipc/terminal'
-import { startMCPServer, setExtensionRegistryProvider } from './mcp-server'
+import { startMCPServer, stopMCPServer, setExtensionRegistryProvider } from './mcp-server'
 import { registerAgentsIPC } from './ipc/agents'
 import { registerStreamIPC } from './ipc/stream'
 import { registerGitIPC } from './ipc/git'
 import { registerBusIPC } from './ipc/bus'
 import { registerChatIPC, killAllChatProcesses } from './ipc/chat'
+import { setChatExtensionRegistryProvider } from './chat/provider-registry'
 import { registerActivityIPC } from './ipc/activity'
 import { registerCollabIPC, stopAllCollabWatchers } from './ipc/collab'
 import { registerTileContextIPC } from './ipc/tile-context'
@@ -24,6 +25,7 @@ import { registerJobsIPC } from './ipc/jobs'
 import { registerSkillsIPC, queuePendingSkillFile } from './ipc/skills'
 import { registerFileProtocol } from './file-protocol'
 import { flushAll as flushActivityStore } from './activity-store'
+import { runQuitDrains } from './quit-drain.ts'
 import { initializeAgentPathsCache, registerAgentPathsIPC } from './agent-paths'
 import { ExtensionRegistry } from './extensions/registry'
 import { registerExtensionProtocol } from './extensions/protocol'
@@ -49,7 +51,7 @@ import { APP_ID, APP_NAME } from './paths'
 import { closeDb, getDb, getDbStatus } from './db'
 import { ensureInitialIndex } from './db/thread-indexer'
 import { ensureInitialJobIndex } from './db/job-indexer'
-import { stopAllRelayServices } from './relay/service'
+import { unregisterRelayIPC } from './ipc/relay'
 import { normalizeSafeExternalUrl } from './utils/externalUrl'
 import { log } from './utils/logger.ts'
 
@@ -60,6 +62,12 @@ import {
 } from './secure-web-preferences'
 import { isOwlHostProcess, runOwlHostProcess, stopOwlSupervisor } from './owl/runtime'
 import { isBrokerTestProcess, runBrokerTestHost } from './extensions/broker/test-harness'
+import {
+  createWindowPersistenceBarrierRegistry,
+  installAppQuitBarrier,
+  type WindowPersistenceReason,
+} from './window-persistence-barrier'
+import { installElectronPermissionBoundary } from './security/permissionBoundary'
 
 const DEFAULT_MAX_OLD_SPACE_SIZE_MB = 8192
 const envMaxOldSpaceSizeMb = Number.parseInt(process.env.CODESURF_MAX_OLD_SPACE_SIZE_MB ?? '', 10)
@@ -80,6 +88,11 @@ app.commandLine.appendSwitch('enable-native-gpu-memory-buffers')
 app.commandLine.appendSwitch('ignore-gpu-blocklist')
 
 const isOwlHost = isOwlHostProcess()
+const isBrokerTest = isBrokerTestProcess()
+const permissionBoundary = installElectronPermissionBoundary({
+  developmentRendererUrl: is.dev ? process.env['ELECTRON_RENDERER_URL'] : undefined,
+  productionRendererFilePath: join(__dirname, '../renderer/index.html'),
+})
 
 // .skill file association support -----------------------------------------
 // Capture launch-via-Finder / `open "X.skill"` before app.whenReady so the
@@ -96,7 +109,9 @@ if (!isOwlHost) {
 // Single-instance lock so a second `open foo.skill` invocation reuses the
 // existing window instead of launching a new one. Argv inspection finds
 // `.skill` paths from Windows/Linux file associations (macOS uses open-file).
-const gotSingleInstanceLock = isOwlHost || app.requestSingleInstanceLock()
+const gotSingleInstanceLock = isOwlHost
+  || isBrokerTest
+  || app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else if (!isOwlHost) {
@@ -128,6 +143,10 @@ const freshWindowIds = new Set<number>()
 const miniChatWindows = new Map<string, BrowserWindow>()
 const MAIN_WINDOW_TABBING_IDENTIFIER = `${APP_ID}.workspace-tabs`
 let extensionRegistry: ExtensionRegistry | null = null
+let windowPersistenceBarrierRegistry: ReturnType<
+  typeof createWindowPersistenceBarrierRegistry
+> | null = null
+let disposeAppQuitBarrier: (() => void) | null = null
 
 interface MainWindowOptions {
   fresh?: boolean
@@ -373,92 +392,6 @@ function broadcastWindowList(): void {
   }
 }
 
-async function requestMacMediaAccess(kind: 'microphone' | 'camera'): Promise<boolean> {
-  if (process.platform !== 'darwin') return true
-  try {
-    return await systemPreferences.askForMediaAccess(kind)
-  } catch (error) {
-    console.warn(`[Permissions] Failed requesting ${kind} access:`, error)
-    return false
-  }
-}
-
-/**
- * Returns true if the given webContents belongs to a trusted main-app renderer
- * (i.e. a BrowserWindow we own), not a guest <webview> tag loading arbitrary content.
- * Webview webContents have getType() === 'webview' in Electron.
- */
-function isTrustedAppRenderer(wc: WebContents | null | undefined): boolean {
-  if (!wc || wc.isDestroyed()) return false
-  return (wc.getType() as string) !== 'webview'
-}
-
-function installMediaPermissionHandlers(): void {
-  const defaultSession = session.defaultSession
-  if (!defaultSession) return
-
-  defaultSession.setPermissionCheckHandler((wc, permission) => {
-    // Display-capture is only allowed for the trusted app renderer, never
-    // for guest <webview> tiles that load arbitrary third-party content.
-    if ((permission as string) === 'display-capture') {
-      return isTrustedAppRenderer(wc)
-    }
-    return permission === 'media'
-  })
-
-  defaultSession.setPermissionRequestHandler(async (wc, permission, callback) => {
-    try {
-      if (permission === 'media') {
-        // Allow mic/camera requests from the main renderer; deny from webviews.
-        if (!isTrustedAppRenderer(wc)) {
-          callback(false)
-          return
-        }
-        const [micAllowed, camAllowed] = await Promise.all([
-          requestMacMediaAccess('microphone'),
-          requestMacMediaAccess('camera'),
-        ])
-        callback(micAllowed || camAllowed)
-        return
-      }
-
-      if (permission === 'display-capture') {
-        // Only grant to trusted app renderer; deny to guest webviews.
-        callback(isTrustedAppRenderer(wc))
-        return
-      }
-
-      callback(false)
-    } catch (error) {
-      console.warn('[Permissions] Permission request failed:', error)
-      callback(false)
-    }
-  })
-
-  defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
-    try {
-      // Resolve the requesting WebContents from the frame when available.
-      // Guard against guest webviews reaching this handler (belt-and-suspenders
-      // in addition to setPermissionCheckHandler/setPermissionRequestHandler).
-      const requestingWc = request.frame ? electronWebContents.fromFrame(request.frame) : null
-      if (!isTrustedAppRenderer(requestingWc)) {
-        console.warn('[Permissions] Display-capture denied for guest webview')
-        callback({})
-        return
-      }
-      const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] })
-      callback(
-        sources[0]
-          ? { video: sources[0], audio: 'loopback' as any }
-          : {},
-      )
-    } catch (error) {
-      console.warn('[Permissions] Display media request failed:', error)
-      callback({})
-    }
-  })
-}
-
 function createWindow(opts?: MainWindowOptions): BrowserWindow {
   const iconPath = resolveAppIconPath()
   const win = new BrowserWindow({
@@ -481,8 +414,10 @@ function createWindow(opts?: MainWindowOptions): BrowserWindow {
     webPreferences: createMainWindowWebPreferences(join(__dirname, '../preload/index.js')),
   })
   attachGuestWebviewSecurityHandlers(win.webContents)
+  permissionBoundary.registerAppWindow(win)
   const windowId = win.webContents.id
   installRenderPerfProbe(win)
+  windowPersistenceBarrierRegistry?.install(win, { role: 'primary-canvas' })
 
   win.on('ready-to-show', () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return
@@ -589,6 +524,8 @@ function createMiniChatWindow(owner: BrowserWindow | null, request: MiniChatWind
     webPreferences: createMainWindowWebPreferences(join(__dirname, '../preload/index.js')),
   })
   attachGuestWebviewSecurityHandlers(win.webContents)
+  permissionBoundary.registerAppWindow(win)
+  windowPersistenceBarrierRegistry?.install(win, { role: 'auxiliary' })
 
   miniChatWindows.set(key, win)
   windowTitles.set(win.webContents.id, typeof request.title === 'string' && request.title.trim() ? request.title.trim() : 'Mini Chat')
@@ -700,7 +637,7 @@ if (isOwlHost) {
     console.error('[owl-host] failed to start:', error)
     app.quit()
   })
-} else if (isBrokerTestProcess()) {
+} else if (isBrokerTest) {
   void runBrokerTestHost().catch(error => {
     console.error('[broker-test] failed to start:', error)
     app.quit()
@@ -708,8 +645,8 @@ if (isOwlHost) {
 } else {
 app.whenReady().then(async () => {
   applyRuntimeAppBranding()
-  installMediaPermissionHandlers()
   electronApp.setAppUserModelId(APP_ID)
+  windowPersistenceBarrierRegistry = createWindowPersistenceBarrierRegistry(ipcMain)
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -788,17 +725,29 @@ app.whenReady().then(async () => {
   extensionRegistry = new ExtensionRegistry({
     bundledDirs: resolveBundledExtensionDirs(),
     catalogDirs: resolveCatalogExtensionDirs(),
+    onSensitiveMediaRevoked: extensionId => {
+      return permissionBoundary.revokeExtensionMedia(extensionId)
+    },
+  })
+  permissionBoundary.setExtensionAuthorizer({
+    getExtensionMediaPermission: extensionId => {
+      return extensionRegistry?.getExtensionMediaPermission(extensionId)
+    },
   })
   registerExtensionProtocol(extensionRegistry)
   registerExtensionIPC(extensionRegistry)
   setExtensionRegistryProvider(() => extensionRegistry)
+  setChatExtensionRegistryProvider(() => extensionRegistry)
 
   registerAppearanceIPC()
   registerPetsIPC()
 
   // Prime cached agent paths from disk only. Full binary detection is deferred
   // until setup/manual refresh so startup does not shell out across all agents.
-  initializeAgentPathsCache().catch(err => console.error('[AgentPaths] Cache init failed:', err))
+  await initializeAgentPathsCache().catch(err => {
+    console.error('[AgentPaths] Cache init failed:', err)
+    return null
+  })
 
   // Start local MCP server for agent→kanban callbacks
   startMCPServer().then(port => {
@@ -816,6 +765,27 @@ app.whenReady().then(async () => {
     broadcastWindowList,
     openExternalIfSafe,
   })
+
+  const reloadFocusedWindow = (
+    reason: Extract<WindowPersistenceReason, 'reload' | 'force-reload'>,
+  ): void => {
+    const win = BrowserWindow.getFocusedWindow() ?? getFocusedMainWindow()
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
+    const persistence = windowPersistenceBarrierRegistry?.requestPersistence(win, reason)
+      ?? Promise.resolve()
+    void persistence
+      .catch(error => {
+        console.error(`[window] ${reason} persistence challenge failed:`, error)
+      })
+      .then(() => {
+        if (win.isDestroyed() || win.webContents.isDestroyed()) return
+        if (reason === 'force-reload') {
+          win.webContents.reloadIgnoringCache()
+        } else {
+          win.webContents.reload()
+        }
+      })
+  }
 
   // Native app menu with Cmd+N / Cmd+T
   const menu = Menu.buildFromTemplate([
@@ -876,8 +846,16 @@ app.whenReady().then(async () => {
     {
       label: 'View',
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
+        {
+          label: 'Reload',
+          accelerator: 'CmdOrCtrl+R',
+          click: () => reloadFocusedWindow('reload'),
+        },
+        {
+          label: 'Force Reload',
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click: () => reloadFocusedWindow('force-reload'),
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'resetZoom' },
@@ -922,14 +900,63 @@ app.whenReady().then(async () => {
 })
 }
 
-app.on('before-quit', () => {
-  flushActivityStore()
+async function runAppShutdownCleanup(): Promise<void> {
+  // The app quit barrier has already settled every window/canvas challenge in
+  // deterministic ownership order. Join main-process persistence here rather
+  // than registering a competing before-quit listener.
+  await runQuitDrains({
+    drains: [{ name: 'activity', run: flushActivityStore }],
+    timeoutMs: 5_000,
+    onFailure: failure => indexLog.warn(
+      'quit drain continued after bounded failure',
+      failure,
+    ),
+  })
+  const mcpShutdown = stopMCPServer()
+  const relayShutdown = unregisterRelayIPC()
+  const chatShutdown = killAllChatProcesses()
   stopAllCollabWatchers()
   extensionRegistry?.deactivateAll()
-  stopAllRelayServices()
-  killAllChatProcesses()
   stopOwlSupervisor()
   closeDb()
+  const [mcpResult, relayResult, chatResult] = await Promise.allSettled([
+    mcpShutdown,
+    relayShutdown,
+    chatShutdown,
+  ])
+  if (mcpResult.status === 'rejected') {
+    console.warn(
+      '[MCP] Failed to stop local server during shutdown:',
+      mcpResult.reason,
+    )
+  }
+  if (relayResult.status === 'rejected') {
+    console.warn(
+      '[Relay] Failed to stop relay providers during shutdown:',
+      relayResult.reason,
+    )
+    throw relayResult.reason
+  }
+  if (chatResult.status === 'rejected') {
+    console.warn(
+      '[Chat] Failed to confirm chat process shutdown:',
+      chatResult.reason,
+    )
+    throw chatResult.reason
+  }
+}
+
+disposeAppQuitBarrier = installAppQuitBarrier(
+  app,
+  () => windowPersistenceBarrierRegistry,
+  runAppShutdownCleanup,
+)
+
+app.on('will-quit', () => {
+  disposeAppQuitBarrier?.()
+  disposeAppQuitBarrier = null
+  windowPersistenceBarrierRegistry?.dispose()
+  windowPersistenceBarrierRegistry = null
 })
 
 app.on('window-all-closed', () => {

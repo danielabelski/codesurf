@@ -24,6 +24,11 @@ exports.default = async function (context) {
   const targetPlatform = context.platform && context.platform.name
   console.log('[before-build] Target platform:', targetPlatform)
 
+  execSync('npm --prefix packages/codesurf-daemon run verify:dist', {
+    cwd: path.join(__dirname, '..'),
+    stdio: 'inherit',
+  })
+
   if (targetPlatform === 'windows') {
     patchNodePtyWin()
 

@@ -1,9 +1,9 @@
 // Daemon-side mirror of src/renderer/src/hooks/personaModelBinding.ts.
 //
 // Kept separate (not imported from the renderer) because the daemon package is
-// self-contained: its published `files` manifest ships only bin/ src/ vendor/,
-// and the cloud clone excludes the desktop `src/` tree — so the CLI here can
-// never import renderer/shared code. This is the same shared↔daemon mirror
+// self-contained: its published `files` manifest ships only bin/ dist/ vendor/,
+// while its compiled CLI cannot import the excluded desktop renderer/shared
+// tree. This is the same shared↔daemon mirror
 // discipline used by agent-mode-resolver.mjs / agent-mode-tools.mjs. The
 // test/daemon suite drift-guards this copy against the renderer original.
 //

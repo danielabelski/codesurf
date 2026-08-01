@@ -11,6 +11,16 @@ import { useTheme } from '../ThemeContext'
 import { useFontTokens, useAppFonts } from '../FontContext'
 import { CODESURF_OPEN_CHAT_SURFACE_EVENT } from '../utils/appLaunchRequests'
 import { PluginSurface } from './PluginSurface'
+import {
+  getExtensionIframeAllow,
+  isSensitiveMediaCapability,
+  type SensitiveMediaCapability,
+} from '../../../shared/extension-sensitive-media'
+import {
+  isTileContextChangeForScope,
+  tileContextChannel,
+  type TileContextChangedPayload,
+} from '../../../shared/tileContextScope'
 
 const el = (window as any).electron
 
@@ -63,6 +73,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [extId, setExtId] = useState<string | null>(null)
+  const [sensitiveMedia, setSensitiveMedia] = useState<SensitiveMediaCapability[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
   const [renderedSize, setRenderedSize] = useState({ w: width, h: Math.max(0, height - 36) })
   const themeCssVarsRef = useRef<Record<string, string>>({})
@@ -363,11 +374,12 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         const request = params?.request ?? params
         const cardId = String(request?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.add(cardId)
         const peers = await buildChatPeers()
         return el.chat?.send?.({
           ...request,
-          workspaceId: request?.workspaceId ?? workspaceId,
+          workspaceId,
           workspaceDir: request?.workspaceDir ?? workspacePath,
           peers: peers.length > 0 ? peers : undefined,
         })
@@ -376,8 +388,9 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       case 'chat.stop': {
         const cardId = String(params?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.delete(cardId)
-        return el.chat?.stop?.(cardId)
+        return el.chat?.stop?.(workspaceId, cardId)
       }
 
       case 'chat.openSurface': {
@@ -404,8 +417,9 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       case 'chat.clearSession': {
         const cardId = String(params?.cardId ?? '').trim()
         if (!cardId) throw new Error('Missing chat cardId')
+        if (!workspaceId) throw new Error('Missing workspace identity')
         extensionChatCardsRef.current.delete(cardId)
-        return el.chat?.clearSession?.(cardId)
+        return el.chat?.clearSession?.(workspaceId, cardId)
       }
 
       case 'relay.init':
@@ -544,6 +558,11 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
         setExtId(match.extId)
         setRenderMode(match.render ?? 'iframe')
+        setSensitiveMedia(
+          Array.isArray(match.sensitiveMedia)
+            ? match.sensitiveMedia.filter(isSensitiveMediaCapability)
+            : [],
+        )
 
         // render:'mcp-ui' tiles paint via PluginSurface (AppRenderer) instead of a
         // raw iframe — fetch the guest HTML and skip the codesurf-ext:// url path.
@@ -674,6 +693,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   useEffect(() => {
     const unsubscribe = el.stream?.onChunk?.((event: any) => {
+      if (event?.workspaceId !== workspaceId) return
       const cardId = typeof event?.cardId === 'string' ? event.cardId : ''
       if (!cardId || !extensionChatCardsRef.current.has(cardId)) return
 
@@ -692,7 +712,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       if (typeof unsubscribe === 'function') unsubscribe()
       extensionChatCardsRef.current.clear()
     }
-  }, [postToIframe])
+  }, [postToIframe, workspaceId])
 
   useEffect(() => {
     if (!bridgeReadyRef.current) return
@@ -705,14 +725,15 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
 
   useEffect(() => {
     const peerContextUnsubs = new Map<string, () => void>()
+    if (!workspaceId) return
 
     for (const peerId of connectedPeerIds) {
-      const channel = `ctx:${peerId}`
-      const subscriberId = `exttile:${tileId}:peer-ctx:${peerId}`
+      const channel = tileContextChannel(workspaceId, peerId)
+      const subscriberId = `exttile:${workspaceId}:${tileId}:peer-ctx:${peerId}`
 
       const unsubscribe = el.bus?.subscribe?.(channel, subscriberId, (event: any) => {
         const p = event?.payload ?? event
-        if (p?.action === 'context_changed') {
+        if (isTileContextChangeForScope(p, workspaceId, peerId) && p.action === 'context_changed') {
           forwardContextEvent(peerId, {
             key: p.key,
             value: p.value,
@@ -730,12 +751,14 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         unsubscribe()
       }
     }
-  }, [connectedPeerIds, forwardContextEvent, tileId])
+  }, [connectedPeerIds, forwardContextEvent, tileId, workspaceId])
 
   // Listen for action invocations via tileContext:changed (proven IPC path)
   useEffect(() => {
     let actionReqId = 0
-    const unsub = el.tileContext?.onChanged?.(tileId, (data: { tileId: string; key: string; value: unknown }) => {
+    if (!workspaceId) return
+    const unsub = el.tileContext?.onChanged?.(workspaceId, tileId, (data: TileContextChangedPayload) => {
+      if (!isTileContextChangeForScope(data, workspaceId, tileId)) return
       if (data.key !== '_action') return
       const cmd = data.value as { action: string; params: Record<string, unknown>; ts: number } | null
       if (!cmd?.action) return
@@ -749,7 +772,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
       })
     })
     return () => { if (typeof unsub === 'function') unsub() }
-  }, [tileId, postToIframe])
+  }, [tileId, postToIframe, workspaceId])
 
   useEffect(() => {
     return () => {
@@ -793,6 +816,8 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         overflow: 'hidden',
         background: extensionSurfaceBackground,
       }}>
+        {/* MCP-UI proxy frames deliberately receive no sensitive media policy:
+            their internal __runext_* principal is not an extension principal. */}
         <PluginSurface extId={extId ?? extType} render="mcp-ui" html={mcpHtml ?? ''} surfaceId={extType} />
       </div>
     )
@@ -811,7 +836,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
         ref={iframeRef}
         src={entryUrl}
         sandbox="allow-scripts allow-same-origin allow-modals"
-        allow="camera; microphone; display-capture; autoplay"
+        allow={getExtensionIframeAllow(sensitiveMedia)}
         style={{
           position: 'absolute',
           top: 0,

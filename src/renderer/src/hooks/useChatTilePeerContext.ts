@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { isTileContextChangeForScope, tileContextChannel } from '../../../shared/tileContextScope'
 import { getImplicitPeerImageAttachments, type DiscoveryPeer } from '../components/chat/chatTileUtils'
 
 export function useChatTilePeerContext(options: {
@@ -53,15 +54,15 @@ export function useChatTilePeerContext(options: {
   }, [workspaceId, connectedPeerSignature])
 
   useEffect(() => {
-    if (!window.electron?.bus) return
+    if (!workspaceId || !window.electron?.bus) return
     const unsubs: Array<() => void> = []
 
     for (const peer of connectedPeers) {
-      const channel = `ctx:${peer.peerId}`
-      const subscriberId = `chat:${tileId}:peer-ctx:${peer.peerId}`
+      const channel = tileContextChannel(workspaceId, peer.peerId)
+      const subscriberId = `chat:${workspaceId}:${tileId}:peer-ctx:${peer.peerId}`
       const unsubscribe = window.electron.bus.subscribe(channel, subscriberId, (event) => {
-        const p = (event?.payload ?? event) as { action?: string; key?: string; value?: unknown }
-        if (p?.action === 'context_changed' && p.key) {
+        const p = event?.payload ?? event
+        if (isTileContextChangeForScope(p, workspaceId, peer.peerId) && p.action === 'context_changed' && p.key) {
           const existing = peerContextRef.current.get(peer.peerId) ?? {}
           peerContextRef.current.set(peer.peerId, { ...existing, [p.key]: p.value })
           setPeerContextVersion(v => v + 1)
@@ -71,7 +72,7 @@ export function useChatTilePeerContext(options: {
     }
 
     return () => { for (const u of unsubs) u() }
-  }, [connectedPeerSignature, tileId])
+  }, [connectedPeerSignature, tileId, workspaceId])
 
   return {
     peerContextRef,

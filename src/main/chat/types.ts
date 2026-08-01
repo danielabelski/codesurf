@@ -23,6 +23,13 @@ export interface ChatImageAttachment {
   mediaType: string
   displayPath: string
   byteCount: number
+  /** Host-verified file identity captured while expanding an attachment capability. */
+  device: string
+  inode: string
+  mtimeMs: number
+  ctimeMs: number
+  /** Host-only ownership bit for renderer-authored temporary bytes. */
+  ownedTemporary?: boolean
 }
 
 export interface ChatContextBucketSection {
@@ -90,6 +97,18 @@ export interface ChatRequest {
   memoryPrompt?: string
   /** Agent-room standing + consumed traffic for this turn (main injects). */
   roomContext?: string
+  /** Main-process-only cursor reservation; never trusted from renderer input. */
+  roomAckSequence?: number
+  /** Host-composed provider system context. Stripped at every inbound boundary. */
+  contextPrompt?: string
+  /** Host-expanded workspace file content, delivered as untrusted user data. */
+  fileReferencePrompt?: string
+  /** Renderer-derived recent edit hint; host bounds and labels it as untrusted user data. */
+  recentEditContext?: string
+  /** Renderer-derived transcript block notes; host bounds and labels them as untrusted user data. */
+  blockNotesContext?: string
+  /** Host-filtered renderer peer observations, delivered only as untrusted user data. */
+  untrustedPeerContext?: string
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle

@@ -16,5 +16,5 @@ export default async function globalSetup(): Promise<void> {
     )
   }
 
-  resolveElectronExecutable()
+  resolveElectronExecutable(join(__dirname, '..'))
 }
