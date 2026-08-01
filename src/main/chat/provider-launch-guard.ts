@@ -57,7 +57,20 @@ export class ProviderPrelaunchBoundary {
       return { ok: false }
     }
 
-    return { ok: true, value: operation.launch(prepared) }
+    try {
+      return { ok: true, value: operation.launch(prepared) }
+    } catch (error) {
+      // Launch is the ownership handoff point. If the provider refuses to
+      // start, prepared state (temporary files, servers, or sessions) still
+      // belongs to this boundary and must be released before the error travels
+      // back to the caller. Preserve the launch error if cleanup itself fails.
+      try {
+        await operation.disposePrepared?.(prepared)
+      } catch {
+        // The original launch failure is the actionable error for the caller.
+      }
+      throw error
+    }
   }
 }
 
