@@ -387,8 +387,25 @@ async function renameProject(args: { projectId?: string, projectPath?: string, n
   return { ok: true, project }
 }
 
+// workspaceId/tileId come from the renderer and are interpolated into storage
+// paths — reject segments that could escape the workspaces dir ('../../x').
+function safeStorageSegment(value: string, label: string, fallback?: string): string {
+  const segment = String(value ?? '').trim() || fallback || ''
+  if (
+    !segment
+    || segment === '.'
+    || segment === '..'
+    || segment.includes('/')
+    || segment.includes('\\')
+    || segment.includes('\0')
+  ) {
+    throw new Error(`Invalid ${label}`)
+  }
+  return segment
+}
+
 function workspaceStorageDir(workspaceId: string): string {
-  return join(WORKSPACES_DIR, workspaceId || 'default')
+  return join(WORKSPACES_DIR, safeStorageSegment(workspaceId, 'workspaceId', 'default'))
 }
 
 async function loadCanvas(workspaceId: string): Promise<unknown | null> {
@@ -403,13 +420,13 @@ async function saveCanvas(workspaceId: string, state: unknown): Promise<boolean>
 }
 
 async function loadTileState(workspaceId: string, tileId: string): Promise<unknown | null> {
-  return await readJson(join(workspaceStorageDir(workspaceId), 'tiles', `${tileId}.json`), null)
+  return await readJson(join(workspaceStorageDir(workspaceId), 'tiles', `${safeStorageSegment(tileId, 'tileId')}.json`), null)
 }
 
 async function saveTileState(workspaceId: string, tileId: string, state: unknown): Promise<boolean> {
   const dir = join(workspaceStorageDir(workspaceId), 'tiles')
   await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, `${tileId}.json`), JSON.stringify(state, null, 2))
+  await writeFile(join(dir, `${safeStorageSegment(tileId, 'tileId')}.json`), JSON.stringify(state, null, 2))
   broadcast('canvas:sessionsChanged', { workspaceId, tileId })
   return true
 }
@@ -1232,7 +1249,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return await saveTileState(String(args[0] ?? ''), String(args[1] ?? ''), args[2])
       case 'canvas:clearTileState':
       case 'canvas:deleteTileArtifacts': {
-        await rm(join(workspaceStorageDir(String(args[0] ?? '')), 'tiles', `${String(args[1] ?? '')}.json`), { force: true })
+        await rm(join(workspaceStorageDir(String(args[0] ?? '')), 'tiles', `${safeStorageSegment(String(args[1] ?? ''), 'tileId')}.json`), { force: true })
         broadcast('canvas:sessionsChanged', { workspaceId: args[0], tileId: args[1] })
         return true
       }

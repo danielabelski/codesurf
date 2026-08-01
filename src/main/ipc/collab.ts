@@ -1,7 +1,8 @@
 import { randomUUID } from 'crypto'
 import { ipcMain, type WebContents } from 'electron'
 import { promises as fs } from 'fs'
-import { join, basename } from 'path'
+import { homedir } from 'os'
+import { join, basename, resolve, sep } from 'path'
 import type {
   CollabState,
   CollabSkills,
@@ -14,6 +15,7 @@ import type {
   CollabMessageType,
 } from '../../shared/types'
 import {
+  CODESURF_HOME,
   workspaceTileDir,
   workspaceTileContextDir,
   legacyWorkspaceTileDir,
@@ -27,6 +29,7 @@ import {
   resolveInside,
 } from '../security/pathSegments.ts'
 import { broadcastToRenderer } from '../utils/broadcast'
+import { getAllWorkspaceProjectPaths } from './workspace'
 
 const MESSAGE_PROTOCOL = 'codesurf-message/v1' as const
 const MESSAGE_MAILBOXES: CollabMailbox[] = ['inbox', 'sent', 'memory', 'bin']
@@ -34,33 +37,76 @@ const MESSAGE_MAILBOX_SET = new Set<string>(MESSAGE_MAILBOXES)
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * Collab handlers operate on <workspacePath>/.codesurf/<tileId> and the
+ * workspacePath itself is renderer-supplied with only resolve() applied.
+ * Never allow the user's home or the app's own config tree: with a
+ * safe-segment tileId like 'sessions', removeTileDir('~', …) would wipe
+ * ~/.codesurf/sessions.
+ */
+function assertCollabWorkspacePath(workspacePath: string): string {
+  const resolved = assertSafeWorkspacePath(workspacePath)
+  const foldCase = process.platform === 'darwin' || process.platform === 'win32'
+  const norm = (p: string) => (foldCase ? resolve(p).toLowerCase() : resolve(p))
+  const target = norm(resolved)
+  const home = norm(homedir())
+  const appHome = norm(CODESURF_HOME)
+  if (target === home || target === appHome || target.startsWith(appHome + sep)) {
+    throw new Error('Refusing collab operation on the home/app config directory')
+  }
+  return resolved
+}
+
+// Destructive handlers (removeTileDir / pruneOrphanedTileDirs) additionally
+// require the path to be a registered workspace project root.
+let workspaceRootsCache: { at: number; roots: Set<string> } | null = null
+const WORKSPACE_ROOTS_CACHE_MS = 10_000
+
+async function isRegisteredWorkspaceRoot(workspacePath: string): Promise<boolean> {
+  const foldCase = process.platform === 'darwin' || process.platform === 'win32'
+  const target = foldCase ? resolve(workspacePath).toLowerCase() : resolve(workspacePath)
+  const lookup = (roots: Set<string>): boolean => {
+    for (const root of roots) {
+      if ((foldCase ? root.toLowerCase() : root) === target) return true
+    }
+    return false
+  }
+  if (workspaceRootsCache && Date.now() - workspaceRootsCache.at < WORKSPACE_ROOTS_CACHE_MS) {
+    if (lookup(workspaceRootsCache.roots)) return true
+  }
+  // Force-refresh on miss so a just-created workspace isn't rejected.
+  const roots = new Set(await getAllWorkspaceProjectPaths().catch(() => [] as string[]))
+  workspaceRootsCache = { at: Date.now(), roots }
+  return lookup(roots)
+}
+
 function assertSafeMailbox(mailbox: CollabMailbox): CollabMailbox {
   if (!MESSAGE_MAILBOX_SET.has(String(mailbox))) throw new Error('Invalid mailbox')
   return mailbox
 }
 
 function collabDir(workspacePath: string, tileId: string): string {
-  return workspaceTileDir(assertSafeWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'))
+  return workspaceTileDir(assertCollabWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'))
 }
 
 function legacyCollabDir(workspacePath: string, tileId: string): string {
-  return legacyWorkspaceTileDir(assertSafeWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'))
+  return legacyWorkspaceTileDir(assertCollabWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'))
 }
 
 function contextDir(workspacePath: string, tileId: string): string {
-  return workspaceTileContextDir(workspacePath, tileId)
+  return workspaceTileContextDir(assertCollabWorkspacePath(workspacePath), tileId)
 }
 
 function legacyContextDir(workspacePath: string, tileId: string): string {
-  return legacyWorkspaceTileContextDir(workspacePath, tileId)
+  return legacyWorkspaceTileContextDir(assertCollabWorkspacePath(workspacePath), tileId)
 }
 
 function messagesDir(workspacePath: string, tileId: string): string {
-  return workspaceTileMessagesDir(workspacePath, tileId)
+  return workspaceTileMessagesDir(assertCollabWorkspacePath(workspacePath), tileId)
 }
 
 function mailboxDir(workspacePath: string, tileId: string, mailbox: CollabMailbox): string {
-  return workspaceTileMessageMailboxDir(assertSafeWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'), assertSafeMailbox(mailbox))
+  return workspaceTileMessageMailboxDir(assertCollabWorkspacePath(workspacePath), assertSafePathSegment(tileId, 'tileId'), assertSafeMailbox(mailbox))
 }
 
 function contextFilePath(workspacePath: string, tileId: string, filename: string): string {
@@ -76,7 +122,7 @@ function messageFilePath(workspacePath: string, tileId: string, mailbox: CollabM
 }
 
 async function ensureTileProtocolDirs(workspacePath: string, tileId: string): Promise<void> {
-  const safeWorkspacePath = assertSafeWorkspacePath(workspacePath)
+  const safeWorkspacePath = assertCollabWorkspacePath(workspacePath)
   const safeTileId = assertSafePathSegment(tileId, 'tileId')
   const tileDir = collabDir(safeWorkspacePath, safeTileId)
 
@@ -636,6 +682,10 @@ export function registerCollabIPC(): void {
   })
 
   ipcMain.handle('collab:removeTileDir', async (_, workspacePath: string, tileId: string) => {
+    // rm -rf handler: require a registered workspace root, not just any path.
+    if (!(await isRegisteredWorkspaceRoot(workspacePath))) {
+      throw new Error('collab:removeTileDir requires a registered workspace path')
+    }
     stopStateWatcher(workspacePath, tileId)
     stopMessageWatcher(workspacePath, tileId)
     await Promise.all([
@@ -646,7 +696,11 @@ export function registerCollabIPC(): void {
   })
 
   ipcMain.handle('collab:pruneOrphanedTileDirs', async (_, workspacePath: string, tileIds: string[]) => {
-    const workspaceRoot = assertSafeWorkspacePath(workspacePath)
+    // rm -rf handler: require a registered workspace root, not just any path.
+    if (!(await isRegisteredWorkspaceRoot(workspacePath))) {
+      throw new Error('collab:pruneOrphanedTileDirs requires a registered workspace path')
+    }
+    const workspaceRoot = assertCollabWorkspacePath(workspacePath)
     const validTileIds = new Set(tileIds.map(id => {
       try { return assertSafePathSegment(id, 'tileId') } catch { return '' }
     }).filter(Boolean))

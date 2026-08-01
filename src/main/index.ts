@@ -223,6 +223,30 @@ function loadRenderer(win: BrowserWindow, query?: Record<string, string>): void 
   }
 }
 
+/**
+ * Same-window navigations must never replace the app UI: an external page
+ * loaded into a main window would inherit the full preload bridge (fs,
+ * terminal, secrets, MCP token). setWindowOpenHandler only covers
+ * window.open/target=_blank — will-navigate catches location.href and plain
+ * link clicks. External links are handed to the OS handler instead.
+ */
+function installNavigationGuard(win: BrowserWindow): void {
+  win.webContents.on('will-navigate', (event) => {
+    const devUrl = process.env['ELECTRON_RENDERER_URL']
+    if (is.dev && devUrl) {
+      try {
+        if (new URL(event.url).origin === new URL(devUrl).origin) return
+      } catch {
+        // fall through to deny
+      }
+    }
+    event.preventDefault()
+    if (/^https?:\/\//i.test(event.url) || event.url.startsWith('file://')) {
+      void openExternalIfSafe(event.url, 'window')
+    }
+  })
+}
+
 function installRenderPerfProbe(win: BrowserWindow): void {
   if (process.env.CODESURF_PERF_RENDER !== '1') return
 
@@ -502,6 +526,7 @@ function createWindow(opts?: MainWindowOptions): BrowserWindow {
     void openExternalIfSafe(details.url, 'window')
     return { action: 'deny' }
   })
+  installNavigationGuard(win)
 
   // Track fresh windows so renderer can query via IPC
   if (opts?.fresh) {
@@ -610,6 +635,7 @@ function createMiniChatWindow(owner: BrowserWindow | null, request: MiniChatWind
     void openExternalIfSafe(details.url, 'window')
     return { action: 'deny' }
   })
+  installNavigationGuard(win)
   win.webContents.on('did-finish-load', async () => {
     if (win.isDestroyed() || win.webContents.isDestroyed()) return
     const level = await getSavedZoomLevel()

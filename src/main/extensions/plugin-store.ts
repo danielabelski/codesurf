@@ -16,12 +16,15 @@ import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { CODESURF_HOME } from '../paths'
 import { bus } from '../event-bus'
+import { assertSafePathSegment } from '../security/pathSegments'
 
 const STORE_DIR = join(CODESURF_HOME, 'plugin-state')
 const cache = new Map<string, Record<string, unknown>>()
 
 function fileFor(extId: string): string {
-  return join(STORE_DIR, `${extId}.json`)
+  // extId comes from renderer IPC — validate before it becomes a filename so
+  // '../mcp-server' can't read/overwrite files outside the store dir.
+  return join(STORE_DIR, `${assertSafePathSegment(extId, 'extId')}.json`)
 }
 
 export function stateChannel(extId: string): string {

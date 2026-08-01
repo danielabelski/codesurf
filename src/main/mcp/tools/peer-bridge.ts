@@ -120,6 +120,28 @@ async function findNoteTileBackingFile(tileId: string): Promise<string | null> {
   return null
 }
 
+/**
+ * Best-effort resolution of which workspace a tile lives in. Used to key
+ * permission grants per workspace — without it every MCP-sourced grant lands
+ * on the null (global) workspace and one "Always" click silently authorizes
+ * the tool against every workspace's tiles forever.
+ */
+export async function resolveTileWorkspaceDir(tileId: string): Promise<string | null> {
+  try {
+    assertSafePathSegment(tileId, 'tile_id')
+    const workspaces = await readWorkspaceRefsFromUserConfig()
+    for (const ws of workspaces) {
+      const protocolDir = await fs.stat(join(ws.path, '.codesurf', tileId)).catch(() => null)
+      if (protocolDir?.isDirectory()) return ws.path
+      const tiles = await readCanvasStateTiles(ws.id)
+      if (tiles.some(entry => entry?.id === tileId)) return ws.path
+    }
+  } catch {
+    // fall through — the grant then keys on the null workspace, as before
+  }
+  return null
+}
+
 // Every tool here takes tile_id as a TARGET peer block, not the caller's own
 // block — cross-tile by design (this is the peer bridge: terminal_send_input,
 // chat_send_message, browser_navigate, kanban_*, image_*, note_* etc. all
@@ -159,9 +181,11 @@ export async function handlePeerBridgeTool(
       )
     }
 
+    const workspaceDir = await resolveTileWorkspaceDir(tileId)
     const permissionRequest = {
       provider: 'mcp',
       toolName: 'terminal_send_input',
+      workspaceDir: workspaceDir ?? undefined,
       title: 'Terminal input from MCP agent',
       description: `An MCP agent wants to type into terminal tile "${tileId}":\n${input.slice(0, 200)}${input.length > 200 ? '...' : ''}`,
     }
@@ -196,8 +220,20 @@ export async function handlePeerBridgeTool(
   if (name === 'note_write_content') {
     const content = asString(args.content)
     if (content === undefined) return 'Missing content'
+    // Gated like terminal_send_input: the backing file may be any path the
+    // canvas state references, so an ungated write is an arbitrary-file
+    // overwrite primitive for any token holder.
+    const notePath = await findNoteTileBackingFile(tileId)
+    const workspaceDir = await resolveTileWorkspaceDir(tileId)
+    const allowed = await requestToolPermission({
+      provider: 'mcp',
+      toolName: 'note_write_content',
+      workspaceDir: workspaceDir ?? undefined,
+      title: 'Note overwrite from MCP agent',
+      description: `An MCP agent wants to replace the contents of note tile "${tileId}"${notePath ? ` (${notePath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
+    }, /* interactive */ true)
+    if (!allowed) return 'Permission denied: note_write_content was not approved'
     try {
-      const notePath = await findNoteTileBackingFile(tileId)
       if (notePath) await fs.writeFile(notePath, content, 'utf8')
     } catch (err) {
       console.warn(`[peer-bridge] note_write_content failed for ${tileId}:`, err)
@@ -210,8 +246,18 @@ export async function handlePeerBridgeTool(
     const content = asString((name === 'kanban_set_status' ? args.message : args.snippet ?? args.context ?? args.note ?? args.message))
     if (!content) return 'Missing message'
     if (name === 'note_append_context') {
+      // Same write primitive as note_write_content — gate it the same way.
+      const notePath = await findNoteTileBackingFile(tileId)
+      const workspaceDir = await resolveTileWorkspaceDir(tileId)
+      const allowed = await requestToolPermission({
+        provider: 'mcp',
+        toolName: 'note_append_context',
+        workspaceDir: workspaceDir ?? undefined,
+        title: 'Note append from MCP agent',
+        description: `An MCP agent wants to append to note tile "${tileId}"${notePath ? ` (${notePath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
+      }, /* interactive */ true)
+      if (!allowed) return 'Permission denied: note_append_context was not approved'
       try {
-        const notePath = await findNoteTileBackingFile(tileId)
         if (notePath) {
           const previous = await fs.readFile(notePath, 'utf8').catch(() => '')
           const next = previous ? `${previous}\n${content}` : content

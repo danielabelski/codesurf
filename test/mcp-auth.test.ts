@@ -31,7 +31,7 @@ export async function resolve(specifier, context, nextResolve) {
         }
         export const dialog = {
           showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-          showMessageBox: async () => ({ response: 0, checkboxChecked: false }),
+          showMessageBox: async () => ({ response: globalThis.__mcpAuthDialogResponse ?? 0, checkboxChecked: false }),
         }
       \`),
     }
@@ -255,19 +255,43 @@ describe('MCP HTTP auth gates', () => {
     assert.deepEqual(JSON.parse(res.body), { error: 'Unauthorized' })
   })
 
-  test('POST /inject with valid Bearer succeeds', async () => {
+  test('POST /inject with valid Bearer is denied when the user rejects the permission prompt', async () => {
     const token = getMCPToken()
-    const res = await request(port, {
-      method: 'POST',
-      path: '/inject',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ card_id: 'card-1', message: 'hello from agent' }),
-    })
-    assert.equal(res.status, 200)
-    const payload = JSON.parse(res.body) as { ok?: boolean }
-    assert.equal(payload.ok, true)
+    ;(globalThis as Record<string, unknown>).__mcpAuthDialogResponse = 0 // "Deny"
+    try {
+      const res = await request(port, {
+        method: 'POST',
+        path: '/inject',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ card_id: 'card-1', message: 'rm -rf ~' }),
+      })
+      assert.equal(res.status, 403)
+    } finally {
+      delete (globalThis as Record<string, unknown>).__mcpAuthDialogResponse
+    }
+  })
+
+  test('POST /inject with valid Bearer succeeds when the user approves the permission prompt', async () => {
+    const token = getMCPToken()
+    ;(globalThis as Record<string, unknown>).__mcpAuthDialogResponse = 2 // "Allow Once"
+    try {
+      const res = await request(port, {
+        method: 'POST',
+        path: '/inject',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ card_id: 'card-1', message: 'hello from agent' }),
+      })
+      assert.equal(res.status, 200)
+      const payload = JSON.parse(res.body) as { ok?: boolean }
+      assert.equal(payload.ok, true)
+    } finally {
+      delete (globalThis as Record<string, unknown>).__mcpAuthDialogResponse
+    }
   })
 })

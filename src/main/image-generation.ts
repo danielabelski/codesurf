@@ -1,4 +1,4 @@
-import { basename, dirname, extname, isAbsolute, join } from 'path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'path'
 import type { AppSettings, GenerationProviderSettings } from '../shared/types'
 
 export interface SelectedImageProvider {
@@ -59,14 +59,23 @@ export function extensionForMimeType(mimeType: string, fallbackPath?: string): s
 }
 
 export function makeImageOutputPath(sourcePath: string, explicitOutputPath: string | undefined, mimeType = 'image/png'): string {
+  const sourceDir = dirname(sourcePath)
   if (explicitOutputPath?.trim()) {
     const requested = explicitOutputPath.trim()
-    return isAbsolute(requested) ? requested : join(dirname(sourcePath), requested)
+    const resolved = isAbsolute(requested) ? resolve(requested) : resolve(sourceDir, requested)
+    // The output path is renderer/MCP-supplied: keep it inside the source
+    // image's directory tree so a prompt-injected agent can't clobber
+    // arbitrary files (~/.zshrc, ~/.codesurf/secrets.json) with image bytes.
+    const rel = relative(sourceDir, resolved)
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error(`Output path must stay inside the source image directory: ${requested}`)
+    }
+    return resolved
   }
 
   const ext = extensionForMimeType(mimeType, sourcePath)
   const base = basename(sourcePath, extname(sourcePath) || ext).replace(/[^\w.-]+/g, '-')
-  return join(dirname(sourcePath), `${base}-edited-${Date.now()}${ext}`)
+  return join(sourceDir, `${base}-edited-${Date.now()}${ext}`)
 }
 
 export function extractGeminiInlineImage(payload: unknown): GeminiInlineImage | null {
