@@ -54,6 +54,9 @@ jobs:
       - name: Verify committed daemon artifacts before generation
         run: npm run verify:daemon-dist
 
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
       - name: Build the main-process test prerequisite
         run: npm run build:main
 
@@ -100,14 +103,21 @@ jobs:
       - name: Verify committed daemon artifacts before generation
         run: npm run verify:daemon-dist
 
+      - name: Verify committed daemon artifacts before generation
+        run: npm run verify:daemon-dist
+
       - name: Audit dependency trees
         run: |
           npm audit --audit-level=low
           npm audit --omit=dev --audit-level=low
           npm --prefix packages/codesurf-daemon audit --audit-level=low
+          npm --prefix packages/codesurf-daemon audit --omit=dev --audit-level=low
           npm --prefix packages/codesurf-relay audit --audit-level=low
+          npm --prefix packages/codesurf-relay audit --omit=dev --audit-level=low
           npm --prefix packages/codesurf-terminal-gateway audit --audit-level=low
+          npm --prefix packages/codesurf-terminal-gateway audit --omit=dev --audit-level=low
           npm --prefix apps/chat-app audit --audit-level=low
+          npm --prefix apps/chat-app audit --omit=dev --audit-level=low
 
       - name: Lint and verify formatting
         run: npm run lint && npm run format:check
@@ -136,8 +146,8 @@ jobs:
       - name: Build, install, and smoke npm package
         run: npm run test:npm-package
 
-      - name: Build and smoke Electrobun runtime
-        run: npm run smoke:electrobun
+      - name: Build, smoke, and accept Electrobun runtime
+        run: npm run verify:electrobun-runtime
 
       - name: Run Playwright E2E suite
         run: npm run test:e2e

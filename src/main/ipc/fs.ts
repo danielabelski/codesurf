@@ -15,9 +15,14 @@ import { CODESURF_HOME, CODESURF_HOME_DIRNAME } from '../paths.ts'
 import { SENSITIVE_HOME_DIRS } from '../security/sensitivePaths.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
 
-const requireElectron = createRequire(import.meta.url)
+let requireElectron: ReturnType<typeof createRequire> | null = null
 
 function getElectron(): typeof import('electron') {
+  if (!requireElectron) {
+    requireElectron = typeof require === 'function'
+      ? require
+      : createRequire(import.meta.url)
+  }
   return requireElectron('electron') as typeof import('electron')
 }
 
@@ -663,6 +668,33 @@ export async function readUtf8FileNoFollow(
   }
 }
 
+export async function readUtf8FilePrefixNoFollow(
+  targetPath: string,
+  maxBytes: number,
+  authorization?: FsPathAuthorization,
+): Promise<string> {
+  const boundedBytes = Math.max(1, Math.min(64 * 1024, Math.floor(maxBytes)))
+  const { handle, stats } = await openExistingFileNoFollow(
+    targetPath,
+    fsConstants.O_RDONLY,
+    authorization,
+  )
+  try {
+    const allocation = Math.min(stats.size, boundedBytes)
+    if (allocation === 0) return ''
+    const buffer = Buffer.allocUnsafe(allocation)
+    let offset = 0
+    while (offset < allocation) {
+      const { bytesRead } = await handle.read(buffer, offset, allocation - offset, offset)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    return buffer.subarray(0, offset).toString('utf8')
+  } finally {
+    await handle.close()
+  }
+}
+
 export interface WriteUtf8FileNoFollowOptions {
   authorization?: FsPathAuthorization
   beforeOpen?: () => void | Promise<void>
@@ -722,6 +754,33 @@ export async function writeUtf8FileNoFollow(
     throw error
   } finally {
     if (handle) await handle.close()
+  }
+}
+
+export async function appendUtf8FileNoFollow(
+  targetPath: string,
+  content: string,
+  options?: WriteUtf8FileNoFollowOptions,
+): Promise<void> {
+  try {
+    const stats = await fs.lstat(targetPath)
+    if (stats.isSymbolicLink()) throw symbolicLinkAccessError(targetPath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    await writeUtf8FileNoFollow(targetPath, content, options)
+    return
+  }
+
+  await options?.beforeOpen?.()
+  const { handle, stats } = await openExistingFileNoFollow(
+    targetPath,
+    fsConstants.O_WRONLY | fsConstants.O_APPEND,
+    options?.authorization,
+  )
+  try {
+    await handle.writeFile(`${stats.size > 0 ? '\n' : ''}${content}`, { encoding: 'utf8' })
+  } finally {
+    await handle.close()
   }
 }
 
@@ -1032,6 +1091,23 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       if (code === 'ENOENT') return ''
       throw error
     }
+  })
+
+  ipcMain.handle('fs:readFilePrefix', async (_, filePath: string, maxBytes: number, workspaceId?: string) => {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
+      throw new Error('maxBytes must be an integer between 1 and 65536')
+    }
+    const validated = await validatePath(
+      filePath,
+      'read',
+      workspaceId,
+      { allowReadOnlyOpenCodeConfig: true },
+    )
+    return await readUtf8FilePrefixNoFollow(
+      validated.operationPath,
+      maxBytes,
+      validated.authorization,
+    )
   })
 
   handleTyped('fs:writeFile', {

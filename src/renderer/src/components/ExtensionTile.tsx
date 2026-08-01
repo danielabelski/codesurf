@@ -757,7 +757,7 @@ export function ExtensionTile({ tileId, extType, width, height, workspaceId, wor
   useEffect(() => {
     let actionReqId = 0
     if (!workspaceId) return
-    const unsub = el.tileContext?.onChanged?.(tileId, (data: TileContextChangedPayload) => {
+    const unsub = el.tileContext?.onChanged?.(workspaceId, tileId, (data: TileContextChangedPayload) => {
       if (!isTileContextChangeForScope(data, workspaceId, tileId)) return
       if (data.key !== '_action') return
       const cmd = data.value as { action: string; params: Record<string, unknown>; ts: number } | null

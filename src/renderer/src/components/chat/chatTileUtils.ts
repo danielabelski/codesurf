@@ -9,6 +9,11 @@ import type { SessionEntryHint } from '../../../../shared/session-types'
 import { buildChatMessageHistoryFingerprint } from '../../../../shared/chat-history'
 import { normalizeChatSurfacePayload, type ChatSurfacePayload } from '../chatSurfaceHostRpc'
 import { isBuiltinProvider } from '../../config/providers'
+import {
+  loadTrustedRecentEditFiles,
+  type RecentEditOrigin,
+} from './recentEditContextReader.ts'
+export { buildBlockNotesContext } from './boundedBlockNotes.ts'
 
 export const CHAT_DEFAULT_SKILL_LOCATIONS = [
   '$HOME/.claude/commands',
@@ -98,6 +103,8 @@ export function isUrgentQueuedContent(text: string): boolean {
 export interface PendingAttachment {
   path: string
   kind: 'image' | 'file'
+  /** Opaque, one-shot host authority for picker/temp attachments. */
+  capability?: string
 }
 
 /**
@@ -150,8 +157,9 @@ export function mergeAttachments(...groups: PendingAttachment[][]): PendingAttac
   for (const group of groups) {
     for (const item of group) {
       const path = item.path.trim()
-      if (!path || seen.has(path)) continue
-      seen.add(path)
+      const key = item.capability ?? path
+      if (!path || seen.has(key)) continue
+      seen.add(key)
       merged.push({ ...item, path })
     }
   }
@@ -210,10 +218,21 @@ export function getToolDisplayName(name: string): string {
 
 export function buildOutgoingMessageContent(draftInput: string, draftAttachments: PendingAttachment[]): string {
   const trimmedInput = draftInput.trim()
-  const attachmentBlock = draftAttachments.length > 0
-    ? `Attached file paths:\n${draftAttachments.map(item => item.path).join('\n')}`
+  const workspaceReferences = draftAttachments
+    .filter(item => !item.capability)
+    .map(item => item.path.replace(/[\r\n\0]/g, ''))
+    .filter(path => path && !path.includes('"'))
+    .map(path => `@file:"${path}"`)
+    .join('\n')
+  const capabilityBlock = draftAttachments.some(item => item.capability)
+    ? [
+        'Attached file capabilities:',
+        ...draftAttachments
+          .filter((item): item is PendingAttachment & { capability: string } => Boolean(item.capability))
+          .map(item => `${item.capability}\t${item.path.replace(/[\r\n\t\0]/g, ' ').slice(0, 160)}`),
+      ].join('\n')
     : ''
-  return [trimmedInput, attachmentBlock].filter(Boolean).join('\n\n').trim()
+  return [trimmedInput, workspaceReferences, capabilityBlock].filter(Boolean).join('\n\n').trim()
 }
 
 export function encodeUtf8Base64(text: string): string {
@@ -228,7 +247,10 @@ export function encodeUtf8Base64(text: string): string {
 
 export function buildQueuedTurnPreview(content: string, attachmentCount: number): string {
   const trimmed = content.trim()
-  const attachmentMarkerIndex = trimmed.indexOf('Attached file paths:')
+  const markerIndexes = ['Attached file paths:', 'Attached file capabilities:']
+    .map(marker => trimmed.indexOf(marker))
+    .filter(index => index >= 0)
+  const attachmentMarkerIndex = markerIndexes.length > 0 ? Math.min(...markerIndexes) : -1
   const visibleText = attachmentMarkerIndex >= 0 ? trimmed.slice(0, attachmentMarkerIndex).trim() : trimmed
   const firstLine = visibleText.split(/\r?\n/, 1)[0]?.trim() ?? ''
   const truncated = firstLine.length > 140 ? `${firstLine.slice(0, 139)}…` : firstLine
@@ -272,7 +294,12 @@ export function extractChangedLineRangesFromDiff(diff: string): Array<{ start: n
   return ranges
 }
 
-export function buildSnippetFromRanges(fileContent: string, ranges: Array<{ start: number; end: number }>): string {
+export function buildSnippetFromRanges(
+  fileContent: string,
+  ranges: Array<{ start: number; end: number }>,
+  maxChars = RECENT_EDIT_CONTEXT_MAX_CHARS,
+): string {
+  if (maxChars <= 0) return ''
   const lines = String(fileContent ?? '').split(/\r?\n/)
   if (lines.length === 0) return ''
   const windows = ranges.length > 0
@@ -294,16 +321,28 @@ export function buildSnippetFromRanges(fileContent: string, ranges: Array<{ star
   }
 
   let emittedLines = 0
+  let emittedChars = 0
   const parts: string[] = []
+  const appendPart = (value: string): boolean => {
+    const separatorChars = parts.length > 0 ? 1 : 0
+    const remaining = maxChars - emittedChars - separatorChars
+    if (remaining <= 0) return false
+    const part = value.length <= remaining
+      ? value
+      : `${value.slice(0, Math.max(0, remaining - 1)).trimEnd()}…`
+    parts.push(part)
+    emittedChars += separatorChars + part.length
+    return value.length <= remaining
+  }
   for (const range of merged) {
-    if (emittedLines >= RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT) break
-    if (parts.length > 0) parts.push('...')
+    if (emittedLines >= RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT || emittedChars >= maxChars) break
+    if (parts.length > 0 && !appendPart('...')) break
     for (let lineNumber = range.start; lineNumber <= range.end; lineNumber += 1) {
       if (emittedLines >= RECENT_EDIT_CONTEXT_SNIPPET_LINE_LIMIT) {
-        parts.push('...')
+        appendPart('...')
         break
       }
-      parts.push(`${lineNumber}: ${lines[lineNumber - 1] ?? ''}`)
+      if (!appendPart(`${lineNumber}: ${lines[lineNumber - 1] ?? ''}`)) break
       emittedLines += 1
     }
   }
@@ -317,103 +356,54 @@ export async function buildRecentEditContext(
   messages: ChatMessage[],
   workspaceDir: string,
   userText: string,
+  workspaceId?: string,
+  activeOrigin?: RecentEditOrigin,
 ): Promise<string | null> {
-  if (!shouldAttachRecentEditContext(userText) || !workspaceDir.trim() || !window.electron?.fs?.readFile) return null
+  if (!shouldAttachRecentEditContext(userText) || !workspaceDir.trim() || !window.electron?.fs?.readFilePrefix) return null
 
-  const seenPaths = new Set<string>()
-  const recentChanges: Array<{ displayPath: string; resolvedPath: string; diff: string; changeType: string }> = []
-
-  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = messages[messageIndex]
-    if (message.role !== 'assistant') continue
-    const toolBlocks = message.toolBlocks ?? []
-    for (let blockIndex = toolBlocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
-      const block = toolBlocks[blockIndex]
-      for (const change of [...(block.fileChanges ?? [])].reverse()) {
-        const resolvedPath = resolveEditedFilePath(change.path, workspaceDir)
-        if (!resolvedPath || seenPaths.has(resolvedPath)) continue
-        seenPaths.add(resolvedPath)
-        recentChanges.push({
-          displayPath: change.path,
-          resolvedPath,
-          diff: change.diff,
-          changeType: change.changeType,
-        })
-        if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
-      }
-      if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
-    }
-    if (recentChanges.length >= RECENT_EDIT_CONTEXT_FILE_LIMIT) break
-  }
+  const recentChanges = await loadTrustedRecentEditFiles(
+    messages,
+    workspaceDir,
+    activeOrigin,
+    window.electron.fs,
+    workspaceId,
+    RECENT_EDIT_CONTEXT_FILE_LIMIT,
+  )
 
   if (recentChanges.length === 0) return null
 
-  const sections: string[] = []
+  let combined = 'Recent edit context from the immediately previous implementation pass. Use this only as fast-follow context if the user is referring to the same change area.'
+  let sectionCount = 0
   for (const change of recentChanges) {
     try {
-      const fileContent = await window.electron.fs.readFile(change.resolvedPath)
-      const snippet = buildSnippetFromRanges(fileContent, extractChangedLineRangesFromDiff(change.diff))
-      if (!snippet) continue
-      sections.push(
-        `File: ${change.displayPath}\n`
-        + `Recent change type: ${change.changeType}\n`
-        + `Current nearby code:\n${snippet}`,
+      const sectionPrefix = `${sectionCount > 0 ? '\n\n---\n\n' : '\n\n'}File: ${change.displayPath}\nRecent change type: ${change.changeType}\nCurrent nearby code:\n`
+      const remaining = RECENT_EDIT_CONTEXT_MAX_CHARS - combined.length - sectionPrefix.length
+      if (remaining <= 0) break
+      const snippet = buildSnippetFromRanges(
+        change.fileContent,
+        extractChangedLineRangesFromDiff(change.diff),
+        remaining,
       )
+      if (!snippet) continue
+      combined += sectionPrefix + snippet
+      sectionCount += 1
+      if (combined.length >= RECENT_EDIT_CONTEXT_MAX_CHARS) break
     } catch {
       // If the file no longer exists or can't be read, skip it quietly.
     }
   }
 
-  if (sections.length === 0) return null
-
-  const combined =
-    'Recent edit context from the immediately previous implementation pass. Use this only as fast-follow context if the user is referring to the same change area.\n\n'
-    + sections.join('\n\n---\n\n')
-
-  if (combined.length <= RECENT_EDIT_CONTEXT_MAX_CHARS) return combined
-  return `${combined.slice(0, RECENT_EDIT_CONTEXT_MAX_CHARS - 1).trimEnd()}…`
-}
-
-/** Per-turn annotations ("block notes") the user has stuck onto earlier
- *  messages, tool calls, or thinking blocks are pure UI state by default —
- *  they never reach the model. This helper serialises them into a compact
- *  markdown block that we append to the newest outgoing user message so the
- *  agent can read them as guidance. Capped in size to avoid ballooning the
- *  request, and silently returns null when there's nothing to send. */
-const BLOCK_NOTES_CONTEXT_MAX_CHARS = 4000
-export function buildBlockNotesContext(messages: ChatMessage[]): string | null {
-  const lines: string[] = []
-  for (let turnIdx = 0; turnIdx < messages.length; turnIdx += 1) {
-    const msg = messages[turnIdx]
-    if (msg.note?.text) {
-      const snippet = (msg.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
-      lines.push(`- [${msg.role} turn ${turnIdx + 1}${snippet ? `: "${snippet}${snippet.length >= 80 ? '…' : ''}"` : ''}] ${msg.note.text}`)
-    }
-    for (const tb of msg.toolBlocks ?? []) {
-      if (tb.note?.text) {
-        lines.push(`- [tool \`${tb.name}\`] ${tb.note.text}`)
-      }
-    }
-    for (const tk of msg.thinkingBlocks ?? []) {
-      if (tk.note?.text) {
-        const snippet = (tk.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
-        lines.push(`- [thinking${snippet ? `: "${snippet}${snippet.length >= 80 ? '…' : ''}"` : ''}] ${tk.note.text}`)
-      }
-    }
-  }
-  if (lines.length === 0) return null
-  const body = 'User annotations on earlier turns (treat as durable guidance, not fresh requests):\n' + lines.join('\n')
-  if (body.length <= BLOCK_NOTES_CONTEXT_MAX_CHARS) return body
-  return `${body.slice(0, BLOCK_NOTES_CONTEXT_MAX_CHARS - 1).trimEnd()}…`
+  return sectionCount > 0 ? combined : null
 }
 
 export function splitMessageAttachmentPaths(text: string): {
   bodyText: string
   attachmentPaths: string[]
 } {
-  const marker = 'Attached file paths:'
+  const markers = ['Attached file capabilities:', 'Attached file paths:']
   const normalized = String(text ?? '')
-  const attachmentMarkerIndex = normalized.indexOf(marker)
+  const marker = markers.find(candidate => normalized.includes(candidate))
+  const attachmentMarkerIndex = marker ? normalized.indexOf(marker) : -1
   if (attachmentMarkerIndex < 0) {
     return {
       bodyText: normalized,
@@ -422,10 +412,10 @@ export function splitMessageAttachmentPaths(text: string): {
   }
 
   const bodyText = normalized.slice(0, attachmentMarkerIndex).trim()
-  const attachmentText = normalized.slice(attachmentMarkerIndex + marker.length).trim()
+  const attachmentText = normalized.slice(attachmentMarkerIndex + marker!.length).trim()
   const attachmentPaths = attachmentText
     .split(/\r?\n/)
-    .map(line => line.trim())
+    .map(line => line.includes('\t') ? line.slice(line.indexOf('\t') + 1).trim() : line.trim())
     .filter(Boolean)
 
   if (attachmentPaths.length === 0) {

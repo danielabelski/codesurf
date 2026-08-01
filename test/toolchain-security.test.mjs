@@ -180,6 +180,7 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
     assert.match(workflow, /npm --prefix apps\/chat-app ci/)
     assert.match(workflow, /npm --prefix apps\/chat-app audit --audit-level=low/)
     assert.match(workflow, /npm run lint && npm run format:check/)
+    assert.match(workflow, /npm run verify:electrobun-runtime/)
   }
 
   const ciWorkflow = await readFile(workflowPaths[0], 'utf8')
@@ -190,7 +191,7 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
   assert.match(ciWorkflow, /npm --prefix "\$\{VERIFY_WORKTREE\}" ci --omit=dev/)
   assert.match(ciWorkflow, /npm run build:web && npm run verify:web-build/)
   assert.match(ciWorkflow, /npm run test:npm-package/)
-  assert.match(ciWorkflow, /npm run smoke:electrobun/)
+  assert.match(ciWorkflow, /npm run verify:electrobun-runtime/)
   assert.match(ciWorkflow, /npm --prefix apps\/chat-app run build/)
 
   const manifest = await readJson(resolve(ROOT_DIR, 'package.json'))
@@ -198,6 +199,10 @@ test('CI and release jobs exercise the declared minimum Node runtime', async () 
   assert.equal(
     manifest.scripts?.['test:npm-package'],
     'npm run build:npm && node scripts/smoke-npm-package.mjs',
+  )
+  assert.equal(
+    manifest.scripts?.['verify:electrobun-runtime'],
+    'npm run build:electrobun && node scripts/smoke-electrobun.mjs && node scripts/accept-electrobun.mjs',
   )
 })
 
@@ -249,6 +254,10 @@ test('CI and release workflows preserve fail-closed artifact and release boundar
   assert.match(
     releaseWorkflow,
     /gh api "\/repos\/\$\{GITHUB_REPOSITORY\}\/git\/ref\/tags\/\$\{REQUESTED_TAG\}"/,
+  )
+  assert.ok(
+    countOccurrences(releaseWorkflow, '/git/ref/tags/${') >= 2,
+    'the protected publish job must re-resolve the remote tag after approval',
   )
   assert.ok(
     countOccurrences(releaseWorkflow, '/git/ref/tags/${') >= 2,

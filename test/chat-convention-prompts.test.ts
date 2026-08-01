@@ -115,7 +115,7 @@ describe('CodeSurf prompt conventions — provider wiring', () => {
     expect(CLAUDE_SOURCE).toContain('req.contextPrompt?.trim()')
     expect(CODEX_SOURCE).toContain('input.contextPrompt')
     expect(OPENCODE_SOURCE).toContain('req.contextPrompt')
-    expect(OPENCLAW_SOURCE).toContain('req.contextPrompt?.trim()')
+    expect(OPENCLAW_SOURCE).toContain('contextPrompt: req.contextPrompt')
     expect(HERMES_SOURCE).toContain('contextPrompt: req.contextPrompt')
     expect(PI_RUNTIME_SOURCE).toContain('req.contextPrompt?.trim()')
   })

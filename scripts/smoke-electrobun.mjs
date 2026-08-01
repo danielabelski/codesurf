@@ -97,6 +97,9 @@ try {
   if (process.env.CODESURF_ELECTROBUN_REQUIRE_BRIDGE !== '0' && !sawBridge) {
     throw new Error(`Electrobun renderer bridge did not report ready. Status: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)
   }
+  if (process.env.CODESURF_ELECTROBUN_REQUIRE_BRIDGE !== '0' && status?.bridge?.homedir !== smokeHome) {
+    throw new Error(`Electrobun renderer facade did not receive the host home directory. Status: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)
+  }
   if (process.env.CODESURF_ELECTROBUN_REQUIRE_WEBVIEW_TAG !== '0' && status?.bridge?.hasElectrobunWebviewTag !== true) {
     throw new Error(`Electrobun renderer did not expose the native electrobun-webview tag. Status: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)
   }
@@ -105,6 +108,10 @@ try {
   }
   if (process.env.CODESURF_ELECTROBUN_REQUIRE_CORE_IPC !== '0' && status?.coreIpcStatus?.ok !== true) {
     throw new Error(`Electrobun smoke did not pass the replacement core IPC self-check. Status: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)
+  }
+  const homedirCheck = status?.coreIpcStatus?.checks?.find(check => check?.name === 'homedir:get')
+  if (process.env.CODESURF_ELECTROBUN_REQUIRE_CORE_IPC !== '0' && homedirCheck?.detail !== smokeHome) {
+    throw new Error(`Electrobun homedir:get self-check did not exercise the host trust path. Status: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)
   }
   if (exit.code !== 0 && exit.signal !== 'SIGTERM') {
     throw new Error(`Electrobun smoke exited unexpectedly: ${JSON.stringify(exit)}\nStatus: ${JSON.stringify(status)}\nstdout:\n${stdout}\nstderr:\n${stderr}`)

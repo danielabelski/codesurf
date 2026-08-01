@@ -1,12 +1,15 @@
 import { useCallback, useState } from 'react'
-import { getDroppedPaths, isImagePath } from '../utils/dnd'
+import { isImagePath } from '../utils/dnd.ts'
+import type { PendingAttachment } from '../components/chat/chatTileUtils'
 
-type Attachment = { path: string, kind: 'image' | 'file' }
+type AttachmentInput = string | { capability: string; displayName: string }
 
 type UseChatTileAttachmentsOptions = {
   textareaRef: React.RefObject<HTMLTextAreaElement | null>
+  workspaceId: string
+  cardId: string
   syncComposerHeight: () => void
-  setAttachments: React.Dispatch<React.SetStateAction<Attachment[]>>
+  setAttachments: React.Dispatch<React.SetStateAction<PendingAttachment[]>>
   setAcType: (type: 'slash' | 'mention' | null) => void
   setAcQuery: (query: string) => void
   setShowInsertMenu: (show: boolean) => void
@@ -14,6 +17,8 @@ type UseChatTileAttachmentsOptions = {
 
 export function useChatTileAttachments({
   textareaRef,
+  workspaceId,
+  cardId,
   syncComposerHeight,
   setAttachments,
   setAcType,
@@ -22,15 +27,18 @@ export function useChatTileAttachments({
 }: UseChatTileAttachmentsOptions) {
   const [isDropTarget, setIsDropTarget] = useState(false)
 
-  const addAttachments = useCallback((paths: string[]) => {
-    if (paths.length === 0) return
+  const addAttachments = useCallback((inputs: AttachmentInput[]) => {
+    if (inputs.length === 0) return
     setAttachments(prev => {
-      const seen = new Set(prev.map(item => item.path))
+      const seen = new Set(prev.map(item => item.capability ?? item.path))
       const next = [...prev]
-      for (const path of paths) {
-        if (seen.has(path)) continue
-        seen.add(path)
-        next.push({ path, kind: isImagePath(path) ? 'image' : 'file' })
+      for (const input of inputs) {
+        const path = typeof input === 'string' ? input : input.displayName
+        const capability = typeof input === 'string' ? undefined : input.capability
+        const key = capability ?? path
+        if (seen.has(key)) continue
+        seen.add(key)
+        next.push({ path, kind: isImagePath(path) ? 'image' : 'file', ...(capability ? { capability } : {}) })
       }
       return next
     })
@@ -47,10 +55,10 @@ export function useChatTileAttachments({
   }, [setAcQuery, setAcType, setAttachments, syncComposerHeight, textareaRef])
 
   const openAttachmentPicker = useCallback(async () => {
-    const paths = await window.electron.chat?.selectFiles()
-    if (paths && paths.length > 0) addAttachments(paths)
+    const attachments = await window.electron.chat?.selectFiles(workspaceId, cardId)
+    if (attachments && attachments.length > 0) addAttachments(attachments)
     setShowInsertMenu(false)
-  }, [addAttachments, setShowInsertMenu])
+  }, [addAttachments, cardId, setShowInsertMenu, workspaceId])
 
   const removeAttachment = useCallback((path: string) => {
     setAttachments(prev => prev.filter(item => item.path !== path))
@@ -76,7 +84,7 @@ export function useChatTileAttachments({
     setIsDropTarget(false)
   }, [])
 
-  const handleTileDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+  const handleTileDrop = useCallback(async (event: React.DragEvent<HTMLDivElement>) => {
     if (event.dataTransfer.types.includes('application/x-codesurf-queued-turn')) {
       setIsDropTarget(false)
       return
@@ -84,11 +92,22 @@ export function useChatTileAttachments({
     event.preventDefault()
     event.stopPropagation()
     setIsDropTarget(false)
-    const fileRef = event.dataTransfer.getData('application/file-reference-path')
-    const droppedPaths = fileRef ? [fileRef] : getDroppedPaths(event.dataTransfer)
-    if (droppedPaths.length === 0) return
-    addAttachments(droppedPaths)
-  }, [addAttachments])
+    const droppedFiles = Array.from(event.dataTransfer.files ?? [])
+    if (droppedFiles.length > 0) {
+      const attachments = await window.electron.chat?.authorizeDroppedFiles(
+        workspaceId,
+        cardId,
+        droppedFiles,
+      )
+      if (!attachments || attachments.length === 0) {
+        window.alert('Dropped files could not be verified. Use the attachment picker instead.')
+        return
+      }
+      addAttachments(attachments)
+      return
+    }
+    window.alert('Path-only drops cannot be verified as attachments. Use the attachment picker instead.')
+  }, [addAttachments, cardId, workspaceId])
 
   return {
     isDropTarget,

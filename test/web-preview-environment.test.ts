@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildIsolatedWebPreviewEnv } from '../e2e/helpers/web-preview-env.ts'
+import { buildIsolatedWebPreviewEnv } from '../e2e/helpers/launch-web-preview.ts'
 
 test('built-web preview environment discards inherited CodeSurf runtime state', () => {
   const inherited = {
@@ -13,17 +13,20 @@ test('built-web preview environment discards inherited CodeSurf runtime state', 
     CODESURF_TERMINAL_TOKEN: 'host-terminal-secret',
     CODESURF_UNRELATED_FUTURE_SETTING: 'host-state',
   }
-  const env = buildIsolatedWebPreviewEnv(inherited, {
-    homeDir: '/isolated/home',
-    codesurfHome: '/isolated/home/.codesurf',
-    hostUrl: 'http://127.0.0.1:41001',
-    hostPort: 41001,
-    hostToken: 'isolated-host-token',
-    previewPort: 41002,
-    runtimeConfigPort: 41003,
-    terminalPort: 41004,
-    terminalToken: 'isolated-terminal-token',
-  })
+  const env = buildIsolatedWebPreviewEnv(
+    inherited,
+    {
+      homeDir: '/isolated/home',
+      codesurfHome: '/isolated/home/.codesurf',
+      hostUrl: 'http://127.0.0.1:41001',
+      hostPort: 41001,
+      hostToken: 'isolated-host-token',
+      previewPort: 41002,
+      runtimeConfigPort: 41003,
+      terminalPort: 41004,
+      terminalToken: 'isolated-terminal-token',
+    },
+  )
 
   assert.equal(env.PATH, '/fixture/bin')
   assert.equal(env.CI, 'true')

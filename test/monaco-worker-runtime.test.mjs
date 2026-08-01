@@ -54,10 +54,36 @@ test('browser starts real TypeScript and JSON Monaco workers without worker erro
         monaco.Uri.parse('file:///worker-proof.json'),
       )
 
-      new Promise(resolve => setTimeout(resolve, 100)).then(() => Promise.all([
-        monaco.typescript.getTypeScriptWorker().then(factory => factory(tsModel.uri)),
-        monaco.json.getWorker().then(factory => factory(jsonModel.uri)),
-      ])).then(async ([tsWorker, jsonWorker]) => {
+      // Model creation requests rich language features, but Monaco finishes
+      // their dynamic registration asynchronously. Wait for that observable
+      // readiness condition rather than assuming a fixed delay is enough
+      // under concurrent core-suite load. Any non-registration error still
+      // fails immediately, and a missing registration remains bounded.
+      async function waitForWorkerFactory(label, getWorkerFactory) {
+        const deadline = performance.now() + 15_000
+        while (true) {
+          try {
+            return await getWorkerFactory()
+          } catch (error) {
+            if (!String(error).endsWith('not registered!')) throw error
+            if (performance.now() >= deadline) {
+              throw new Error(label + ' worker registration timed out: ' + String(error))
+            }
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+        }
+      }
+
+      Promise.all([
+        waitForWorkerFactory(
+          'TypeScript',
+          () => monaco.typescript.getTypeScriptWorker(),
+        ).then(factory => factory(tsModel.uri)),
+        waitForWorkerFactory(
+          'JSON',
+          () => monaco.json.getWorker(),
+        ).then(factory => factory(jsonModel.uri)),
+      ]).then(async ([tsWorker, jsonWorker]) => {
         const [tsDiagnostics, jsonDiagnostics] = await Promise.all([
           tsWorker.getSemanticDiagnostics(tsModel.uri.toString()),
           jsonWorker.doValidation(jsonModel.uri.toString()),

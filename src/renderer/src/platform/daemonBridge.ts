@@ -11,7 +11,7 @@
  */
 
 import { createHostHeaders, hostUrl } from './hostConfig.ts'
-import { createTerminalTransport, TerminalUnavailableError } from './terminalTransport.ts'
+import { createTerminalTransport } from './terminalTransport.ts'
 
 type Json = unknown
 
@@ -321,6 +321,17 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
           }
           throw err
         }
+      },
+      readFilePrefix: async (path: string, maxBytes: number) => {
+        const res = await hostFetch<{ content?: string; missing?: boolean }>(
+          `/host/fs/readFilePrefix?path=${encodeURIComponent(path)}&maxBytes=${encodeURIComponent(String(maxBytes))}`,
+        )
+        if (res?.missing) {
+          const err = new Error(`ENOENT: ${path}`) as Error & { code?: string }
+          err.code = 'ENOENT'
+          throw err
+        }
+        return res.content ?? ''
       },
       writeFile: async (path: string, content: string) => {
         await hostFetch('/host/fs/writeFile', { method: 'POST', body: JSON.stringify({ path, content }) })
@@ -715,16 +726,13 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
         launchArgs?: string[],
         options?: { cols?: number, rows?: number },
       ) => {
-        // The public gateway protocol deliberately does not accept an arbitrary
-        // executable. Sandboxes select an allowlisted shell/server-side image.
-        if (launchBin || launchArgs?.length) {
-          throw new TerminalUnavailableError('Remote terminals only support the configured sandbox shell')
-        }
         const session = await terminalTransport.create(tileId, {
           cwd: workspaceDir,
           workspaceId,
           cols: options?.cols,
           rows: options?.rows,
+          launchBin,
+          launchArgs,
         })
         return { cols: session.cols, rows: session.rows, buffer: session.buffer }
       },

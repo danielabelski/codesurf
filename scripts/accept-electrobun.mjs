@@ -12,6 +12,7 @@ const repoRoot = new URL('..', import.meta.url).pathname
 const tempDir = await mkdtemp(join(tmpdir(), 'codesurf-electrobun-accept-'))
 const homeDir = join(tempDir, 'home')
 await mkdir(homeDir, { recursive: true })
+const codesurfHome = join(homeDir, '.codesurf')
 const statusFile = join(tempDir, 'status.json')
 const timeoutMs = Number(process.env.CODESURF_ELECTROBUN_ACCEPT_TIMEOUT_MS ?? 20000)
 const settleAfterBridgeMs = Number(process.env.CODESURF_ELECTROBUN_ACCEPT_SETTLE_MS ?? 1200)
@@ -119,8 +120,10 @@ try {
     env: {
       ...process.env,
       HOME: homeDir,
+      CODESURF_HOME: codesurfHome,
       CODESURF_ELECTROBUN_FORCE_BUNDLED: '1',
       CODESURF_ELECTROBUN_SELF_CHECK: '1',
+      CODESURF_ELECTROBUN_RENDERER_SELF_CHECK: '1',
       CODESURF_ELECTROBUN_SMOKE_FILE: statusFile,
     },
     detached: true,
@@ -147,10 +150,51 @@ try {
   assert(child.exitCode === null, 'Electrobun real-run exited before acceptance completed', { exitCode: child.exitCode, signal: child.signalCode, status, stdout, stderr })
   assert(status?.rendererUrl === 'views://mainview/index.html', 'Electrobun did not boot the bundled renderer', status)
   assert(status?.bridge?.hasElectronFacade === true, 'Electrobun renderer bridge/facade did not become ready', status)
+  assert(status?.bridge?.homedir === homeDir, 'Electrobun renderer facade did not receive the host home directory', status)
   assert(status?.bridge?.hasElectrobunWebviewTag === true, 'Electrobun renderer did not expose the native electrobun-webview tag', status)
+  assert(status?.bridge?.selfCheck?.ok === true, 'Electrobun renderer-to-host chat self-check failed', status?.bridge?.selfCheck)
+  const bridgeCheckNames = new Set((status?.bridge?.selfCheck?.checks ?? [])
+    .filter(check => check?.ok === true)
+    .map(check => check.name))
+  for (const checkName of [
+    'renderer:chat:send-stream-stop',
+    'renderer:chat:clearSession',
+    'renderer:chat:attachment-issue',
+    'renderer:chat:attachment-revoke',
+  ]) {
+    assert(bridgeCheckNames.has(checkName), `Electrobun renderer self-check did not prove ${checkName}`, status?.bridge?.selfCheck)
+  }
   assert(status?.dbStatus?.schemaVersion === 4, 'Electrobun did not open/migrate the runtime DB', status)
   assert(status?.daemonStatus?.running === true, 'Electrobun did not start/report the real daemon', status)
   assert(status?.coreIpcStatus?.ok === true, 'Electrobun core IPC self-check failed', status?.coreIpcStatus)
+  const homedirCheck = status?.coreIpcStatus?.checks?.find(check => check?.name === 'homedir:get')
+  assert(homedirCheck?.detail === homeDir, 'Electrobun homedir:get self-check did not exercise the host trust path', status?.coreIpcStatus)
+  const workspaceCheck = status?.coreIpcStatus?.checks?.find(check => check?.name === 'workspace:list')
+  const [workspaceDoc, projectsDoc] = await Promise.all([
+    readFile(join(codesurfHome, 'workspaces', 'workspaces.json'), 'utf8').then(JSON.parse),
+    readFile(join(codesurfHome, 'projects', 'projects.json'), 'utf8').then(JSON.parse),
+  ])
+  const persistedWorkspace = workspaceDoc?.workspaces?.find(entry => entry?.id === 'electrobun-local')
+  const persistedProject = projectsDoc?.projects?.find(entry => entry?.id === persistedWorkspace?.primaryProjectId)
+  const expectedProjectPath = join(codesurfHome, 'projects', 'electrobun-local')
+  assert(
+    persistedWorkspace?.projectIds?.length === 1
+      && persistedWorkspace.projectIds[0] === persistedWorkspace.primaryProjectId,
+    'Electrobun first-run workspace registry is not singular and referentially complete',
+    { workspaceDoc, projectsDoc },
+  )
+  assert(
+    persistedProject?.path === expectedProjectPath && existsSync(expectedProjectPath),
+    'Electrobun first-run project authority is not the app-owned project directory',
+    { expectedProjectPath, persistedProject },
+  )
+  assert(
+    workspaceCheck?.detail?.workspaceId === persistedWorkspace.id
+      && workspaceCheck?.detail?.projectId === persistedProject.id
+      && workspaceCheck?.detail?.reloadVerified === true,
+    'Electrobun core IPC self-check did not prove concurrent/reloaded registry integrity',
+    { workspaceCheck, persistedWorkspace, persistedProject },
+  )
 
   const rows = await processTable()
   const tree = [

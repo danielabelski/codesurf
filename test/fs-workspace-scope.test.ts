@@ -1195,3 +1195,63 @@ describe('validateFsPath sensitive-dir denylist (shared with file-protocol-auth)
     assert.equal(resolved, join('/tmp/workspace/readme.md'))
   })
 })
+
+describe('fs:readFilePrefix workspace and byte bounds', () => {
+  test('passes workspace identity through validation and reads only the requested prefix', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const largeFile = join(fixture.workspace, 'large.txt')
+      await writeFile(largeFile, `HEAD\n${'x'.repeat(2 * 1024 * 1024)}\nTAIL`, 'utf8')
+      const validations: Array<{ path: string; workspaceId?: string }> = []
+      const { invoke } = captureFsHandlers(scopedTo(fixture.workspace), {
+        validatePath: async (filePath, intent, workspaceId, operationOptions) => {
+          validations.push({ path: filePath, workspaceId })
+          return await validateCanonicalFsPathDetails(filePath, intent, {
+            ...scopedTo(fixture.workspace),
+            ...operationOptions,
+          })
+        },
+      })
+
+      const prefix = await invoke('fs:readFilePrefix', largeFile, 1024, 'workspace-a')
+      assert.equal(typeof prefix, 'string')
+      assert.equal(Buffer.byteLength(prefix as string, 'utf8'), 1024)
+      assert.match(prefix as string, /^HEAD\n/)
+      assert.doesNotMatch(prefix as string, /TAIL/)
+      assert.deepEqual(validations, [{ path: largeFile, workspaceId: 'workspace-a' }])
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('rejects invalid byte budgets before validation and rejects cross-workspace paths', async () => {
+    const fixture = await createFsFixture()
+    try {
+      const outsideFile = join(fixture.outside, 'secret.txt')
+      await writeFile(outsideFile, 'secret', 'utf8')
+      let validations = 0
+      const { invoke } = captureFsHandlers(scopedTo(fixture.workspace), {
+        validatePath: async (filePath, intent, _workspaceId, operationOptions) => {
+          validations += 1
+          return await validateCanonicalFsPathDetails(filePath, intent, {
+            ...scopedTo(fixture.workspace),
+            ...operationOptions,
+          })
+        },
+      })
+
+      await assert.rejects(invoke('fs:readFilePrefix', outsideFile, 0, 'workspace-a'), /between 1 and 65536/)
+      await assert.rejects(invoke('fs:readFilePrefix', outsideFile, 65_537, 'workspace-a'), /between 1 and 65536/)
+      await assert.rejects(invoke('fs:readFilePrefix', outsideFile, 1.5, 'workspace-a'), /between 1 and 65536/)
+      assert.equal(validations, 0)
+
+      await assert.rejects(
+        invoke('fs:readFilePrefix', outsideFile, 64, 'workspace-a'),
+        /outside allowed workspace roots/,
+      )
+      assert.equal(validations, 1)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+})

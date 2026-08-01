@@ -1,3 +1,9 @@
+import type { TileContextEntry } from '../../shared/types.ts'
+import {
+  isTileContextChangeForScope,
+  type TileContextChangedPayload,
+} from '../../shared/tileContextScope.ts'
+
 export type ElectrobunInvokeArgs = unknown[]
 
 export interface ElectrobunInvokeCall {
@@ -26,6 +32,10 @@ type FacadeOptions = {
   eventHub?: ElectrobunEventHub
 }
 
+type HostBackedFacadeOptions = Omit<FacadeOptions, 'homedir'> & {
+  hostHomedir: unknown
+}
+
 export function createElectrobunEventHub(): ElectrobunEventHub {
   const handlers = new Map<string, Set<ElectrobunEventHandler>>()
 
@@ -44,6 +54,28 @@ export function createElectrobunEventHub(): ElectrobunEventHub {
       if (channel !== '*') handlers.get('*')?.forEach(handler => handler(payload))
     },
   }
+}
+
+export function withElectrobunHostBootstrap(
+  preloadSource: string,
+  hostHomedir: string,
+  selfCheck = false,
+): string {
+  if (!hostHomedir.trim()) throw new Error('Electrobun host home directory is empty')
+  if (!preloadSource.trim()) throw new Error('Electrobun bridge preload source is empty')
+  const bootstrap = JSON.stringify({ homedir: hostHomedir, selfCheck: selfCheck === true })
+  return `Object.defineProperty(globalThis, '__codesurfElectrobunHostBootstrap', { value: Object.freeze(${bootstrap}), configurable: false, enumerable: false, writable: false });\n${preloadSource}`
+}
+
+export function createHostBackedElectrobunElectronFacade(
+  options: HostBackedFacadeOptions,
+): any {
+  const { hostHomedir: rawHostHomedir, ...facadeOptions } = options
+  const hostHomedir = typeof rawHostHomedir === 'string' ? rawHostHomedir.trim() : ''
+  if (!hostHomedir) {
+    throw new Error('Electrobun host did not provide a valid home directory')
+  }
+  return createElectrobunElectronFacade({ ...facadeOptions, homedir: hostHomedir })
 }
 
 export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
@@ -204,6 +236,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
     fs: {
       readDir: (path: string, workspaceId?: string) => invokeFs('fs:readDir', [path], workspaceId),
       readFile: (path: string, workspaceId?: string) => invokeFs('fs:readFile', [path], workspaceId),
+      readFilePrefix: (path: string, maxBytes: number, workspaceId?: string) => invokeFs('fs:readFilePrefix', [path, maxBytes], workspaceId),
       writeFile: (path: string, content: string, workspaceId?: string) => invokeFs('fs:writeFile', [path, content], workspaceId),
       createFile: (path: string, workspaceId?: string) => invokeFs('fs:createFile', [path], workspaceId),
       createDir: (path: string, workspaceId?: string) => invokeFs('fs:createDir', [path], workspaceId),
@@ -236,13 +269,20 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       onFileOpened: makeEventListener(eventHub, 'skill:file-opened'),
     },
     tileContext: {
-      get: makeInvoker(invoke, 'tileContext:get'),
-      getAll: makeInvoker(invoke, 'tileContext:getAll'),
-      set: makeInvoker(invoke, 'tileContext:set'),
-      delete: makeInvoker(invoke, 'tileContext:delete'),
-      onChanged: (tileId: string, callback: (data: any) => void) => eventHub.on('tileContext:changed', payload => {
-        const data = payload as { tileId?: string }
-        if (data?.tileId === tileId) callback(data)
+      get: (workspaceId: string, tileId: string, key?: string) => (
+        invoke('tileContext:get', [workspaceId, tileId, key]) as Promise<TileContextEntry | Record<string, TileContextEntry> | null>
+      ),
+      getAll: (workspaceId: string, tileId: string, tagPrefix?: string) => (
+        invoke('tileContext:getAll', [workspaceId, tileId, tagPrefix]) as Promise<TileContextEntry[]>
+      ),
+      set: (workspaceId: string, tileId: string, key: string, value: unknown) => (
+        invoke('tileContext:set', [workspaceId, tileId, key, value]) as Promise<boolean>
+      ),
+      delete: (workspaceId: string, tileId: string, key: string) => (
+        invoke('tileContext:delete', [workspaceId, tileId, key]) as Promise<boolean>
+      ),
+      onChanged: (workspaceId: string, tileId: string, callback: (data: TileContextChangedPayload) => void) => eventHub.on('tileContext:changed', payload => {
+        if (isTileContextChangeForScope(payload, workspaceId, tileId)) callback(payload)
       }),
     },
     image: {
@@ -282,7 +322,18 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       save: makeInvoker(invoke, 'kanban:save'),
     },
     terminal: {
-      create: makeInvoker(invoke, 'terminal:create'),
+      // Bun's terminal host authorizes workspaceDir (not the renderer's
+      // workspace id) and accepts the shared Electron six-argument contract.
+      // Keep this as an explicit adapter so provider CLI handoff reaches the
+      // PTY with the correct cwd, executable, and resume args.
+      create: (
+        tileId: string,
+        workspaceId: string,
+        workspaceDir: string,
+        launchBin?: string,
+        launchArgs?: string[],
+        options?: { cols?: number; rows?: number },
+      ) => invoke('terminal:create', [tileId, workspaceId, workspaceDir, launchBin, launchArgs, options]),
       write: makeInvoker(invoke, 'terminal:write'),
       cd: makeInvoker(invoke, 'terminal:cd'),
       resize: makeInvoker(invoke, 'terminal:resize'),
@@ -315,7 +366,12 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       openclawAgents: makeInvoker(invoke, 'chat:openclawAgents'),
       csagentModels: makeInvoker(invoke, 'chat:csagentModels'),
       selectFiles: makeInvoker(invoke, 'chat:selectFiles'),
+      // The browser bridge cannot prove that a renderer-supplied File carries
+      // a native path. Fail closed and let the UI direct users to the
+      // host-owned picker, which issues scoped one-shot capabilities.
+      authorizeDroppedFiles: async () => [],
       writeTempAttachment: makeInvoker(invoke, 'chat:writeTempAttachment'),
+      revokeAttachmentSelections: makeInvoker(invoke, 'chat:revokeAttachmentSelections'),
       answerUserQuestion: makeInvoker(invoke, 'chat:answerUserQuestion'),
       answerToolPermission: makeInvoker(invoke, 'chat:answerToolPermission'),
       setPermissionMode: makeInvoker(invoke, 'chat:setPermissionMode'),

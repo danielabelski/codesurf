@@ -3,7 +3,10 @@ import { homedir } from 'os'
 import type { AggregatedSessionEntry, SessionEntryHint } from '../shared/session-types'
 import type { RecentJobsRequest, RecentJobsResponse } from '../shared/job-types'
 import type { ActivityQuery, ActivityUpsertInput } from '../shared/activity-types'
-import type { TileContextChangedPayload } from '../shared/tileContextScope'
+import {
+  isTileContextChangeForScope,
+  type TileContextChangedPayload,
+} from '../shared/tileContextScope'
 
 function channelMatches(pattern: string, channel: string): boolean {
   if (pattern === '*') return true
@@ -83,6 +86,7 @@ const electronApi = {
   fs: {
     readDir: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:readDir', path, workspaceId),
     readFile: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:readFile', path, workspaceId),
+    readFilePrefix: (path: string, maxBytes: number, workspaceId?: string) => ipcRenderer.invoke('fs:readFilePrefix', path, maxBytes, workspaceId),
     writeFile: (path: string, content: string, workspaceId?: string) => ipcRenderer.invoke('fs:writeFile', path, content, workspaceId),
     createFile: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:createFile', path, workspaceId),
     createDir: (path: string, workspaceId?: string) => ipcRenderer.invoke('fs:createDir', path, workspaceId),
@@ -132,8 +136,10 @@ const electronApi = {
     getAll: (workspaceId: string, tileId: string, tagPrefix?: string) => ipcRenderer.invoke('tileContext:getAll', workspaceId, tileId, tagPrefix),
     set: (workspaceId: string, tileId: string, key: string, value: unknown) => ipcRenderer.invoke('tileContext:set', workspaceId, tileId, key, value),
     delete: (workspaceId: string, tileId: string, key: string) => ipcRenderer.invoke('tileContext:delete', workspaceId, tileId, key),
-    onChanged: (tileId: string, callback: (data: TileContextChangedPayload) => void) => {
-      const handler = (_: unknown, data: TileContextChangedPayload) => { if (data.tileId === tileId) callback(data) }
+    onChanged: (workspaceId: string, tileId: string, callback: (data: TileContextChangedPayload) => void) => {
+      const handler = (_: unknown, data: TileContextChangedPayload) => {
+        if (isTileContextChangeForScope(data, workspaceId, tileId)) callback(data)
+      }
       ipcRenderer.on('tileContext:changed', handler)
       return () => ipcRenderer.removeListener('tileContext:changed', handler)
     },
@@ -260,6 +266,8 @@ const electronApi = {
       negotiatedTools?: string[]
       peers?: { peerId: string; peerType: string; tools: string[]; actions?: Array<{ name: string; description: string }>; context?: Record<string, unknown> }[]
       providerTransport?: import('../shared/types').ExtensionChatTransportConfig | null
+      recentEditContext?: string
+      blockNotesContext?: string
       agentId?: string | null
       agentMode?: import('../shared/types').AgentMode | null
     }) =>
@@ -291,9 +299,18 @@ const electronApi = {
     },
     openclawAgents: () => ipcRenderer.invoke('chat:openclawAgents'),
     csagentModels: () => ipcRenderer.invoke('chat:csagentModels'),
-    selectFiles: () => ipcRenderer.invoke('chat:selectFiles') as Promise<string[]>,
-    writeTempAttachment: (payload: { data: string; mime?: string; ext?: string; filenameHint?: string }) =>
-      ipcRenderer.invoke('chat:writeTempAttachment', payload) as Promise<{ ok: true; path: string } | { ok: false; error: string }>,
+    selectFiles: (workspaceId: string, cardId: string) => ipcRenderer.invoke('chat:selectFiles', workspaceId, cardId) as Promise<Array<{ capability: string; displayName: string }>>,
+    authorizeDroppedFiles: (workspaceId: string, cardId: string, files: File[]) => {
+      const paths = Array.from(files ?? [])
+        .map(file => {
+          try { return webUtils.getPathForFile(file) } catch { return '' }
+        })
+        .filter(Boolean)
+      if (paths.length === 0) return Promise.resolve([])
+      return ipcRenderer.invoke('chat:authorizeDroppedFiles', workspaceId, cardId, paths) as Promise<Array<{ capability: string; displayName: string }>>
+    },
+    writeTempAttachment: (payload: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }) =>
+      ipcRenderer.invoke('chat:writeTempAttachment', payload) as Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }>,
     answerUserQuestion: (payload: {
       workspaceId: string
       cardId: string

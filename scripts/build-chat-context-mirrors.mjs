@@ -16,6 +16,10 @@ const targets = [
     source: 'src/main/chat/prompt-conventions.ts',
     output: 'packages/codesurf-daemon/bin/prompt-conventions.mjs',
   },
+  {
+    source: 'src/main/chat/peer-authority-policy.ts',
+    output: 'packages/codesurf-daemon/bin/peer-authority-policy.mjs',
+  },
 ]
 
 async function renderTarget(target) {

@@ -2,9 +2,57 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   buildSafeSpawnEnv,
+  resolveManagedLocalProxySpawnEnvironment,
   SPAWN_ENV_ALLOWLIST,
   SPAWN_ENV_DENYLIST_RE,
+  shouldForwardTmuxEnvironment,
 } from '../src/main/ipc/terminal-helpers.ts'
+
+describe('managed local-proxy terminal environment', () => {
+  it('starts the runtime and injects only the scoped endpoint and bearer', async () => {
+    const calls: Array<number | undefined> = []
+    const resolved = await resolveManagedLocalProxySpawnEnvironment(
+      { localProxyEnabled: true, localProxyPort: 1777 },
+      {
+        ensureRunning: async port => {
+          calls.push(port)
+          return { ok: true, port }
+        },
+        getStatus: () => ({ running: true, port: 1777, token: 'runtime-token' }),
+      },
+    )
+    assert.deepEqual(calls, [1777])
+    assert.deepEqual(resolved, {
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:1777/v1',
+        ANTHROPIC_AUTH_TOKEN: 'runtime-token',
+      },
+      token: 'runtime-token',
+    })
+    assert.equal(shouldForwardTmuxEnvironment('ANTHROPIC_BASE_URL'), true)
+    assert.equal(shouldForwardTmuxEnvironment('ANTHROPIC_AUTH_TOKEN'), true)
+    assert.equal(shouldForwardTmuxEnvironment('ANTHROPIC_API_KEY'), false)
+    assert.equal(shouldForwardTmuxEnvironment('GITHUB_TOKEN'), false)
+  })
+
+  it('fails closed when startup or runtime bearer proof is absent', async () => {
+    await assert.rejects(resolveManagedLocalProxySpawnEnvironment(
+      { localProxyEnabled: true },
+      {
+        ensureRunning: async () => ({ ok: false, message: 'listen failed' }),
+        getStatus: () => ({ running: false, port: 1337, token: null }),
+      },
+    ), /listen failed/)
+
+    await assert.rejects(resolveManagedLocalProxySpawnEnvironment(
+      { localProxyEnabled: true },
+      {
+        ensureRunning: async () => ({ ok: true, port: 1337 }),
+        getStatus: () => ({ running: true, port: 1337, token: null }),
+      },
+    ), /not running/)
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Helpers

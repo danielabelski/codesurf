@@ -18,6 +18,13 @@ async function webBuildFixture(t, overrides = {}) {
     ?? 'importScripts("./workbox-proof.js");precacheAndRoute(["manifest.webmanifest","ts.worker-a.js","json.worker-b.js"])'
   await writeFile(join(outputDir, 'manifest.webmanifest'), JSON.stringify(manifest), 'utf8')
   await writeFile(join(outputDir, 'sw.js'), serviceWorker, 'utf8')
+  if (overrides.runtimeConfigFallback !== false) {
+    await writeFile(
+      join(outputDir, 'codesurf-runtime-config.js'),
+      '// credential-free packaged fallback\n',
+      'utf8',
+    )
+  }
   await writeFile(join(outputDir, 'workbox-proof.js'), 'self.workbox = true\n', 'utf8')
   return outputDir
 }
@@ -27,6 +34,7 @@ test('web build verifier accepts complete install and Monaco-worker artifacts', 
   const result = verifyWebBuild(outputDir)
   assert.equal(result.manifestPath, join(outputDir, 'manifest.webmanifest'))
   assert.equal(result.serviceWorkerPath, join(outputDir, 'sw.js'))
+  assert.equal(result.runtimeConfigFallbackPath, join(outputDir, 'codesurf-runtime-config.js'))
   assert.equal(result.workboxPath, join(outputDir, 'workbox-proof.js'))
 })
 
@@ -40,4 +48,14 @@ test('web build verifier rejects missing install metadata and worker precache en
     serviceWorker: 'importScripts("./workbox-proof.js");precacheAndRoute(["manifest.webmanifest"])',
   })
   assert.throws(() => verifyWebBuild(missingWorkerDir), /does not precache ts\.worker-/)
+})
+
+test('web build verifier requires the packaged fallback but forbids precaching it', async t => {
+  const missingFallbackDir = await webBuildFixture(t, { runtimeConfigFallback: false })
+  assert.throws(() => verifyWebBuild(missingFallbackDir), /Missing packaged runtime-config fallback/)
+
+  const cachedFallbackDir = await webBuildFixture(t, {
+    serviceWorker: 'importScripts("./workbox-proof.js");precacheAndRoute(["manifest.webmanifest","ts.worker-a.js","json.worker-b.js","codesurf-runtime-config.js"])',
+  })
+  assert.throws(() => verifyWebBuild(cachedFallbackDir), /must not precache/)
 })

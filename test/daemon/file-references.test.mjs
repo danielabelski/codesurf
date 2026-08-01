@@ -30,7 +30,7 @@ async function startDaemon() {
   })
 }
 
-test('expandFileReferences expands workspace-relative @path tokens and strips absolute attachment paths for cloud prompts', async t => {
+test('expandFileReferences expands workspace-relative @path tokens without exposing absolute paths', async t => {
   const fixture = await makeWorkspaceFixture()
   t.after(async () => {
     await rm(fixture.root, { recursive: true, force: true })
@@ -39,35 +39,27 @@ test('expandFileReferences expands workspace-relative @path tokens and strips ab
   const result = await expandFileReferences({
     workspaceDir: fixture.workspaceDir,
     executionTarget: 'cloud',
-    message: [
-      'Please review @src/app.ts and the attached README.',
-      '',
-      'Attached file paths:',
-      join(fixture.workspaceDir, 'README.md'),
-    ].join('\n'),
+    message: 'Please review @src/app.ts.',
   })
 
   assert.equal(result.changed, true)
-  assert.equal(result.references.length, 2)
+  assert.equal(result.references.length, 1)
   assert.deepEqual(
     result.references.map(reference => ({
       source: reference.source,
       displayPath: reference.displayPath,
       truncated: reference.truncated,
     })),
-    [
-      { source: '@src/app.ts', displayPath: 'src/app.ts', truncated: false },
-      { source: 'attachment', displayPath: 'README.md', truncated: false },
-    ],
+    [{ source: '@src/app.ts', displayPath: 'src/app.ts', truncated: false }],
   )
-  assert.match(result.message, /Please review @src\/app\.ts and the attached README\./)
+  assert.match(result.message, /Please review @src\/app\.ts\./)
   assert.match(result.message, /Referenced workspace files/i)
   assert.match(result.message, /src\/app\.ts/)
-  assert.match(result.message, /README\.md/)
   assert.match(result.message, /export const value = 42/)
-  assert.match(result.message, /# Workspace/)
-  assert.doesNotMatch(result.message, /Attached file paths:/)
   assert.doesNotMatch(result.message, new RegExp(fixture.workspaceDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(result.bodyText, 'Please review @src/app.ts.')
+  assert.match(result.contextText, /^## Referenced workspace files/)
+  assert.doesNotMatch(result.bodyText, /export const value/)
   assert.equal(result.bodyText, 'Please review @src/app.ts and the attached README.')
   assert.match(result.contextText, /^## Referenced workspace files/)
   assert.doesNotMatch(result.bodyText, /export const value/)
@@ -96,29 +88,25 @@ test('expandFileReferences never follows references inside host-appended untrust
   assert.doesNotMatch(result.contextText, /ROOM-ONLY-SECRET/)
 })
 
-test('expandFileReferences ignores stale attachment paths without failing the turn', async t => {
+test('expandFileReferences rejects renderer-authored raw attachment paths', async t => {
   const fixture = await makeWorkspaceFixture()
   t.after(async () => {
     await rm(fixture.root, { recursive: true, force: true })
   })
 
-  const missingAttachment = join(fixture.root, 'TemporaryItems', 'missing-screenshot.png')
-  const result = await expandFileReferences({
-    workspaceDir: fixture.workspaceDir,
-    executionTarget: 'local',
-    message: [
-      'Please answer normally.',
-      '',
-      'Attached file paths:',
-      missingAttachment,
-    ].join('\n'),
-  })
-
-  assert.equal(result.changed, true)
-  assert.deepEqual(result.references, [])
-  assert.equal(result.message, 'Please answer normally.')
-  assert.doesNotMatch(result.message, /Attached file paths:/)
-  assert.doesNotMatch(result.message, /missing-screenshot\.png/)
+  await assert.rejects(
+    expandFileReferences({
+      workspaceDir: fixture.workspaceDir,
+      executionTarget: 'local',
+      message: [
+        'Please answer normally.',
+        '',
+        'Attached file paths:',
+        '/etc/hosts',
+      ].join('\n'),
+    }),
+    /Raw attachment paths are not accepted/i,
+  )
 })
 
 test('expandFileReferences rejects symlink escapes outside the workspace root', async t => {

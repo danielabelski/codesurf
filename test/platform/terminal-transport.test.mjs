@@ -412,3 +412,28 @@ describe('terminal transport', () => {
     }
   })
 })
+
+test('forwards the provider CLI resume contract to the remote gateway', async () => {
+  FakeWebSocket.instances.length = 0
+  const calls = []
+  const client = new transport.TerminalTransport({
+    endpoint: 'https://gateway.example.test',
+    token: 'runtime-token',
+    fetchImpl: makeFetch(calls),
+    webSocketConstructor: FakeWebSocket,
+  })
+  await client.create('tile-resume', {
+    cwd: '/workspace/demo',
+    workspaceId: 'workspace-a',
+    launchBin: 'claude',
+    launchArgs: ['--resume', 'session-42'],
+  })
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    cwd: '/workspace/demo',
+    workspaceId: 'workspace-a',
+    cols: 80,
+    rows: 24,
+    launchBin: 'claude',
+    launchArgs: ['--resume', 'session-42'],
+  })
+})

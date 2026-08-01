@@ -419,3 +419,70 @@ test('output backpressure terminates a PTY instead of buffering unbounded data',
   await once(socket, 'close')
   assert.equal(gateway.getSnapshot().sessions, 0)
 })
+
+test('validates and forwards a provider CLI resume launch to the adapter', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'codesurf-terminal-gateway-resume-'))
+  const launches = []
+  const gateway = createTerminalGateway({
+    config: {
+      bindHost: '127.0.0.1',
+      port: 0,
+      allowedOrigins: ['https://app.example.test'],
+      tenants: [{ id: 'acme', bearerToken: 'test-bearer-token', roots: [root], workspaces: { demo: root } }],
+    },
+    adapter: {
+      async spawn(options) {
+        launches.push(options)
+        return new FakeTerminal()
+      },
+    },
+  })
+  const endpoint = await gateway.listen()
+  t.after(async () => {
+    await gateway.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  const response = await sessionRequest(endpoint, {
+    body: {
+      workspaceId: 'demo',
+      cwd: '.',
+      cols: 100,
+      rows: 30,
+      launchBin: 'claude',
+      launchArgs: ['--resume', 'session-42'],
+    },
+  })
+  assert.equal(response.status, 201)
+  const created = await response.json()
+  const socket = new WebSocket(created.websocketUrl, { origin: 'https://app.example.test' })
+  await once(socket, 'open')
+  socket.send(JSON.stringify({ type: 'attach', attachToken: created.attachToken }))
+  assert.equal((await waitForMessage(socket)).type, 'ready')
+  assert.equal(launches.length, 1)
+  assert.equal(launches[0].launchBin, 'claude')
+  assert.deepEqual(launches[0].launchArgs, ['--resume', 'session-42'])
+  socket.send(JSON.stringify({ type: 'close' }))
+  await waitForMessage(socket)
+  await once(socket, 'close')
+})
+
+test('rejects arbitrary terminal executables and argument injection', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'codesurf-terminal-gateway-launch-policy-'))
+  const { gateway, endpoint } = await startGateway(root)
+  t.after(async () => {
+    await gateway.close()
+    await rm(root, { recursive: true, force: true })
+  })
+
+  for (const launch of [
+    { launchBin: '/bin/sh', launchArgs: ['-c', 'touch /tmp/pwned'] },
+    { launchBin: 'claude', launchArgs: ['--resume', '../escape'] },
+    { launchBin: 'codex', launchArgs: ['resume', 'session', '--dangerous'] },
+  ]) {
+    const response = await sessionRequest(endpoint, {
+      body: { workspaceId: 'demo', cwd: '.', cols: 100, rows: 30, ...launch },
+    })
+    assert.equal(response.status, 400)
+  }
+})

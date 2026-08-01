@@ -13,6 +13,7 @@ import { registerStreamIPC } from './ipc/stream'
 import { registerGitIPC } from './ipc/git'
 import { registerBusIPC } from './ipc/bus'
 import { registerChatIPC, killAllChatProcesses } from './ipc/chat'
+import { setChatExtensionRegistryProvider } from './chat/provider-registry'
 import { registerActivityIPC } from './ipc/activity'
 import { registerCollabIPC, stopAllCollabWatchers } from './ipc/collab'
 import { registerTileContextIPC } from './ipc/tile-context'
@@ -736,6 +737,7 @@ app.whenReady().then(async () => {
   registerExtensionProtocol(extensionRegistry)
   registerExtensionIPC(extensionRegistry)
   setExtensionRegistryProvider(() => extensionRegistry)
+  setChatExtensionRegistryProvider(() => extensionRegistry)
 
   registerAppearanceIPC()
   registerPetsIPC()
@@ -912,14 +914,15 @@ async function runAppShutdownCleanup(): Promise<void> {
   })
   const mcpShutdown = stopMCPServer()
   const relayShutdown = unregisterRelayIPC()
+  const chatShutdown = killAllChatProcesses()
   stopAllCollabWatchers()
   extensionRegistry?.deactivateAll()
-  killAllChatProcesses()
   stopOwlSupervisor()
   closeDb()
-  const [mcpResult, relayResult] = await Promise.allSettled([
+  const [mcpResult, relayResult, chatResult] = await Promise.allSettled([
     mcpShutdown,
     relayShutdown,
+    chatShutdown,
   ])
   if (mcpResult.status === 'rejected') {
     console.warn(
@@ -933,6 +936,13 @@ async function runAppShutdownCleanup(): Promise<void> {
       relayResult.reason,
     )
     throw relayResult.reason
+  }
+  if (chatResult.status === 'rejected') {
+    console.warn(
+      '[Chat] Failed to confirm chat process shutdown:',
+      chatResult.reason,
+    )
+    throw chatResult.reason
   }
 }
 

@@ -27,6 +27,8 @@ export function composeHostChatContext(
     | 'peers'
     | 'roomContext'
     | 'fileReferencePrompt'
+    | 'recentEditContext'
+    | 'blockNotesContext'
   >,
 ): HostChatContextResult {
   const peerContext = buildPeerContextPrompt(request.peers)
@@ -40,9 +42,13 @@ export function composeHostChatContext(
       insightConvention: buildCodeSurfInsightConvention(),
       activityConvention: buildCodeSurfActivityConvention(),
       async: buildAsyncExecutionPrompt(request.asyncExecution),
-      peer: peerContext.fragment?.text,
+      // Persisted canvas topology is renderer-replaceable functional state,
+      // not a system-prompt trust root. It is injected through room/user data.
+      peer: undefined,
       room: request.roomContext,
       fileReferences: request.fileReferencePrompt,
+      recentEdit: request.recentEditContext,
+      blockNotes: request.blockNotesContext,
     }),
   }
 }

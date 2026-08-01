@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
 import test from 'node:test'
@@ -155,6 +156,13 @@ test('normal npm pack fails closed on stale dist without mutating the real tree'
   await symlink(
     join(DAEMON_DIR, 'node_modules'),
     join(fixturePackage, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  )
+  const typescriptManifest = createRequire(join(DAEMON_DIR, 'package.json'))
+    .resolve('typescript/package.json')
+  await symlink(
+    dirname(dirname(typescriptManifest)),
+    join(fixture, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir',
   )
   await writeFile(join(fixturePackage, 'dist', 'index.js'), 'export const stale = true\n')

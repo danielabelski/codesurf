@@ -52,9 +52,12 @@ async function migrateStorageToContexDir(storageId: string): Promise<void> {
 const migratedStorageIds = new Set<string>()
 
 async function resolveStorageIds(workspaceId: string): Promise<string[]> {
-  const { getWorkspaceStorageIds } = await import('../ipc/workspace.ts')
-  const ids = await getWorkspaceStorageIds(workspaceId)
-  return Array.from(new Set(ids))
+  // Artifact ownership is workspace-scoped: a workspace ID is also its sole
+  // storage ID. Keep this invariant in the storage layer instead of importing
+  // the Electron workspace IPC module. Besides avoiding a storage -> IPC
+  // dependency, this lets non-Electron hosts (the MCP HTTP server and daemon
+  // tests) read authoritative canvas state without bootstrapping Electron.
+  return [workspaceId]
 }
 
 export async function ensureWorkspaceStorageMigrated(workspaceId: string): Promise<string[]> {

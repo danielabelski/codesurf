@@ -160,6 +160,10 @@ export declare function createDaemonClient(hooks: DaemonClientHooks): {
         summary?: unknown;
         error?: string;
     }>;
+    clearRuntimeSession(workspaceId: string, cardId: string): Promise<{
+        ok: boolean;
+        error?: string;
+    }>;
     getLocalSessionState(workspaceId: string, sessionEntryId: string): Promise<unknown | null>;
     deleteLocalSession(workspaceId: string, sessionEntryId: string): Promise<{
         ok: boolean;
@@ -310,8 +314,10 @@ export declare function createDaemonClient(hooks: DaemonClientHooks): {
     expandFileReferences(payload: {
         message: string;
         workspaceId?: string | null;
+        cardId?: string | null;
         workspaceDir?: string | null;
         executionTarget?: "local" | "cloud";
+        supportedImageMediaTypes?: string[];
     }): Promise<{
         changed: boolean;
         message: string;
@@ -325,9 +331,44 @@ export declare function createDaemonClient(hooks: DaemonClientHooks): {
             binary?: boolean;
             mediaType?: string;
             resolvedPath?: string;
+            device?: string;
+            inode?: string;
+            mtimeMs?: number;
+            ctimeMs?: number;
+            ownedTemporary?: boolean;
+        }>;
+        ownedTemporaryAttachments?: Array<{
+            capability: string;
+            path: string;
+            mediaType?: string;
+            displayPath: string;
+            byteCount: number;
+            device: string;
+            inode: string;
+            mtimeMs: number;
+            ctimeMs: number;
+            ownedTemporary: true;
         }>;
         summaryText?: string;
         inputText?: string;
+    }>;
+    issueAttachmentCapabilities(payload: {
+        workspaceId: string;
+        cardId: string;
+        paths: string[];
+        ownedTemporary?: boolean;
+    }): Promise<{
+        attachments: Array<{
+            capability: string;
+            displayName: string;
+        }>;
+    }>;
+    inspectAttachmentCapabilities(payload: {
+        workspaceId: string;
+        cardId: string;
+        capabilities: string[];
+    }): Promise<{
+        hasAttachments: boolean;
     }>;
     getSettings<T = unknown>(): Promise<T>;
     setSettings<T = unknown>(settings: T): Promise<T>;

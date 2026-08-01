@@ -20,6 +20,7 @@ import type {
   ThinkingBlock,
   FileChange,
   CommandEntry,
+  FileChangesOrigin,
 } from '../../../shared/chat-types'
 import { normalizeToolName } from '../../../shared/tool-normalization.ts'
 
@@ -33,6 +34,8 @@ export interface ChatStreamEvent {
   toolInput?: string
   elapsed?: number
   fileChanges?: FileChange[]
+  fileChangesTrusted?: boolean
+  fileChangesOrigin?: FileChangesOrigin
   commandEntries?: CommandEntry[]
   cost?: number
   turns?: number
@@ -96,6 +99,8 @@ export function mergeToolBlockDuplicate(existing: ToolBlock, incoming: ToolBlock
       : incoming.status,
     elapsed: incoming.elapsed ?? existing.elapsed,
     fileChanges: incoming.fileChanges ?? existing.fileChanges,
+    fileChangesTrusted: incoming.fileChangesTrusted ?? existing.fileChangesTrusted,
+    fileChangesOrigin: incoming.fileChangesOrigin ?? existing.fileChangesOrigin,
     commandEntries: incoming.commandEntries ?? existing.commandEntries,
     rawName: incoming.rawName ?? existing.rawName,
     canonicalName: incoming.canonicalName ?? existing.canonicalName,
@@ -230,6 +235,12 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
           summary: typeof event.text === 'string' ? event.text : blocks[target].summary,
           status: 'done',
           fileChanges: Array.isArray(event.fileChanges) ? event.fileChanges : blocks[target].fileChanges,
+          fileChangesTrusted: Array.isArray(event.fileChanges)
+            ? event.fileChangesTrusted === true
+            : blocks[target].fileChangesTrusted,
+          fileChangesOrigin: Array.isArray(event.fileChanges) && event.fileChangesTrusted === true
+            ? event.fileChangesOrigin
+            : blocks[target].fileChangesOrigin,
           commandEntries: Array.isArray(event.commandEntries) ? event.commandEntries : blocks[target].commandEntries,
         }
       } else if (typeof event.text === 'string' && event.text.trim()) {
@@ -241,6 +252,10 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
           summary: event.text,
           status: 'done',
           fileChanges: Array.isArray(event.fileChanges) ? event.fileChanges : undefined,
+          fileChangesTrusted: Array.isArray(event.fileChanges) && event.fileChangesTrusted === true,
+          fileChangesOrigin: Array.isArray(event.fileChanges) && event.fileChangesTrusted === true
+            ? event.fileChangesOrigin
+            : undefined,
           commandEntries: Array.isArray(event.commandEntries) ? event.commandEntries : undefined,
         })
         return {

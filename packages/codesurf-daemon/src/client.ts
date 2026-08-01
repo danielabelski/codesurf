@@ -19,7 +19,13 @@ import type {
   ProjectRecord,
   Workspace,
 } from './types.js'
-import { parseSseJsonBuffer } from './sse.js'
+import {
+  BoundedSseJsonDecoder,
+  DaemonChatEventBudget,
+  DaemonSseLimitError,
+  readBoundedResponseDiagnostic,
+  type ParsedSseJsonBuffer,
+} from './sse.js'
 
 export interface DaemonClientHooks {
   /**
@@ -265,9 +271,11 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
       30_000,
       Math.max(0, Number(options.reconnectDelayMs ?? 250) || 0),
     )
+    const eventBudget = new DaemonChatEventBudget({ expectedJobId: jobId })
 
-    async function deliverBuffer(buffer: string): Promise<{ remaining: string; terminal: boolean }> {
-      const parsed = parseSseJsonBuffer<DaemonChatJobEvent>(buffer)
+    async function deliverParsed(
+      parsed: ParsedSseJsonBuffer<unknown>,
+    ): Promise<{ terminal: boolean }> {
       for (const error of parsed.errors) {
         try {
           await options.onParseError?.(error)
@@ -275,21 +283,26 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
           throw new DaemonStreamConsumerError(consumerError)
         }
       }
-      for (const event of parsed.events) {
-        const sequence = Number(event?.sequence)
-        if (!Number.isFinite(sequence) || sequence <= 0) {
+      for (const payload of parsed.events) {
+        let event: DaemonChatJobEvent
+        try {
+          event = eventBudget.sanitize(payload)
+        } catch (error) {
+          if (error instanceof DaemonSseLimitError) throw error
           try {
-            await options.onParseError?.(new Error('Daemon event is missing a valid sequence'))
+            await options.onParseError?.(error instanceof Error ? error : new Error(String(error)))
           } catch (consumerError) {
             throw new DaemonStreamConsumerError(consumerError)
           }
           continue
         }
+        const sequence = Number(event?.sequence)
         if (sequence <= lastDeliveredSequence) continue
         const expectedSequence = lastDeliveredSequence + 1
         if (sequence !== expectedSequence) {
           throw new DaemonStreamSequenceGapError(jobId, expectedSequence, sequence)
         }
+        eventBudget.consume(event)
         try {
           await options.onEvent(event)
         } catch (consumerError) {
@@ -298,10 +311,10 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         lastDeliveredSequence = sequence
         if (event.type === 'done') {
           terminalEventSeen = true
-          return { remaining: parsed.remaining, terminal: true }
+          return { terminal: true }
         }
       }
-      return { remaining: parsed.remaining, terminal: false }
+      return { terminal: false }
     }
 
     while (true) {
@@ -326,7 +339,7 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         })
 
         if (!response.ok || !response.body) {
-          const text = await response.text().catch(() => '')
+          const text = await readBoundedResponseDiagnostic(response).catch(() => '')
           if (RETRYABLE_RESPONSE_STATUSES.has(response.status)) hooks.invalidate()
           throw new DaemonResponseError(
             text || `Daemon event stream failed: ${response.status}`,
@@ -335,28 +348,23 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         }
 
         reader = response.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
+        const decoder = new BoundedSseJsonDecoder<unknown>()
 
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const delivered = await deliverBuffer(buffer)
-          buffer = delivered.remaining
+          const delivered = await deliverParsed(decoder.push(value))
           if (delivered.terminal) return
         }
 
-        buffer += decoder.decode()
-        if (buffer.trim()) {
-          const delivered = await deliverBuffer(buffer.endsWith('\n\n') ? buffer : `${buffer}\n\n`)
-          if (delivered.terminal) return
-        }
+        const delivered = await deliverParsed(decoder.finish())
+        if (delivered.terminal) return
       } catch (error) {
         if (error instanceof DaemonStreamConsumerError) {
           if (error.original instanceof Error) throw error.original
           throw new Error(String(error.original))
         }
+        if (error instanceof DaemonSseLimitError) throw error
         if (options.signal?.aborted) throw abortReason(options.signal)
         disconnectError = error instanceof Error ? error : new Error(String(error))
       } finally {
@@ -579,6 +587,9 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     upsertRuntimeSession(workspaceId: string, cardId: string, state: unknown): Promise<{ ok: boolean; summary?: unknown; error?: string }> {
       return request('/session/runtime/upsert', { body: { workspaceId, cardId, state } })
     },
+    clearRuntimeSession(workspaceId: string, cardId: string): Promise<{ ok: boolean; error?: string }> {
+      return request('/session/runtime/clear', { body: { workspaceId, cardId } })
+    },
     getLocalSessionState(workspaceId: string, sessionEntryId: string): Promise<unknown | null> {
       return request(`/session/local/state?workspaceId=${encodeURIComponent(workspaceId)}&sessionEntryId=${encodeURIComponent(sessionEntryId)}`)
     },
@@ -755,8 +766,10 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
     expandFileReferences(payload: {
       message: string
       workspaceId?: string | null
+      cardId?: string | null
       workspaceDir?: string | null
       executionTarget?: 'local' | 'cloud'
+      supportedImageMediaTypes?: string[]
     }): Promise<{
       changed: boolean
       message: string
@@ -770,6 +783,23 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         binary?: boolean
         mediaType?: string
         resolvedPath?: string
+        device?: string
+        inode?: string
+        mtimeMs?: number
+        ctimeMs?: number
+        ownedTemporary?: boolean
+      }>
+      ownedTemporaryAttachments?: Array<{
+        capability: string
+        path: string
+        mediaType?: string
+        displayPath: string
+        byteCount: number
+        device: string
+        inode: string
+        mtimeMs: number
+        ctimeMs: number
+        ownedTemporary: true
       }>
       summaryText?: string
       inputText?: string
@@ -778,10 +808,29 @@ export function createDaemonClient(hooks: DaemonClientHooks) {
         body: {
           message: payload.message,
           workspaceId: String(payload.workspaceId ?? '').trim() || null,
+          cardId: String(payload.cardId ?? '').trim() || null,
           workspaceDir: String(payload.workspaceDir ?? '').trim() || null,
           executionTarget: payload.executionTarget === 'cloud' ? 'cloud' : 'local',
+          supportedImageMediaTypes: payload.supportedImageMediaTypes,
         },
       })
+    },
+
+    issueAttachmentCapabilities(payload: {
+      workspaceId: string
+      cardId: string
+      paths: string[]
+      ownedTemporary?: boolean
+    }): Promise<{ attachments: Array<{ capability: string; displayName: string }> }> {
+      return request('/file-references/capabilities/issue', { body: payload })
+    },
+
+    inspectAttachmentCapabilities(payload: {
+      workspaceId: string
+      cardId: string
+      capabilities: string[]
+    }): Promise<{ hasAttachments: boolean }> {
+      return request('/file-references/capabilities/inspect', { body: payload })
     },
 
     getSettings<T = DaemonAppSettings>(): Promise<T> {

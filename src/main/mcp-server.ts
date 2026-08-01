@@ -98,6 +98,17 @@ function isSafeMcpScopeId(value: unknown, label: string): value is string {
   }
 }
 
+export function requireMcpPermissionWorkspace(
+  workspaceDir: string | null | undefined,
+  operation: string,
+): string {
+  const scopedWorkspaceDir = String(workspaceDir ?? '').trim()
+  if (!scopedWorkspaceDir) {
+    throw new Error(`${operation} requires an authoritative workspace scope`)
+  }
+  return scopedWorkspaceDir
+}
+
 export function isValidSseEventName(event: unknown): event is string {
   return typeof event === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(event)
 }
@@ -1069,10 +1080,19 @@ export async function startMCPServer(): Promise<number> {
               String(card_id ?? ''),
               typeof workspaceId === 'string' ? workspaceId : undefined,
             )
+            let permissionWorkspace: string
+            try {
+              permissionWorkspace = requireMcpPermissionWorkspace(workspaceDir, '/inject')
+            } catch (error) {
+              setCorsHeaders(res, req)
+              res.writeHead(403, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: (error as Error).message }))
+              return
+            }
             const allowed = await requestToolPermission({
               provider: 'mcp',
               toolName: 'terminal_send_input',
-              workspaceDir: workspaceDir ?? undefined,
+              workspaceDir: permissionWorkspace,
               title: 'Terminal input via /inject',
               description: `An MCP agent wants to write into terminal tile "${card_id}" via /inject:\n${String(message ?? '').slice(0, 200)}${String(message ?? '').length > 200 ? '...' : ''}`,
             }, /* interactive */ true)
@@ -1135,6 +1155,7 @@ export async function startMCPServer(): Promise<number> {
           })
           res.end(JSON.stringify(response))
         } catch (e) {
+          mcpLog.debug('MCP request failed', e)
           setCorsHeaders(res, req)
           res.writeHead(400); res.end()
         }

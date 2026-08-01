@@ -115,6 +115,67 @@ test('streamJobEvents parses SSE without putting bearer token in the URL', async
   assert.equal(events[0].text, 'hi')
 })
 
+test('streamJobEvents cancels an oversized non-OK diagnostic body without retrying its status', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  let cancelled = false
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(256 * 1024)))
+      },
+      cancel() {
+        cancelled = true
+      },
+    }), {
+      status: 500,
+      headers: { 'Content-Length': String(256 * 1024) },
+    })
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.streamJobEvents({ jobId: 'job-1', onEvent() {} }),
+    /Response body omitted: exceeds 65536 bytes/i,
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(cancelled, true)
+})
+
+test('streamJobEvents terminates instead of reconnecting after a delimiter-free frame overflow', async t => {
+  const originalFetch = globalThis.fetch
+  const calls = []
+  let cancelled = false
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  globalThis.fetch = async () => {
+    calls.push('fetch')
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${'x'.repeat(1024 * 1024)}`))
+      },
+      cancel() {
+        cancelled = true
+      },
+    }), { status: 200 })
+  }
+
+  const client = makeClient(calls)
+  await assert.rejects(
+    client.streamJobEvents({ jobId: 'job-1', onEvent() {} }),
+    /frame limit exceeded/i,
+  )
+  assert.equal(calls.length, 1)
+  assert.equal(cancelled, true)
+})
+
 test('streamJobEvents reconnects active EOF from the last delivered sequence and deduplicates replay', async t => {
   const originalFetch = globalThis.fetch
   const calls = []

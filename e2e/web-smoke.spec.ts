@@ -58,6 +58,10 @@ test.describe('CodeSurf built-web smoke', () => {
     )
     await expect(page.locator('#root')).not.toContainText('Renderer failed to start')
     await expect(page.locator('[data-canvas-surface="true"]')).toBeVisible({ timeout: 45_000 })
+    const onboarding = page.getByRole('dialog', { name: 'Welcome to CodeSurf' })
+    await expect(onboarding).toBeVisible()
+    await onboarding.getByRole('button', { name: 'Get started' }).click()
+    await expect(onboarding).toBeHidden()
 
     const firstPass = await page.evaluate(async () => {
       const runtime = window as typeof window & {

@@ -5,7 +5,6 @@
 
 import { query, type Query, type Options, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { existsSync } from 'fs'
-import { promises as fs } from 'fs'
 import { resolve } from 'path'
 import { getAgentPath } from '../../agent-paths'
 import { getMCPPort, getTileToken, getContexMcpToolNames } from '../../mcp-server'
@@ -23,11 +22,12 @@ import { getDisconnectedPeerBridgeMcpToolNames } from '../../../shared/nodeTools
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { createRuntimeCheckpoint } from '../runtime-checkpoints'
-import type {
-  ChatImageAttachment,
-  ChatRequest,
-  RuntimeChatSessionState,
-} from '../types'
+import type { ChatRequest, RuntimeChatSessionState } from '../types'
+import {
+  buildClaudePromptWithImages,
+  cleanupOwnedImageAttachments,
+} from '../provider-image-attachments.ts'
+export { buildClaudePromptWithImages } from '../provider-image-attachments.ts'
 import {
   activeQueries,
   chatRequestScope,
@@ -37,6 +37,7 @@ import {
   getPreparedMessages,
   isActiveQuery,
   log,
+  markRoomPromptAccepted,
   getCardSessionId,
   sendStream,
   setCardSessionId,
@@ -207,73 +208,6 @@ async function allowToolWithCheckpoint(
   return { behavior: 'allow', updatedInput: input, toolUseID: toolOptions?.toolUseID }
 }
 
-// --- Prompt / multimodal helpers ---------------------------------------------
-
-// Anthropic limits: ~5 MB per image; keep a conservative per-request total so
-// we don't blow past context-window or HTTP payload limits on big screenshots.
-const MAX_IMAGE_BYTES_PER_FILE = 5 * 1024 * 1024
-const MAX_IMAGE_BYTES_PER_REQUEST = 20 * 1024 * 1024
-
-function buildClaudePromptWithImages(
-  text: string,
-  imageAttachments: ChatImageAttachment[] | undefined,
-): AsyncIterable<SDKUserMessage> {
-  // Read images off disk synchronously-at-start-of-async-gen so any read
-  // failure surfaces before we yield the message. We stream one user message
-  // containing text + image blocks, then close the input stream so the query
-  // proceeds to assistant generation.
-  async function* generator(): AsyncGenerator<any, void, unknown> {
-    const contentBlocks: Array<Record<string, unknown>> = []
-    const normalizedText = String(text ?? '').trim()
-    if (normalizedText) {
-      contentBlocks.push({ type: 'text', text: normalizedText })
-    }
-
-    let totalBytes = 0
-    for (const attachment of imageAttachments!) {
-      try {
-        if (attachment.byteCount > MAX_IMAGE_BYTES_PER_FILE) {
-          log(`skipping oversize image attachment (${attachment.byteCount} B > ${MAX_IMAGE_BYTES_PER_FILE}):`, attachment.displayPath)
-          continue
-        }
-        if (totalBytes + attachment.byteCount > MAX_IMAGE_BYTES_PER_REQUEST) {
-          log('per-request image byte limit reached; dropping remaining attachments')
-          break
-        }
-        const buffer = await fs.readFile(attachment.path)
-        totalBytes += buffer.byteLength
-        contentBlocks.push({
-          type: 'image',
-          source: {
-            type: 'base64',
-            media_type: attachment.mediaType,
-            data: buffer.toString('base64'),
-          },
-        })
-      } catch (err) {
-        log('failed to load image attachment', attachment.path, (err as Error).message)
-      }
-    }
-
-    // Fallback: if every image failed and there was no text, send a minimal
-    // text block so the SDK has something to work with.
-    if (contentBlocks.length === 0) {
-      contentBlocks.push({ type: 'text', text: normalizedText || '(empty message)' })
-    }
-
-    yield {
-      type: 'user',
-      message: {
-        role: 'user',
-        content: contentBlocks,
-      },
-      parent_tool_use_id: null,
-    }
-  }
-
-  return generator()
-}
-
 export function buildClaudeTextInput(text: string, priority: SDKUserMessage['priority'] = 'now'): AsyncIterable<SDKUserMessage> {
   async function* generator(): AsyncGenerator<SDKUserMessage, void, unknown> {
     yield {
@@ -417,6 +351,7 @@ export function chatClaude(req: ChatRequest): void {
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
   if (!lastUserMsg) {
     sendStream(scope, { type: 'error', error: 'No user message' })
+    void cleanupOwnedImageAttachments(req.imageAttachments)
     return
   }
 
@@ -512,6 +447,7 @@ export function chatClaude(req: ChatRequest): void {
     sendStream(scope, { type: 'error', error: err instanceof Error ? err.message : String(err) })
     sendStream(scope, { type: 'done' })
     cardAbortControllers.delete(scopeKey)
+    void cleanupOwnedImageAttachments(req.imageAttachments)
     return
   }
   // Resolve claude binary from startup detection
@@ -641,6 +577,10 @@ export function chatClaude(req: ChatRequest): void {
       let capturedSessionId = false
       const assistantText = new BoundedTextAccumulator(MAX_PROVIDER_ACCUMULATED_OUTPUT_BYTES)
       let sawAssistantOutput = false
+      const noteAssistantOutput = (): void => {
+        sawAssistantOutput = true
+        markRoomPromptAccepted(scope)
+      }
       // Track streamed text per content_block index so we can fall back to the
       // assembled `assistant` message for any text the partial stream missed.
       // Key format: `${turn}:${index}` — we bump `turn` on each assistant message.
@@ -682,17 +622,17 @@ export function chatClaude(req: ChatRequest): void {
                   tail: appendBoundedSuffix(prior.tail, evt.delta.text, MAX_PROVIDER_DEDUP_TAIL_BYTES),
                 })
                 assistantText.append(evt.delta.text)
-                sawAssistantOutput = true
+                noteAssistantOutput()
                 sendStream(scope, { type: 'text', text: evt.delta.text })
               } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
-                sawAssistantOutput = true
+                noteAssistantOutput()
                 sendStream(scope, { type: 'thinking', text: evt.delta.thinking, thinkingId: currentThinkingId })
               } else if (evt.delta?.type === 'input_json_delta' && evt.delta.partial_json) {
                 sendStream(scope, { type: 'tool_input', text: evt.delta.partial_json })
               }
             } else if (evt.type === 'content_block_start') {
               if (evt.content_block?.type === 'tool_use') {
-                sawAssistantOutput = true
+                noteAssistantOutput()
                 sendStream(scope, {
                   type: 'tool_start',
                   toolName: evt.content_block.name,
@@ -716,7 +656,7 @@ export function chatClaude(req: ChatRequest): void {
               for (let idx = 0; idx < message.content.length; idx++) {
                 const block = message.content[idx]
                 if (block.type === 'tool_use') {
-                  sawAssistantOutput = true
+                  noteAssistantOutput()
                   const toolInputStr = JSON.stringify(block.input, null, 2)
                   sendStream(scope, {
                     type: 'tool_use',
@@ -754,7 +694,7 @@ export function chatClaude(req: ChatRequest): void {
                     : block.text
                   if (tail.length > 0) {
                     assistantText.append(tail)
-                    sawAssistantOutput = true
+                    noteAssistantOutput()
                     sendStream(scope, { type: 'text', text: tail })
                     streamedTextByIndex.set(key, {
                       length: block.text.length,
@@ -775,9 +715,9 @@ export function chatClaude(req: ChatRequest): void {
               type: 'tool_summary',
               text: (msg as any).summary,
             })
-            if (typeof (msg as any).summary === 'string' && (msg as any).summary.trim()) sawAssistantOutput = true
+            if (typeof (msg as any).summary === 'string' && (msg as any).summary.trim()) noteAssistantOutput()
           } else if (msg.type === 'tool_progress') {
-            sawAssistantOutput = true
+            noteAssistantOutput()
             sendStream(scope, {
               type: 'tool_progress',
               toolName: (msg as any).tool_name,
@@ -791,7 +731,7 @@ export function chatClaude(req: ChatRequest): void {
             const resultText = typeof result.result === 'string' ? result.result.trim() : ''
             if (!assistantText.value.trim() && resultText) {
               assistantText.append(resultText)
-              sawAssistantOutput = true
+              noteAssistantOutput()
               sendStream(scope, { type: 'text', text: resultText })
             }
             if (!sawAssistantOutput && !resultText) {
@@ -872,11 +812,14 @@ export function chatClaude(req: ChatRequest): void {
         void upsertRuntimeSessionState(req, runtimeSession)
         sendStream(scope, { type: 'error', error: errorMessage })
         clearActiveQuery(scope, q)
+      } finally {
+        await cleanupOwnedImageAttachments(req.imageAttachments)
       }
     })()
   } catch (err) {
     const errorMessage = formatClaudeSdkError(err, claudeStderr.value)
     log('query() threw:', errorMessage)
     sendStream(scope, { type: 'error', error: errorMessage })
+    void cleanupOwnedImageAttachments(req.imageAttachments)
   }
 }

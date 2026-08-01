@@ -20,18 +20,44 @@ import {
 } from '../bounded-output'
 import { sanitizeToolOutputText } from '../output-sanitizers'
 import { createRuntimeCheckpoint } from '../runtime-checkpoints'
+import {
+  completeStableContextCliTurn,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from '../stable-session-context'
 import { buildCodexSpawnArgs } from './agent-mode-payloads'
 import type { ChatRequest, RuntimeChatSessionState } from '../types'
+import {
+  cleanupMaterializedCodexImages,
+  insertCodexImageArgs,
+  materializeVerifiedCodexImages,
+} from '../provider-image-attachments.ts'
+import {
+  awaitGuardedPreparation,
+  codexPrelaunchBoundary,
+  providerLaunchIsCurrent,
+  type ProviderLaunchGuard,
+} from '../provider-launch-guard.ts'
+export {
+  cleanupMaterializedCodexImages,
+  insertCodexImageArgs,
+  materializeVerifiedCodexImages,
+} from '../provider-image-attachments.ts'
 import {
   sendStream,
   cloneChatMessages,
   getPreparedMessages,
   upsertRuntimeSessionState,
-  activeProcesses,
   chatRequestScope,
   chatStreamScopeKey,
   getCardSessionId,
+  isCurrentChatProcess,
   setCardSessionId,
+  markRoomPromptAccepted,
+  processTreeSpawnOptions,
+  registerActiveChatProcess,
+  stopActiveChatProcess,
+  terminateProcessTree,
 } from '../runtime'
 
 const execFileAsync = promisify(execFile)
@@ -254,7 +280,10 @@ async function summarizeCodexFileChanges(
 
 // createRuntimeCheckpoint is shared (../runtime-checkpoints). getDisplayPath stays for Codex diffs.
 
-export async function chatCodex(req: ChatRequest): Promise<void> {
+export async function chatCodex(
+  req: ChatRequest,
+  launchGuard?: ProviderLaunchGuard,
+): Promise<void> {
   const scope = chatRequestScope(req)
   const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
@@ -267,6 +296,12 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
   const shellPath = getShellEnvPath()
   const runtimeMessages = cloneChatMessages(req.messages)
   const resumeThreadId = req.sessionId ?? getCardSessionId(scope, req.provider) ?? null
+  const stableContext = selectStableContextForTurn({
+    scope,
+    provider: req.provider,
+    sessionId: resumeThreadId,
+    contextPrompt: req.contextPrompt,
+  })
   const runtimeSession: RuntimeChatSessionState = {
     provider: req.provider,
     model: req.model,
@@ -288,6 +323,16 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
   // thread ID is present it emits `exec resume <threadId>` to preserve multi-turn
   // context; `--ignore-user-config` keeps the run isolated from ~/.codex.
   let args: string[]
+  let materializedImages: { directory: string | null; paths: string[] } = { directory: null, paths: [] }
+  const launchIsCurrent = (): boolean => providerLaunchIsCurrent(launchGuard)
+  const abandonPrelaunch = async (): Promise<void> => {
+    invalidateStableContextSelection(stableContext)
+    if (materializedImages.directory) {
+      const directory = materializedImages.directory
+      materializedImages = { directory: null, paths: [] }
+      await cleanupMaterializedCodexImages(directory).catch(() => {})
+    }
+  }
   try {
     args = buildCodexSpawnArgs({
       agentId: req.agentId,
@@ -297,9 +342,27 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
       userContent: lastUserMsg.content,
       resumeThreadId,
       workspaceDir: req.workspaceDir,
-      contextPrompt: req.contextPrompt,
+      contextPrompt: stableContext.contextPrompt,
     })
+    const preparedImages = await awaitGuardedPreparation(
+      launchGuard,
+      materializeVerifiedCodexImages(req.imageAttachments),
+      prepared => prepared.directory
+        ? cleanupMaterializedCodexImages(prepared.directory)
+        : undefined,
+    )
+    if (!preparedImages.ok) {
+      invalidateStableContextSelection(stableContext)
+      return
+    }
+    materializedImages = preparedImages.value
+    args = insertCodexImageArgs(args, materializedImages.paths)
   } catch (err) {
+    if (!launchIsCurrent()) {
+      await abandonPrelaunch()
+      return
+    }
+    invalidateStableContextSelection(stableContext)
     // Clear isStreaming before returning — we already upserted true above.
     // Leaving it stuck true makes resume/job UI treat the turn as live forever.
     runtimeSession.isStreaming = false
@@ -309,8 +372,19 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
     return
   }
 
+  const cleanupMaterializedImages = (): void => {
+    if (!materializedImages.directory) return
+    const directory = materializedImages.directory
+    materializedImages = { directory: null, paths: [] }
+    void cleanupMaterializedCodexImages(directory)
+  }
+
   if (req.workspaceDir) {
     await writeMCPConfigToWorkspace(req.workspaceDir).catch(() => {})
+    if (!launchIsCurrent()) {
+      await abandonPrelaunch()
+      return
+    }
   }
 
   const spawnEnv: Record<string, string> = buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) })
@@ -327,15 +401,48 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
     } catch {
       // invalid workspace/card path — fail closed without MCP
     }
+    if (!launchIsCurrent()) {
+      await abandonPrelaunch()
+      return
+    }
   }
   if (mcpConfigPath) spawnEnv.CODESURF_MCP_CONFIG = mcpConfigPath
 
-  const proc = spawn(codexBin, args, {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: spawnEnv,
+  const launched = await codexPrelaunchBoundary.run({
+    guard: launchGuard,
+    prepare: () => ({
+      command: codexBin,
+      args,
+      options: processTreeSpawnOptions({
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: spawnEnv,
+      }),
+    }),
+    disposePrepared: () => abandonPrelaunch(),
+    launch: prepared => spawn(prepared.command, prepared.args, prepared.options),
   })
+  if (!launched.ok) {
+    await abandonPrelaunch()
+    return
+  }
+  const proc = launched.value
 
-  activeProcesses.set(scopeKey, proc)
+  if (!launchIsCurrent()) {
+    const termination = await terminateProcessTree(proc)
+    if (!termination.confirmed) {
+      throw new Error(`Superseded Codex process could not be terminated: ${termination.detail}`)
+    }
+    await abandonPrelaunch()
+    return
+  }
+
+  if (!registerActiveChatProcess(scopeKey, proc)) {
+    const termination = await terminateProcessTree(proc)
+    if (!termination.confirmed) {
+      throw new Error(`Duplicate Codex process could not be terminated: ${termination.detail}`)
+    }
+    throw new Error('Codex launch refused because the previous chat process is still active')
+  }
   const pendingSnapshots = new Map<string, CodexFileSnapshot>()
   const aggregatedFileChanges = new Map<string, StreamToolFileChange>()
   const exploreEntries: StreamToolCommandEntry[] = []
@@ -348,10 +455,15 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
   // Set to true after a fatal event (checkpoint failure, turn.failed, error)
   // so buffered stdout chunks are not streamed after the error chip.
   let aborted = false
+  let sawProviderAcceptance = false
+  const noteProviderAcceptance = (): void => {
+    sawProviderAcceptance = true
+    markRoomPromptAccepted(scope)
+  }
 
   const handleCodexJsonEvent = async (evt: any): Promise<void> => {
     if (!evt || typeof evt !== 'object') return
-    if (aborted) return
+    if (aborted || !launchIsCurrent()) return
 
     // Surface turn.failed / top-level error events as explicit error chips
     if (evt.type === 'turn.failed' || evt.type === 'error') {
@@ -368,10 +480,15 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
       sendStream(scope, { type: 'session', sessionId: evt.thread_id })
       return
     }
+    if (evt.type === 'turn.completed') {
+      noteProviderAcceptance()
+      return
+    }
 
     if (evt.type === 'item.started') {
       const item = evt.item
       if (item?.type === 'file_change' && Array.isArray(item.changes)) {
+        noteProviderAcceptance()
         // Snapshot pre-edit content SYNCHRONOUSLY before awaiting anything.
         // Codex writes the files very shortly after emitting `item.started`;
         // any `await` here yields the event loop long enough for the write
@@ -395,8 +512,22 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
         })
         if (!checkpoint.ok) {
           aborted = true
-          proc.kill('SIGTERM')
           sendStream(scope, { type: 'error', error: `Checkpoint creation failed before Codex file changes: ${checkpoint.error ?? 'unknown error'}` })
+          const termination = await stopActiveChatProcess(scopeKey)
+          invalidateStableContextSelection(stableContext)
+          runtimeSession.isStreaming = false
+          void upsertRuntimeSessionState(req, runtimeSession)
+          if (!termination?.confirmed) {
+            sendStream(scope, {
+              type: 'error',
+              error: `Codex process-tree termination failed: ${termination?.detail ?? 'process ownership was lost'}`,
+            })
+          } else {
+            sendStream(scope, {
+              type: 'done',
+              sessionId: runtimeSession.sessionId ?? undefined,
+            })
+          }
           return
         }
       }
@@ -408,12 +539,14 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
     if (!item || typeof item !== 'object') return
 
     if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) {
+      noteProviderAcceptance()
       assistantText.append(item.text)
       sendStream(scope, { type: 'text', text: item.text })
       return
     }
 
     if (item.type === 'command_execution' && typeof item.command === 'string') {
+      noteProviderAcceptance()
       const command = normalizeCodexShellCommand(item.command)
       const kind = classifyCodexCommand(command)
       const output = boundRecentText(
@@ -453,6 +586,7 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
     }
 
     if (item.type === 'file_change' && Array.isArray(item.changes)) {
+      noteProviderAcceptance()
       const fileChanges = await summarizeCodexFileChanges(item.changes, pendingSnapshots, req.workspaceDir)
       if (fileChanges.length === 0) return
       for (const change of fileChanges) {
@@ -469,6 +603,16 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
         toolId: 'codex-file-changes',
         toolName: buildEditedToolName(mergedFileChanges),
         fileChanges: mergedFileChanges,
+        fileChangesTrusted: req.executionTarget !== 'cloud' && Boolean(req.workspaceId),
+        fileChangesOrigin: req.executionTarget !== 'cloud' && req.workspaceId
+          ? {
+            workspaceId: req.workspaceId,
+            cardId: req.cardId,
+            provider: req.provider,
+            executionTarget: 'local',
+            sessionId: runtimeSession.sessionId ?? null,
+          }
+          : undefined,
       })
     }
   }
@@ -494,7 +638,10 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
           const evt = JSON.parse(trimmed)
           await handleCodexJsonEvent(evt)
         } catch {
-          if (!aborted) sendStream(scope, { type: 'text', text: `${line}\n` })
+          if (!aborted && launchIsCurrent()) {
+            noteProviderAcceptance()
+            sendStream(scope, { type: 'text', text: `${line}\n` })
+          }
         }
       }
     }).catch(() => {}).finally(() => {
@@ -516,68 +663,114 @@ export async function chatCodex(req: ChatRequest): Promise<void> {
   // before the old proc's close handler fires; without this guard the old
   // handler would delete the new proc's entry and inject stale done/error
   // events into the new turn.
-  const isCurrent = (): boolean => activeProcesses.get(scopeKey) === proc
+  const isCurrent = (): boolean => isCurrentChatProcess(scopeKey, proc)
 
   proc.on('close', (code) => {
+    cleanupMaterializedImages()
     if (!isCurrent()) return // superseded — new turn owns the slot
-    if (aborted) {
-      activeProcesses.delete(scopeKey)
-      runtimeSession.isStreaming = false
-      void upsertRuntimeSessionState(req, runtimeSession)
-      // Always emit done on abort so tool blocks leave `running` (reducer
-      // finalizes tools only on `done`, not on `error` alone).
-      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
-      return
-    }
-    activeProcesses.delete(scopeKey)
-    stdoutChain = stdoutChain.then(async () => {
-      const pendingStdout = stdoutDecoder.flush()
-      if (pendingStdout?.trim()) {
-        try {
-          await handleCodexJsonEvent(JSON.parse(pendingStdout.trim()))
-        } catch {
-          assistantText.append(pendingStdout)
-          sendStream(scope, { type: 'text', text: pendingStdout })
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      if (!termination?.confirmed) {
+        invalidateStableContextSelection(stableContext)
+        runtimeSession.isStreaming = false
+        void upsertRuntimeSessionState(req, runtimeSession)
+        sendStream(scope, {
+          type: 'error',
+          error: `Codex process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      if (aborted) {
+        invalidateStableContextSelection(stableContext)
+        runtimeSession.isStreaming = false
+        void upsertRuntimeSessionState(req, runtimeSession)
+        // Always emit done on abort so tool blocks leave `running` (reducer
+        // finalizes tools only on `done`, not on `error` alone).
+        sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+        return
+      }
+      if (code !== 0) invalidateStableContextSelection(stableContext)
+      stdoutChain = stdoutChain.then(async () => {
+        const pendingStdout = stdoutDecoder.flush()
+        if (pendingStdout?.trim()) {
+          try {
+            await handleCodexJsonEvent(JSON.parse(pendingStdout.trim()))
+          } catch {
+            assistantText.append(pendingStdout)
+            sendStream(scope, { type: 'text', text: pendingStdout })
+          }
         }
-      }
-      if (assistantText.value.trim()) {
-        runtimeSession.messages = [
-          ...runtimeMessages,
-          { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
-        ]
-      }
-      runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
+        if (assistantText.value.trim()) {
+          runtimeSession.messages = [
+            ...runtimeMessages,
+            { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
+          ]
+        }
+        completeStableContextCliTurn(stableContext, {
+          exitCode: code,
+          sawProviderAcceptance,
+          providerError: aborted,
+          sessionId: getCardSessionId(scope, req.provider) ?? resumeThreadId,
+        })
+        if (code === 0 && !aborted && sawProviderAcceptance) markRoomPromptAccepted(scope)
+        runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
+        runtimeSession.isStreaming = false
+        void upsertRuntimeSessionState(req, runtimeSession)
+        if (code !== 0 && stderrBuf.value.trim()) {
+          sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
+        }
+        sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      }).catch(() => {
+        invalidateStableContextSelection(stableContext)
+        if (assistantText.value.trim()) {
+          runtimeSession.messages = [
+            ...runtimeMessages,
+            { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
+          ]
+        }
+        runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
+        runtimeSession.isStreaming = false
+        void upsertRuntimeSessionState(req, runtimeSession)
+        if (code !== 0 && stderrBuf.value.trim()) {
+          sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
+        }
+        sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      })
+    })().catch(error => {
+      invalidateStableContextSelection(stableContext)
       runtimeSession.isStreaming = false
       void upsertRuntimeSessionState(req, runtimeSession)
-      if (code !== 0 && stderrBuf.value.trim()) {
-        sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
-      }
-      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
-    }).catch(() => {
-      if (assistantText.value.trim()) {
-        runtimeSession.messages = [
-          ...runtimeMessages,
-          { role: 'assistant', content: boundProviderHistoryText(assistantText.value) },
-        ]
-      }
-      runtimeSession.sessionId = getCardSessionId(scope, req.provider) ?? runtimeSession.sessionId
-      runtimeSession.isStreaming = false
-      void upsertRuntimeSessionState(req, runtimeSession)
-      if (code !== 0 && stderrBuf.value.trim()) {
-        sendStream(scope, { type: 'error', error: stderrBuf.value.trim() })
-      }
-      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+      sendStream(scope, {
+        type: 'error',
+        error: `Codex process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
     })
   })
 
   proc.on('error', (err) => {
+    cleanupMaterializedImages()
     if (!isCurrent()) return // superseded — new turn owns the slot
-    activeProcesses.delete(scopeKey)
-    runtimeSession.isStreaming = false
-    void upsertRuntimeSessionState(req, runtimeSession)
-    sendStream(scope, { type: 'error', error: err.message.includes('ENOENT')
-      ? 'Codex CLI not found. Install: npm install -g @openai/codex'
-      : err.message })
-    sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+    void (async () => {
+      const termination = await stopActiveChatProcess(scopeKey)
+      invalidateStableContextSelection(stableContext)
+      runtimeSession.isStreaming = false
+      void upsertRuntimeSessionState(req, runtimeSession)
+      sendStream(scope, { type: 'error', error: err.message.includes('ENOENT')
+        ? 'Codex CLI not found. Install: npm install -g @openai/codex'
+        : err.message })
+      if (!termination?.confirmed) {
+        sendStream(scope, {
+          type: 'error',
+          error: `Codex process-tree exit could not be confirmed: ${termination?.detail ?? 'process ownership was lost'}`,
+        })
+        return
+      }
+      sendStream(scope, { type: 'done', sessionId: runtimeSession.sessionId ?? undefined })
+    })().catch(error => {
+      sendStream(scope, {
+        type: 'error',
+        error: `Codex process finalization failed: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    })
   })
 }

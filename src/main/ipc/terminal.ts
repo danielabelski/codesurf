@@ -3,18 +3,35 @@ import { existsSync, chmodSync } from 'fs'
 import { promises as fsP } from 'fs'
 import { execFileSync } from 'child_process'
 import { createHash } from 'node:crypto'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { bus } from '../event-bus'
 import { writeMCPConfigToWorkspace, writeTileMcpConfig, getTileToken, revokeTileToken } from '../mcp-server'
 import { CODESURF_HOME, workspaceTileDir, legacyWorkspaceTileDir } from '../paths'
 import { getAllNodeTools } from '../../shared/nodeTools'
 import { setTerminalNotifier, updateLinks, removeTile as removePeerTile } from '../peer-state'
-import { readSettingsSync } from './workspace'
-import { isAllowedBinary, expandHome, buildSafeSpawnEnv, ALLOWED_AGENT_BINS } from './terminal-helpers'
+import { getWorkspacePathById, readSettingsSync } from './workspace'
+import {
+  isAllowedBinary,
+  terminalLaunchChanged,
+  expandHome,
+  buildSafeSpawnEnv,
+  ALLOWED_AGENT_BINS,
+  hasManagedLocalProxyEnvironmentEvidence,
+  inferManagedLocalProxyProcessState,
+  managedLocalProxyProcessState,
+  MANAGED_LOCAL_PROXY_MODE_ENV,
+  reconcileManagedLocalProxySession,
+  resolveManagedLocalProxySpawnEnvironment,
+  shouldForwardTmuxEnvironment,
+  type ManagedLocalProxyProcessState,
+  type ManagedLocalProxySessionState,
+} from './terminal-helpers'
 import { handlePtyExit } from './terminal-exit.ts'
 import { log } from '../utils/logger.ts'
 import { handleTyped, ipcSchemas } from './handleTyped.ts'
 import { isValidAgentRoomId } from '../agent-room/validation.ts'
+import { loadAuthoritativeChatPeers } from '../chat/peer-authority.ts'
+import { ensureLocalProxyRunning, getProxyStatus } from './localProxy.ts'
 
 const terminalLog = log.scope('terminal')
 
@@ -128,6 +145,40 @@ function tmuxKillSession(sessionName: string): void {
   } catch { /* session may already be gone */ }
 }
 
+function tmuxSessionEnvironmentValue(
+  sessionName: string,
+  key: string,
+): string | null {
+  const tmux = getTmuxPath()
+  if (!tmux) return null
+  try {
+    const output = execFileSync(
+      tmux,
+      ['show-environment', '-t', sessionName, key],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    )
+    const line = output.trim()
+    const prefix = `${key}=`
+    return line.startsWith(prefix) ? line.slice(prefix.length) : null
+  } catch {
+    return null
+  }
+}
+
+function readTmuxManagedLocalProxyState(
+  sessionName: string,
+): { eligible: boolean; state: ManagedLocalProxyProcessState } {
+  const environment = {
+    mode: tmuxSessionEnvironmentValue(sessionName, MANAGED_LOCAL_PROXY_MODE_ENV),
+    baseUrl: tmuxSessionEnvironmentValue(sessionName, 'ANTHROPIC_BASE_URL'),
+    token: tmuxSessionEnvironmentValue(sessionName, 'ANTHROPIC_AUTH_TOKEN'),
+  }
+  return {
+    eligible: hasManagedLocalProxyEnvironmentEvidence(environment),
+    state: inferManagedLocalProxyProcessState(environment),
+  }
+}
+
 /**
  * Peer state updates previously repainted a tmux status bar here. The status
  * bar is now hidden (see `ensureTmuxConf` + attach-time `status off`), so this
@@ -156,8 +207,7 @@ function tmuxNewSessionArgs(
   // Inject env vars via -e (tmux 3.2+)
   for (const [k, v] of Object.entries(env)) {
     if (k === 'PATH' || k === 'HOME' || k === 'SHELL' || k === 'TERM') continue
-    if (k.startsWith('CODESURF_') || k.startsWith('COLLAB_') || k === 'CARD_ID'
-      || k === 'LANG' || k === 'LC_ALL' || k === 'LC_CTYPE') {
+    if (shouldForwardTmuxEnvironment(k)) {
       tmuxArgs.push('-e', `${k}=${v}`)
     }
   }
@@ -185,6 +235,43 @@ interface TerminalSession {
   buffer: string
   tmuxSession?: string // tmux session name if backed by tmux
   shell: string // absolute shell binary used to spawn this pty (for cd syntax)
+  launchBin?: string
+  launchArgs: string[]
+  managedLocalProxy: ManagedLocalProxySessionState
+}
+
+interface ResolvedTerminalManagedLocalProxy {
+  env: Record<string, string>
+  state: ManagedLocalProxyProcessState
+}
+
+async function resolveTerminalManagedLocalProxy(
+  eligible: boolean,
+): Promise<ResolvedTerminalManagedLocalProxy> {
+  if (!eligible) {
+    return {
+      env: {},
+      state: managedLocalProxyProcessState('disabled'),
+    }
+  }
+
+  const managedProxy = await resolveManagedLocalProxySpawnEnvironment(
+    readSettingsSync(),
+    {
+      ensureRunning: ensureLocalProxyRunning,
+      getStatus: getProxyStatus,
+    },
+  )
+  if (!managedProxy) {
+    return {
+      env: {},
+      state: managedLocalProxyProcessState('disabled'),
+    }
+  }
+  return {
+    env: managedProxy.env,
+    state: managedLocalProxyProcessState('enabled', managedProxy.token),
+  }
 }
 
 const terminals = new Map<string, TerminalSession>()
@@ -264,13 +351,61 @@ export function registerTerminalIPC(): void {
     }
 
     const existing = terminals.get(tileId)
+    let carriedListeners: Set<WebContents> | null = null
+    let preResolvedManagedLocalProxy: ResolvedTerminalManagedLocalProxy | null = null
     if (existing) {
       if (existing.workspaceId !== workspaceId) {
         return { error: 'Terminal tile ID is already active in another workspace' }
       }
-      existing.listeners.add(event.sender)
-      trackTerminalSender(event.sender, tileId)
-      return { cols: 80, rows: 24, buffer: existing.buffer }
+
+      // A chat terminal is a view over a specific provider session. Reusing a
+      // tile id is safe only when the requested provider argv is unchanged;
+      // otherwise the old PTY would keep running the previous conversation.
+      // Omitted launch metadata remains a reconnect request for legacy callers.
+      const launchChanged = terminalLaunchChanged(existing, launchBin, launchArgs)
+
+      if (!launchChanged) {
+        try {
+          const resolved = await resolveTerminalManagedLocalProxy(
+            existing.managedLocalProxy.eligible,
+          )
+          const reconciliation = reconcileManagedLocalProxySession(
+            existing.managedLocalProxy,
+            resolved.state,
+          )
+          existing.managedLocalProxy = reconciliation.state
+          if (reconciliation.action === 'reuse') {
+            existing.listeners.add(event.sender)
+            trackTerminalSender(event.sender, tileId)
+            return { cols: 80, rows: 24, buffer: existing.buffer }
+          }
+          preResolvedManagedLocalProxy = resolved
+        } catch (error) {
+          return {
+            error: error instanceof Error
+              ? error.message
+              : 'Failed to reconcile the managed local proxy',
+          }
+        }
+      }
+
+      // Process environments are immutable. Remove only this proxy-managed
+      // Claude session, then let the normal creation path replace it with the
+      // desired mode/token. Non-Claude sessions never reach this branch.
+      carriedListeners = new Set(existing.listeners)
+      carriedListeners.add(event.sender)
+      terminals.delete(tileId)
+      if (existing.tmuxSession) tmuxKillSession(existing.tmuxSession)
+      try { existing.pty.kill() } catch { /* already stopped */ }
+      const pending = terminalBuffers.get(tileId)
+      if (pending?.timer) clearTimeout(pending.timer)
+      terminalBuffers.delete(tileId)
+      if (!launchBin) {
+        launchBin = existing.shell
+        if (launchArgs === undefined && existing.launchBin === launchBin) {
+          launchArgs = existing.launchArgs
+        }
+      }
     }
 
     // If a binary is specified, validate it against the allowlist (SEC-04)
@@ -284,12 +419,15 @@ export function registerTerminalIPC(): void {
       ? (process.env.COMSPEC || 'cmd.exe')
       : (process.env.SHELL || '/bin/zsh')
     const bin = launchBin || defaultShell
+    const launchContractArgs = launchBin ? [...(launchArgs ?? [])] : []
     const args = launchBin ? (launchArgs ?? []).map(expandHome) : []
 
     // Check if we should inject MCP config for agent CLIs. Derive the set
     // from the spawn allowlist so the two never drift (SEC-04 + M3).
     const launchBase = (bin.split(/[/\\]/).pop() || '').replace(/\.(exe|cmd|bat|ps1)$/i, '')
     const isAgent = ALLOWED_AGENT_BINS.includes(launchBase)
+    const isClaude = launchBase === 'claude'
+    let desiredManagedLocalProxy = managedLocalProxyProcessState('disabled')
     const spawnEnv: Record<string, string> = buildSafeSpawnEnv({
       CARD_ID: tileId,
       CODESURF_WORKSPACE_ID: workspaceId,
@@ -360,7 +498,6 @@ export function registerTerminalIPC(): void {
       } catch { /* no skills config */ }
 
       // Auto-allow codesurf MCP tools for Claude Code CLI launches
-      const isClaude = launchBase === 'claude'
       if (isClaude) {
         // Point Claude Code at the tile-scoped MCP config (not just workspace
         // .mcp.json which still carries the global token for human CLI use).
@@ -400,10 +537,23 @@ export function registerTerminalIPC(): void {
         args.push('--allowedTools', filteredTools.join(','))
       }
 
-      // Redirect API calls to local proxy if enabled (e.g. Ollama/llama.cpp via api-proxy)
-      const proxySettings = readSettingsSync()
-      if (proxySettings.localProxyEnabled && proxySettings.localProxyPort) {
-        spawnEnv.ANTHROPIC_BASE_URL = `http://localhost:${proxySettings.localProxyPort}/v1`
+      // Redirect Claude API calls only after the managed listener is live and
+      // inject its runtime bearer explicitly. Inherited provider credentials
+      // remain stripped by buildSafeSpawnEnv.
+      if (isClaude) {
+        try {
+          const managedProxy = preResolvedManagedLocalProxy
+            ?? await resolveTerminalManagedLocalProxy(true)
+          Object.assign(spawnEnv, managedProxy.env)
+          desiredManagedLocalProxy = managedProxy.state
+          spawnEnv[MANAGED_LOCAL_PROXY_MODE_ENV] = managedProxy.state.mode
+        } catch (error) {
+          return {
+            error: error instanceof Error
+              ? error.message
+              : 'Failed to prepare the managed local proxy',
+          }
+        }
       }
 
       bus.publish({
@@ -423,10 +573,35 @@ export function registerTerminalIPC(): void {
     const sessName = tmuxSessionName(workspaceId, tileId)
     let useTmux = false
     let reattaching = false
+    let managedLocalProxyEligible = isClaude
+    let actualManagedLocalProxy = desiredManagedLocalProxy
 
     if (tmux) {
       ensureTmuxConf()
       reattaching = tmuxSessionExists(sessName)
+      if (reattaching) {
+        const actual = readTmuxManagedLocalProxyState(sessName)
+        managedLocalProxyEligible = isClaude && actual.eligible
+        const reconciliation = reconcileManagedLocalProxySession(
+          {
+            eligible: managedLocalProxyEligible,
+            desired: desiredManagedLocalProxy,
+            actual: actual.state,
+          },
+          desiredManagedLocalProxy,
+        )
+        if (reconciliation.action === 'replace') {
+          // A tmux-hosted Claude process cannot have its environment replaced
+          // in place. Rotate it on mode or bearer changes. The eligibility
+          // guard deliberately preserves unrelated non-Claude sessions.
+          tmuxKillSession(sessName)
+          reattaching = false
+          managedLocalProxyEligible = isClaude
+          actualManagedLocalProxy = desiredManagedLocalProxy
+        } else {
+          actualManagedLocalProxy = reconciliation.state.actual
+        }
+      }
       if (!reattaching) {
         // Create a detached tmux session running the target binary
         try {
@@ -475,10 +650,17 @@ export function registerTerminalIPC(): void {
     const session: TerminalSession = {
       workspaceId,
       pty: term,
-      listeners: new Set([event.sender]),
+      listeners: carriedListeners ?? new Set([event.sender]),
       buffer: '',
       tmuxSession: useTmux ? sessName : undefined,
       shell: bin,
+      launchBin,
+      launchArgs: launchContractArgs,
+      managedLocalProxy: {
+        eligible: managedLocalProxyEligible,
+        desired: desiredManagedLocalProxy,
+        actual: actualManagedLocalProxy,
+      },
     }
     terminals.set(tileId, session)
     trackTerminalSender(event.sender, tileId)
@@ -632,12 +814,31 @@ export function registerTerminalIPC(): void {
     workspaceDir: string,
     peers: Array<{ peerId: string; peerType: string; tools: string[] }>,
   ) => {
+    if (!isValidAgentRoomId(workspaceId) || !isValidAgentRoomId(tileId)) {
+      throw new Error('Invalid terminal peer scope')
+    }
+    const registeredWorkspaceDir = await getWorkspacePathById(workspaceId)
+    if (!registeredWorkspaceDir) throw new Error(`Workspace not found: ${workspaceId}`)
+    const canonicalWorkspaceDir = await fsP.realpath(registeredWorkspaceDir)
+    if (String(workspaceDir ?? '').trim()) {
+      let suppliedWorkspaceDir: string
+      try {
+        suppliedWorkspaceDir = await fsP.realpath(resolve(workspaceDir))
+      } catch {
+        throw new Error('workspaceDir does not match the registered workspace root')
+      }
+      if (suppliedWorkspaceDir !== canonicalWorkspaceDir) {
+        throw new Error('workspaceDir does not match the registered workspace root')
+      }
+    }
+    const authority = await loadAuthoritativeChatPeers(workspaceId, tileId, peers)
+    const authoritativePeers = authority.peers
     const tileTypes: Record<string, string> = { [tileId]: 'terminal' }
-    for (const p of peers ?? []) tileTypes[p.peerId] = p.peerType || 'unknown'
+    for (const peer of authoritativePeers) tileTypes[peer.peerId] = peer.peerType || 'unknown'
     const room = updateLinks(
       workspaceId,
       tileId,
-      (peers ?? []).map(p => p.peerId),
+      authoritativePeers.map(peer => peer.peerId),
       tileTypes,
     )
 
@@ -647,10 +848,10 @@ export function registerTerminalIPC(): void {
       updateTmuxStatus(session.tmuxSession, tileId)
     }
 
-    const contexDir = workspaceTileDir(workspaceDir, tileId)
+    const contexDir = workspaceTileDir(canonicalWorkspaceDir, tileId)
     const peersPath = join(contexDir, 'peers.md')
 
-    if (!peers || peers.length === 0) {
+    if (authoritativePeers.length === 0) {
       try { await fsP.unlink(peersPath) } catch { /* didn't exist or not permitted */ }
       bus.publish({
         channel: `tile:${workspaceId}:${tileId}`,
@@ -670,7 +871,7 @@ export function registerTerminalIPC(): void {
       `Live inbox: ~/.codesurf/workspaces/${workspaceId}/agent-rooms/inboxes/${tileId}/ROOM.md`,
       '',
     ]
-    for (const peer of peers) {
+    for (const peer of authoritativePeers) {
       lines.push(`## ${peer.peerType} — \`${peer.peerId}\``)
       if (peer.tools.length > 0) {
         lines.push('Available tools:')
@@ -700,8 +901,8 @@ export function registerTerminalIPC(): void {
       payload: {
         action: 'peers_updated',
         workspaceId,
-        count: peers.length,
-        peerIds: peers.map(p => p.peerId),
+        count: authoritativePeers.length,
+        peerIds: authoritativePeers.map(peer => peer.peerId),
         persisted,
       }
     })

@@ -10,7 +10,10 @@ import type { AppSettings, ExecutionHostRecord, ExecutionPreference, ProjectReco
 import { DEFAULT_SETTINGS, normalizeLoadedSettings, withDefaultSettings, withFreshInstallDefaults } from '../../src/shared/types.ts'
 import { buildOpenClawAgentArgs, buildOpenCodeRunArgs, sanitizeAgentCliDiagnostic } from '../../src/main/agents/agent-cli-contracts.ts'
 import { CODESURF_HOME, WORKSPACES_DIR } from '../../src/main/paths.ts'
-import { getDefaultElectrobunInvokeResponse } from '../../src/electrobun/browser/electron-facade.ts'
+import {
+  getDefaultElectrobunInvokeResponse,
+  withElectrobunHostBootstrap,
+} from '../../src/electrobun/browser/electron-facade.ts'
 import {
   assertAuthorizedParentUnchanged,
   assertDirectoryNoFollow,
@@ -19,6 +22,7 @@ import {
   copyFileNoFollow,
   getUniqueCopyPath,
   isProbablyTextFile,
+  readUtf8FilePrefixNoFollow,
   readUtf8FileNoFollow,
   statPathNoFollow,
   validateCanonicalFsPathDetails,
@@ -26,6 +30,8 @@ import {
 } from '../../src/main/ipc/fs.ts'
 import { buildSafeSpawnEnv, isAllowedBinary } from '../../src/main/ipc/terminal-helpers.ts'
 import type { ChatRequest } from '../../src/main/chat/types.ts'
+import { tileContextChannel } from '../../src/shared/tileContextScope.ts'
+import { acknowledgeThrough } from '../../src/main/agent-room/index.ts'
 import {
   formatExtensionSidebarResponse,
   listExtensionsForBridge,
@@ -33,7 +39,31 @@ import {
 } from '../../src/main/extensions/light-scan.ts'
 import { createElectrobunDbRuntime } from './runtime-db.ts'
 import { builtInDaemonHosts, createElectrobunDaemonRuntime, sanitizeDaemonStatusError, summarizeDaemonDashboard } from './runtime-daemon.ts'
-import { parseClaudeStreamJsonLine, parseCodexJsonLine, parseOpenClawOutput, parseOpenCodeJsonLine, type ElectrobunStreamEvent } from './chat-streams.ts'
+import { createClaudeStreamParser, createCodexStreamParser, parseOpenClawOutput, parseOpenCodeJsonLine, type ElectrobunStreamEvent } from './chat-streams.ts'
+import {
+  createElectrobunTileContextStore,
+  invokeElectrobunTileContext,
+} from './tile-context-runtime.ts'
+import { ElectrobunTileStateRuntime } from './tile-state-runtime.ts'
+import {
+  type ElectrobunChatTurn,
+} from './chat-room-lifecycle.ts'
+import { ElectrobunChatRuntimeState } from './chat-runtime-state.ts'
+import { loadElectrobunTrustedChatContext } from './trusted-context-runtime.ts'
+import {
+  buildClaudeStreamInput,
+  insertCodexImageArgs,
+  materializeVerifiedElectrobunImages,
+  readVerifiedElectrobunImages,
+  sweepStaleElectrobunImageDirectories,
+} from './multimodal-runtime.ts'
+import {
+  ElectrobunOwnedAttachmentRegistry,
+  issueElectrobunPickedAttachments,
+  revokeElectrobunAttachmentSelections,
+  writeElectrobunTempAttachment,
+  type ElectrobunIssuedAttachment,
+} from './attachment-capability-runtime.ts'
 import {
   authorizeElectrobunFsPath,
   authorizeElectrobunTerminalPath,
@@ -42,6 +72,8 @@ import {
   buildElectrobunHermesSpawnArgs,
   buildElectrobunPersonaPrompt,
   canonicalizeElectrobunChatRequest,
+  composeElectrobunProviderContext,
+  prepareCanonicalElectrobunChatRequest,
   type ElectrobunChatRequest,
 } from './trust-policy.ts'
 import {
@@ -74,6 +106,8 @@ type LiveWindow = {
 
 type TerminalSession = {
   shell: string
+  launchBin?: string
+  launchArgs: string[]
   buffer: string
   cwd: string
   workspaceId: string | null
@@ -102,6 +136,7 @@ const RENDERER_DEV_URL = process.env.CODESURF_ELECTROBUN_RENDERER_URL ?? 'http:/
 const RENDERER_BUNDLED_URL = 'views://mainview/index.html'
 const BRIDGE_PRELOAD_URL = 'views://codesurf-electrobun/index.js'
 const PROJECTS_PATH = join(CODESURF_HOME, 'projects', 'projects.json')
+const FIRST_RUN_PROJECT_PATH = join(CODESURF_HOME, 'projects', 'electrobun-local')
 const WORKSPACES_PATH = join(CODESURF_HOME, 'workspaces', 'workspaces.json')
 const SETTINGS_PATH = join(CODESURF_HOME, 'settings.json')
 const MCP_CONFIG_PATH = join(CODESURF_HOME, 'mcp-server.json')
@@ -186,24 +221,45 @@ async function getDaemonSummaryForStatusBar() {
 
 const liveWindows = new Map<number, LiveWindow>()
 const terminalSessions = new Map<string, TerminalSession>()
-const chatProcesses = new Map<string, ChildProcess>()
-const chatSessionIds = new Map<string, string>()
+const ownedAttachmentDirectory = join(CODESURF_HOME, 'chat-attachments')
+const codexImageDirectory = join(CODESURF_HOME, 'tmp', 'electrobun-images')
+const ownedAttachments = new ElectrobunOwnedAttachmentRegistry(ownedAttachmentDirectory)
+const chatRuntime = new ElectrobunChatRuntimeState(
+  acknowledgeThrough,
+  (scope, event) => broadcast('agent:stream', { ...scope, ...event }),
+)
 const busHistory = new Map<string, BusEvent[]>()
-const tileContext = new Map<string, unknown>()
+const tileStateRuntime = new ElectrobunTileStateRuntime(WORKSPACES_DIR)
+const tileContext = createElectrobunTileContextStore({
+  persistence: {
+    load: (workspaceId, tileId) => tileStateRuntime.loadContext(workspaceId, tileId),
+    save: (workspaceId, tileId, context) => tileStateRuntime.saveContext(workspaceId, tileId, context),
+    delete: (workspaceId, tileId) => tileStateRuntime.delete(workspaceId, tileId),
+  },
+  onChanged: payload => {
+    publishBus(
+      tileContextChannel(payload.workspaceId, payload.tileId),
+      'data',
+      `tile:${payload.workspaceId}:${payload.tileId}`,
+      { action: 'context_changed', ...payload },
+    )
+    broadcast('tileContext:changed', payload)
+  },
+})
 const activityRecords = new Map<string, Record<string, unknown>>()
 const fsWatchers = new Map<string, { watcher: FSWatcher, debounce: ReturnType<typeof setTimeout> | null }>()
 let focusedWindowId = 1
 let shellPathCache: string | null | undefined
 let ptyHostProcess: ChildProcess | null = null
 let ptyHostStdoutBuffer = ''
+let defaultWorkspaceInitialization: Promise<Workspace[]> | null = null
 
 function defaultWorkspace(): Workspace {
-  const cwd = process.cwd()
   return {
     id: 'electrobun-local',
-    name: basename(cwd) || 'CodeSurf',
-    path: cwd,
-    projectPaths: [cwd],
+    name: 'CodeSurf Workspace',
+    path: FIRST_RUN_PROJECT_PATH,
+    projectPaths: [FIRST_RUN_PROJECT_PATH],
   }
 }
 
@@ -224,8 +280,19 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
 }
 
 async function writeJson(filePath: string, data: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, JSON.stringify(data, null, 2))
+  const parent = dirname(filePath)
+  const temporaryPath = join(parent, `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`)
+  await mkdir(parent, { recursive: true })
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    })
+    await rename(temporaryPath, filePath)
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 async function writeSmokeStatus(phase: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -289,12 +356,51 @@ function workspaceFromRecord(record: WorkspaceRecord, projectById: Map<string, P
   }
 }
 
+async function initializeDefaultWorkspace(): Promise<Workspace[]> {
+  // Re-read while holding the in-process single-flight. This avoids clobbering
+  // a workspace persisted between the caller's empty read and initialization.
+  const [workspaceDoc, projects] = await Promise.all([readWorkspacesDoc(), listProjects()])
+  const projectById = new Map(projects.map(project => [project.id, project]))
+  const records = Array.isArray(workspaceDoc.workspaces) ? workspaceDoc.workspaces : []
+  const mapped = records.map(record => workspaceFromRecord(record, projectById))
+  if (mapped.length > 0) return mapped
+
+  // The renderer and daemon share these registries as their workspace trust
+  // boundary. Persist the first-run fallback instead of exposing an in-memory
+  // workspace id that the daemon cannot authorize for attachments and jobs.
+  const fallback = defaultWorkspace()
+  await mkdir(fallback.path, { recursive: true, mode: 0o700 })
+  const project = await upsertProjectForPath(fallback.path)
+  const record: WorkspaceRecord = {
+    id: fallback.id,
+    name: fallback.name,
+    projectIds: [project.id],
+    primaryProjectId: project.id,
+  }
+  await writeWorkspacesDoc({
+    ...workspaceDoc,
+    activeWorkspaceId: record.id,
+    workspaces: [record],
+  })
+  return [workspaceFromRecord(record, new Map([[project.id, project]]))]
+}
+
 async function listWorkspaces(): Promise<Workspace[]> {
   const [workspaceDoc, projects] = await Promise.all([readWorkspacesDoc(), listProjects()])
   const projectById = new Map(projects.map(project => [project.id, project]))
   const records = Array.isArray(workspaceDoc.workspaces) ? workspaceDoc.workspaces : []
   const mapped = records.map(record => workspaceFromRecord(record, projectById))
-  return mapped.length > 0 ? mapped : [defaultWorkspace()]
+  if (mapped.length > 0) return mapped
+
+  if (!defaultWorkspaceInitialization) {
+    defaultWorkspaceInitialization = initializeDefaultWorkspace()
+  }
+  try {
+    return await defaultWorkspaceInitialization
+  } catch (error) {
+    defaultWorkspaceInitialization = null
+    throw error
+  }
 }
 
 async function getActiveWorkspace(): Promise<Workspace | null> {
@@ -391,6 +497,7 @@ async function deleteWorkspace(id: string): Promise<boolean> {
   doc.workspaces = (doc.workspaces ?? []).filter(item => item.id !== id)
   if (doc.activeWorkspaceId === id) doc.activeWorkspaceId = doc.workspaces[0]?.id ?? null
   await writeWorkspacesDoc(doc)
+  if (doc.workspaces.length === 0) defaultWorkspaceInitialization = null
   await rm(workspaceStorageDir(id), { recursive: true, force: true })
   broadcast('workspace:changed', { deletedWorkspaceId: id, activeWorkspaceId: doc.activeWorkspaceId ?? null })
   return true
@@ -441,13 +548,11 @@ async function saveCanvas(workspaceId: string, state: unknown): Promise<boolean>
 }
 
 async function loadTileState(workspaceId: string, tileId: string): Promise<unknown | null> {
-  return await readJson(join(workspaceStorageDir(workspaceId), 'tiles', `${safeStorageSegment(tileId, 'tileId')}.json`), null)
+  return await tileStateRuntime.load(workspaceId || 'default', tileId)
 }
 
 async function saveTileState(workspaceId: string, tileId: string, state: unknown): Promise<boolean> {
-  const dir = join(workspaceStorageDir(workspaceId), 'tiles')
-  await mkdir(dir, { recursive: true })
-  await writeFile(join(dir, `${safeStorageSegment(tileId, 'tileId')}.json`), JSON.stringify(state, null, 2))
+  await tileStateRuntime.save(workspaceId || 'default', tileId, state)
   broadcast('canvas:sessionsChanged', { workspaceId, tileId })
   return true
 }
@@ -740,11 +845,9 @@ function stopPtyHost(): void {
   try { host.kill('SIGTERM') } catch { /* ignore */ }
 }
 
-function stopAllChatProcesses(): void {
-  for (const [cardId, proc] of chatProcesses.entries()) {
-    try { proc.kill('SIGTERM') } catch { /* ignore */ }
-    chatProcesses.delete(cardId)
-  }
+async function stopAllChatProcesses(): Promise<boolean> {
+  const results = await chatRuntime.stopAll()
+  return results.every(result => result.confirmed)
 }
 
 function stopAllFsWatchers(): void {
@@ -755,15 +858,39 @@ function stopAllFsWatchers(): void {
   fsWatchers.clear()
 }
 
-function shutdownRuntimeChildren(): void {
+let runtimeShutdown: Promise<boolean> | null = null
+
+function shutdownRuntimeChildren(): Promise<boolean> {
+  if (runtimeShutdown) return runtimeShutdown
+  runtimeShutdown = (async () => {
+    stopPtyHost()
+    const chatStopped = await stopAllChatProcesses()
+    await ownedAttachments.dispose()
+    stopAllFsWatchers()
+    return chatStopped
+  })()
+  return runtimeShutdown
+}
+
+function forceShutdownRuntimeChildren(): void {
   stopPtyHost()
-  stopAllChatProcesses()
+  chatRuntime.forceStopAll()
   stopAllFsWatchers()
 }
 
 async function createTerminal(tileId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number, rows: number, buffer: string }> {
   const existing = terminalSessions.get(tileId)
-  if (existing) return { cols: 80, rows: 24, buffer: existing.buffer }
+  const requestedArgs = Array.isArray(launchArgs) ? [...launchArgs] : []
+  const launchChanged = launchBin !== undefined && (
+    existing?.launchBin !== launchBin
+    || existing.launchArgs.length !== requestedArgs.length
+    || existing.launchArgs.some((value, index) => value !== requestedArgs[index])
+  )
+  if (existing && !launchChanged) return { cols: 80, rows: 24, buffer: existing.buffer }
+  if (existing) {
+    sendPtyHost({ type: 'destroy', tileId })
+    terminalSessions.delete(tileId)
+  }
 
   const authorized = await authorizeElectrobunTerminalPath({
     ...(await workspaceAuthority()),
@@ -772,9 +899,11 @@ async function createTerminal(tileId: string, workspaceDir: string, launchBin?: 
   workspaceDir = authorized.path.operationPath
   if (launchBin && !isAllowedBinary(launchBin)) launchBin = undefined
   const shell = launchBin || defaultShell()
-  const args = Array.isArray(launchArgs) ? launchArgs : []
+  const args = launchBin ? requestedArgs : []
   const session: TerminalSession = {
     shell,
+    launchBin,
+    launchArgs: launchBin ? requestedArgs : [],
     buffer: '',
     cwd: workspaceDir,
     workspaceId: authorized.workspaceId,
@@ -800,27 +929,38 @@ function cdCommand(shell: string, dirPath: string): string {
   return `cd '${dirPath.replace(/'/g, "'\\''")}'`
 }
 
-function stopChat(cardId: string): void {
-  const proc = chatProcesses.get(cardId)
-  if (proc) {
-    try { proc.kill('SIGTERM') } catch { /* ignore */ }
-    chatProcesses.delete(cardId)
-  }
+async function stopChat(scope: Pick<ElectrobunChatTurn, 'workspaceId' | 'cardId'>) {
+  return await chatRuntime.stop(scope)
 }
 
-function sendStream(cardId: string, event: Record<string, unknown>): void {
-  broadcast('agent:stream', { cardId, ...event })
+function broadcastChatStream(
+  scope: Pick<ElectrobunChatTurn, 'workspaceId' | 'cardId'>,
+  event: Record<string, unknown>,
+): void {
+  chatRuntime.sendDirect(scope, event)
 }
 
-function sendParsedStreamEvents(cardId: string, events: ElectrobunStreamEvent[]): void {
+function sendStream(turn: ElectrobunChatTurn, event: Record<string, unknown>): void {
+  chatRuntime.send(turn, event)
+}
+
+function sendParsedStreamEvents(
+  turn: ElectrobunChatTurn,
+  provider: string,
+  events: ElectrobunStreamEvent[],
+): void {
   for (const event of events) {
-    if (event.type === 'session') chatSessionIds.set(cardId, event.sessionId)
-    sendStream(cardId, event)
+    if (event.type === 'session') {
+      chatRuntime.setSession(turn, provider, event.sessionId)
+    }
+    sendStream(turn, event)
   }
 }
 
 function lastUserMessage(req: ChatRequest): string | null {
-  const messages = Array.isArray(req.messages) ? req.messages : []
+  const messages = Array.isArray(req.expandedMessages) && req.expandedMessages.length > 0
+    ? req.expandedMessages
+    : Array.isArray(req.messages) ? req.messages : []
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
     if (message?.role === 'user' && typeof message.content === 'string' && message.content.trim()) return message.content
@@ -845,65 +985,47 @@ function resolveCommand(command: string, envName?: string): string | null {
   }
 }
 
-function streamProcessText(cardId: string, proc: ChildProcess, options: {
-  onStdoutText?: (text: string) => void
-  onStdoutLine?: (line: string) => void
-  onClose?: (code: number | null, stderr: string) => void
-  missingBinaryMessage: string
-}): void {
-  let stdoutBuffer = ''
-  let stderrBuffer = ''
-
-  proc.stdout?.on('data', (chunk: Buffer) => {
-    const text = chunk.toString()
-    if (options.onStdoutText) {
-      options.onStdoutText(text)
-      return
-    }
-    stdoutBuffer += text
-    const lines = stdoutBuffer.split(/\r?\n/)
-    stdoutBuffer = lines.pop() ?? ''
-    for (const line of lines) options.onStdoutLine?.(line)
-  })
-
-  proc.stderr?.on('data', (chunk: Buffer) => { stderrBuffer += chunk.toString() })
-
-  proc.on('close', (code) => {
-    if (!options.onStdoutText && stdoutBuffer) options.onStdoutLine?.(stdoutBuffer)
-    chatProcesses.delete(cardId)
-    options.onClose?.(code, stderrBuffer)
-    sendStream(cardId, { type: 'done' })
-  })
-
-  proc.on('error', (error) => {
-    chatProcesses.delete(cardId)
-    const message = error.message.includes('ENOENT') ? options.missingBinaryMessage : error.message
-    sendStream(cardId, { type: 'error', error: message })
-    sendStream(cardId, { type: 'done' })
-  })
+function rejectUnsupportedImageAttachments(request: ChatRequest, provider: string): void {
+  if ((request.imageAttachments?.length ?? 0) > 0) {
+    throw new Error(`${provider} image attachments are not supported by the Electrobun runtime; use Claude or Codex.`)
+  }
 }
 
-async function runHermesChat(req: ChatRequest, prompt: string): Promise<{ ok: boolean, error?: string }> {
-  const cardId = req.cardId
+const detachedChatProcess = process.platform !== 'win32'
+
+async function runHermesChat(req: ChatRequest, prompt: string, turn: ElectrobunChatTurn): Promise<{ ok: boolean, error?: string }> {
+  const provider = 'hermes'
+  rejectUnsupportedImageAttachments(req, 'Hermes')
   const hermesBin = resolveCommand('hermes', 'HERMES_BIN')
   if (!hermesBin) {
     const error = 'Hermes CLI not found. Install: pip install hermes-agent, or set HERMES_BIN.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
   const args = buildElectrobunHermesSpawnArgs(
     req,
     prompt,
-    req.sessionId ?? chatSessionIds.get(cardId) ?? null,
+    req.sessionId ?? chatRuntime.getSession(turn, provider),
   )
   const cwd = req.workspaceDir
-  const proc = spawn(hermesBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
-  chatProcesses.set(cardId, proc)
+  const proc = spawn(hermesBin, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: childEnv(),
+    cwd,
+    detached: detachedChatProcess,
+  })
+  if (!await chatRuntime.registerProcess(turn, proc)) {
+    return { ok: false, error: 'Chat turn was superseded before Hermes started' }
+  }
+  const acceptedSpawn = chatRuntime.waitForAcceptedSpawn(
+    proc,
+    'Hermes CLI not found. Install: pip install hermes-agent, or set HERMES_BIN.',
+  )
 
   let partial = ''
-  streamProcessText(cardId, proc, {
+  chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'Hermes CLI not found. Install: pip install hermes-agent, or set HERMES_BIN.',
     onStdoutText: (text) => {
       partial += text
@@ -912,81 +1034,111 @@ async function runHermesChat(req: ChatRequest, prompt: string): Promise<{ ok: bo
       for (const line of lines) {
         const match = line.trim().match(/^(?:session_id|session)\s*:\s*(\S+)$/i)
         if (match?.[1]) {
-          chatSessionIds.set(cardId, match[1])
-          sendStream(cardId, { type: 'session', sessionId: match[1] })
+          chatRuntime.setSession(turn, provider, match[1])
+          sendStream(turn, { type: 'session', sessionId: match[1] })
           continue
         }
-        if (line) sendStream(cardId, { type: 'text', text: `${line}\n` })
+        if (line) sendStream(turn, { type: 'text', text: `${line}\n` })
       }
     },
-    onClose: (_code, stderr) => {
-      if (partial.trim()) sendStream(cardId, { type: 'text', text: partial })
-      if (stderr.trim()) sendStream(cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim()) })
+    onClose: (code, stderr) => {
+      if (partial.trim()) sendStream(turn, { type: 'text', text: partial })
+      if (code !== 0) sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || `Hermes exited with ${code}`) })
     },
   })
 
-  return { ok: true }
+  return await acceptedSpawn
 }
 
-async function runClaudeChat(req: ChatRequest, prompt: string): Promise<{ ok: boolean, error?: string }> {
-  const cardId = req.cardId
+async function runClaudeChat(req: ChatRequest, prompt: string, turn: ElectrobunChatTurn): Promise<{ ok: boolean, error?: string }> {
+  const provider = 'claude'
   const claudeBin = resolveCommand('claude', 'CLAUDE_BIN')
   if (!claudeBin) {
     const error = 'Claude CLI not found. Install Claude Code, or set CLAUDE_BIN.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
-  const resumeSessionId = req.sessionId ?? chatSessionIds.get(cardId) ?? null
-  const args = buildElectrobunClaudeSpawnArgs(req, prompt, resumeSessionId)
+  const resumeSessionId = req.sessionId ?? chatRuntime.getSession(turn, provider)
+  const images = await readVerifiedElectrobunImages(req.imageAttachments)
+  const streamInput = images.length > 0
+  const args = buildElectrobunClaudeSpawnArgs(req, prompt, resumeSessionId, { streamInput })
 
   const cwd = req.workspaceDir
-  const proc = spawn(claudeBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
-  chatProcesses.set(cardId, proc)
+  const proc = spawn(claudeBin, args, {
+    stdio: [streamInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    env: childEnv(),
+    cwd,
+    detached: detachedChatProcess,
+  })
+  if (!await chatRuntime.registerProcess(turn, proc)) {
+    return { ok: false, error: 'Chat turn was superseded before Claude started' }
+  }
+  const acceptedSpawn = chatRuntime.waitForAcceptedSpawn(
+    proc,
+    'Claude CLI not found. Install Claude Code, or set CLAUDE_BIN.',
+  )
 
-  streamProcessText(cardId, proc, {
+  const parser = createClaudeStreamParser()
+  chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'Claude CLI not found. Install Claude Code, or set CLAUDE_BIN.',
-    onStdoutLine: (line) => sendParsedStreamEvents(cardId, parseClaudeStreamJsonLine(line)),
+    onStdoutLine: (line) => sendParsedStreamEvents(turn, provider, parser.parseLine(line)),
     onClose: (code, stderr) => {
-      if (code !== 0 && stderr.trim()) sendStream(cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim()) })
+      if (code !== 0) sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || `Claude exited with ${code}`) })
     },
   })
+  if (streamInput) {
+    const userContent = composeElectrobunProviderContext(req, prompt).userContent
+    proc.stdin?.end(buildClaudeStreamInput(userContent, images))
+  }
 
-  return { ok: true }
+  return await acceptedSpawn
 }
 
-async function runOpenCodeChat(req: ChatRequest, prompt: string): Promise<{ ok: boolean, error?: string }> {
-  const cardId = req.cardId
+async function runOpenCodeChat(req: ChatRequest, prompt: string, turn: ElectrobunChatTurn): Promise<{ ok: boolean, error?: string }> {
+  const provider = 'opencode'
+  rejectUnsupportedImageAttachments(req, 'OpenCode')
   const opencodeBin = resolveCommand('opencode', 'OPENCODE_BIN')
   if (!opencodeBin) {
     const error = 'OpenCode CLI not found. Install opencode, or set OPENCODE_BIN.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
   const args = buildOpenCodeRunArgs({
-    prompt: buildElectrobunPersonaPrompt(prompt, req.agentMode),
+    prompt: buildElectrobunPersonaPrompt(prompt, req),
     model: req.model,
-    sessionId: req.sessionId ?? chatSessionIds.get(cardId) ?? null,
+    sessionId: req.sessionId ?? chatRuntime.getSession(turn, provider),
     cwd: req.workspaceDir,
     bypassPermissions: req.mode === 'full-access' || req.mode === 'bypassPermissions',
   })
 
   const cwd = req.workspaceDir
-  const proc = spawn(opencodeBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
-  chatProcesses.set(cardId, proc)
+  const proc = spawn(opencodeBin, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: childEnv(),
+    cwd,
+    detached: detachedChatProcess,
+  })
+  if (!await chatRuntime.registerProcess(turn, proc)) {
+    return { ok: false, error: 'Chat turn was superseded before OpenCode started' }
+  }
+  const acceptedSpawn = chatRuntime.waitForAcceptedSpawn(
+    proc,
+    'OpenCode CLI not found. Install opencode, or set OPENCODE_BIN.',
+  )
 
-  streamProcessText(cardId, proc, {
+  chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'OpenCode CLI not found. Install opencode, or set OPENCODE_BIN.',
-    onStdoutLine: (line) => sendParsedStreamEvents(cardId, parseOpenCodeJsonLine(line)),
+    onStdoutLine: (line) => sendParsedStreamEvents(turn, provider, parseOpenCodeJsonLine(line)),
     onClose: (code, stderr) => {
-      if (code !== 0 && stderr.trim()) sendStream(cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim()) })
+      if (code !== 0) sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || `OpenCode exited with ${code}`) })
     },
   })
 
-  return { ok: true }
+  return await acceptedSpawn
 }
 
 function normalizeModelRef(model?: string | null): string {
@@ -1044,17 +1196,18 @@ function selectOpenClawAgentId(openclawBin: string, preferredModel?: string | nu
   return agents.find(agent => agent.isDefault)?.id ?? agents[0]?.id ?? 'main'
 }
 
-async function runOpenClawChat(req: ChatRequest, prompt: string): Promise<{ ok: boolean, error?: string }> {
-  const cardId = req.cardId
+async function runOpenClawChat(req: ChatRequest, prompt: string, turn: ElectrobunChatTurn): Promise<{ ok: boolean, error?: string }> {
+  const provider = 'openclaw'
+  rejectUnsupportedImageAttachments(req, 'OpenClaw')
   const openclawBin = resolveCommand('openclaw', 'OPENCLAW_BIN')
   if (!openclawBin) {
     const error = 'OpenClaw CLI not found. Install: npm install -g openclaw, or set OPENCLAW_BIN.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
-  const existingSessionId = req.sessionId ?? chatSessionIds.get(cardId) ?? null
+  const existingSessionId = req.sessionId ?? chatRuntime.getSession(turn, provider)
   const selectedAgentId = existingSessionId ? null : selectOpenClawAgentId(openclawBin, req.model)
   if (!existingSessionId && req.model && !selectedAgentId) {
     const available = parseOpenClawAgents(openclawBin)
@@ -1062,8 +1215,8 @@ async function runOpenClawChat(req: ChatRequest, prompt: string): Promise<{ ok: 
       .filter((value, index, all): value is string => typeof value === 'string' && value.trim().length > 0 && all.indexOf(value) === index)
     const details = available.length > 0 ? ` Available: ${available.join(', ')}` : ''
     const error = `OpenClaw model must match exactly: ${req.model}.${details}`
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
@@ -1076,7 +1229,7 @@ async function runOpenClawChat(req: ChatRequest, prompt: string): Promise<{ ok: 
     adaptive: 'medium',
   }
   const args = buildOpenClawAgentArgs({
-    prompt: buildElectrobunPersonaPrompt(prompt, req.agentMode),
+    prompt: buildElectrobunPersonaPrompt(prompt, req),
     agentId: selectedAgentId ?? 'main',
     sessionId: existingSessionId,
     thinking: thinkingMap[req.thinking ?? ''] ?? null,
@@ -1084,134 +1237,218 @@ async function runOpenClawChat(req: ChatRequest, prompt: string): Promise<{ ok: 
   })
 
   const cwd = req.workspaceDir
-  const proc = spawn(openclawBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
-  chatProcesses.set(cardId, proc)
+  const proc = spawn(openclawBin, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: childEnv(),
+    cwd,
+    detached: detachedChatProcess,
+  })
+  if (!await chatRuntime.registerProcess(turn, proc)) {
+    return { ok: false, error: 'Chat turn was superseded before OpenClaw started' }
+  }
+  const acceptedSpawn = chatRuntime.waitForAcceptedSpawn(
+    proc,
+    'OpenClaw CLI not found. Install: npm install -g openclaw, or set OPENCLAW_BIN.',
+  )
 
   let stdout = ''
-  streamProcessText(cardId, proc, {
+  chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'OpenClaw CLI not found. Install: npm install -g openclaw, or set OPENCLAW_BIN.',
     onStdoutText: text => { stdout += text },
     onClose: (code, stderr) => {
       if (code !== 0) {
-        sendStream(cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || stdout.trim() || `OpenClaw exited with ${code}`) })
+        sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || stdout.trim() || `OpenClaw exited with ${code}`) })
         return
       }
-      sendParsedStreamEvents(cardId, parseOpenClawOutput(stdout))
+      sendParsedStreamEvents(turn, provider, parseOpenClawOutput(stdout))
     },
   })
 
-  return { ok: true }
+  return await acceptedSpawn
 }
 
-function handleCodexEvent(cardId: string, event: any): void {
-  if (!event || typeof event !== 'object') return
-  if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
-    chatSessionIds.set(cardId, event.thread_id)
-    sendStream(cardId, { type: 'session', sessionId: event.thread_id })
-    return
-  }
-
-  const item = event.item && typeof event.item === 'object' ? event.item : null
-  if (event.type === 'item.completed' && item) {
-    if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) {
-      sendStream(cardId, { type: 'text', text: item.text })
-      return
-    }
-    if (item.type === 'command_execution' && typeof item.command === 'string') {
-      sendStream(cardId, {
-        type: 'tool_summary',
-        toolId: `codex-command-${Math.abs(item.command.length)}`,
-        toolName: 'Command',
-        commandEntries: [{ label: item.command, command: item.command, output: String(item.aggregated_output ?? ''), kind: 'command' }],
-      })
-      return
-    }
-    if (item.type === 'file_change' && Array.isArray(item.changes)) {
-      sendStream(cardId, {
-        type: 'tool_summary',
-        toolId: 'codex-file-changes',
-        toolName: `Edited ${item.changes.length} file${item.changes.length === 1 ? '' : 's'}`,
-      })
-      return
-    }
-  }
-
-  if (typeof event.delta === 'string') sendStream(cardId, { type: 'text', text: event.delta })
-  else if (typeof event.text === 'string' && event.text) sendStream(cardId, { type: 'text', text: event.text })
-}
-
-async function runCodexChat(req: ChatRequest, prompt: string): Promise<{ ok: boolean, error?: string }> {
-  const cardId = req.cardId
+async function runCodexChat(req: ChatRequest, prompt: string, turn: ElectrobunChatTurn): Promise<{ ok: boolean, error?: string }> {
+  const provider = 'codex'
   const codexBin = resolveCommand('codex', 'CODEX_BIN')
   if (!codexBin) {
     const error = 'Codex CLI not found. Install: npm install -g @openai/codex, or set CODEX_BIN.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
 
   const workspaceDir = req.workspaceDir
   if (!workspaceDir) {
     const error = 'The authoritative workspace root is unavailable.'
-    sendStream(cardId, { type: 'error', error })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error })
+    sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
   const args = buildElectrobunCodexSpawnArgs(
     req,
     prompt,
     workspaceDir,
-    req.sessionId ?? chatSessionIds.get(cardId) ?? null,
+    req.sessionId ?? chatRuntime.getSession(turn, provider),
   )
   const resumeIndex = args.indexOf('resume')
   args.splice(resumeIndex >= 0 ? resumeIndex : args.length - 1, 0, '-c', 'mcp_servers={}')
+  const images = await readVerifiedElectrobunImages(req.imageAttachments)
+  const materialized = images.length > 0
+    ? await materializeVerifiedElectrobunImages(images, codexImageDirectory)
+    : null
+  const spawnArgs = insertCodexImageArgs(args, materialized?.paths ?? [])
 
   const cwd = workspaceDir
-  const proc = spawn(codexBin, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(), cwd })
-  chatProcesses.set(cardId, proc)
+  let proc: ChildProcess
+  try {
+    proc = spawn(codexBin, spawnArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: childEnv(),
+      cwd,
+      detached: detachedChatProcess,
+    })
+  } catch (error) {
+    await materialized?.cleanup()
+    throw error
+  }
+  if (materialized) {
+    proc.once('close', () => { void materialized.cleanup() })
+    proc.once('error', () => { void materialized.cleanup() })
+  }
+  if (!await chatRuntime.registerProcess(turn, proc)) {
+    await materialized?.cleanup()
+    return { ok: false, error: 'Chat turn was superseded before Codex started' }
+  }
+  const acceptedSpawn = chatRuntime.waitForAcceptedSpawn(
+    proc,
+    'Codex CLI not found. Install: npm install -g @openai/codex, or set CODEX_BIN.',
+  )
 
-  streamProcessText(cardId, proc, {
+  const parser = createCodexStreamParser()
+  chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'Codex CLI not found. Install: npm install -g @openai/codex, or set CODEX_BIN.',
-    onStdoutLine: (line) => sendParsedStreamEvents(cardId, parseCodexJsonLine(line)),
+    onStdoutLine: (line) => sendParsedStreamEvents(turn, provider, parser.parseLine(line)),
     onClose: (code, stderr) => {
-      if (code !== 0 && stderr.trim()) sendStream(cardId, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim()) })
+      if (code !== 0) sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || `Codex exited with ${code}`) })
     },
   })
 
-  return { ok: true }
+  return await acceptedSpawn
 }
 
 async function sendChat(rawRequest: ElectrobunChatRequest): Promise<{ ok: boolean, error?: string, jobId?: string }> {
   const cardId = String(rawRequest.cardId ?? '')
   if (!cardId) return { ok: false, error: 'missing cardId' }
-  let req: ChatRequest
+  let canonical: ChatRequest
   try {
-    req = await canonicalizeElectrobunChatRequest(rawRequest, await listWorkspaces())
+    canonical = await canonicalizeElectrobunChatRequest(rawRequest, await listWorkspaces())
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+
+  let turn: ElectrobunChatTurn
+  try {
+    // The scope is authoritative now. Supersede and fully terminate the prior
+    // foreground turn before any slower context loading or capability redemption.
+    turn = await chatRuntime.start(canonical)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+
+  let req: ChatRequest
+  let consumedAttachmentCapabilities: string[] = []
+  try {
+    req = await prepareCanonicalElectrobunChatRequest(
+      canonical,
+      rawRequest.peers,
+      async request => {
+        const trusted = await loadElectrobunTrustedChatContext(request, {
+          request: async <T>(path: string, options?: { body?: unknown }): Promise<T> => {
+            const response = await daemonRuntime.request<T>(path, options)
+            if (path === '/file-references/expand') {
+              const receiptCapabilities = ownedAttachments.registerExpansionResponse(response)
+              consumedAttachmentCapabilities = [...new Set([
+                ...consumedAttachmentCapabilities,
+                ...receiptCapabilities,
+              ])]
+            }
+            return response
+          },
+          status: () => daemonRuntime.status(),
+        }, {
+          isTurnCurrent: () => chatRuntime.isCurrent(turn),
+          onConsumedAttachmentCapabilities: capabilities => {
+            consumedAttachmentCapabilities = [...new Set([
+              ...consumedAttachmentCapabilities,
+              ...capabilities,
+            ])]
+          },
+        })
+        return trusted
+      },
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    sendStream(cardId, { type: 'error', error: message })
-    sendStream(cardId, { type: 'done' })
+    sendStream(turn, { type: 'error', error: message })
+    sendStream(turn, { type: 'done' })
+    await ownedAttachments.cleanupCapabilities(consumedAttachmentCapabilities)
     return { ok: false, error: message }
   }
-  const prompt = lastUserMessage(req)
-  if (!prompt) {
-    sendStream(cardId, { type: 'error', error: 'No user message' })
-    sendStream(cardId, { type: 'done' })
-    return { ok: false, error: 'No user message' }
+  try {
+    if (!chatRuntime.bindRequest(turn, req)) {
+      return { ok: false, error: 'Chat turn was superseded during context preparation' }
+    }
+    const prompt = lastUserMessage(req)
+    if (!prompt) {
+      sendStream(turn, { type: 'error', error: 'No user message' })
+      sendStream(turn, { type: 'done' })
+      return { ok: false, error: 'No user message' }
+    }
+
+    const provider = String(req.provider ?? 'claude').toLowerCase()
+    const isBridgeSelfCheck = provider === 'codesurf-self-check'
+      && process.env.CODESURF_ELECTROBUN_SELF_CHECK === '1'
+    if (
+      !isBridgeSelfCheck
+      && !['claude', 'hermes', 'codex', 'opencode', 'openclaw'].includes(provider)
+    ) {
+      const error = `Provider "${provider}" is not supported by the Electrobun runtime. Use Claude, Codex, Hermes, OpenCode, or OpenClaw for Electrobun local chat.`
+      sendStream(turn, { type: 'error', error })
+      sendStream(turn, { type: 'done' })
+      return { ok: false, error }
+    }
+
+    const result = await chatRuntime.runLaunch(turn, async () => {
+      if (isBridgeSelfCheck) {
+        const sessionId = `electrobun-self-check-${turn.turnId}`
+        chatRuntime.setSession(turn, provider, sessionId)
+        sendStream(turn, { type: 'session', sessionId })
+        sendStream(turn, { type: 'text', text: 'Electrobun chat bridge self-check' })
+        // Keep the launch live briefly so the renderer can exercise the real
+        // stop/cancellation RPC while a turn is active, without launching an
+        // external provider or making a network request.
+        await new Promise(resolve => setTimeout(resolve, 150))
+        sendStream(turn, { type: 'done' })
+        return { ok: true, jobId: turn.turnId }
+      }
+      if (provider === 'claude') return await runClaudeChat(req, prompt, turn)
+      if (provider === 'hermes') return await runHermesChat(req, prompt, turn)
+      if (provider === 'codex') return await runCodexChat(req, prompt, turn)
+      if (provider === 'opencode') return await runOpenCodeChat(req, prompt, turn)
+      return await runOpenClawChat(req, prompt, turn)
+    })
+    if (!result.ok) {
+      chatRuntime.reject(turn)
+    }
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    sendStream(turn, { type: 'error', error: message })
+    sendStream(turn, { type: 'done' })
+    return { ok: false, error: message }
+  } finally {
+    await ownedAttachments.cleanupCapabilities(consumedAttachmentCapabilities)
   }
-  stopChat(cardId)
-
-  const provider = String(req.provider ?? 'claude').toLowerCase()
-  if (provider === 'claude') return await runClaudeChat(req, prompt)
-  if (provider === 'hermes') return await runHermesChat(req, prompt)
-  if (provider === 'codex') return await runCodexChat(req, prompt)
-  if (provider === 'opencode') return await runOpenCodeChat(req, prompt)
-  if (provider === 'openclaw') return await runOpenClawChat(req, prompt)
-
-  const error = `Provider "${provider}" is not supported by the Electrobun runtime. Use Claude, Codex, Hermes, OpenCode, or OpenClaw for Electrobun local chat.`
-  sendStream(cardId, { type: 'error', error })
-  sendStream(cardId, { type: 'done' })
-  return { ok: false, error }
 }
 
 function runGit(cwd: string, args: string[]): string {
@@ -1310,7 +1547,9 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return await saveTileState(String(args[0] ?? ''), String(args[1] ?? ''), args[2])
       case 'canvas:clearTileState':
       case 'canvas:deleteTileArtifacts': {
-        await rm(join(workspaceStorageDir(String(args[0] ?? '')), 'tiles', `${safeStorageSegment(String(args[1] ?? ''), 'tileId')}.json`), { force: true })
+        const workspaceId = String(args[0] ?? '') || 'default'
+        const tileId = String(args[1] ?? '')
+        await tileContext.reset(workspaceId, tileId)
         broadcast('canvas:sessionsChanged', { workspaceId: args[0], tileId: args[1] })
         return true
       }
@@ -1378,6 +1617,23 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
           throw error
         }
+      }
+      case 'fs:readFilePrefix': {
+        const maxBytes = Number(args[1])
+        if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 64 * 1024) {
+          throw new Error('maxBytes must be an integer between 1 and 65536')
+        }
+        const { path: validated } = await authorizeFsPath(
+          String(args[0] ?? ''),
+          'read',
+          args[2],
+          true,
+        )
+        return await readUtf8FilePrefixNoFollow(
+          validated.operationPath,
+          maxBytes,
+          validated.authorization,
+        )
       }
       case 'fs:writeFile': {
         const { path: validated } = await authorizeFsPath(String(args[0] ?? ''), 'write', args[2])
@@ -1531,8 +1787,22 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return true
       }
 
-      case 'terminal:create':
-        return await createTerminal(String(args[0] ?? ''), String(args[1] ?? ''), typeof args[2] === 'string' ? args[2] : undefined, Array.isArray(args[3]) ? args[3] as string[] : undefined)
+      case 'terminal:create': {
+        // Keep the RPC shape aligned with Electron/preload:
+        // (tileId, workspaceId, workspaceDir, launchBin, launchArgs, options).
+        // The Bun host authorizes the canonical directory and does not need
+        // the workspace id or renderer-only size hint. Accept the legacy
+        // four-argument shape as well for older Native shells.
+        const sharedShape = args.length >= 5
+        const workspaceDir = String(args[sharedShape ? 2 : 1] ?? '')
+        const launchBin = typeof args[sharedShape ? 3 : 2] === 'string'
+          ? args[sharedShape ? 3 : 2] as string
+          : undefined
+        const launchArgs = Array.isArray(args[sharedShape ? 4 : 3])
+          ? args[sharedShape ? 4 : 3] as string[]
+          : undefined
+        return await createTerminal(String(args[0] ?? ''), workspaceDir, launchBin, launchArgs)
+      }
       case 'terminal:write': {
         const tileId = String(args[0] ?? '')
         if (!terminalSessions.has(tileId)) throw new Error(`Terminal session not found: ${tileId}`)
@@ -1591,13 +1861,24 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return await sendChat((args[0] ?? {}) as ChatRequest)
       case 'chat:resumeJob':
         return await sendChat((args[0] ?? {}) as ChatRequest)
-      case 'chat:stop':
-        stopChat(String(args[0] ?? ''))
-        sendStream(String(args[0] ?? ''), { type: 'done' })
+      case 'chat:stop': {
+        const scope = { workspaceId: String(args[0] ?? ''), cardId: String(args[1] ?? '') }
+        const stopped = await stopChat(scope)
+        if (!stopped.confirmed) {
+          const error = stopped.error ?? 'Unable to confirm chat process termination'
+          broadcastChatStream(scope, { type: 'error', error })
+          return { ok: false, error }
+        }
+        broadcastChatStream(scope, { type: 'done' })
         return { ok: true }
-      case 'chat:clearSession':
-        chatSessionIds.delete(String(args[0] ?? ''))
+      }
+      case 'chat:clearSession': {
+        const scope = { workspaceId: String(args[0] ?? ''), cardId: String(args[1] ?? '') }
+        const stopped = await chatRuntime.stopAndClearSessions(scope)
+        if (!stopped.confirmed) return { ok: false, error: stopped.error ?? 'Unable to confirm chat process termination' }
+        broadcastChatStream(scope, { type: 'done' })
         return { ok: true }
+      }
       case 'chat:steer':
         return { ok: false, error: 'Electrobun CLI subprocess providers cannot accept mid-stream steering events.' }
       case 'chat:setPermissionMode':
@@ -1605,19 +1886,52 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
       case 'chat:answerToolPermission':
         return { ok: false, error: `${channel} is unavailable for Electrobun CLI subprocess providers.` }
       case 'chat:disposeCard': {
-        const cardId = String(args[0] ?? '')
-        stopChat(cardId)
-        chatSessionIds.delete(cardId)
+        const scope = { workspaceId: String(args[0] ?? ''), cardId: String(args[1] ?? '') }
+        const stopped = await stopChat(scope)
+        if (!stopped.confirmed) return { ok: false, error: stopped.error ?? 'Unable to confirm chat process termination' }
+        chatRuntime.clearSessions(scope)
         return { ok: true }
       }
-      case 'chat:selectFiles':
-        return await Utils.openFileDialog({ canChooseFiles: true, canChooseDirectory: false, allowsMultipleSelection: true })
+      case 'chat:selectFiles': {
+        const paths = await Utils.openFileDialog({ canChooseFiles: true, canChooseDirectory: false, allowsMultipleSelection: true })
+        return await issueElectrobunPickedAttachments(args[0], args[1], paths, async (workspaceId, cardId, selectedPaths) => {
+          await daemonRuntime.ensureRunning()
+          const response = await daemonRuntime.request<{ attachments?: ElectrobunIssuedAttachment[] }>(
+            '/file-references/selections/issue',
+            { body: { workspaceId, cardId, paths: selectedPaths, ownedTemporary: false } },
+          )
+          if (!Array.isArray(response.attachments)) throw new Error('Attachment selection issuer returned an invalid response')
+          return response.attachments
+        })
+      }
       case 'chat:writeTempAttachment': {
-        const dir = join(CODESURF_HOME, 'tmp', 'attachments')
-        await mkdir(dir, { recursive: true })
-        const filePath = join(dir, `${Date.now()}-${basename(String((args[0] as any)?.name ?? 'attachment.txt'))}`)
-        await writeFile(filePath, String((args[0] as any)?.content ?? ''))
-        return { ok: true, path: filePath }
+        return await writeElectrobunTempAttachment(
+          (args[0] ?? {}) as Parameters<typeof writeElectrobunTempAttachment>[0],
+          ownedAttachmentDirectory,
+          async (workspaceId, cardId, paths) => {
+            await daemonRuntime.ensureRunning()
+            const response = await daemonRuntime.request<{ attachments?: ElectrobunIssuedAttachment[] }>(
+              '/file-references/selections/issue',
+              { body: { workspaceId, cardId, paths, ownedTemporary: true } },
+            )
+            if (!Array.isArray(response.attachments)) throw new Error('Attachment selection issuer returned an invalid response')
+            return response.attachments
+          },
+          ownedAttachments,
+        )
+      }
+      case 'chat:revokeAttachmentSelections': {
+        return await revokeElectrobunAttachmentSelections(
+          (args[0] ?? {}) as Parameters<typeof revokeElectrobunAttachmentSelections>[0],
+          async (workspaceId, cardId, selectionReceipts) => {
+            await daemonRuntime.ensureRunning()
+            return await daemonRuntime.request<{ ok: boolean, revoked?: number, error?: string }>(
+              '/file-references/selections/revoke',
+              { body: { workspaceId, cardId, selectionReceipts } },
+            )
+          },
+          ownedAttachments,
+        )
       }
       case 'chat:loadSessionHistory':
         return { ok: true, messages: [], hasMore: false, nextCursor: null }
@@ -1709,17 +2023,10 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         return 0
 
       case 'tileContext:get':
-        return tileContext.get(String(args[0] ?? '')) ?? null
       case 'tileContext:getAll':
-        return Object.fromEntries(tileContext.entries())
       case 'tileContext:set':
-        tileContext.set(String(args[0] ?? ''), args[1])
-        broadcast('tileContext:changed', { tileId: String(args[0] ?? ''), value: args[1] })
-        return true
       case 'tileContext:delete':
-        tileContext.delete(String(args[0] ?? ''))
-        broadcast('tileContext:changed', { tileId: String(args[0] ?? ''), value: null })
-        return true
+        return invokeElectrobunTileContext(tileContext, channel, args)
 
       case 'activity:upsert': {
         const record = (args[0] ?? {}) as Record<string, unknown>
@@ -1941,13 +2248,41 @@ async function runCoreIpcSelfCheck(): Promise<{ ok: boolean, checks: Array<{ nam
   }
 
   await check('workspace:list', async () => {
-    const result = await handleInvoke('workspace:list', [])
-    return assert(Array.isArray(result), 'workspace:list did not return an array', result)
+    const [listed, active] = await Promise.all([
+      handleInvoke('workspace:list', []) as Promise<Workspace[]>,
+      handleInvoke('workspace:getActive', []) as Promise<Workspace | null>,
+    ])
+    assert(listed.length === 1, 'concurrent first-run workspace:list did not return exactly one workspace', listed)
+    assert(active?.id === listed[0]?.id, 'concurrent workspace:getActive returned a different workspace', { listed, active })
+
+    const [workspaceDoc, projectsDoc] = await Promise.all([readWorkspacesDoc(), readProjectsDoc()])
+    const record = workspaceDoc.workspaces?.find(candidate => candidate.id === listed[0]?.id)
+    const project = projectsDoc.projects?.find(candidate => candidate.id === record?.primaryProjectId)
+    assert(record?.projectIds?.length === 1, 'first-run workspace registry is not singular and durable', workspaceDoc)
+    assert(project?.path === FIRST_RUN_PROJECT_PATH, 'first-run project authority is not app-owned', {
+      expected: FIRST_RUN_PROJECT_PATH,
+      project,
+    })
+
+    const [reloaded, reloadedActive] = await Promise.all([listWorkspaces(), getActiveWorkspace()])
+    assert(reloaded.length === 1 && reloaded[0]?.path === FIRST_RUN_PROJECT_PATH, 'reloaded workspace lost its project authority', reloaded)
+    assert(reloadedActive?.id === listed[0]?.id, 'reloaded active workspace changed identity', reloadedActive)
+    return {
+      workspaceId: listed[0]?.id,
+      projectId: project?.id,
+      projectPath: project?.path,
+      reloadVerified: true,
+    }
   })
 
   await check('settings:get', async () => {
     const result = await handleInvoke('settings:get', []) as Record<string, unknown>
     return assert(result && typeof result === 'object' && typeof result.appearance === 'string', 'settings:get did not return app settings', result)
+  })
+
+  await check('homedir:get', async () => {
+    const result = await handleInvoke('homedir:get', [])
+    return assert(result === homedir(), 'homedir:get did not return the host home directory', result)
   })
 
   await check('db:status', async () => {
@@ -2029,6 +2364,26 @@ async function resolveRendererUrl(): Promise<string> {
   return RENDERER_BUNDLED_URL
 }
 
+async function resolveBridgePreloadSource(): Promise<string> {
+  const entryDir = typeof process.argv[1] === 'string' && process.argv[1]
+    ? dirname(process.argv[1])
+    : process.cwd()
+  const candidates = [
+    join(entryDir, 'app', 'views', 'codesurf-electrobun', 'index.js'),
+    join(process.cwd(), '..', 'Resources', 'app', 'views', 'codesurf-electrobun', 'index.js'),
+    join(process.cwd(), 'views', 'codesurf-electrobun', 'index.js'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const source = await readFile(candidate, 'utf8')
+      if (source.trim()) return source
+    } catch {
+      // Try the next packaged runtime layout.
+    }
+  }
+  throw new Error(`Electrobun bridge preload source was not found: ${candidates.join(', ')}`)
+}
+
 function installMenu(): void {
   ApplicationMenu.setApplicationMenu([
     {
@@ -2074,10 +2429,15 @@ function installMenu(): void {
 
 async function createWindow(options: { fresh?: boolean, url?: string } = {}): Promise<BrowserWindow<ElectrobunRPCInstance>> {
   const url = options.url ?? await resolveRendererUrl()
+  const preload = withElectrobunHostBootstrap(
+    await resolveBridgePreloadSource(),
+    homedir(),
+    process.env.CODESURF_ELECTROBUN_RENDERER_SELF_CHECK === '1',
+  )
   const win = new BrowserWindow<ElectrobunRPCInstance>({
     title: 'CodeSurf',
     url,
-    preload: BRIDGE_PRELOAD_URL,
+    preload,
     rpc,
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     frame: {
@@ -2100,8 +2460,7 @@ async function createWindow(options: { fresh?: boolean, url?: string } = {}): Pr
     liveWindows.delete(win.id)
     broadcastWindowList()
     if (liveWindows.size === 0) {
-      shutdownRuntimeChildren()
-      Utils.quit()
+      void shutdownRuntimeChildren().finally(() => Utils.quit())
     }
   })
 
@@ -2110,17 +2469,21 @@ async function createWindow(options: { fresh?: boolean, url?: string } = {}): Pr
 }
 
 function installProcessCleanupHandlers(): void {
-  process.once('exit', shutdownRuntimeChildren)
+  process.once('exit', forceShutdownRuntimeChildren)
   process.once('SIGTERM', () => {
-    shutdownRuntimeChildren()
-    process.exit(0)
+    void shutdownRuntimeChildren().finally(() => process.exit(0))
   })
   process.once('SIGINT', () => {
-    shutdownRuntimeChildren()
-    process.exit(0)
+    void shutdownRuntimeChildren().finally(() => process.exit(0))
   })
 }
 
+await ownedAttachments.sweepStale().catch(error => {
+  console.warn('[Electrobun] Failed to sweep stale private attachments:', error instanceof Error ? error.message : String(error))
+})
+await sweepStaleElectrobunImageDirectories(codexImageDirectory).catch(error => {
+  console.warn('[Electrobun] Failed to sweep stale private Codex images:', error instanceof Error ? error.message : String(error))
+})
 installProcessCleanupHandlers()
 installMenu()
 const initialRendererUrl = await resolveRendererUrl()

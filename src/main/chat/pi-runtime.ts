@@ -28,16 +28,30 @@
  * of the dep (which would pull its transitive types eagerly).
  */
 
-import { promises as fs, existsSync, readdirSync, readFileSync } from 'fs'
+import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { pathToFileURL } from 'url'
 import { CODESURF_HOME } from '../paths'
+import { buildCsagentImages } from './provider-image-attachments.ts'
+export { buildCsagentImages } from './provider-image-attachments.ts'
+import {
+  awaitGuardedPreparation,
+  csagentPrelaunchBoundary,
+  providerLaunchIsCurrent,
+  type ProviderLaunchGuard,
+} from './provider-launch-guard.ts'
 import {
   chatStreamScopeKey,
   createChatStreamScope,
   type ChatStreamScope,
 } from './room-stream-scope.ts'
+import {
+  bindStableContextSession,
+  clearStableSessionContext,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from './stable-session-context.ts'
 
 /** Internal provider id (neutral). Never surface 'pi'/'earendil' to users. */
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
@@ -56,6 +70,13 @@ export type EmitFn = (event: StreamEvent) => void
 interface CsagentImageAttachment {
   path: string
   mediaType: string
+  displayPath: string
+  byteCount: number
+  device: string
+  inode: string
+  mtimeMs: number
+  ctimeMs: number
+  ownedTemporary?: boolean
 }
 
 /** The subset of the chat request this runtime consumes. */
@@ -346,23 +367,6 @@ function buildCsagentContextPreamble(req: CsagentRunRequest): string | undefined
   return req.contextPrompt?.trim() || undefined
 }
 
-/** Read + base64-encode image attachments into the runtime's image shape. */
-async function buildCsagentImages(
-  attachments: CsagentImageAttachment[] | undefined,
-): Promise<PiImageContent[]> {
-  if (!attachments || attachments.length === 0) return []
-  const images: PiImageContent[] = []
-  for (const att of attachments) {
-    try {
-      const data = await fs.readFile(att.path)
-      images.push({ type: 'image', data: data.toString('base64'), mimeType: att.mediaType })
-    } catch {
-      // Best-effort — skip unreadable attachments.
-    }
-  }
-  return images
-}
-
 /**
  * Translate the subscribe-channel AgentSessionEvent stream into codesurf's
  * agent:stream event schema.
@@ -538,8 +542,13 @@ function safeStats(scopeKey: string): PiSessionStats | undefined {
  * load the runtime or create the session, emits an `{type:'error'}` followed by
  * `{type:'done'}` and returns (mirrors the OpenCode degrade path).
  */
-export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Promise<void> {
-  const scopeKey = chatStreamScopeKey(csagentScope(req))
+export async function runCodesurfAgent(
+  req: CsagentRunRequest,
+  emit: EmitFn,
+  launchGuard?: ProviderLaunchGuard,
+): Promise<void> {
+  const scope = csagentScope(req)
+  const scopeKey = chatStreamScopeKey(scope)
   // Restore a stored runtime sessionId for resume (the caller persists it via
   // the `session` event; on a fresh turn after restart req.sessionId carries it).
   if (req.sessionId && !csagentSessionIds.has(scopeKey)) {
@@ -547,9 +556,28 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
   }
 
   let rt: PiRuntime
+  let stableContext: ReturnType<typeof selectStableContextForTurn> | null = null
+  let launchedSession: PiAgentSession | null = null
+  const launchIsCurrent = (): boolean => providerLaunchIsCurrent(launchGuard)
+  const disposeLaunchedSession = (): void => {
+    if (stableContext) invalidateStableContextSelection(stableContext)
+    const session = launchedSession
+    if (!session) return
+    try { session.dispose() } catch { /* already disposed */ }
+    if (csagentSessions.get(scopeKey) === session) {
+      try { csagentUnsubs.get(scopeKey)?.() } catch { /* already unsubscribed */ }
+      csagentUnsubs.delete(scopeKey)
+      csagentSessions.delete(scopeKey)
+      csagentSessionIds.delete(scopeKey)
+    }
+    launchedSession = null
+  }
   try {
-    rt = await getCsagentRuntime()
+    const preparedRuntime = await awaitGuardedPreparation(launchGuard, getCsagentRuntime())
+    if (!preparedRuntime.ok) return
+    rt = preparedRuntime.value
   } catch (e) {
+    if (!launchIsCurrent()) return
     emit({ type: 'error', error: e instanceof Error ? e.message : String(e) })
     emit({ type: 'done' })
     return
@@ -582,17 +610,25 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
       cwd: req.workspaceDir ?? process.cwd(),
       agentDir: rt.getAgentDir(),
     })
-    await loader.reload()
+    const reloaded = await awaitGuardedPreparation(launchGuard, loader.reload())
+    if (!reloaded.ok) return
 
-    const { session } = await rt.createAgentSession({
-      cwd: req.workspaceDir,
-      authStorage: _csagentAuth,
-      modelRegistry: _csagentModels,
-      resourceLoader: loader,
-      sessionManager,
-      thinkingLevel: mapThinking(req.thinking),
-      ...(model ? { model } : {}),
-    })
+    const created = await awaitGuardedPreparation(
+      launchGuard,
+      rt.createAgentSession({
+        cwd: req.workspaceDir,
+        authStorage: _csagentAuth,
+        modelRegistry: _csagentModels,
+        resourceLoader: loader,
+        sessionManager,
+        thinkingLevel: mapThinking(req.thinking),
+        ...(model ? { model } : {}),
+      }),
+      ({ session }) => { try { session.dispose() } catch { /* incomplete session */ } },
+    )
+    if (!created.ok) return
+    const { session } = created.value
+    launchedSession = session
     csagentSessions.set(scopeKey, session)
 
     // Emit the runtime sessionId once so the tile persists it for resume.
@@ -607,16 +643,50 @@ export async function runCodesurfAgent(req: CsagentRunRequest, emit: EmitFn): Pr
     csagentUnsubs.set(scopeKey, unsub)
 
     // First/idle prompt: NO streamingBehavior (only required while streaming).
-    const images = await buildCsagentImages(req.imageAttachments)
-    const contextPreamble = buildCsagentContextPreamble(req)
+    const preparedImages = await awaitGuardedPreparation(
+      launchGuard,
+      buildCsagentImages(req.imageAttachments),
+    )
+    if (!preparedImages.ok) {
+      disposeLaunchedSession()
+      return
+    }
+    const images = preparedImages.value
+    stableContext = selectStableContextForTurn({
+      scope,
+      provider: CSAGENT_PROVIDER_ID,
+      sessionId: sid,
+      contextPrompt: buildCsagentContextPreamble(req),
+    })
+    const contextPreamble = stableContext.contextPrompt
     const promptText = contextPreamble
       ? `${contextPreamble}\n\n---\n\n${req.prompt}`
       : req.prompt
-    await session.prompt(promptText, {
-      ...(images.length > 0 ? { images } : {}),
-      source: 'interactive',
+    const prompted = await csagentPrelaunchBoundary.run({
+      guard: launchGuard,
+      prepare: () => ({ session, promptText, images }),
+      disposePrepared: () => disposeLaunchedSession(),
+      launch: prepared => prepared.session.prompt(prepared.promptText, {
+        ...(prepared.images.length > 0 ? { images: prepared.images } : {}),
+        source: 'interactive',
+      }),
     })
+    if (!prompted.ok) {
+      disposeLaunchedSession()
+      return
+    }
+    await prompted.value
+    if (!launchIsCurrent()) {
+      disposeLaunchedSession()
+      return
+    }
+    bindStableContextSession(stableContext, sid)
   } catch (e) {
+    if (!launchIsCurrent()) {
+      disposeLaunchedSession()
+      return
+    }
+    if (stableContext) invalidateStableContextSelection(stableContext)
     emit({ type: 'error', error: e instanceof Error ? e.message : String(e) })
     emit({ type: 'done' })
   }
@@ -686,6 +756,7 @@ export function disposeCsagent(scope: ChatStreamScope): void {
   csagentUnsubs.delete(scopeKey)
   csagentSessions.delete(scopeKey)
   csagentSessionIds.delete(scopeKey)
+  clearStableSessionContext(scope, CSAGENT_PROVIDER_ID)
 }
 
 /**
@@ -697,6 +768,7 @@ export function clearCsagentSession(scope: ChatStreamScope): void {
   csagentUnsubs.delete(scopeKey)
   csagentSessions.delete(scopeKey)
   csagentSessionIds.delete(scopeKey)
+  clearStableSessionContext(scope, CSAGENT_PROVIDER_ID)
 }
 
 /** True if a live CodeSurf Agent session exists for the card (for dispatch). */

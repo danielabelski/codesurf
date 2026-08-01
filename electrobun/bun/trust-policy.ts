@@ -1,8 +1,19 @@
 import { realpath } from 'node:fs/promises'
 import path from 'node:path'
-import type { AppSettings, Persona, Workspace } from '../../src/shared/types.ts'
+import type { AppSettings, Workspace } from '../../src/shared/types.ts'
 import type { ChatRequest } from '../../src/main/chat/types.ts'
+import {
+  loadAuthoritativeChatPeers,
+  type AuthoritativeChatPeers,
+} from '../../src/main/chat/peer-authority.ts'
 import { resolveAuthoritativeAgentMode } from '../../src/main/chat/agent-mode-resolver.ts'
+import { composeChatContext, type ComposedChatContext } from '../../src/main/chat/context-composer.ts'
+import { buildAsyncExecutionPrompt } from '../../src/main/chat/prompt-builders.ts'
+import {
+  buildCodeSurfActivityConvention,
+  buildCodeSurfInsightConvention,
+  buildCodeSurfOutputConvention,
+} from '../../src/main/chat/prompt-conventions.ts'
 import {
   applyAuthoritativePersonaPolicy,
   canonicalizeElectronChatRequest,
@@ -29,6 +40,26 @@ export interface AuthorizedElectrobunPath {
   path: ValidatedFsPath
   workspaceId: string | null
   allowedRoots: string[]
+}
+
+export interface TrustedElectrobunChatContext {
+  memoryPrompt?: string
+  contextBuckets?: ChatRequest['contextBuckets']
+  skillsPrompt?: string
+  skillsSummary?: string | null
+  roomContext?: string
+  roomAckSequence?: number
+  expandedMessages?: ChatRequest['expandedMessages']
+  fileReferencePrompt?: string
+  imageAttachments?: ChatRequest['imageAttachments']
+  consumedAttachmentCapabilities?: string[]
+  asyncExecution?: ChatRequest['asyncExecution']
+}
+
+export interface ElectrobunProviderContext {
+  systemPrompt: string | undefined
+  userContent: string
+  composed: ComposedChatContext
 }
 
 function workspaceRoots(workspace: Workspace | null | undefined): string[] {
@@ -145,7 +176,116 @@ export async function canonicalizeElectrobunChatRequest(
     resolveWorkspaceRoot: () => canonical.workspaceDir ?? null,
   })
   if (!resolution.ok) throw new Error(resolution.error)
-  return applyAuthoritativePersonaPolicy(canonical, resolution.agentMode)
+  return applyAuthoritativePersonaPolicy({
+    ...canonical,
+    // Renderer-supplied runtime topology is useful input, but execution-host
+    // claims are privileged. The host derives these again after policy binding.
+    asyncExecution: undefined,
+    roomContext: undefined,
+    roomAckSequence: undefined,
+  }, resolution.agentMode)
+}
+
+function trustedOptionalString(value: unknown): string | undefined {
+  const normalized = typeof value === 'string' ? value.trim() : ''
+  return normalized || undefined
+}
+
+function trustedRoomAckSequence(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : undefined
+}
+
+export async function prepareElectrobunChatRequest(
+  request: ElectrobunChatRequest,
+  workspaces: Workspace[],
+  loadTrustedContext: (request: ChatRequest) => Promise<TrustedElectrobunChatContext>,
+  loadAuthoritativePeers: (
+    workspaceId: string,
+    tileId: string,
+    submittedPeers?: unknown,
+  ) => Promise<AuthoritativeChatPeers> = loadAuthoritativeChatPeers,
+): Promise<ChatRequest> {
+  const canonical = await canonicalizeElectrobunChatRequest(request, workspaces)
+  return await prepareCanonicalElectrobunChatRequest(
+    canonical,
+    request.peers,
+    loadTrustedContext,
+    loadAuthoritativePeers,
+  )
+}
+
+export async function prepareCanonicalElectrobunChatRequest(
+  canonical: ChatRequest,
+  submittedPeers: unknown,
+  loadTrustedContext: (request: ChatRequest) => Promise<TrustedElectrobunChatContext>,
+  loadAuthoritativePeers: (
+    workspaceId: string,
+    tileId: string,
+    submittedPeers?: unknown,
+  ) => Promise<AuthoritativeChatPeers> = loadAuthoritativeChatPeers,
+): Promise<ChatRequest> {
+  const peerAuthority = await loadAuthoritativePeers(
+    String(canonical.workspaceId ?? ''),
+    canonical.cardId,
+    submittedPeers,
+  )
+  const authoritative = {
+    ...canonical,
+    peers: peerAuthority.peers,
+    untrustedPeerContext: peerAuthority.untrustedPeerContext,
+  }
+  const trusted = await loadTrustedContext(authoritative)
+  return {
+    ...authoritative,
+    memoryPrompt: trustedOptionalString(trusted.memoryPrompt),
+    contextBuckets: trusted.contextBuckets,
+    skillsPrompt: trustedOptionalString(trusted.skillsPrompt),
+    skillsSummary: trustedOptionalString(trusted.skillsSummary) ?? null,
+    roomContext: trustedOptionalString(trusted.roomContext),
+    roomAckSequence: trustedRoomAckSequence(trusted.roomAckSequence),
+    expandedMessages: trusted.expandedMessages,
+    fileReferencePrompt: trustedOptionalString(trusted.fileReferencePrompt),
+    imageAttachments: trusted.imageAttachments,
+    asyncExecution: trusted.asyncExecution,
+  }
+}
+
+export function composeElectrobunProviderContext(
+  request: ChatRequest,
+  userContent: string,
+  options: { includePersona?: boolean, includeStableContext?: boolean } = {},
+): ElectrobunProviderContext {
+  const includeStableContext = options.includeStableContext !== false
+  const composed = composeChatContext({
+    persona: includeStableContext && options.includePersona !== false
+      ? request.agentMode?.systemPrompt
+      : undefined,
+    memory: includeStableContext ? request.memoryPrompt : undefined,
+    skills: includeStableContext ? request.skillsPrompt : undefined,
+    outputConvention: includeStableContext ? buildCodeSurfOutputConvention() : undefined,
+    insightConvention: includeStableContext ? buildCodeSurfInsightConvention() : undefined,
+    activityConvention: includeStableContext ? buildCodeSurfActivityConvention() : undefined,
+    // Execution topology is host-owned but can change between turns, so Codex
+    // continuation turns must receive it even after stable context is installed.
+    async: buildAsyncExecutionPrompt(request.asyncExecution),
+    // Canvas topology is host-validated functional state, but tile metadata
+    // remains user-controlled data. synchronizeRoom carries it in the
+    // untrusted user suffix instead of granting it system-prompt authority.
+    peer: undefined,
+    room: request.roomContext,
+    fileReferences: request.fileReferencePrompt,
+    recentEdit: request.recentEditContext,
+    blockNotes: request.blockNotesContext,
+  })
+  return {
+    systemPrompt: composed.systemPrompt,
+    userContent: composed.userSuffix
+      ? `${userContent}\n\n${composed.userSuffix}`
+      : userContent,
+    composed,
+  }
 }
 
 function claudePermissionMode(mode: unknown): string {
@@ -167,15 +307,18 @@ export function buildElectrobunClaudeSpawnArgs(
   request: ChatRequest,
   prompt: string,
   resumeSessionId?: string | null,
+  options: { streamInput?: boolean } = {},
 ): string[] {
-  const { tools, persona } = buildClaudeAgentModeOptions(request)
+  const { tools } = buildClaudeAgentModeOptions(request)
+  const context = composeElectrobunProviderContext(request, prompt)
   const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages']
+  if (options.streamInput) args.push('--input-format', 'stream-json')
   if (request.model) args.push('--model', request.model)
   args.push('--permission-mode', claudePermissionMode(request.mode))
-  if (persona) args.push('--append-system-prompt', persona)
+  if (context.systemPrompt) args.push('--append-system-prompt', context.systemPrompt)
   if (tools !== undefined) args.push('--tools', tools.join(','))
   if (resumeSessionId) args.push('--resume', resumeSessionId)
-  args.push(prompt)
+  if (!options.streamInput) args.push(context.userContent)
   return args
 }
 
@@ -184,15 +327,23 @@ export function buildElectrobunCodexSpawnArgs(
   prompt: string,
   workspaceDir: string,
   resumeThreadId?: string | null,
+  options: { includeStableContext?: boolean } = {},
 ): string[] {
+  const context = composeElectrobunProviderContext(request, prompt, {
+    // A thread id alone does not prove that this process successfully installed
+    // the current stable context. The runtime's accepted-session/hash ledger
+    // makes that decision and passes it explicitly.
+    includeStableContext: options.includeStableContext !== false,
+  })
   return buildCodexSpawnArgs({
     agentId: request.agentId,
     agentMode: request.agentMode,
     mode: request.mode,
     model: request.model || 'gpt-5.5',
-    userContent: prompt,
+    userContent: context.userContent,
     resumeThreadId,
     workspaceDir,
+    contextPrompt: context.systemPrompt,
   })
 }
 
@@ -201,20 +352,24 @@ export function buildElectrobunHermesSpawnArgs(
   prompt: string,
   resumeSessionId?: string | null,
 ): string[] {
+  const context = composeElectrobunProviderContext(request, prompt)
   return buildHermesSpawnArgs({
     agentId: request.agentId,
     agentMode: request.agentMode,
     mode: request.mode,
     model: request.model,
-    userContent: prompt,
+    userContent: context.userContent,
     existingSessionId: resumeSessionId,
+    contextPrompt: context.systemPrompt,
   })
 }
 
 export function buildElectrobunPersonaPrompt(
   prompt: string,
-  persona: Persona | null | undefined,
+  request: ChatRequest,
 ): string {
-  const systemPrompt = persona?.systemPrompt?.trim()
-  return systemPrompt ? `${systemPrompt}\n\n## User Request\n${prompt}` : prompt
+  const context = composeElectrobunProviderContext(request, prompt)
+  return context.systemPrompt
+    ? `${context.systemPrompt}\n\n## User Request\n${context.userContent}`
+    : context.userContent
 }

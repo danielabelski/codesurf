@@ -191,6 +191,19 @@ Content-Type: application/json
 directory under a configured tenant root. `workspaceId` is optional CodeSurf
 metadata, never a filesystem path.
 
+Chat terminal mode can request a provider CLI that resumes the chat session in
+the terminal. The request carries a bare allowlisted binary and argv only; the
+gateway validates the provider-specific grammar and never invokes a shell:
+
+```json
+{"cwd":"/srv/codesurf/tenants/acme/project","workspaceId":"workspace_123","launchBin":"claude","launchArgs":["--resume","session-id"]}
+```
+
+Supported launch binaries are `claude`, `codex`, `opencode`, `openclaw`,
+`hermes`, and `pi`. Session identifiers are bounded to safe ASCII characters;
+provider flags are fixed (`--resume`, `resume`, `--session`, or `tui`) and
+unknown binaries or argument shapes are rejected before a process starts.
+
 The `201` response is exactly:
 
 ```json

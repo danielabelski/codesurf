@@ -111,19 +111,51 @@ function safeSerializeContextValue(value, limits) {
   }
 }
 
+// src/main/chat/contextual-fragments.ts
+function createContextualPromptFragment(owner, text, maxUtf8Bytes, volatility = "per-turn") {
+  const boundedText = utf8Bytes(text) <= maxUtf8Bytes ? text : utf8Prefix(text, maxUtf8Bytes);
+  return Object.freeze({
+    owner,
+    volatility,
+    maxUtf8Bytes,
+    text: boundedText
+  });
+}
+
 // src/main/chat/context-composer.ts
 var CHAT_CONTEXT_LIMITS = Object.freeze({
   aggregateBytes: 1e4,
-  personaBytes: 980,
-  memoryBytes: 980,
-  skillsBytes: 980,
-  outputConventionBytes: 980,
-  insightConventionBytes: 980,
-  activityConventionBytes: 980,
-  asyncBytes: 980,
+  personaBytes: 800,
+  memoryBytes: 800,
+  skillsBytes: 800,
+  outputConventionBytes: 800,
+  insightConventionBytes: 800,
+  activityConventionBytes: 800,
+  asyncBytes: 800,
   peerBytes: 1e3,
-  roomBytes: 980,
-  fileReferenceBytes: 980
+  roomBytes: 800,
+  fileReferenceBytes: 800,
+  recentEditBytes: 800,
+  blockNotesBytes: 800
+});
+var ROOM_CONTEXT_OPEN = '<codesurf_peer_context trust="untrusted" source="agent-room">';
+var ROOM_CONTEXT_CLOSE = "</codesurf_peer_context>";
+var FILE_CONTEXT_OPEN = '<codesurf_file_context trust="untrusted" source="workspace-files">';
+var FILE_CONTEXT_CLOSE = "</codesurf_file_context>";
+var RECENT_EDIT_CONTEXT_OPEN = '<codesurf_recent_edit_context trust="untrusted" source="renderer-derived-file-state">';
+var RECENT_EDIT_CONTEXT_CLOSE = "</codesurf_recent_edit_context>";
+var BLOCK_NOTES_CONTEXT_OPEN = '<codesurf_block_notes_context trust="untrusted" source="renderer-derived-transcript">';
+var BLOCK_NOTES_CONTEXT_CLOSE = "</codesurf_block_notes_context>";
+function wrappedBodyBudget(limit, open, close) {
+  return limit - utf8Bytes(`${open}
+
+${close}`);
+}
+var CHAT_CONTEXT_BODY_LIMITS = Object.freeze({
+  roomBytes: wrappedBodyBudget(CHAT_CONTEXT_LIMITS.roomBytes, ROOM_CONTEXT_OPEN, ROOM_CONTEXT_CLOSE),
+  fileReferenceBytes: wrappedBodyBudget(CHAT_CONTEXT_LIMITS.fileReferenceBytes, FILE_CONTEXT_OPEN, FILE_CONTEXT_CLOSE),
+  recentEditBytes: wrappedBodyBudget(CHAT_CONTEXT_LIMITS.recentEditBytes, RECENT_EDIT_CONTEXT_OPEN, RECENT_EDIT_CONTEXT_CLOSE),
+  blockNotesBytes: wrappedBodyBudget(CHAT_CONTEXT_LIMITS.blockNotesBytes, BLOCK_NOTES_CONTEXT_OPEN, BLOCK_NOTES_CONTEXT_CLOSE)
 });
 function normalizedText(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -154,37 +186,42 @@ function buildFragment(spec, precedence) {
   const text = normalizedText(spec.value);
   if (!text) return null;
   const bounded = boundText(spec.kind, text, spec.maxBytes, spec.open, spec.close);
+  const contextual = createContextualPromptFragment(
+    "chat-context-composer",
+    bounded.text,
+    spec.maxBytes,
+    spec.volatility
+  );
   return Object.freeze({
+    ...contextual,
     kind: spec.kind,
-    owner: "chat-context-composer",
     placement: spec.placement,
     trust: spec.trust,
-    maxUtf8Bytes: spec.maxBytes,
     precedence,
     originalBytes: bounded.originalBytes,
     includedBytes: utf8Bytes(bounded.text),
-    truncated: bounded.truncated,
-    text: bounded.text
+    truncated: bounded.truncated
   });
 }
 function composeChatContext(input) {
   const specs = [
-    { kind: "persona", value: input.persona, maxBytes: CHAT_CONTEXT_LIMITS.personaBytes, placement: "system", trust: "host" },
-    { kind: "memory", value: input.memory, maxBytes: CHAT_CONTEXT_LIMITS.memoryBytes, placement: "system", trust: "host" },
-    { kind: "skills", value: input.skills, maxBytes: CHAT_CONTEXT_LIMITS.skillsBytes, placement: "system", trust: "host" },
-    { kind: "output-convention", value: input.outputConvention, maxBytes: CHAT_CONTEXT_LIMITS.outputConventionBytes, placement: "system", trust: "host" },
-    { kind: "insight-convention", value: input.insightConvention, maxBytes: CHAT_CONTEXT_LIMITS.insightConventionBytes, placement: "system", trust: "host" },
-    { kind: "activity-convention", value: input.activityConvention, maxBytes: CHAT_CONTEXT_LIMITS.activityConventionBytes, placement: "system", trust: "host" },
-    { kind: "async", value: input.async, maxBytes: CHAT_CONTEXT_LIMITS.asyncBytes, placement: "system", trust: "host" },
-    { kind: "peer", value: input.peer, maxBytes: CHAT_CONTEXT_LIMITS.peerBytes, placement: "system", trust: "host" },
+    { kind: "persona", value: input.persona, maxBytes: CHAT_CONTEXT_LIMITS.personaBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "memory", value: input.memory, maxBytes: CHAT_CONTEXT_LIMITS.memoryBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "skills", value: input.skills, maxBytes: CHAT_CONTEXT_LIMITS.skillsBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "output-convention", value: input.outputConvention, maxBytes: CHAT_CONTEXT_LIMITS.outputConventionBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "insight-convention", value: input.insightConvention, maxBytes: CHAT_CONTEXT_LIMITS.insightConventionBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "activity-convention", value: input.activityConvention, maxBytes: CHAT_CONTEXT_LIMITS.activityConventionBytes, placement: "system", trust: "host", volatility: "stable-session" },
+    { kind: "async", value: input.async, maxBytes: CHAT_CONTEXT_LIMITS.asyncBytes, placement: "system", trust: "host", volatility: "per-turn" },
+    { kind: "peer", value: input.peer, maxBytes: CHAT_CONTEXT_LIMITS.peerBytes, placement: "system", trust: "host", volatility: "per-turn" },
     {
       kind: "room",
       value: input.room,
       maxBytes: CHAT_CONTEXT_LIMITS.roomBytes,
       placement: "user",
       trust: "untrusted-data",
-      open: '<codesurf_peer_context trust="untrusted" source="agent-room">',
-      close: "</codesurf_peer_context>"
+      volatility: "per-turn",
+      open: ROOM_CONTEXT_OPEN,
+      close: ROOM_CONTEXT_CLOSE
     },
     {
       kind: "file-reference",
@@ -192,8 +229,29 @@ function composeChatContext(input) {
       maxBytes: CHAT_CONTEXT_LIMITS.fileReferenceBytes,
       placement: "user",
       trust: "untrusted-data",
-      open: '<codesurf_file_context trust="untrusted" source="workspace-files">',
-      close: "</codesurf_file_context>"
+      volatility: "per-turn",
+      open: FILE_CONTEXT_OPEN,
+      close: FILE_CONTEXT_CLOSE
+    },
+    {
+      kind: "recent-edit",
+      value: input.recentEdit,
+      maxBytes: CHAT_CONTEXT_LIMITS.recentEditBytes,
+      placement: "user",
+      trust: "untrusted-data",
+      volatility: "per-turn",
+      open: RECENT_EDIT_CONTEXT_OPEN,
+      close: RECENT_EDIT_CONTEXT_CLOSE
+    },
+    {
+      kind: "block-notes",
+      value: input.blockNotes,
+      maxBytes: CHAT_CONTEXT_LIMITS.blockNotesBytes,
+      placement: "user",
+      trust: "untrusted-data",
+      volatility: "per-turn",
+      open: BLOCK_NOTES_CONTEXT_OPEN,
+      close: BLOCK_NOTES_CONTEXT_CLOSE
     }
   ];
   const fragments = specs.map((spec, precedence) => buildFragment(spec, precedence)).filter((fragment) => fragment !== null);
@@ -216,6 +274,7 @@ function composeChatContext(input) {
   });
 }
 export {
+  CHAT_CONTEXT_BODY_LIMITS,
   CHAT_CONTEXT_LIMITS,
   composeChatContext
 };

@@ -143,6 +143,8 @@ export function useChatTileSendPath(opts: UseChatTileSendPathOptions) {
 
   const attachmentsApi = useChatTileAttachments({
     textareaRef,
+    workspaceId: opts.workspaceId,
+    cardId: opts.tileId,
     syncComposerHeight,
     setAttachments,
     setAcType,

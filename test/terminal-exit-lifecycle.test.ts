@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, test } from 'node:test'
 import {
   handlePtyExit,
@@ -148,4 +150,27 @@ describe('handlePtyExit', () => {
     assert.equal(terminals.size, 0)
     assert.equal(published.length, 0)
   })
+})
+
+test('terminal data callback rejects bytes from a superseded PTY before side effects', () => {
+  // terminal.ts cannot be imported under plain node:test because it loads the
+  // Electron and node-pty hosts at module scope. Keep a source-level wiring
+  // contract around the identity guard while the pure exit lifecycle behavior
+  // above exercises the same stale-session invariant directly.
+  const source = readFileSync(resolve(process.cwd(), 'src/main/ipc/terminal.ts'), 'utf8')
+  const callbackStart = source.indexOf('term.onData((data: string) => {')
+  const callbackEnd = source.indexOf('\n    term.onExit(', callbackStart)
+  assert.ok(callbackStart >= 0 && callbackEnd > callbackStart, 'terminal data callback must exist')
+
+  const callback = source.slice(callbackStart, callbackEnd)
+  const guard = 'if (terminals.get(tileId) !== session || session.pty !== term) return'
+  const guardIndex = callback.indexOf(guard)
+  const bufferMutationIndex = callback.indexOf('session.buffer =')
+  const listenerSendIndex = callback.indexOf('listener.send(`terminal:data:${tileId}`, data)')
+  const busBufferMutationIndex = callback.indexOf('buf.data += data')
+
+  assert.ok(guardIndex >= 0, 'onData must identity-guard its PTY and session')
+  assert.ok(guardIndex < bufferMutationIndex, 'guard must precede session buffer mutation')
+  assert.ok(guardIndex < listenerSendIndex, 'guard must precede renderer delivery')
+  assert.ok(guardIndex < busBufferMutationIndex, 'guard must precede bus buffering')
 })

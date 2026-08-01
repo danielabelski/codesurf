@@ -20,6 +20,16 @@ import {
   type ChatStreamScope,
 } from './room-stream-scope.ts'
 import { RoomContextAcknowledgements } from './room-context-acknowledgements.ts'
+import { clearStableSessionContext } from './stable-session-context.ts'
+import {
+  RuntimeSessionPersistenceCoordinator,
+  type RuntimeSessionPersistenceLease,
+} from './runtime-session-persistence.ts'
+import {
+  ChatProcessLifecycle,
+  type ChatProcessStopResult,
+} from './chat-process-lifecycle.ts'
+export { processTreeSpawnOptions, terminateProcessTree } from '../../../packages/codesurf-daemon/bin/process-tree.mjs'
 
 export type { RuntimeChatSessionState } from './types'
 export {
@@ -86,6 +96,11 @@ export function acknowledgeRoomContext(req: ChatRequest): void {
   settleRoomContextAcknowledgement(chatRequestScope(req), 'delivered')
 }
 
+/** Call only after the provider has accepted the prompt or emitted real output. */
+export function markRoomPromptAccepted(scope: ChatStreamScope): void {
+  settleRoomContextAcknowledgement(scope, 'delivered')
+}
+
 export function discardRoomContextAcknowledgement(scope: ChatStreamScope): void {
   settleRoomContextAcknowledgement(scope, 'stopped')
 }
@@ -95,8 +110,6 @@ export function sendStream(scope: ChatStreamScope, event: Record<string, unknown
 
   if (event.type === 'error') {
     settleRoomContextAcknowledgement(scope, 'failed')
-  } else {
-    settleRoomContextAcknowledgement(scope, 'delivered')
   }
 
   roomStreamAccumulator.record(scope, event)
@@ -121,20 +134,69 @@ export function getPreparedMessages(req: ChatRequest): ChatMessage[] {
     : req.messages
 }
 
+const runtimeSessionPersistence = new RuntimeSessionPersistenceCoordinator<RuntimeChatSessionState>({
+  upsertRuntimeSession: (workspaceId, cardId, state) => (
+    daemonClient.upsertRuntimeSession(workspaceId, cardId, state)
+  ),
+  clearRuntimeSession: (workspaceId, cardId) => (
+    daemonClient.clearRuntimeSession(workspaceId, cardId)
+  ),
+})
+
+export function beginRuntimeSessionPersistence(
+  req: ChatRequest,
+  advanceGeneration = true,
+): RuntimeSessionPersistenceLease | null {
+  return runtimeSessionPersistence.beginRequest(req, advanceGeneration)
+}
+
+export function bindRuntimeSessionPersistence(
+  req: ChatRequest,
+  lease: RuntimeSessionPersistenceLease | null,
+): boolean {
+  return runtimeSessionPersistence.bindRequest(req, lease)
+}
+
 export async function upsertRuntimeSessionState(req: ChatRequest, state: RuntimeChatSessionState): Promise<void> {
-  if (!req.workspaceId) return
   try {
-    await daemonClient.upsertRuntimeSession(req.workspaceId, req.cardId, state)
+    await runtimeSessionPersistence.upsert(req, state)
   } catch (error) {
     log('upsertRuntimeSession error', req.cardId, error)
   }
 }
 
+export async function clearRuntimeSessionState(scope: ChatStreamScope): Promise<void> {
+  await runtimeSessionPersistence.clear(scope)
+}
+
 // Active Claude SDK queries
 export const activeQueries = new Map<string, Query>()
 
-// Active CLI subprocesses (codex, openclaw, hermes, etc.)
-export const activeProcesses = new Map<string, ChildProcess>()
+// Active CLI subprocesses (codex, openclaw, hermes, etc.). Keep the legacy
+// map export for diagnostics/tests, but route ownership changes through the
+// lifecycle so "signal sent" is never mistaken for "tree exited".
+const chatProcessLifecycle = new ChatProcessLifecycle()
+export const activeProcesses = chatProcessLifecycle.processes
+
+export function registerActiveChatProcess(scopeKey: string, proc: ChildProcess): boolean {
+  return chatProcessLifecycle.register(scopeKey, proc)
+}
+
+export function isCurrentChatProcess(scopeKey: string, proc: ChildProcess): boolean {
+  return chatProcessLifecycle.isCurrent(scopeKey, proc)
+}
+
+export function releaseActiveChatProcess(scopeKey: string, proc: ChildProcess): boolean {
+  return chatProcessLifecycle.release(scopeKey, proc)
+}
+
+export async function stopActiveChatProcess(scopeKey: string): Promise<ChatProcessStopResult | null> {
+  return await chatProcessLifecycle.stop(scopeKey)
+}
+
+export async function stopAllActiveChatProcesses(): Promise<ChatProcessStopResult[]> {
+  return await chatProcessLifecycle.stopAll()
+}
 
 // Active HTTP requests (proxy-backed providers)
 export const activeHttpRequests = new Map<string, http.ClientRequest>()
@@ -179,6 +241,7 @@ export function deleteCardSessionIds(scope: ChatStreamScope): void {
       sessionIds.delete(key)
     }
   }
+  clearStableSessionContext(scope)
 }
 
 // Persist session IDs to disk so they survive main-process restarts.

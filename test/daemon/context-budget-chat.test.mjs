@@ -14,6 +14,7 @@ import {
 } from '../../packages/codesurf-daemon/bin/context-budget.mjs'
 import { PEER_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/peer-context-policy.mjs'
 import { CHAT_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/context-composer.mjs'
+import { StableSessionContextCache } from '../../packages/codesurf-daemon/bin/stable-session-context.mjs'
 
 async function waitFor(check, timeoutMs = 5_000, intervalMs = 15) {
   const started = Date.now()
@@ -83,6 +84,14 @@ test('daemon strips and recomposes tagged context independently for prepared mes
     '<codesurf_file_context trust="untrusted" source="workspace-files">',
     'FILE-CONTEXT-ONCE-5934',
     '</codesurf_file_context>',
+    '',
+    '<codesurf_recent_edit_context trust="untrusted" source="renderer-derived-file-state">',
+    'RECENT-EDIT-ONCE-7045',
+    '</codesurf_recent_edit_context>',
+    '',
+    '<codesurf_block_notes_context trust="untrusted" source="renderer-derived-transcript">',
+    'BLOCK-NOTES-ONCE-8156',
+    '</codesurf_block_notes_context>',
   ].join('\n')
   const prepared = `Review the prepared context.\n\n${suffix}`
   const result = revalidateDaemonContextRequest({
@@ -94,13 +103,109 @@ test('daemon strips and recomposes tagged context independently for prepared mes
     const content = messages?.[0]?.content ?? ''
     assert.equal(content.match(/ROOM-CONTEXT-ONCE-4812/g)?.length, 1)
     assert.equal(content.match(/FILE-CONTEXT-ONCE-5934/g)?.length, 1)
+    assert.equal(content.match(/RECENT-EDIT-ONCE-7045/g)?.length, 1)
+    assert.equal(content.match(/BLOCK-NOTES-ONCE-8156/g)?.length, 1)
     assert.equal(content.match(/<codesurf_peer_context /g)?.length, 1)
     assert.equal(content.match(/<codesurf_file_context /g)?.length, 1)
+    assert.equal(content.match(/<codesurf_recent_edit_context /g)?.length, 1)
+    assert.equal(content.match(/<codesurf_block_notes_context /g)?.length, 1)
   }
   assert.ok(result.metadata.context.aggregateBytes <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 })
 
-test('daemon revalidates peer context before Claude and Codex provider prompt construction', async t => {
+test('daemon Codex installs stable context once while resumed turns keep fresh dynamic context', () => {
+  const base = {
+    provider: 'codex',
+    model: 'gpt-test',
+    mode: 'default',
+    memoryPrompt: 'DAEMON-STABLE-MEMORY-9267',
+    skillsPrompt: 'DAEMON-STABLE-SKILLS-0378',
+    agentMode: {
+      id: 'agent',
+      name: 'Agent',
+      systemPrompt: 'DAEMON-STABLE-PERSONA-1489',
+      tools: null,
+    },
+  }
+  const firstRequest = revalidateDaemonContextRequest({
+    ...base,
+    messages: [{ role: 'user', content: 'First user turn' }],
+    recentEditContext: 'DAEMON-FIRST-RECENT-2590',
+    blockNotesContext: 'DAEMON-FIRST-NOTES-3601',
+    asyncExecution: {
+      requestedRunMode: 'foreground',
+      backend: 'daemon',
+      hostType: 'local-daemon',
+      hostLabel: 'DAEMON-FIRST-HOST-7045',
+      providerNativeBackground: true,
+      detachedDaemonAvailable: true,
+      detachedDaemonPreferred: false,
+    },
+  }).request
+  const resumedRequest = revalidateDaemonContextRequest({
+    ...base,
+    sessionId: 'thread-4712',
+    messages: [{ role: 'user', content: 'Second user turn' }],
+    recentEditContext: 'DAEMON-SECOND-RECENT-5823',
+    blockNotesContext: 'DAEMON-SECOND-NOTES-6934',
+    asyncExecution: {
+      requestedRunMode: 'foreground',
+      backend: 'daemon',
+      hostType: 'local-daemon',
+      hostLabel: 'DAEMON-SECOND-HOST-8156',
+      providerNativeBackground: true,
+      detachedDaemonAvailable: true,
+      detachedDaemonPreferred: false,
+    },
+  }).request
+
+  const firstPrompt = buildCodexExecArgs(firstRequest, '/workspace').at(-1) ?? ''
+  assert.match(firstPrompt, /DAEMON-STABLE-PERSONA-1489/)
+  assert.match(firstPrompt, /DAEMON-STABLE-MEMORY-9267/)
+  assert.match(firstPrompt, /DAEMON-STABLE-SKILLS-0378/)
+  assert.match(firstPrompt, /DAEMON-FIRST-RECENT-2590/)
+  assert.match(firstPrompt, /DAEMON-FIRST-NOTES-3601/)
+  assert.match(firstPrompt, /DAEMON-FIRST-HOST-7045/)
+
+  const stableContexts = new StableSessionContextCache()
+  const afterRestart = stableContexts.select({
+    workspaceId: 'workspace-a',
+    cardId: 'card-a',
+    provider: 'codex',
+    sessionId: 'thread-4712',
+    contextPrompt: 'DAEMON-STABLE-COMPOSITE',
+  })
+  assert.equal(afterRestart.contextPrompt, 'DAEMON-STABLE-COMPOSITE')
+  assert.equal(stableContexts.complete(afterRestart, {
+    accepted: true,
+    sessionId: 'thread-4712',
+  }), true)
+  const resumedSelection = stableContexts.select({
+    workspaceId: 'workspace-a',
+    cardId: 'card-a',
+    provider: 'codex',
+    sessionId: 'thread-4712',
+    contextPrompt: 'DAEMON-STABLE-COMPOSITE',
+  })
+  assert.equal(resumedSelection.contextPrompt, undefined)
+
+  const resumedArgs = buildCodexExecArgs(resumedRequest, '/workspace', '', {
+    contextPrompt: resumedSelection.contextPrompt,
+  })
+  const resumedPrompt = resumedArgs.at(-1) ?? ''
+  assert.equal(resumedArgs[resumedArgs.indexOf('resume') + 1], 'thread-4712')
+  assert.doesNotMatch(
+    resumedPrompt,
+    /DAEMON-STABLE-(?:PERSONA|MEMORY|SKILLS)/,
+  )
+  assert.match(resumedPrompt, /DAEMON-SECOND-RECENT-5823/)
+  assert.match(resumedPrompt, /DAEMON-SECOND-NOTES-6934/)
+  assert.match(resumedPrompt, /DAEMON-SECOND-HOST-8156/)
+  assert.doesNotMatch(resumedPrompt, /DAEMON-FIRST-(?:RECENT|NOTES)/)
+  assert.doesNotMatch(resumedPrompt, /DAEMON-FIRST-HOST-7045/)
+})
+
+test('renderer-supplied peers never become privileged Claude or Codex context', async t => {
   const homeDir = await mkdtemp(join(tmpdir(), 'codesurf-peer-context-'))
   const workspaceDir = join(homeDir, 'workspace')
   await mkdir(workspaceDir, { recursive: true })
@@ -158,7 +263,7 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
     return state && state.status !== 'running' && state.status !== 'queued' ? state : null
   })
   assert.ok(claudePrompt)
-  assert.match(claudePrompt, /Peer prompt truncated:/)
+  assert.doesNotMatch(claudePrompt, /Peer prompt truncated:|Connected peer blocks/)
   assert.ok(Buffer.byteLength(claudePrompt, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 
   let harnessContextPrompt = null
@@ -190,6 +295,16 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
       detachedDaemonAvailable: true,
       detachedDaemonPreferred: false,
     },
+    skillsPrompt: 'HARNESS-SKILLS-CONTEXT',
+    asyncExecution: {
+      requestedRunMode: 'background',
+      backend: 'daemon',
+      hostType: 'local-daemon',
+      hostLabel: 'Test daemon',
+      providerNativeBackground: true,
+      detachedDaemonAvailable: true,
+      detachedDaemonPreferred: false,
+    },
     workspaceDir,
     messages: [{ role: 'user', content: 'use peers in the background' }],
     peers,
@@ -200,8 +315,8 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
   })
   assert.match(harnessContextPrompt, /## Async Execution/)
   assert.match(harnessContextPrompt, /HARNESS-SKILLS-CONTEXT/)
-  assert.match(harnessContextPrompt, /## Connected peer blocks/)
-  assert.match(harnessContextPrompt, /Peer prompt truncated:/)
+  assert.match(harnessContextPrompt, /HARNESS-SKILLS-CONTEXT/)
+  assert.doesNotMatch(harnessContextPrompt, /## Connected peer blocks|Peer prompt truncated:/)
   assert.ok(Buffer.byteLength(harnessContextPrompt, 'utf8') <= CHAT_CONTEXT_LIMITS.aggregateBytes)
 
   const codexRequest = revalidateDaemonContextRequest({
@@ -211,8 +326,7 @@ test('daemon revalidates peer context before Claude and Codex provider prompt co
   }).request
   const codexArgs = buildCodexExecArgs(codexRequest, workspaceDir)
   const codexPrompt = codexArgs.at(-1)
-  assert.match(codexPrompt, /## Agent room/)
-  assert.match(codexPrompt, /Peer prompt truncated:/)
+  assert.doesNotMatch(codexPrompt, /## Agent room|Peer prompt truncated:/)
   assert.ok(Buffer.byteLength(codexPrompt, 'utf8') < CHAT_CONTEXT_LIMITS.aggregateBytes + 1024)
 })
 

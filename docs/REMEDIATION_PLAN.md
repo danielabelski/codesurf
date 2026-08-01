@@ -1,5 +1,19 @@
 # CodeSurf — Remediation Plan
 
+> **Archived remediation snapshot.** This file records the 2026-06-09 pass.
+> Current full-review disposition and verification are in
+> [`plans/2026-07-31-full-review-remediation.md`](../plans/2026-07-31-full-review-remediation.md).
+
+The current integration now includes bounded daemon SSE; provider and peer
+authority enforcement; host-attested recent-edit provenance; generation-fenced
+chat preparation and authoritative session clear; managed-local-proxy limits
+and completion fencing; attested attachment capabilities; and Electrobun
+process, session, hydration, and temporary-file lifecycle hardening. Peer
+topology is host-validated, while user-role peer observations remain untrusted
+and bounded. These implementation updates do not imply that the final exact
+branch tip has passed its detached clean-checkout proof; that record remains
+pending under Plan 015.
+
 Tracks fixes for findings in `docs/CODE_REVIEW.md`. Status as of 2026-06-09.
 
 ## Critical — DONE

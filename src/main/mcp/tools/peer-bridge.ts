@@ -9,6 +9,17 @@ import { requestToolPermission } from '../../permissions'
 import { assertSafePathSegment } from '../../security/pathSegments'
 import { isValidAgentRoomId } from '../../agent-room/validation'
 import { resolvePeerWorkspaceScope } from '../peer-scope'
+import { authorizePeerBridgeTarget } from '../peer-bridge-authority.ts'
+import {
+  appendAuthorizedNoteFile,
+  authorizeWorkspaceNoteFile,
+  readAuthorizedNoteFile,
+  writeAuthorizedNoteFile,
+  type NoteFileIntent,
+} from '../note-file-boundary.ts'
+import {
+  type ValidatedFsPath,
+} from '../../ipc/fs.ts'
 
 // SECURITY: terminal_send_input writes arbitrary text (+ Enter) directly into
 // a terminal tile, giving any MCP caller that holds the bearer token from
@@ -82,34 +93,42 @@ async function readWorkspaceRefsFromUserConfig(): Promise<UserConfigWorkspaceRef
   return []
 }
 
-async function readCanvasStateTiles(workspaceId: string): Promise<TileState[]> {
+async function readCanvasState(workspaceId: string): Promise<{ tiles?: TileState[]; lockedConnections?: unknown[] } | null> {
   const storageIds = await ensureWorkspaceStorageMigrated(workspaceId)
   for (const storageId of storageIds) {
     try {
       const raw = await fs.readFile(canvasStatePath(storageId), 'utf8')
-      const parsed = JSON.parse(raw) as { tiles?: TileState[] }
-      if (Array.isArray(parsed.tiles)) return parsed.tiles
+      const parsed = JSON.parse(raw) as { tiles?: TileState[]; lockedConnections?: unknown[] }
+      if (Array.isArray(parsed.tiles)) return parsed
     } catch {
       // try next alias
     }
   }
-  return []
+  return null
+}
+
+async function readCanvasStateTiles(workspaceId: string): Promise<TileState[]> {
+  return (await readCanvasState(workspaceId))?.tiles ?? []
 }
 
 async function findNoteTileBackingFile(
   workspaceId: string,
   tileId: string,
-): Promise<string | null> {
+  intent: NoteFileIntent,
+): Promise<ValidatedFsPath | null> {
   // Validate before using tileId as a path segment: prevents traversal via
   // MCP-supplied tile_id values like '../../../etc/passwd'.
   assertSafePathSegment(tileId, 'tile_id')
   const workspaces = await readWorkspaceRefsFromUserConfig()
   for (const ws of workspaces) {
     if (ws.id !== workspaceId) continue
+    const validateCandidate = (candidate: string): Promise<ValidatedFsPath> => (
+      authorizeWorkspaceNoteFile(candidate, ws.path, intent)
+    )
     try {
       const notePath = join(ws.path, '.codesurf', tileId, 'context', 'note.txt')
       const stat = await fs.stat(notePath).catch(() => null)
-      if (stat?.isFile()) return notePath
+      if (stat?.isFile()) return await validateCandidate(notePath)
     } catch {
       // ignore
     }
@@ -118,7 +137,7 @@ async function findNoteTileBackingFile(
       const tiles = await readCanvasStateTiles(ws.id)
       const tile = tiles.find(entry => entry?.id === tileId && entry?.type === 'note')
       const filePath = typeof tile?.filePath === 'string' ? tile.filePath.trim() : ''
-      if (filePath) return filePath
+      if (filePath) return await validateCandidate(filePath)
     } catch {
       // ignore
     }
@@ -147,9 +166,15 @@ export async function resolveTileWorkspaceDir(
       if (tiles.some(entry => entry?.id === tileId)) return ws.path
     }
   } catch {
-    // fall through — the grant then keys on the null workspace, as before
+    // Resolution is intentionally best-effort for callers that only need a
+    // lookup. Permission-gated peer tools must reject a null result instead of
+    // turning it into an unscoped (global) permission request.
   }
   return null
+}
+
+function unresolvedPermissionWorkspaceError(toolName: string, tileId: string): string {
+  return `Permission denied: ${toolName} requires an authoritative workspace scope for tile "${tileId}"`
 }
 
 // Every tool here takes tile_id as a TARGET peer block, not the caller's own
@@ -171,6 +196,15 @@ export async function handlePeerBridgeTool(
   const workspaceScope = resolvePeerWorkspaceScope(ctx.principal, args.workspace_id)
   if (!workspaceScope.ok) return workspaceScope.error
   const workspaceId = workspaceScope.workspaceId
+  const canvas = await readCanvasState(workspaceId)
+  const targetAuthority = authorizePeerBridgeTarget({
+    principal: ctx.principal,
+    workspaceId,
+    targetTileId: tileId,
+    toolName: name,
+    canvas,
+  })
+  if (!targetAuthority.ok) return targetAuthority.error
 
   if (name.startsWith('browser_') || name === 'browser_set_mode') {
     const mode = asString(args.mode)
@@ -195,10 +229,13 @@ export async function handlePeerBridgeTool(
     }
 
     const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
+    if (!workspaceDir) {
+      return unresolvedPermissionWorkspaceError('terminal_send_input', tileId)
+    }
     const permissionRequest = {
       provider: 'mcp',
       toolName: 'terminal_send_input',
-      workspaceDir: workspaceDir ?? undefined,
+      workspaceDir,
       title: 'Terminal input from MCP agent',
       description: `An MCP agent wants to type into terminal tile "${tileId}":\n${input.slice(0, 200)}${input.length > 200 ? '...' : ''}`,
     }
@@ -225,8 +262,8 @@ export async function handlePeerBridgeTool(
 
   if (name === 'note_read_content') {
     try {
-      const notePath = await findNoteTileBackingFile(workspaceId, tileId)
-      if (notePath) return await fs.readFile(notePath, 'utf8')
+      const notePath = await findNoteTileBackingFile(workspaceId, tileId, 'read')
+      if (notePath) return await readAuthorizedNoteFile(notePath)
     } catch (err) {
       console.warn(`[peer-bridge] note_read_content failed for ${tileId}:`, err)
     }
@@ -239,18 +276,23 @@ export async function handlePeerBridgeTool(
     // Gated like terminal_send_input: the backing file may be any path the
     // canvas state references, so an ungated write is an arbitrary-file
     // overwrite primitive for any token holder.
-    const notePath = await findNoteTileBackingFile(workspaceId, tileId)
     const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
+    if (!workspaceDir) {
+      return unresolvedPermissionWorkspaceError('note_write_content', tileId)
+    }
+    const notePath = await findNoteTileBackingFile(workspaceId, tileId, 'write')
     const allowed = await requestToolPermission({
       provider: 'mcp',
       toolName: 'note_write_content',
-      workspaceDir: workspaceDir ?? undefined,
+      workspaceDir,
       title: 'Note overwrite from MCP agent',
-      description: `An MCP agent wants to replace the contents of note tile "${tileId}"${notePath ? ` (${notePath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
+      description: `An MCP agent wants to replace the contents of note tile "${tileId}"${notePath ? ` (${notePath.displayPath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
     }, /* interactive */ true)
     if (!allowed) return 'Permission denied: note_write_content was not approved'
     try {
-      if (notePath) await fs.writeFile(notePath, content, 'utf8')
+      if (notePath) {
+        await writeAuthorizedNoteFile(notePath, content)
+      }
     } catch (err) {
       console.warn(`[peer-bridge] note_write_content failed for ${tileId}:`, err)
       return `Failed to write note: ${(err as Error).message}`
@@ -263,21 +305,22 @@ export async function handlePeerBridgeTool(
     if (!content) return 'Missing message'
     if (name === 'note_append_context') {
       // Same write primitive as note_write_content — gate it the same way.
-      const notePath = await findNoteTileBackingFile(workspaceId, tileId)
       const workspaceDir = await resolveTileWorkspaceDir(tileId, workspaceId)
+      if (!workspaceDir) {
+        return unresolvedPermissionWorkspaceError('note_append_context', tileId)
+      }
+      const notePath = await findNoteTileBackingFile(workspaceId, tileId, 'write')
       const allowed = await requestToolPermission({
         provider: 'mcp',
         toolName: 'note_append_context',
-        workspaceDir: workspaceDir ?? undefined,
+        workspaceDir,
         title: 'Note append from MCP agent',
-        description: `An MCP agent wants to append to note tile "${tileId}"${notePath ? ` (${notePath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
+        description: `An MCP agent wants to append to note tile "${tileId}"${notePath ? ` (${notePath.displayPath})` : ''}:\n${content.slice(0, 200)}${content.length > 200 ? '...' : ''}`,
       }, /* interactive */ true)
       if (!allowed) return 'Permission denied: note_append_context was not approved'
       try {
         if (notePath) {
-          const previous = await fs.readFile(notePath, 'utf8').catch(() => '')
-          const next = previous ? `${previous}\n${content}` : content
-          await fs.writeFile(notePath, next, 'utf8')
+          await appendAuthorizedNoteFile(notePath, content)
         }
       } catch (err) {
         console.warn(`[peer-bridge] note_append_context failed for ${tileId}:`, err)

@@ -29,6 +29,7 @@ interface ElectronAPI {
   fs: {
     readDir(path: string, workspaceId?: string): Promise<Array<{ name: string; path: string; isDir: boolean; ext: string }>>
     readFile(path: string, workspaceId?: string): Promise<string>
+    readFilePrefix(path: string, maxBytes: number, workspaceId?: string): Promise<string>
     writeFile(path: string, content: string, workspaceId?: string): Promise<void>
     createFile(path: string, workspaceId?: string): Promise<void>
     createDir(path: string, workspaceId?: string): Promise<void>
@@ -81,7 +82,7 @@ interface ElectronAPI {
     getAll(workspaceId: string, tileId: string, tagPrefix?: string): Promise<Array<{ key: string; value: unknown; updatedAt?: number; source?: string }>>
     set(workspaceId: string, tileId: string, key: string, value: unknown): Promise<boolean>
     delete(workspaceId: string, tileId: string, key: string): Promise<boolean>
-    onChanged?(tileId: string, cb: (data: { workspaceId: string; tileId: string; key: string; value: unknown }) => void): () => void
+    onChanged?(workspaceId: string, tileId: string, cb: (data: { workspaceId: string; tileId: string; key: string; value: unknown }) => void): () => void
   }
   image?: {
     edit(req: { workspaceId: string; tileId: string; prompt: string; provider?: string; model?: string; outputPath?: string }): Promise<{ ok: boolean; result?: string; error?: string }>
@@ -97,8 +98,9 @@ interface ElectronAPI {
     onOpencodeModelsUpdated(cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void): () => void
     openclawAgents(): Promise<{ agents: Array<{ id: string; label: string; description?: string }> }>
     csagentModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }> }>
-    selectFiles(): Promise<string[]>
-    writeTempAttachment(payload: { data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; path: string } | { ok: false; error: string }>
+    selectFiles(workspaceId: string, cardId: string): Promise<Array<{ capability: string; displayName: string }>>
+    authorizeDroppedFiles(workspaceId: string, cardId: string, files: File[]): Promise<Array<{ capability: string; displayName: string }>>
+    writeTempAttachment(payload: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }>
     answerUserQuestion(payload: {
       workspaceId: string
       cardId: string
@@ -300,7 +302,7 @@ interface ElectronAPI {
     save(workspaceId: string, tileId: string, state: { columns: Array<{ id: string; title: string }>; cards: import('./components/KanbanCard').KanbanCardData[] }): Promise<void>
   }
   terminal: {
-    create(tileId: string, workspaceId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[]): Promise<{ cols: number; rows: number; buffer?: string }>
+    create(tileId: string, workspaceId: string, workspaceDir: string, launchBin?: string, launchArgs?: string[], options?: { cols?: number; rows?: number }): Promise<{ cols: number; rows: number; buffer?: string }>
     write(tileId: string, data: string): Promise<void>
     resize(tileId: string, cols: number, rows: number): Promise<void>
     destroy(tileId: string, workspaceId: string): Promise<void>

@@ -85,6 +85,7 @@
     "run:electrobun": "electrobun run",
     "smoke:electrobun": "npm run build:electrobun && node scripts/smoke-electrobun.mjs",
     "acceptance:electrobun": "npm run build:electrobun && node scripts/accept-electrobun.mjs",
+    "verify:electrobun-runtime": "npm run build:electrobun && node scripts/smoke-electrobun.mjs && node scripts/accept-electrobun.mjs",
     "validate-extension": "node scripts/validate-extension.mjs",
     "ensure-electron": "node scripts/ensure-electron.js",
     "rebuild": "node scripts/rebuild-natives.mjs",

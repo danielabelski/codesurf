@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { describe, test, before, after } from 'node:test'
 import {
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -64,6 +65,7 @@ const {
   writeMCPConfigToWorkspace,
   readContextFilesBounded,
   isValidSseEventName,
+  requireMcpPermissionWorkspace,
   startMCPServer,
   stopMCPServer,
 } = await import('../src/main/mcp-server.ts')
@@ -127,6 +129,21 @@ describe('buildContexHttpMcpServerEntry', () => {
 })
 
 describe('MCP persistence and context boundaries', () => {
+  test('permission-gated routes reject unresolved workspace authority', () => {
+    assert.throws(
+      () => requireMcpPermissionWorkspace(null, '/inject'),
+      /requires an authoritative workspace scope/,
+    )
+    assert.throws(
+      () => requireMcpPermissionWorkspace('  ', '/inject'),
+      /requires an authoritative workspace scope/,
+    )
+    assert.equal(
+      requireMcpPermissionWorkspace('/workspace/project', '/inject'),
+      '/workspace/project',
+    )
+  })
+
   test('scrubs legacy workspace-global CodeSurf credentials', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'codesurf-workspace-mcp-'))
     try {
@@ -323,6 +340,15 @@ describe('MCP HTTP auth gates', () => {
     bus.subscribe(`tile:${workspaceB}:${targetTileId}`, 'peer-scope-b', event => {
       workspaceBEvents.push(event)
     })
+    const canvasDir = join(testCodesurfHome, 'workspaces', workspaceA, '.codesurf')
+    mkdirSync(canvasDir, { recursive: true })
+    writeFileSync(join(canvasDir, 'canvas-state.json'), JSON.stringify({
+      tiles: [
+        { id: callerTileId, type: 'terminal' },
+        { id: targetTileId, type: 'browser' },
+      ],
+      lockedConnections: [{ sourceTileId: callerTileId, targetTileId }],
+    }))
 
     const call = async (
       authorization: string,
@@ -349,7 +375,9 @@ describe('MCP HTTP auth gates', () => {
           },
         }),
       })
-      assert.equal(response.status, 200)
+      if (response.status !== 200) {
+        throw new Error(`Unexpected MCP response: ${JSON.stringify(response)}`)
+      }
       const body = JSON.parse(response.body) as {
         result?: { content?: Array<{ text?: string }> }
       }

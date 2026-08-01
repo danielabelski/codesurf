@@ -2,9 +2,8 @@
  * OpenCode provider — uses @opencode-ai/sdk against a local `opencode serve` process.
  */
 
-import { spawn, ChildProcess, execFileSync } from 'child_process'
+import { spawn, execFileSync } from 'child_process'
 import * as net from 'net'
-import { randomUUID } from 'node:crypto'
 import { buildOpenCodeSessionPermissions } from '../../agents/opencode-permissions'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
@@ -13,6 +12,12 @@ import { errorMessage } from '../../../shared/errors.ts'
 import { type ToolPermissionRequest } from '../../permissions'
 import { resolveInlineToolPermission } from '../permission-flow'
 import { buildPeerAwareTurnPrompt } from '../prompt-builders'
+import {
+  bindStableContextSession,
+  clearStableSessionContext,
+  invalidateStableContextSelection,
+  selectStableContextForTurn,
+} from '../stable-session-context'
 import type { ChatRequest } from '../types'
 import {
   chatRequestScope,
@@ -20,9 +25,18 @@ import {
   log,
   sendStream,
   getPreparedMessages,
+  markRoomPromptAccepted,
+  processTreeSpawnOptions,
+  terminateProcessTree,
   type ChatStreamScope,
 } from '../runtime'
 import { createAuthenticatedOpenCodeClient, OpenCodeClientCache } from './opencode-client'
+import { OpenCodeServerManager as HardenedOpenCodeServerManager } from './opencode-server-manager.ts'
+import {
+  awaitGuardedPreparation,
+  providerLaunchIsCurrent,
+  type ProviderLaunchGuard,
+} from '../provider-launch-guard.ts'
 
 // Lazy-loaded: @opencode-ai/sdk only exports ESM, Electron main is CJS.
 // externalizeDepsPlugin converts dynamic import() to require() which can't
@@ -73,121 +87,29 @@ function resolveOpenCodeBinary(): string | null {
   }
 }
 
-class OpenCodeServerManager {
-  private static instance: OpenCodeServerManager | null = null
-  private server: ChildProcess | null = null
-  private port: number | null = null
-  private startPromise: Promise<{ port: number; url: string }> | null = null
-  // `opencode serve` listens on 127.0.0.1 but otherwise has no auth — any
-  // local process could drive agent sessions with the user's permissions.
-  // The server honors OPENCODE_SERVER_PASSWORD (basic auth, user "opencode"),
-  // so generate one per app run and pass it to the server + every client.
-  private readonly serverPassword = randomUUID()
+const openCodeServerManager = new HardenedOpenCodeServerManager({
+  resolveBinary: resolveOpenCodeBinary,
+  findAvailablePort,
+  spawnServer: (binary, port, password) => {
+    const shellPath = getShellEnvPath()
+    return spawn(binary, ['serve', '--port', String(port)], processTreeSpawnOptions({
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildSafeSpawnEnv({
+        ...(shellPath && { PATH: shellPath }),
+        OPENCODE_SERVER_PASSWORD: password,
+      }),
+    }))
+  },
+  terminateProcessTree,
+  log,
+})
 
-  static getInstance(): OpenCodeServerManager {
-    if (!OpenCodeServerManager.instance) {
-      OpenCodeServerManager.instance = new OpenCodeServerManager()
-    }
-    return OpenCodeServerManager.instance
-  }
-
-  getAuthHeaders(): Record<string, string> {
-    return {
-      Authorization: `Basic ${Buffer.from(`opencode:${this.serverPassword}`).toString('base64')}`,
-    }
-  }
-
-  async ensureRunning(): Promise<{ port: number; url: string }> {
-    if (this.server && this.port && !this.server.killed) {
-      return { port: this.port, url: `http://127.0.0.1:${this.port}` }
-    }
-
-    if (!this.startPromise) {
-      this.startPromise = this.startServer().catch((err) => {
-        this.startPromise = null
-        throw err
-      })
-    }
-
-    return this.startPromise
-  }
-
-  private async startServer(): Promise<{ port: number; url: string }> {
-    const binary = resolveOpenCodeBinary()
-    if (!binary) throw new Error('opencode CLI not found. Install: go install github.com/opencodeco/opencode@latest')
-
-    this.port = await findAvailablePort()
-    const url = `http://127.0.0.1:${this.port}`
-
-    return new Promise((resolve, reject) => {
-      const shellPath = getShellEnvPath()
-      this.server = spawn(binary, ['serve', '--port', String(this.port)], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: buildSafeSpawnEnv({
-          ...(shellPath && { PATH: shellPath }),
-          OPENCODE_SERVER_PASSWORD: this.serverPassword,
-        }),
-      })
-
-      let started = false
-      const timeout = setTimeout(() => {
-        if (!started) reject(new Error('OpenCode server startup timeout (30s)'))
-      }, 30_000)
-
-      this.server.stdout?.on('data', (data: Buffer) => {
-        const output = data.toString()
-        log('opencode stdout:', output.trim().slice(0, 200))
-        if (output.includes('listening on') && !started) {
-          started = true
-          clearTimeout(timeout)
-          resolve({ port: this.port!, url })
-        }
-      })
-
-      this.server.stderr?.on('data', (data: Buffer) => {
-        log('opencode stderr:', data.toString().trim().slice(0, 200))
-      })
-
-      this.server.on('error', (err) => {
-        clearTimeout(timeout)
-        reject(err)
-      })
-
-      this.server.on('exit', (code) => {
-        if (!started) {
-          clearTimeout(timeout)
-          reject(new Error(`OpenCode server exited with code ${code}`))
-        }
-        this.server = null
-        this.port = null
-        // H-10: clear startPromise so the next ensureRunning() call triggers
-        // a fresh startServer() rather than returning the stale resolved
-        // promise that still points at the now-dead port.
-        this.startPromise = null
-      })
-    })
-  }
-
-  async shutdown(): Promise<void> {
-    if (this.server && !this.server.killed) {
-      this.server.kill('SIGTERM')
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(() => { this.server?.kill('SIGKILL'); resolve() }, 5000)
-        this.server?.on('exit', () => { clearTimeout(t); resolve() })
-      })
-    }
-    this.server = null
-    this.port = null
-    this.startPromise = null
-  }
-
-  isRunning(): boolean {
-    return !!(this.server && this.port && !this.server.killed)
-  }
+function getOpenCodeServerManager(): HardenedOpenCodeServerManager {
+  return openCodeServerManager
 }
 
-export function shutdownOpenCodeServer(): void {
-  void OpenCodeServerManager.getInstance().shutdown()
+export async function shutdownOpenCodeServer(): Promise<void> {
+  await openCodeServerManager.shutdown()
 }
 
 // Cached model list
@@ -336,13 +258,14 @@ export function clearOpenCodeSession(scope: ChatStreamScope): void {
   const key = chatStreamScopeKey(scope)
   opencodeSessionIds.delete(key)
   opencodeSessionPermissionModes.delete(key)
+  clearStableSessionContext(scope, 'opencode')
 }
 
 export async function abortOpenCodeSession(scope: ChatStreamScope): Promise<void> {
   const ocSessionId = opencodeSessionIds.get(chatStreamScopeKey(scope))
   if (!ocSessionId) return
   try {
-    const mgr = OpenCodeServerManager.getInstance()
+    const mgr = getOpenCodeServerManager()
     if (mgr.isRunning()) {
       const createClient = await getOpencodeClient()
       const { url } = await mgr.ensureRunning()
@@ -360,14 +283,17 @@ export async function abortOpenCodeSession(scope: ChatStreamScope): Promise<void
 const opencodeClientCache = new OpenCodeClientCache<any>()
 
 async function getOrCreateOpencodeClient(): Promise<{ client: any; url: string }> {
-  const mgr = OpenCodeServerManager.getInstance()
+  const mgr = getOpenCodeServerManager()
   const { url } = await mgr.ensureRunning()
   const createClient = await getOpencodeClient()
   const client = opencodeClientCache.getOrCreate(url, createClient, mgr.getAuthHeaders())
   return { client, url }
 }
 
-export function chatOpencode(req: ChatRequest): void {
+export function chatOpencode(
+  req: ChatRequest,
+  launchGuard?: ProviderLaunchGuard,
+): void {
   const scope = chatRequestScope(req)
   const scopeKey = chatStreamScopeKey(scope)
   const lastUserMsg = [...getPreparedMessages(req)].reverse().find(m => m.role === 'user')
@@ -375,6 +301,8 @@ export function chatOpencode(req: ChatRequest): void {
     sendStream(scope, { type: 'error', error: 'No user message' })
     return
   }
+  const launchIsCurrent = (): boolean => providerLaunchIsCurrent(launchGuard)
+  if (!launchIsCurrent()) return
 
   // Parse model string like "anthropic/claude-sonnet-4-6" into providerID + modelID
   const slashIdx = req.model.indexOf('/')
@@ -406,11 +334,17 @@ export function chatOpencode(req: ChatRequest): void {
     prompt: lastUserMsg.content.slice(0, 100),
     resuming: !!existingSessionId,
   })
+  let stableContext: ReturnType<typeof selectStableContextForTurn> | null = null
 
   ;(async () => {
     try {
       // 1. Get cached client (server already warm from model list fetch)
-      const { client } = await getOrCreateOpencodeClient()
+      const preparedClient = await awaitGuardedPreparation(
+        launchGuard,
+        getOrCreateOpencodeClient(),
+      )
+      if (!preparedClient.ok) return
+      const { client } = preparedClient.value
 
       // 2. Create or reuse session
       let sessionID = existingSessionId
@@ -426,6 +360,10 @@ export function chatOpencode(req: ChatRequest): void {
         if (!sessionID) {
           throw new Error('Failed to create OpenCode session — no session ID returned')
         }
+        if (!launchIsCurrent()) {
+          try { await client.session.abort({ sessionID }) } catch { /* incomplete session */ }
+          return
+        }
         opencodeSessionIds.set(scopeKey, sessionID)
         opencodeSessionPermissionModes.set(scopeKey, requestedPermissionMode)
         log('opencode session created:', sessionID, req.mode === 'plan'
@@ -438,6 +376,10 @@ export function chatOpencode(req: ChatRequest): void {
       // 3. Subscribe to SSE + send prompt concurrently
       const sseResult = await client.event.subscribe()
       const stream = (sseResult as any).stream
+      if (!launchIsCurrent()) {
+        try { await stream?.return?.() } catch { /* stream not yet active */ }
+        return
+      }
 
       // Track state for this response
       let assistantMessageId: string | null = null
@@ -447,18 +389,35 @@ export function chatOpencode(req: ChatRequest): void {
       const userMessageIds = new Set<string>() // message IDs that are user messages
 
       // Fire prompt without waiting — response arrives via SSE.
-      // OpenCode has no separate system channel in this call; prepend the one
-      // host composition on every turn so volatile peer/room context stays live.
+      // OpenCode has no separate system channel in this call. Install stable
+      // host context once per session/version; volatile context remains in the
+      // latest prepared user message on every turn.
+      stableContext = selectStableContextForTurn({
+        scope,
+        provider: req.provider,
+        sessionId: sessionID,
+        contextPrompt: req.contextPrompt,
+      })
       const promptText = buildPeerAwareTurnPrompt(
         lastUserMsg.content,
-        req.contextPrompt,
+        stableContext.contextPrompt,
       )
+      if (!launchIsCurrent()) {
+        invalidateStableContextSelection(stableContext)
+        try { await stream?.return?.() } catch { /* stream not yet active */ }
+        return
+      }
       const promptPromise = client.session.prompt({
         sessionID,
         model: { providerID, modelID },
         parts: [{ type: 'text', text: promptText }],
+      }).then(() => {
+        if (!launchIsCurrent()) return
+        if (stableContext) bindStableContextSession(stableContext, sessionID)
+        markRoomPromptAccepted(scope)
       }).catch((err: any) => {
-        if (!isDone) {
+        if (stableContext) invalidateStableContextSelection(stableContext)
+        if (!isDone && launchIsCurrent()) {
           log('opencode prompt error:', err.message)
           sendStream(scope, { type: 'error', error: err.message ?? String(err) })
         }
@@ -489,6 +448,7 @@ export function chatOpencode(req: ChatRequest): void {
 
       try {
         for await (const event of stream) {
+          if (!launchIsCurrent()) break
           resetStreamTimeout()
           if (isDone) break
           const evt = event as any
@@ -709,10 +669,12 @@ export function chatOpencode(req: ChatRequest): void {
 
       await promptPromise
 
-      if (!isDone) {
+      if (!isDone && launchIsCurrent()) {
         sendStream(scope, { type: 'done', sessionId: sessionID })
       }
     } catch (err) {
+      if (stableContext) invalidateStableContextSelection(stableContext)
+      if (!launchIsCurrent()) return
       const msg = errorMessage(err)
       log('chatOpencode error:', msg)
       const errorMsg = msg.includes('opencode CLI not found')

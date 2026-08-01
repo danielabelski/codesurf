@@ -230,6 +230,7 @@ export function useChatTilePersistence(options: UseChatTilePersistenceOptions): 
         setAttachments(saved.attachments.filter((item: PendingAttachment) => typeof item?.path === 'string').map((item: PendingAttachment) => ({
           path: item.path,
           kind: item.kind === 'image' || isImagePath(item.path) ? 'image' : 'file',
+          ...(typeof item.capability === 'string' ? { capability: item.capability } : {}),
         })))
       }
       if (Array.isArray(saved.queuedTurns)) {

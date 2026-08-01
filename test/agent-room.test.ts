@@ -23,6 +23,10 @@ const {
   getRoomForTile,
   leaveRoom,
 } = await import('../src/main/agent-room/store.ts')
+const {
+  CHAT_CONTEXT_LIMITS,
+  composeChatContext,
+} = await import('../src/main/chat/context-composer.ts')
 const workspaceId = 'workspace-compat'
 
 beforeEach(async () => {
@@ -91,6 +95,38 @@ describe('agent-room', () => {
       true,
     )
     assert.equal(digest(workspaceId, b).unconsumed, 0)
+  })
+
+  it('projects only whole canonical events that fit the final composed room fragment', () => {
+    const a = 'tile-a-room-fragment-budget'
+    const b = 'tile-b-room-fragment-budget'
+    updateLinks(workspaceId, a, [b], { [a]: 'chat', [b]: 'chat' })
+    for (let index = 0; index < 10; index += 1) {
+      post(workspaceId, {
+        fromTileId: a,
+        text: `event-${index}-${'界'.repeat(400)}`,
+        kind: 'message',
+      })
+    }
+
+    const first = prepareTurnContext(workspaceId, b, 'chat')
+    assert.ok(first.consumed.events.length > 0)
+    assert.ok(first.consumed.events.length < 10)
+    assert.ok(first.acknowledgeThrough)
+    for (const event of first.consumed.events) {
+      assert.match(first.systemExtra, new RegExp(`event-${event.sequence - 1}-`))
+    }
+    const composed = composeChatContext({ room: first.systemExtra })
+    const roomFragment = composed.fragments.find(fragment => fragment.kind === 'room')
+    assert.ok(roomFragment)
+    assert.equal(roomFragment.truncated, false)
+    assert.ok(roomFragment.includedBytes <= CHAT_CONTEXT_LIMITS.roomBytes)
+
+    const deliveredCount = first.consumed.events.length
+    assert.equal(acknowledgeThrough(workspaceId, b, first.acknowledgeThrough!), true)
+    const second = prepareTurnContext(workspaceId, b, 'chat')
+    assert.match(second.systemExtra, new RegExp(`event-${deliveredCount}-`))
+    assert.equal(second.consumed.events[0]?.sequence, deliveredCount + 1)
   })
 
   it('delivers budgeted traffic in ordered batches without gaps', () => {
