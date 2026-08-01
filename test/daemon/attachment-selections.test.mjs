@@ -230,4 +230,3 @@ test('live durable owned receipts survive startup sweep, then expire with verifi
   await assertMissing(owned)
   await restarted.dispose()
 })
-

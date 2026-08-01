@@ -32,4 +32,3 @@ test('local-proxy turn generations are isolated by full scope key', () => {
   assert.equal(fence.finish('workspace-a/same-card', workspaceA), true)
   assert.equal(fence.isCurrent('workspace-b/same-card', workspaceB), true)
 })
-

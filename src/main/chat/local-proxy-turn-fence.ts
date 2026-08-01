@@ -27,4 +27,3 @@ export class LocalProxyTurnFence {
     this.active.delete(scopeKey)
   }
 }
-
