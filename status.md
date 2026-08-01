@@ -1,21 +1,40 @@
 # CodeSurf full-review remediation — reboot handoff
 
-Generated: 2026-08-01 08:04 BST
+Generated: 2026-08-01 08:22 BST
 
 ## Current state
 
-The remediation is implemented and committed on an isolated review branch.
-The original checkout was not reset, cleaned, merged, or pushed.
+The review branch is being merged into `main`. All ten textual conflicts have
+been resolved in the working tree and the resolved files are marker-free. A
+merge commit has not been created in this session because the managed runtime
+denies writes to `.git/index.lock`; the source tree is ready for staging and
+commit in a normal Git-capable session.
 
 ```text
 review worktree: /private/tmp/codesurf-full-review-integration.mbGkPH
-branch:          review/full-remediation-2026-07-31
-head:            ef6026b (Fix Monaco worker package imports)
+source branch:   review/full-remediation-2026-07-31
+source head:     ef6026b (Fix Monaco worker package imports)
 review base:     4e51e4e0a8ce75af472accfe236202dac5cf899e
-main baseline:   bc2d0a94d1a7188419b7bbf01fc083f8fdbd4296
-worktree state:  clean
-commit size:     194 files, 22,818 insertions, 2,243 deletions
+main HEAD:       2da6639a14ca153d5c8738acfe4c0c41400c4f06
+merge head:      ef6026b2bc8b103618c9756ae029f12c1a9b073b
+merge state:     in progress; source conflicts resolved, metadata not staged
+worktree state:  563 changed paths from the integrated review plus main-only edits
 commits:         7 remediation commits after the review base
+```
+
+Resolved conflict paths:
+
+```text
+.codesurf/DREAMING.md
+electrobun/bun/index.ts
+packages/codesurf-relay/src/relay.ts
+plans/015-clean-checkout-verification.md
+plans/2026-07-30-full-code-review.md
+plans/README.md
+src/main/chat/providers/opencode.ts
+src/main/mcp-server.ts
+src/main/mcp/tools/peer-bridge.ts
+test/mcp-auth.test.ts
 ```
 
 Remediation commits, newest first:
@@ -41,7 +60,8 @@ git log --oneline --decorate -5
 
 Do not run `git clean`, `git reset --hard`, `git checkout -- .`, or prune the
 other worktrees. The repository still has old/prunable worktree registrations;
-they were left untouched deliberately.
+they were left untouched deliberately. The review branch remains the canonical
+source of the integrated changes until the merge commit is made.
 
 ## Terminal mode contract (the explicit product requirement)
 
@@ -150,12 +170,12 @@ Known environment/tooling limits (not silently treated as product passes):
   the same abort). Two non-host assertions pass.
 - Vite emits existing dynamic-import and large-chunk warnings; builds exit 0.
 
-## Main checkout preservation
+## Main checkout / merge preservation
 
-`/Users/jkneen/clawd/collaborator-clone` remains on its original `main`
-checkout with its pre-existing user edits preserved. The review did not copy
-the remediation source into main. The only new main-root artifacts are this
-handover and the recoverable backups below.
+`/Users/jkneen/clawd/collaborator-clone` is on `main` with the review merge
+in progress. The integrated source is present in the working tree and all
+conflict markers have been removed. Main-only changes were preserved; no reset,
+clean, worktree prune, or push was performed.
 
 ```text
 /Users/jkneen/clawd/collaborator-clone/status.md
@@ -164,7 +184,9 @@ handover and the recoverable backups below.
 ```
 
 The patch and snapshot were regenerated at 08:04 BST from the review base and
-include all seven remediation commits. The patch is byte-identical to
+include all seven remediation commits. They remain recoverable backups of the
+source branch, not a replacement for the in-progress merge. The patch is
+byte-identical to
 `git diff --binary 4e51e4e0a8ce75af472accfe236202dac5cf899e`; SHA-256 values:
 
 ```text
@@ -177,9 +199,22 @@ the source snapshot contains the full isolated tree (excluding `node_modules`,
 generated `dist`, `dist-electron`, `out`, and `.git`) so untracked implementation
 and test files are also recoverable.
 
-To apply the reviewed branch to main later, make a separate backup first and
-explicitly cherry-pick the remediation commits; do not apply them automatically
-during reboot.
+The managed session cannot create `.git/index.lock`, so the resolved files
+could not be staged or committed here. Do not discard the merge state. In a
+normal Git-capable session, run:
+
+```bash
+git status --short
+git diff --check
+git add -f .codesurf/DREAMING.md
+git add status.md electrobun/bun/index.ts \
+  packages/codesurf-relay/src/relay.ts plans/015-clean-checkout-verification.md \
+  plans/2026-07-30-full-code-review.md plans/README.md \
+  src/main/chat/providers/opencode.ts src/main/mcp-server.ts \
+  src/main/mcp/tools/peer-bridge.ts test/mcp-auth.test.ts
+git diff --name-only --diff-filter=U  # must be empty
+git commit -m "Merge review/full-remediation-2026-07-31 into main"
+```
 
 ## Tool/hook note
 
@@ -187,7 +222,8 @@ No Alexandria skill or hook was invoked for this remediation.
 
 ## Safe next action after reboot
 
-Start in the review worktree, confirm `git status --short` is empty, and run the
-expanded focused command above. If the product should land on main, review the
-seven commits and cherry-pick them deliberately. Remaining red evidence is
-environment-backed socket/Electron validation, not an uncommitted code handoff.
+Start in this checkout, confirm the ten paths above are staged with no unmerged
+entries, create the merge commit, then run the expanded focused command above.
+Remaining red evidence is environment-backed socket/Electron validation, not a
+source conflict. Do not claim the merge is complete until `git log -1` shows a
+new merge commit and `git status --short` is clean.
