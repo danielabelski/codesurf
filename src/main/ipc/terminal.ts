@@ -678,6 +678,7 @@ export function registerTerminalIPC(): void {
     })
 
     term.onData((data: string) => {
+      if (terminals.get(tileId) !== session || session.pty !== term) return
       session.buffer = (session.buffer + data).slice(-200000)
       for (const listener of [...session.listeners]) {
         try {
