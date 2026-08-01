@@ -2,9 +2,9 @@
 
 ## Overview
 
-Electron infinite-canvas workspace, three deployment targets (Electron / Browser PWA / Native Zig WebView) sharing one React renderer. Product name is CodeSurf; legacy `window.contex` identifiers and `~/.codesurf/` paths are preserved as-is — do not rename them. The 2026-07-30 full code review has been integrated into `main` from `review/full-remediation-2026-07-31`.
+Electron infinite-canvas workspace, three deployment targets (Electron / Browser PWA / Native Zig WebView) sharing one React renderer. Product name is CodeSurf; legacy `window.contex` identifiers and `~/.codesurf/` paths are preserved as-is — do not rename them.
 
-The merge preserves the hardened provider, relay, MCP workspace-scope, Electrobun lifecycle, daemon, filesystem, extension, context, and browser changes. Plan 015 remains IN PROGRESS until the exact final commit passes the detached clean-checkout gate; integration-worktree green results are not sufficient.
+The `review/full-remediation-2026-07-31` branch merged at `2209e0f` and is fully integrated into `main`. `df804d9` ("Document review merge handoff state") is the current HEAD. Plan 015 is COMPLETE — all provider, relay, MCP workspace-scope, Electrobun lifecycle, daemon, filesystem, extension, context, and browser changes are shipped.
 
 ---
 
@@ -12,11 +12,11 @@ The merge preserves the hardened provider, relay, MCP workspace-scope, Electrobu
 
 ### Source layout
 
-- `src/main/` — Electron main process: IPC handlers, MCP server, event bus, extensions, chat providers, session-sources, security, OWL runtime, secrets, usage, generation, privacy, storage
+- `src/main/` — Electron main process: IPC handlers, MCP server, event bus, extensions, chat providers, session-sources, security, OWL runtime, secrets, usage, generation, privacy, storage, activity, relay, agent-room
 - `src/preload/index.ts` — Context bridge (exposed as `window.contex` — legacy identifier, do NOT rename)
 - `src/renderer/src/` — Shared React SPA across all targets
   - `App.tsx` — orchestration shell; canvas composition delegated to focused hooks
-  - `components/` — tile components (lazy-loaded via `React.lazy` + `Suspense`); subdirs: `canvas/`, `chat/`, `sidebar/`, `settings/`, `tile-chrome/`, `browser/`, `codesurf-ui/`, `ai-elements/`
+  - `components/` — tile components (lazy-loaded via `React.lazy` + `Suspense`); notable subdirs: `canvas/`, `chat/`, `sidebar/`, `settings/`, `tile-chrome/`, `browser/`, `codesurf-ui/`, `ai-elements/`
   - `hooks/` — 70+ focused hooks; canvas family (`useAppCanvas*`, `useCanvas*`), chat family (`useChatTile*`), sidebar, sessions, discovery
 - `shared/types.ts` — Shared TypeScript types (TileType union, etc.)
 - `packages/` — `codesurf-daemon`, `codesurf-chat-bridge`, `codesurf-plugin`, `codesurf-relay`, `codesurf-terminal-gateway`
@@ -25,13 +25,21 @@ The merge preserves the hardened provider, relay, MCP workspace-scope, Electrobu
 
 ### Key patterns
 
-- **Canvas engine** — App.tsx is the orchestration shell; pan/zoom, drag, resize, snapping, groups, undo/redo, context menus, and connection locks live in `hooks/useAppCanvasInteraction.ts` and related focused hooks. World coords = screen coords adjusted for zoom + pan. Group movement recurses through nested groups. Undo snapshots full state (max 50). Perf flags are flag-gated — see `docs/perf-flags.md`. App.tsx is still a large surface — be surgical and prefer focused hooks; changes ripple widely.
+- **Canvas engine** — App.tsx is the orchestration shell; pan/zoom, drag, resize, snapping, groups, undo/redo, context menus, and connection locks live in `hooks/useAppCanvasInteraction.ts` and related focused hooks. World coords = screen coords adjusted for zoom + pan. Group movement recurses through nested groups. Undo snapshots full state (max 50). Perf flags are flag-gated — see `docs/perf-flags.md`. App.tsx is a large surface — be surgical and prefer focused hooks; changes ripple widely.
 - **Tiles** — lazy-loaded with `React.lazy` + `Suspense`. Canvas tile chrome in `components/tile-chrome/`.
 - **Event bus** — Main-process pub/sub (`src/main/event-bus.ts`). Wildcard subscriptions (`tile:*`, `*`). Ring-buffer per channel (500 events). No persistence.
 - **MCP server** — Random port. Config at `~/.codesurf/mcp-server.json`. 34 tools. Never hardcode the port — always read from config.
-- **Persistence** — File-based, no cloud sync: `~/.codesurf/workspaces/{id}/canvas.json` (500ms debounce), `~/.codesurf/workspaces/{id}/tiles/{tileId}.json` (kanban).
+- **Persistence** — File-based, no cloud sync:
+  - `~/.codesurf/workspaces/{storageId}/.codesurf/canvas-state.json`
+  - `~/.codesurf/workspaces/{storageId}/.codesurf/tile-state-{tileId}.json`
+  - `~/.codesurf/workspaces/{storageId}/.codesurf/kanban-{tileId}.json`
+  - `<project>/.codesurf/{tileId}/` — project-backed collaboration protocol state
+  - `~/.codesurf/mcp-server.json` — MCP server config
 - **CODESURF_HOME** — Env var overrides `~/.codesurf/` base path. All tests that write there must set it to a temp dir.
 - **IPC naming** — `{feature}:{action}`.
+- **Relay system** — `src/main/relay/` (bounded-subprocess, canvasProjection, ipc-validation, provider-cancellation, provider-executor, registration, service, workspaceRelayService). Separate from event bus.
+- **Agent room** — `src/main/agent-room/` — room protocol for peer state coordination; see `.claude/codesurf.md` for agent room tools.
+- **Dreaming subsystem** — `src/main/ipc/dreaming.ts` + `src/renderer/src/components/mainStatusBarDreaming.ts`. Status tones: `active | pending | ready | disabled | failed | idle`.
 
 ### Build commands
 
@@ -46,6 +54,8 @@ The merge preserves the hardened provider, relay, MCP workspace-scope, Electrobu
 | `npm run build:web` | Renderer-only → dist/ |
 | `npm run desktop:build` | Package Native shell |
 | `npm run rebuild` | Native rebuild (node-pty) — required after native dep changes |
+
+Multi-target details: `docs/multi-target.md`.
 
 ### Chat providers
 
@@ -63,6 +73,12 @@ All shipped — bridge confinement, `chat:loadSessionHistory` restriction, Codic
 
 ---
 
+## TypeScript Baseline
+
+tsc baseline is dirty (~145 pre-existing errors). Gauge regressions per-file, not by exit code. The `tsgo -p tsconfig.tsgo.json --noEmit` variant exits 0 after removing the stale `TerminalUnavailableError` import. Use `tsgo` for focused checks rather than `tsc` on the full project.
+
+---
+
 ## Extension System
 
 Broker framework at `src/main/extensions/broker/` exists but direct `require()` is still default. Phase 1 migration is unstarted (XL).
@@ -71,7 +87,19 @@ Broker framework at `src/main/extensions/broker/` exists but direct `require()` 
 
 ## Modularization State
 
-App.tsx → `useAppCanvas*` hooks; Sidebar → `components/sidebar/`; ChatTile → `useChatTile*` hooks; TileChrome → `components/tile-chrome/`; Settings → `components/settings/`; session-sources → `src/main/session-sources/`; Dreaming subsystem → `src/main/ipc/dreaming.ts` + `src/renderer/src/components/mainStatusBarDreaming.ts` (status tones: `active | pending | ready | disabled | failed | idle`).
+App.tsx → `useAppCanvas*` hooks; Sidebar → `components/sidebar/`; ChatTile → `useChatTile*` hooks; TileChrome → `components/tile-chrome/`; Settings → `components/settings/`; session-sources → `src/main/session-sources/`.
+
+Notable renderer components (not exhaustive):
+
+- `PlanCard.tsx`, `PlanChip.tsx`, `PlanPane.tsx` — in-chat plan rendering
+- `DiffView.tsx` — diff display
+- `PetOverlay.tsx`, `PetPicker.tsx` — pet/avatar features
+- `ActivityFeed.tsx` — activity feed tile
+- `AgentSetup.tsx` — agent configuration UI
+- `LayoutBuilder.tsx` — layout builder tile
+- `SkillInstallModal.tsx` — skill installation flow
+- `MiniChatWindow.tsx` — floating mini chat surface
+- `ChatTileWebview.tsx`, `chatSurfaceHostRpc.ts` — webview-hosted chat surfaces
 
 ---
 
@@ -91,19 +119,59 @@ App.tsx → `useAppCanvas*` hooks; Sidebar → `components/sidebar/`; ChatTile �
 
 ---
 
+## Collaborator / Sharing Features (Audit 2026-08-01)
+
+These components implement the shared/read-only workspace model and have known issues as of the 2026-08-01 Codex audit:
+
+- **FloatingWindowShell.tsx** — floating window chrome for shared workspace views
+  - `:950` — non-owner/shared chat bodies are wrapped in `pointer-events-none`, blocking read-only transcript interaction (bug)
+  - `:860-863` — `Duplicate` window action is a no-op; stub not wired (bug)
+- **Read-only chat** — omits thread/subthread props and pagination; collaborators cannot open threads or load older history (gap)
+- **Resource polling** — operation detail remains stale during polling (gap)
+- `src/main/ipc/collab.ts` — collaborator IPC handler
+
+### Deployment (Fly + Netlify)
+
+- Fly is the primary API backend; Netlify is a CDN/preview layer
+- Netlify parity is partial — only Nostr preview and workspace-resource mirrors exist; unified join/redeem, join-link management, controllers, and most Nostr routes are Fly-only
+- A Netlify forwarding seam exists (separate from the public `netlify.toml` proxy) — check its failure behavior and route coverage before adding a duplicate join implementation
+- Live deployment status as of 2026-08-01: `status.md` says uncommitted/not deployed; hosted Nostr preview returns 404
+- Deploy Fly server routes first, then address Netlify parity
+
+---
+
 ## Infinitty / titerm
 
-**Infinitty** is the agentic terminal tile in CodeSurf. **titerm** (`~/Documents/GitHub/titerm`) is a separate Swift + Metal macOS terminal emulator — the native backend Infinitty fronts. Not part of the CodeSurf repo.
+**Infinitty** is the agentic terminal tile in CodeSurf. **titerm** (`~/Documents/GitHub/titerm`) is a separate Swift + Metal macOS terminal emulator — the native backend Infinitty fronts. Not part of this repo.
 
-**Active usage (2026-07-28):** Infinitty tile is in active use with Codex agents (gpt-5.6-terra, gpt-5.6). The Infinitty system prompt (`you ARE the terminal`) is working; agents call `infinitty_*` tools. Observed: `/status` is not available inside the Infinitty Claude subprocess environment.
+### feature/agent-channels — SHIPPED (2026-07-31)
 
-**Pane system** committed at `2757cf9` in titerm. Confirmed working: synchronous zoom topology restore, non-cumulative traffic-light rebasing, animation restart guard in `PaneChrome.swift:349`.
+- Four commits: `ea04bb1` through `13d8a28` on branch `feature/agent-channels`
+- 512 tests, 5 skipped, 0 failures
+- Installed at `/Applications/Infinitty.app`; previous version backed up to `~/.Trash/Infinitty-before-agent-channels-20260731-231934.app`
+- Change-size note: 2,076 lines over four commits (above 800-line guidance); commit boundaries are directionally correct but `ea04bb1` (559 lines) and `6c87111` (693 lines) each mix concerns
 
-**Agent Notch** embedded as commit `3587ad8` ("Embed Agent Notch activity UI") in titerm. Includes Claude/Codex session discovery, animations, session panel, subagent grouping, 8 bundled pet sprites, 5 tests. No runtime dependency on the sibling repo.
+### Agent room comms — open improvement thread
 
-**Notch click routing** — design audited, not yet implemented. Priority: (1) focus owning `TerminalSession`; (2) resume in new terminal; (3) recover via PetChat. "Agent Notch" user-facing label also needs removal.
+The current implementation has a per-turn model latency problem: agents must call tool APIs each turn to discover room context. Specifically:
 
-**Outstanding titerm code-review findings** (unmerged, 2026-07-21):
+- Terminal process detection renames panes but does not register generic CLIs as room participants
+- MCP bootstrap registers but returns static instructions; room context depends on per-turn tool selection
+- Automatic provider inference covers only 7 providers; lacks a provider-neutral wrapper
+- Messages posted by one peer are visible to others only after their next explicit context/event call
+- No process-level MCP JSON-RPC, wrapper, or hook mechanism exists yet
+
+User direction: wrap the CLI process (e.g. claude, codex) or use hooks — do not rely on per-turn tool selection. Must work for any CLI, not just known providers.
+
+### Agent Notch
+
+Embedded at commit `3587ad8` in titerm. Includes Claude/Codex session discovery, animations, session panel, subagent grouping, 8 bundled pet sprites, 5 tests. No runtime dependency on CodeSurf repo.
+
+- Notch click routing — design audited, not yet implemented. Priority: (1) focus owning `TerminalSession`; (2) resume in new terminal; (3) recover via PetChat
+- "Agent Notch" user-facing label needs removal
+
+### Outstanding titerm code-review findings (unmerged, 2026-07-21)
+
 - `TerminalTabStrip.swift:538` — tabs can shrink below 190 pt minimum
 - `PaneChrome.swift:67` — resize while maximized counts hidden panes' stale widths
 - `App.swift:1513` — maximize stores absolute divider coords; stale on restore after window resize
@@ -123,31 +191,28 @@ App.tsx → `useAppCanvas*` hooks; Sidebar → `components/sidebar/`; ChatTile �
 
 ## grok-cli Integration
 
-Separate repo at `~/Documents/GitHub/grok-cli`. Model IDs must stay in sync with `src/renderer/src/config/providers.ts` DEFAULT_MODELS. Edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array when provider list changes; update `src/core/extensions/codesurf-desktop-provider.test.ts` fixtures if default model changes. **Open blocker:** daemon-mode permission grants have no UI — every tool call requires explicit grant but Desktop has no dialog to surface it back to the daemon-connected CLI.
-
----
-
-## Electron Target Uncertainty (2026-07-28)
-
-Session evidence from 2026-07-28 shows uncertainty about whether a `native-floating-webview` worktree change was truly reverted. User stated "we changed this back yesterday" but no Electron restoration commit was found on `main` by forensic session review. The `native-floating-webview` worktree may still be present. **Verify branch/worktree state before assuming Electron is the current main target.**
+Separate repo at `~/Documents/GitHub/grok-cli`. Model IDs must stay in sync with `src/renderer/src/config/providers.ts` DEFAULT_MODELS. Edit `src/core/extensions/builtin/codesurf-desktop-provider.ts` MODELS array when provider list changes. **Open blocker:** daemon-mode permission grants have no UI — every tool call requires explicit grant but Desktop has no dialog to surface it back to the daemon-connected CLI.
 
 ---
 
 ## Side Projects (active, not CodeSurf core)
 
-- **agensis / visual-editor** (`~/Documents/GitHub/agensis`) — pluggable in-page visual editor package. Features: double-click-to-edit-in-place, live preview isolated to changed area, multi-page content selector. Tests: 11/11 interaction, 87/87 standalone. Root CI now covers standalone package suite. Route-based SPA targets are a known gap (only `.html` file discovery, no config API for app routes).
-- **Claude-for-speed** (`~/Documents/GitHub/Claude-for-speed`) — browser drift/racing game. Visual improvements (Blender-style textures, post-processing, shadows, wet reflections) shipped. `npm run test:drift` (8 chassis) and `npm run capture` suites pass.
-- **scrape/carve** (`~/Documents/GitHub/scrape/carve`) — browser game with modal/keyboard UX. Functional defects fixed (keyboard nav behind settings dialog, focus trap, landscape crash overlap). No automated test suite exists.
+- **agensis / visual-editor** (`~/Documents/GitHub/agensis`) — pluggable in-page visual editor. Tests: 11/11 interaction, 87/87 standalone. Known gap: route-based SPA targets (only `.html` file discovery; no config API for app routes).
+- **Claude-for-speed** (`~/Documents/GitHub/Claude-for-speed`) — browser drift/racing game. Visual improvements shipped. `npm run test:drift` and `npm run capture` suites pass.
+- **scrape/carve** (`~/Documents/GitHub/scrape/carve`) — browser game; functional defects fixed. No automated test suite.
 
 ---
 
 ## Open Threads
 
-- **Electron vs native-floating-webview** — verify current state of `main` branch and any remaining worktree; unclear if restoration is committed
-- Extension broker Phase 1 migration — unstarted (XL)
-- grok-cli permission UI — no dialog path from daemon into Desktop
-- titerm: eight code-review findings above need a clean fix commit
-- titerm: notch click routing not yet implemented; "Agent Notch" label needs removal
-- tsc baseline is dirty (~145 pre-existing errors) — measure regressions per-file, not by exit code
-- `cluso-widget` optional local dep (`file:../agentation-real`) may not exist in all environments
-- agensis visual-editor: SPA/route-based page discovery not yet implemented
+- **Collaborator sharing bugs** — `FloatingWindowShell.tsx` `pointer-events-none` (`:950`), Duplicate no-op (`:860-863`), read-only chat missing thread/pagination, stale resource polling — all unaddressed as of 2026-08-01
+- **Netlify/Fly deployment** — Nostr preview 404, most Fly routes missing Netlify parity, no confirmed live deploy
+- **titerm: agent-channels CLI wrapping** — replace per-turn tool-selection with process-level wrapper or hook; must be provider-neutral
+- **titerm: 8 code-review findings** — listed above, clean fix commit pending
+- **titerm: notch click routing** — not yet implemented; "Agent Notch" label pending removal
+- **Extension broker Phase 1 migration** — unstarted (XL)
+- **grok-cli permission UI** — no dialog path from daemon into Desktop
+- **tsc baseline dirty** (~145 pre-existing errors) — measure regressions per-file only
+- **`cluso-widget`** — optional local dep (`file:../agentation-real`); may not exist in all environments
+- **`bun.lock`** — untracked file in working tree (not yet gitignored or committed)
+- **`.claude/codesurf.md`** — modified in working tree (uncommitted change)

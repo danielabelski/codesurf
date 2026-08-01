@@ -12,7 +12,7 @@ Your block ID is the environment variable `CARD_ID`. Wires on the canvas put you
 3. mcp__codesurf__room_consume(tile_id=$CARD_ID)   # if unconsumed > 0
 ```
 
-Also read `~/.codesurf/room-inboxes/$CARD_ID/ROOM.md` for a live inbox dump.
+Also read `~/.codesurf/workspaces/$CODESURF_WORKSPACE_ID/agent-rooms/inboxes/$CARD_ID/ROOM.md` for a live inbox dump.
 
 ## Agent Room Protocol
 
