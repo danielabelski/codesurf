@@ -64,6 +64,7 @@ import {
   writeElectrobunTempAttachment,
   type ElectrobunIssuedAttachment,
 } from './attachment-capability-runtime.ts'
+import { ElectrobunCodexStableContextRuntime } from './codex-stable-context-runtime.ts'
 import {
   authorizeElectrobunFsPath,
   authorizeElectrobunTerminalPath,
@@ -228,6 +229,7 @@ const chatRuntime = new ElectrobunChatRuntimeState(
   acknowledgeThrough,
   (scope, event) => broadcast('agent:stream', { ...scope, ...event }),
 )
+const codexStableContextRuntime = new ElectrobunCodexStableContextRuntime()
 const busHistory = new Map<string, BusEvent[]>()
 const tileStateRuntime = new ElectrobunTileStateRuntime(WORKSPACES_DIR)
 const tileContext = createElectrobunTileContextStore({
@@ -1284,38 +1286,45 @@ async function runCodexChat(req: ChatRequest, prompt: string, turn: ElectrobunCh
     sendStream(turn, { type: 'done' })
     return { ok: false, error }
   }
-  const args = buildElectrobunCodexSpawnArgs(
+  const resumeThreadId = req.sessionId ?? chatRuntime.getSession(turn, provider)
+  const prepared = codexStableContextRuntime.prepare(
     req,
     prompt,
     workspaceDir,
-    req.sessionId ?? chatRuntime.getSession(turn, provider),
+    { workspaceId: turn.workspaceId, cardId: turn.cardId },
+    resumeThreadId,
   )
+  const args = prepared.args
   const resumeIndex = args.indexOf('resume')
   args.splice(resumeIndex >= 0 ? resumeIndex : args.length - 1, 0, '-c', 'mcp_servers={}')
-  const images = await readVerifiedElectrobunImages(req.imageAttachments)
-  const materialized = images.length > 0
-    ? await materializeVerifiedElectrobunImages(images, codexImageDirectory)
-    : null
-  const spawnArgs = insertCodexImageArgs(args, materialized?.paths ?? [])
-
-  const cwd = workspaceDir
+  let materialized: Awaited<ReturnType<typeof materializeVerifiedElectrobunImages>> | null = null
   let proc: ChildProcess
   try {
+    const images = await readVerifiedElectrobunImages(req.imageAttachments)
+    materialized = images.length > 0
+      ? await materializeVerifiedElectrobunImages(images, codexImageDirectory)
+      : null
+    const spawnArgs = insertCodexImageArgs(args, materialized?.paths ?? [])
     proc = spawn(codexBin, spawnArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv(),
-      cwd,
+      cwd: workspaceDir,
       detached: detachedChatProcess,
     })
   } catch (error) {
+    codexStableContextRuntime.invalidate(prepared)
     await materialized?.cleanup()
     throw error
   }
+  proc.once('error', () => {
+    codexStableContextRuntime.invalidate(prepared)
+  })
   if (materialized) {
     proc.once('close', () => { void materialized.cleanup() })
     proc.once('error', () => { void materialized.cleanup() })
   }
   if (!await chatRuntime.registerProcess(turn, proc)) {
+    codexStableContextRuntime.invalidate(prepared)
     await materialized?.cleanup()
     return { ok: false, error: 'Chat turn was superseded before Codex started' }
   }
@@ -1325,15 +1334,34 @@ async function runCodexChat(req: ChatRequest, prompt: string, turn: ElectrobunCh
   )
 
   const parser = createCodexStreamParser()
+  let providerSessionId = resumeThreadId ?? null
+  let sawProviderAcceptance = false
+  let providerError = false
   chatRuntime.streamProcess(turn, proc, {
     missingBinaryMessage: 'Codex CLI not found. Install: npm install -g @openai/codex, or set CODEX_BIN.',
-    onStdoutLine: (line) => sendParsedStreamEvents(turn, provider, parser.parseLine(line)),
+    onStdoutLine: (line) => {
+      const events = parser.parseLine(line)
+      for (const event of events) {
+        if (event.type === 'session') providerSessionId = event.sessionId
+        if (event.type === 'prompt_accepted') sawProviderAcceptance = true
+        if (event.type === 'error') providerError = true
+      }
+      sendParsedStreamEvents(turn, provider, events)
+    },
     onClose: (code, stderr) => {
+      codexStableContextRuntime.complete(prepared, {
+        exitCode: code,
+        sawProviderAcceptance,
+        providerError,
+        sessionId: providerSessionId ?? chatRuntime.getSession(turn, provider),
+      })
       if (code !== 0) sendStream(turn, { type: 'error', error: sanitizeAgentCliDiagnostic(stderr.trim() || `Codex exited with ${code}`) })
     },
   })
 
-  return await acceptedSpawn
+  const accepted = await acceptedSpawn
+  if (!accepted.ok) codexStableContextRuntime.invalidate(prepared)
+  return accepted
 }
 
 async function sendChat(rawRequest: ElectrobunChatRequest): Promise<{ ok: boolean, error?: string, jobId?: string }> {
@@ -1876,6 +1904,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         const scope = { workspaceId: String(args[0] ?? ''), cardId: String(args[1] ?? '') }
         const stopped = await chatRuntime.stopAndClearSessions(scope)
         if (!stopped.confirmed) return { ok: false, error: stopped.error ?? 'Unable to confirm chat process termination' }
+        codexStableContextRuntime.clear(scope)
         broadcastChatStream(scope, { type: 'done' })
         return { ok: true }
       }
@@ -1890,6 +1919,7 @@ async function handleInvoke(channel: string, args: unknown[] = []): Promise<unkn
         const stopped = await stopChat(scope)
         if (!stopped.confirmed) return { ok: false, error: stopped.error ?? 'Unable to confirm chat process termination' }
         chatRuntime.clearSessions(scope)
+        codexStableContextRuntime.clear(scope)
         return { ok: true }
       }
       case 'chat:selectFiles': {

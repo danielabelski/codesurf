@@ -329,11 +329,14 @@ export function buildElectrobunCodexSpawnArgs(
   resumeThreadId?: string | null,
   options: { includeStableContext?: boolean } = {},
 ): string[] {
+  // Callers that have not installed the acceptance-gated ledger use the
+  // provider's resume flag as the conservative public-helper default. The
+  // Electrobun runtime passes an explicit decision from
+  // ElectrobunCodexStableContextRuntime, so a bare id can never suppress
+  // context in the production path without a committed session proof.
+  const includeStableContext = options.includeStableContext ?? !resumeThreadId
   const context = composeElectrobunProviderContext(request, prompt, {
-    // A thread id alone does not prove that this process successfully installed
-    // the current stable context. The runtime's accepted-session/hash ledger
-    // makes that decision and passes it explicitly.
-    includeStableContext: options.includeStableContext !== false,
+    includeStableContext,
   })
   return buildCodexSpawnArgs({
     agentId: request.agentId,
