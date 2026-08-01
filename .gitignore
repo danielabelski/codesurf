@@ -32,3 +32,5 @@ opensrc/morph-labs--morph-typescript-sdk/
 /.plans
 /.codesurf
 /.codesurf
+review-full-remediation-snapshot.tar.gz
+review-full-remediation.patch
