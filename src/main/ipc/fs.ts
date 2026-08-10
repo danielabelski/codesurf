@@ -156,7 +156,7 @@ export interface FsPathScopeOptions {
   allowReadOnlyOpenCodeConfig?: boolean
 }
 
-export type FsPathIntent = 'read' | 'create' | 'write' | 'delete-link' | 'directory'
+export type FsPathIntent = 'read' | 'read-directory' | 'create' | 'write' | 'delete-link' | 'directory'
 
 export function isPathUnderRoot(candidatePath: string, rootPath: string): boolean {
   const resolvedCandidate = path.resolve(candidatePath)
@@ -421,7 +421,7 @@ export async function validateCanonicalFsPathDetails(
   const home = resolveHome()
   const allowReadOnlyOpenCodeConfig = Boolean(
     options?.allowReadOnlyOpenCodeConfig
-    && (intent === 'read' || intent === 'directory'),
+    && (intent === 'read' || intent === 'read-directory'),
   )
   const effectiveOptions = {
     ...options,
@@ -481,10 +481,15 @@ export async function validateCanonicalFsPathDetails(
       && (options.allowedRoots ?? []).some(root => resolvedPath === path.resolve(root)),
     )
   )
+  // Read-only operations use the already-authorized canonical target, so a
+  // user-managed skill/command symlink cannot be retargeted after validation.
+  // Mutations still reject the link itself rather than following it.
+  const followsCanonicalTargetReadOnly = intent === 'read' || intent === 'read-directory'
   if (
     target.finalIsSymbolicLink
     && intent !== 'delete-link'
     && !isExplicitDirectoryRoot
+    && !followsCanonicalTargetReadOnly
   ) {
     throw new Error(`Access denied: path "${filePath}" is a symbolic link`)
   }
@@ -1038,7 +1043,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
     try {
       const validatedDirPath = await validatePath(
         dirPath,
-        'directory',
+        'read-directory',
         workspaceId,
         { allowReadOnlyOpenCodeConfig: true },
       )
@@ -1234,7 +1239,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
     try {
       const validated = await validatePath(
         dirPath,
-        'directory',
+        'read-directory',
         workspaceId,
         { allowReadOnlyOpenCodeConfig: true },
       )
@@ -1337,7 +1342,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       event.sender,
       subscriptionKey,
       async () => {
-        const validated = await validatePath(dirPath, 'directory', workspaceId)
+        const validated = await validatePath(dirPath, 'read-directory', workspaceId)
         if (event.sender.isDestroyed()) return
         await assertDirectoryNoFollow(
           validated.operationPath,
@@ -1399,7 +1404,7 @@ export function registerFsIPC(dependencies?: FsIpcRegistrationDependencies): voi
       async () => {
         const trackedPath = untrackWatchSender(event.sender, subscriptionKey)
         const operationPath = trackedPath ?? (
-          await validatePath(dirPath, 'directory', workspaceId)
+          await validatePath(dirPath, 'read-directory', workspaceId)
         ).operationPath
         const entry = watchers.get(operationPath)
         if (!entry) return

@@ -257,7 +257,7 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
     }
   })
 
-  test('rejects a final file symlink even when its target stays in the workspace', async () => {
+  test('follows a final in-workspace file symlink for reads but rejects writes', async () => {
     const fixture = await createFsFixture()
     try {
       const targetFile = join(fixture.workspace, 'target.txt')
@@ -265,12 +265,14 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       await writeFile(targetFile, 'inside', 'utf8')
       await symlink(targetFile, linkedFile)
 
-      for (const intent of ['read', 'write'] as const) {
-        await assert.rejects(
-          validateCanonicalFsPath(linkedFile, intent, scopedTo(fixture.workspace)),
-          /symbolic link/,
-        )
-      }
+      assert.equal(
+        await validateCanonicalFsPath(linkedFile, 'read', scopedTo(fixture.workspace)),
+        await realpath(targetFile),
+      )
+      await assert.rejects(
+        validateCanonicalFsPath(linkedFile, 'write', scopedTo(fixture.workspace)),
+        /symbolic link/,
+      )
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -282,10 +284,12 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       const linkedDirectory = join(fixture.workspace, 'linked-directory')
       await symlink(fixture.outside, linkedDirectory)
 
-      await assert.rejects(
-        validateCanonicalFsPath(linkedDirectory, 'directory', scopedTo(fixture.workspace)),
-        /outside allowed workspace roots|symbolic link/,
-      )
+      for (const intent of ['read-directory', 'directory'] as const) {
+        await assert.rejects(
+          validateCanonicalFsPath(linkedDirectory, intent, scopedTo(fixture.workspace)),
+          /outside allowed workspace roots|symbolic link/,
+        )
+      }
       await assert.rejects(
         validateCanonicalFsPath(
           join(linkedDirectory, 'created.txt'),
@@ -303,7 +307,7 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
     }
   })
 
-  test('rejects a final directory symlink even when its target stays in the workspace', async () => {
+  test('follows a final in-workspace directory symlink for reads but rejects writes', async () => {
     const fixture = await createFsFixture()
     try {
       const targetDirectory = join(fixture.workspace, 'target-directory')
@@ -311,6 +315,10 @@ describe('validateCanonicalFsPath operation-aware authorization', () => {
       await mkdir(targetDirectory)
       await symlink(targetDirectory, linkedDirectory)
 
+      assert.equal(
+        await validateCanonicalFsPath(linkedDirectory, 'read-directory', scopedTo(fixture.workspace)),
+        await realpath(targetDirectory),
+      )
       for (const intent of ['directory', 'write'] as const) {
         await assert.rejects(
           validateCanonicalFsPath(linkedDirectory, intent, scopedTo(fixture.workspace)),
@@ -953,15 +961,22 @@ describe('registered filesystem handlers', () => {
       const sourceRoot = join(fixture.root, 'source')
       const deniedRoot = join(fixture.root, 'denied')
       const deniedFile = join(deniedRoot, 'secret.txt')
+      const sourceFile = join(sourceRoot, 'source.txt')
       const escapedFile = join(fixture.workspace, 'escaped-file.txt')
       const escapedSource = join(sourceRoot, 'escaped-source.txt')
       const escapedDirectory = join(fixture.workspace, 'escaped-directory')
-      await Promise.all([mkdir(sourceRoot), mkdir(deniedRoot)])
-      await writeFile(deniedFile, 'secret', 'utf8')
+      const internalTargetDirectory = join(fixture.workspace, 'target-directory')
+      const internalLinkedDirectory = join(fixture.workspace, 'linked-directory')
+      await Promise.all([mkdir(sourceRoot), mkdir(deniedRoot), mkdir(internalTargetDirectory)])
+      await Promise.all([
+        writeFile(deniedFile, 'secret', 'utf8'),
+        writeFile(sourceFile, 'source', 'utf8'),
+      ])
       await Promise.all([
         symlink(deniedFile, escapedFile),
         symlink(deniedFile, escapedSource),
         symlink(deniedRoot, escapedDirectory),
+        symlink(internalTargetDirectory, internalLinkedDirectory),
       ])
 
       const { invoke } = captureFsHandlers({
@@ -989,6 +1004,11 @@ describe('registered filesystem handlers', () => {
         invoke('fs:copyIntoDir', join(sourceRoot, 'missing.txt'), escapedDirectory),
         /outside allowed workspace roots|symbolic link/,
       )
+      await assert.rejects(
+        invoke('fs:copyIntoDir', sourceFile, internalLinkedDirectory),
+        /symbolic link/,
+      )
+      await assert.rejects(readFile(join(internalTargetDirectory, 'source.txt'), 'utf8'), { code: 'ENOENT' })
       assert.equal(await readFile(deniedFile, 'utf8'), 'secret')
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
