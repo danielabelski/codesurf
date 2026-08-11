@@ -49,6 +49,12 @@ npm run verify:dist    # prove committed dist/ matches a clean compilation
 npm test               # verify the package contract and packaged runtime
 ```
 
+From the repository root, `npm run check:daemon-interface` compares the live
+recursive feature surface with `contracts/recursive-interface.json`. Intentional
+interface changes require the explicit `npm run update:daemon-interface`
+command. Set `FEATURES_BIN=/absolute/path/to/features` when the `features` CLI is
+not on `PATH`.
+
 ## Usage (host adapter)
 
 ```ts
