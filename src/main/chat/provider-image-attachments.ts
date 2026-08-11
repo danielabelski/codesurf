@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readVerifiedFile } from '../../../packages/codesurf-daemon/bin/secure-file-reader.mjs'
+import { readVerifiedFile } from '@codesurf/daemon/secure-file-reader'
 
 export interface VerifiedImageAttachment {
   path: string

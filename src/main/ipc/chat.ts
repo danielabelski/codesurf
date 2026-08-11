@@ -39,7 +39,7 @@ import {
   MAX_SKILLS_SUMMARY_BYTES,
   previewContextToolInput,
   truncateUtf8,
-} from '../../../packages/codesurf-daemon/bin/context-budget.mjs'
+} from '@codesurf/daemon/context-budget'
 import { getBuiltinExecutionHosts, resolveExecutionTarget } from '../execution/targets'
 import { getWorkspacePathById, readSettingsSync } from './workspace'
 

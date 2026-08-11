@@ -18,7 +18,11 @@ const COMPILED_EXPORTS = new Map([
   ['./sse', 'sse'],
   ['./chat-cli', 'chat-cli'],
   ['./chat-session-store', 'chat-session-store'],
+  ['./chat-policy', 'chat-policy'],
   ['./paths', 'paths'],
+  ['./context-budget', 'context-budget'],
+  ['./process-tree', 'process-tree'],
+  ['./secure-file-reader', 'secure-file-reader'],
 ])
 
 async function readJson(path) {
@@ -101,7 +105,7 @@ test('daemon owns its runtime native dependency and compiler-only dev dependenci
   assert.equal(manifest.dependencies?.['@types/node'], undefined)
 })
 
-test('NodeNext source imports use emitted .js relative specifiers', async () => {
+test('NodeNext source imports use explicit runtime relative specifiers', async () => {
   const sourceDir = join(DAEMON_DIR, 'src')
   const sourceFiles = (await readdir(sourceDir)).filter(name => name.endsWith('.ts'))
 
@@ -112,7 +116,7 @@ test('NodeNext source imports use emitted .js relative specifiers', async () => 
       ...source.matchAll(/\bimport\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g),
     ].map(match => match[1])
     for (const specifier of relativeSpecifiers) {
-      assert.match(specifier, /\.js$/, `${fileName} has non-NodeNext specifier ${specifier}`)
+      assert.match(specifier, /\.m?js$/, `${fileName} has non-runtime specifier ${specifier}`)
     }
   }
 })
@@ -150,7 +154,7 @@ test('normal npm pack fails closed on stale dist without mutating the real tree'
   const realDistBefore = await readFile(join(DAEMON_DIR, 'dist', 'index.js'))
   t.after(async () => { await rm(fixture, { recursive: true, force: true }) })
   await Promise.all([mkdir(fixturePackage), mkdir(packDir)])
-  for (const entry of ['package.json', 'tsconfig.json', 'src', 'dist', 'scripts']) {
+  for (const entry of ['package.json', 'tsconfig.json', 'src', 'dist', 'scripts', 'bin', 'vendor']) {
     await cp(join(DAEMON_DIR, entry), join(fixturePackage, entry), { recursive: true })
   }
   await symlink(

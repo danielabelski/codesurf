@@ -48,6 +48,21 @@
       "import": "./dist/paths.js",
       "default": "./dist/paths.js"
     },
+    "./context-budget": {
+      "types": "./dist/context-budget.d.ts",
+      "import": "./dist/context-budget.js",
+      "default": "./dist/context-budget.js"
+    },
+    "./process-tree": {
+      "types": "./dist/process-tree.d.ts",
+      "import": "./dist/process-tree.js",
+      "default": "./dist/process-tree.js"
+    },
+    "./secure-file-reader": {
+      "types": "./dist/secure-file-reader.d.ts",
+      "import": "./dist/secure-file-reader.js",
+      "default": "./dist/secure-file-reader.js"
+    },
     "./bin/codesurfd": "./bin/codesurfd.mjs",
     "./bin/chat-jobs": "./bin/chat-jobs.mjs",
     "./bin/checkpoints": "./bin/checkpoints.mjs",
@@ -70,11 +85,12 @@
   ],
   "scripts": {
     "build": "node scripts/build-dist.mjs",
+    "check:isolation": "node scripts/check-isolation.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:dist": "node scripts/verify-dist.mjs",
-    "prepack": "npm run verify:dist",
+    "prepack": "npm run check:isolation && npm run verify:dist",
     "test:unit": "node --test test/*.test.mjs",
-    "test": "npm run typecheck && npm run verify:dist && npm run test:unit"
+    "test": "npm run check:isolation && npm run typecheck && npm run verify:dist && npm run test:unit"
   },
   "dependencies": {
     "@ai-sdk/harness": "1.0.49",

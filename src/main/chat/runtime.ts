@@ -29,7 +29,7 @@ import {
   ChatProcessLifecycle,
   type ChatProcessStopResult,
 } from './chat-process-lifecycle.ts'
-export { processTreeSpawnOptions, terminateProcessTree } from '../../../packages/codesurf-daemon/bin/process-tree.mjs'
+export { processTreeSpawnOptions, terminateProcessTree } from '@codesurf/daemon/process-tree'
 
 export type { RuntimeChatSessionState } from './types'
 export {

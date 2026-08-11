@@ -16,7 +16,11 @@ const PUBLIC_EXPORTS = [
   '@codesurf/daemon/sse',
   '@codesurf/daemon/chat-cli',
   '@codesurf/daemon/chat-session-store',
+  '@codesurf/daemon/chat-policy',
   '@codesurf/daemon/paths',
+  '@codesurf/daemon/context-budget',
+  '@codesurf/daemon/process-tree',
+  '@codesurf/daemon/secure-file-reader',
 ]
 
 function run(command, args, options = {}) {

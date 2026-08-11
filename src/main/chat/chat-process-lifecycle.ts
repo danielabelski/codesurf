@@ -3,7 +3,7 @@ import {
   terminateProcessTree,
   type ProcessTreeTerminationOptions,
   type ProcessTreeTerminationResult,
-} from '../../../packages/codesurf-daemon/bin/process-tree.mjs'
+} from '@codesurf/daemon/process-tree'
 
 export type ChatProcessStopResult = ProcessTreeTerminationResult & {
   scopeKey: string

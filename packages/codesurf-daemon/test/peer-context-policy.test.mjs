@@ -7,7 +7,7 @@ import {
 } from '../bin/peer-context-policy.mjs'
 
 const fixtures = JSON.parse(readFileSync(
-  new URL('../../../test/fixtures/peer-context-policy.json', import.meta.url),
+  new URL('./fixtures/peer-context-policy.json', import.meta.url),
   'utf8',
 ))
 

@@ -7,11 +7,15 @@
     "chat-policy",
     "chat-session-store",
     "client",
+    "context-budget",
     "contracts",
     "daemon",
+    "fixtures",
     "manager",
     "paths",
     "persona-model-binding",
+    "process-tree",
+    "secure-file-reader",
     "sse"
   ],
   "included_feature_ids": [
@@ -20,18 +24,22 @@
     "f_6b00ff8df0886a9b65416e14acd83474",
     "f_9efd52c28c3b38453e3005557b30cb17",
     "f_1d0a1f27ae70993ddcb39502abe3edb2",
+    "f_e319607b9c6705ba67b7cb2c40cc8826",
     "f_4d63aaa250f8b1418bfc492959bb3e64",
     "f_84a71d368a0fb9444efc939585fe9d50",
+    "f_bbef6b811b11a33a2642fed5ad2145ff",
     "f_0b1f6ccc9803323bae7b57de0352ee39",
     "f_20b23fe7620e51d012883bab1c4847e9",
     "f_541fe53fd5737b20befc4f96f50a8a57",
+    "f_9e6cd746cb7db0d635c3cb8cf9694b45",
+    "f_ae2eef32e1fd9d3c56742a243ba7d906",
     "f_98cf524c5863633eac6ded1aeae62eaf"
   ],
   "domain": "codesurf-daemon",
   "query": "codesurf-daemon",
   "feature": "codesurf-daemon",
   "feature_id": "f_17a2e36a8c358bc7b1433695717a92ce",
-  "frozen_at": "2026-08-11T20:15:59Z",
+  "frozen_at": "2026-08-11T20:24:59Z",
   "contracts": [
     {
       "name": "AGENT_MODE_RESOLUTION_DENIED_ERROR",
@@ -1863,6 +1871,39 @@
       "surface": "production"
     },
     {
+      "name": "MAX_SKILLS_SUMMARY_BYTES",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/context-budget.ts",
+      "signature": "export { MAX_SKILLS_SUMMARY_BYTES }",
+      "outputs": [
+        "MAX_SKILLS_SUMMARY_BYTES"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "previewContextToolInput",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/context-budget.ts",
+      "signature": "export { previewContextToolInput }",
+      "outputs": [
+        "previewContextToolInput"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "truncateUtf8",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/context-budget.ts",
+      "signature": "export { truncateUtf8 }",
+      "outputs": [
+        "truncateUtf8"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
       "name": "createDaemonManager",
       "kind": "export",
       "path": "packages/codesurf-daemon/src/index.ts",
@@ -2343,6 +2384,39 @@
         "PersonaModelSeed | null"
       ],
       "line": 43,
+      "surface": "production"
+    },
+    {
+      "name": "processTreeSpawnOptions",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/process-tree.ts",
+      "signature": "export { processTreeSpawnOptions }",
+      "outputs": [
+        "processTreeSpawnOptions"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "terminateProcessTree",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/process-tree.ts",
+      "signature": "export { terminateProcessTree }",
+      "outputs": [
+        "terminateProcessTree"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "readVerifiedFile",
+      "kind": "export",
+      "path": "packages/codesurf-daemon/src/secure-file-reader.ts",
+      "signature": "export { readVerifiedFile }",
+      "outputs": [
+        "readVerifiedFile"
+      ],
+      "line": 1,
       "surface": "production"
     },
     {
