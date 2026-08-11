@@ -41,6 +41,8 @@ test/
 ```
 
 Production consumers import the package exports, which resolve to `dist/`.
+Authored `bin/` modules are package-private implementation; `codesurfd` is the
+only executable boundary and is exposed through the manifest's `bin` field.
 The package is the source authority for context composition, prompt conventions,
 peer policy, and node-tool contracts; host-side files are compatibility facades
 only. No root build step writes into this package. The committed build is

@@ -92,17 +92,7 @@
       "types": "./dist/node-tools.d.ts",
       "import": "./dist/node-tools.js",
       "default": "./dist/node-tools.js"
-    },
-    "./bin/codesurfd": "./bin/codesurfd.mjs",
-    "./bin/chat-jobs": "./bin/chat-jobs.mjs",
-    "./bin/checkpoints": "./bin/checkpoints.mjs",
-    "./bin/memory-loader": "./bin/memory-loader.mjs",
-    "./bin/skills-index": "./bin/skills-index.mjs",
-    "./bin/file-references": "./bin/file-references.mjs",
-    "./bin/session-index": "./bin/session-index.mjs",
-    "./bin/context-buckets": "./bin/context-buckets.mjs",
-    "./bin/project-context": "./bin/project-context.mjs",
-    "./bin/instruction-context": "./bin/instruction-context.mjs"
+    }
   },
   "bin": {
     "codesurfd": "./bin/codesurfd.mjs"

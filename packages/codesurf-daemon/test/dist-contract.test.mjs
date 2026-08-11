@@ -59,11 +59,12 @@ test('public JavaScript API exports resolve only to compiled dist with declarati
     })
   }
 
-  for (const [subpath, target] of Object.entries(manifest.exports ?? {})) {
-    if (!subpath.startsWith('./bin/')) continue
-    assert.equal(typeof target, 'string')
-    assert.match(target, /^\.\/bin\/.+\.mjs$/)
-  }
+  assert.deepEqual(
+    Object.keys(manifest.exports ?? {}).filter(subpath => subpath.startsWith('./bin/')),
+    [],
+    'authored bin modules stay package-private; consumers use the compiled API',
+  )
+  assert.deepEqual(manifest.bin, { codesurfd: './bin/codesurfd.mjs' })
 })
 
 test('daemon tarballs include compiled output and never include source TypeScript', async () => {

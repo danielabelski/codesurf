@@ -23,7 +23,7 @@ import {
   hermesToolsetsForRequest,
   revalidateDaemonContextRequest,
   shouldUseHarness,
-} from '../../bin/chat-jobs.mjs'
+} from '../../packages/codesurf-daemon/bin/chat-jobs.mjs'
 import {
   CODEX_SDK_CONFIG_ISOLATION_GAP,
   buildCodexSdkThreadOptions,

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -5,6 +6,17 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PRODUCTION_ROOTS = ['src', 'scripts', 'electrobun']
 const TOP_LEVEL_FILES = ['electrobun.config.ts', 'electron.vite.config.ts']
+const LEGACY_ROOT_DAEMON_SHIMS = [
+  'chat-jobs.mjs',
+  'checkpoints.mjs',
+  'context-buckets.mjs',
+  'file-references.mjs',
+  'instruction-context.mjs',
+  'memory-loader.mjs',
+  'project-context.mjs',
+  'session-index.mjs',
+  'skills-index.mjs',
+]
 const CODE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.tsx'])
 const violations = []
 
@@ -34,6 +46,12 @@ const files = [
   ...(await Promise.all(PRODUCTION_ROOTS.map(root => walk(join(ROOT, root))))).flat(),
   ...TOP_LEVEL_FILES.map(file => join(ROOT, file)),
 ]
+
+for (const shim of LEGACY_ROOT_DAEMON_SHIMS) {
+  if (existsSync(join(ROOT, 'bin', shim))) {
+    violations.push(`bin/${shim}: legacy daemon re-export shims are forbidden`)
+  }
+}
 
 for (const file of files) {
   const source = await readFile(file, 'utf8').catch(error => {
