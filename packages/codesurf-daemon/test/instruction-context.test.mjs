@@ -3,14 +3,14 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { buildInstructionPrompt, loadInstructionContext } from '../../bin/instruction-context.mjs'
+import { buildInstructionPrompt, loadInstructionContext } from '../bin/instruction-context.mjs'
 import {
   MAX_CONTEXT_FILE_BYTES,
   MAX_IMPORT_DEPTH,
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
-} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
-import { loadMemoryContext } from '../../packages/codesurf-daemon/bin/memory-loader.mjs'
+} from '../bin/context-budget.mjs'
+import { loadMemoryContext } from '../bin/memory-loader.mjs'
 
 async function makeFixture() {
   const root = await mkdtemp(join(tmpdir(), 'codesurf-instruction-context-'))

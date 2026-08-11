@@ -4,13 +4,13 @@ import { execFileSync } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { chmodSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { buildSkillSelectionPrompt, createSkillsIndex } from '../../bin/skills-index.mjs'
+import { buildSkillSelectionPrompt, createSkillsIndex } from '../bin/skills-index.mjs'
 import {
   MAX_CONTEXT_FILE_BYTES,
   MAX_SELECTED_SKILLS,
   MAX_SKILL_DESCRIPTION_BYTES,
   MAX_SKILLS_PROMPT_BYTES,
-} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
+} from '../bin/context-budget.mjs'
 import {
   makeDaemonTestTempDir as makeTestTempDir,
   spawnDaemon,

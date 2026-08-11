@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildMemoryPrompt } from '../../bin/memory-loader.mjs'
-import { buildContextBucketBundle, describeContextBucketsForTool } from '../../bin/context-buckets.mjs'
+import { buildMemoryPrompt } from '../bin/memory-loader.mjs'
+import { buildContextBucketBundle, describeContextBucketsForTool } from '../bin/context-buckets.mjs'
 
 test('context buckets build explicit local-only and remote-safe bundle summaries for inspectable local runs', () => {
   const context = {

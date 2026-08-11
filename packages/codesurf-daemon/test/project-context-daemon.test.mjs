@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { applyProjectContextPolicy } from '../../bin/project-context.mjs'
+import { applyProjectContextPolicy } from '../bin/project-context.mjs'
 
 test('daemon local execution keeps full project context', () => {
   const output = applyProjectContextPolicy({

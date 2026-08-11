@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isHarnessEnabled } from '../../packages/codesurf-daemon/bin/harness-settings.mjs'
+import { isHarnessEnabled } from '../bin/harness-settings.mjs'
 
 test('disabled by default (no settings, no env)', () => {
   assert.equal(isHarnessEnabled({ settings: {}, env: '', provider: 'claude' }), false)

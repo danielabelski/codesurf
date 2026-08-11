@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { createServer } from 'node:http'
 import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createChatJobManager } from '../../packages/codesurf-daemon/bin/chat-jobs.mjs'
+import { createChatJobManager } from '../bin/chat-jobs.mjs'
 
 async function waitForCompletedJob(manager, jobId, timeoutMs = 5_000) {
   const started = Date.now()

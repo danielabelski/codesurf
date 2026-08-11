@@ -13,7 +13,7 @@ import {
   applyPaths,
   applyWorktree,
   removeWorktree,
-} from '../../packages/codesurf-daemon/bin/harness-worktree.mjs'
+} from '../bin/harness-worktree.mjs'
 
 function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' })

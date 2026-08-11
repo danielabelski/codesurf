@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } from '../../bin/memory-loader.mjs'
+import { buildMemoryPrompt, describeMemoryContextForTool, loadMemoryContext } from '../bin/memory-loader.mjs'
 import {
   MAX_AGGREGATE_INSTRUCTION_BYTES,
   MAX_CONTEXT_FILE_BYTES,
@@ -11,7 +11,7 @@ import {
   MAX_IMPORT_TRAVERSAL_ATTEMPTS,
   MAX_INSTRUCTION_SECTIONS,
   MAX_ROOT_TRAVERSAL_ATTEMPTS,
-} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
+} from '../bin/context-budget.mjs'
 import {
   makeDaemonTestTempDir as makeTestTempDir,
   spawnDaemon,

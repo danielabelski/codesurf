@@ -4,9 +4,9 @@ import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/pr
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createChatJobManager } from '../../bin/chat-jobs.mjs'
+import { createChatJobManager } from '../bin/chat-jobs.mjs'
 
-const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
 
 async function makeTestTempDir(prefix) {

@@ -3,9 +3,9 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
-const DEFAULT_DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
-const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
+const DEFAULT_DAEMON_ENTRY = join(PACKAGE_ROOT, 'bin', 'codesurfd.mjs')
+const TEST_TMP_ROOT = join(PACKAGE_ROOT, '.tmp', 'daemon-tests')
 // A cold daemon import can exceed five seconds on a loaded CI runner. Keep the
 // default bounded while leaving enough headroom for deterministic integration
 // tests; explicit timeout tests pass their own much smaller value.
@@ -101,7 +101,7 @@ export async function makeDaemonTestTempDir(prefix) {
 export function spawnManagedChild({
   command,
   args = [],
-  cwd = ROOT_DIR,
+  cwd = PACKAGE_ROOT,
   env = process.env,
   outputLimitBytes = DEFAULT_OUTPUT_LIMIT_BYTES,
 }) {
@@ -301,7 +301,7 @@ export async function spawnDaemon({
   const managed = spawnManagedChild({
     command: process.execPath,
     args: [daemonEntry],
-    cwd: ROOT_DIR,
+    cwd: PACKAGE_ROOT,
     env: {
       ...process.env,
       ...env,

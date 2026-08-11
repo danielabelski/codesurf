@@ -89,7 +89,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:dist": "node scripts/verify-dist.mjs",
     "prepack": "npm run check:isolation && npm run verify:dist",
-    "test:unit": "node --test test/*.test.mjs",
+    "test:unit": "node --test --test-concurrency=1 test/*.test.mjs",
     "test": "npm run check:isolation && npm run typecheck && npm run verify:dist && npm run test:unit"
   },
   "dependencies": {

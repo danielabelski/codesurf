@@ -98,6 +98,7 @@ for (const file of files) {
       ? developmentDependencies
       : dependencies
     const dependency = packageName(specifier)
+    if (dependency === MANIFEST.name) continue
     if (!declared.has(dependency)) {
       violations.push(`${rel}: bare import ${specifier} is not declared in package.json`)
     }

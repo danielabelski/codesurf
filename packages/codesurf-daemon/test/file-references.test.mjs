@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { expandFileReferences } from '../../bin/file-references.mjs'
+import { expandFileReferences } from '../bin/file-references.mjs'
 import { spawnDaemon } from './helpers/spawn-daemon.mjs'
 
 async function makeWorkspaceFixture() {

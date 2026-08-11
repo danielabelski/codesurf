@@ -6,8 +6,8 @@ import test from 'node:test'
 import {
   createAttachmentSelectionRegistry,
   SELECTION_RECEIPT_TTL_MS,
-} from '../../packages/codesurf-daemon/bin/attachment-selections.mjs'
-import { expandFileReferences } from '../../packages/codesurf-daemon/bin/file-references.mjs'
+} from '../bin/attachment-selections.mjs'
+import { expandFileReferences } from '../bin/file-references.mjs'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'codesurf-attachment-selections-'))

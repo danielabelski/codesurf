@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import {
   fileIdentity,
   readVerifiedFile,
-} from '../../packages/codesurf-daemon/bin/secure-file-reader.mjs'
+} from '../bin/secure-file-reader.mjs'
 
 test('verified provider read rejects same-size mutation during the read', async t => {
   const root = await mkdtemp(join(tmpdir(), 'codesurf-secure-read-'))

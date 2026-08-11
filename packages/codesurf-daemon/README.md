@@ -34,6 +34,10 @@ src/
 dist/
   *.js                  # committed NodeNext runtime modules
   *.d.ts                # generated public declarations
+test/
+  *.test.mjs            # package-owned unit and daemon integration contracts
+  helpers/              # package-local process lifecycle harness
+  fixtures/             # package-local test data and child processes
 ```
 
 Production consumers import the package exports, which resolve to `dist/`.

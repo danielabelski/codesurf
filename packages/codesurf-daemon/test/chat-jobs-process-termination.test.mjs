@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import test from 'node:test'
-import { createChatJobManager } from '../../packages/codesurf-daemon/bin/chat-jobs.mjs'
+import { createChatJobManager } from '../bin/chat-jobs.mjs'
 
 async function waitFor(check, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs

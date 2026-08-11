@@ -9,7 +9,7 @@ import {
   pumpHarnessStream,
   PI_HARNESS_UNAVAILABLE_ERROR,
   HARNESS_SUPPORTED_PROVIDERS,
-} from '../../packages/codesurf-daemon/bin/harness-runtime.mjs'
+} from '../bin/harness-runtime.mjs'
 
 // A fake AI SDK StreamTextResult.fullStream: an async iterable of scripted parts.
 async function* scriptedStream(parts) {

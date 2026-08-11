@@ -34,7 +34,7 @@
     "test:npm-package": "npm run build:npm && node scripts/smoke-npm-package.mjs",
     "test:packages": "npm run test:daemon-package && npm run test:relay && npm run test:terminal-gateway",
     "test:all": "npm test",
-    "test:daemon": "node --test test/daemon/*.test.mjs",
+    "test:daemon": "npm --prefix packages/codesurf-daemon run test:unit",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "test:e2e:build": "npm run build && npm run build:web && npm run test:e2e && npm run test:web-smoke",
     "test:e2e:headed": "playwright test --config e2e/playwright.config.ts --headed",

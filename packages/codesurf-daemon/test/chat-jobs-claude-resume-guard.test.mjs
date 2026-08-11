@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createChatJobManager } from '../../bin/chat-jobs.mjs'
+import { createChatJobManager } from '../bin/chat-jobs.mjs'
 
-const ROOT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+const ROOT_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
 
 async function makeTestTempDir(prefix) {

@@ -7,14 +7,14 @@ import {
   buildCodexExecArgs,
   createChatJobManager,
   revalidateDaemonContextRequest,
-} from '../../bin/chat-jobs.mjs'
+} from '../bin/chat-jobs.mjs'
 import {
   MAX_SKILLS_SUMMARY_BYTES,
   MAX_TRANSCRIPT_CONTEXT_PREVIEW_BYTES,
-} from '../../packages/codesurf-daemon/bin/context-budget.mjs'
-import { PEER_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/peer-context-policy.mjs'
-import { CHAT_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/context-composer.mjs'
-import { StableSessionContextCache } from '../../packages/codesurf-daemon/bin/stable-session-context.mjs'
+} from '../bin/context-budget.mjs'
+import { PEER_CONTEXT_LIMITS } from '../bin/peer-context-policy.mjs'
+import { CHAT_CONTEXT_LIMITS } from '../bin/context-composer.mjs'
+import { StableSessionContextCache } from '../bin/stable-session-context.mjs'
 
 async function waitFor(check, timeoutMs = 5_000, intervalMs = 15) {
   const started = Date.now()

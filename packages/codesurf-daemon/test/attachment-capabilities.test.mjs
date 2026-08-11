@@ -23,8 +23,8 @@ import {
   issueAttachmentCapabilities,
   OWNED_TEMP_ATTACHMENT_TTL_MS,
   sweepStaleOwnedTempAttachments,
-} from '../../packages/codesurf-daemon/bin/attachment-capabilities.mjs'
-import { expandFileReferences } from '../../packages/codesurf-daemon/bin/file-references.mjs'
+} from '../bin/attachment-capabilities.mjs'
+import { expandFileReferences } from '../bin/file-references.mjs'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'codesurf-attachment-caps-'))
