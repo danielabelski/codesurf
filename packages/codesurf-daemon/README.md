@@ -30,7 +30,7 @@ bin/
 vendor/
   dreaming.mjs          # autonomous research runner (was @codesurf/dreaming)
 src/
-  *.ts                  # TypeScript authoring sources (not published)
+  *.ts                  # canonical TypeScript APIs and shared policy modules
 dist/
   *.js                  # committed NodeNext runtime modules
   *.d.ts                # generated public declarations
@@ -41,8 +41,11 @@ test/
 ```
 
 Production consumers import the package exports, which resolve to `dist/`.
-The committed build is verified byte-for-byte before packaging, so stale
-generated output fails closed instead of silently shipping.
+The package is the source authority for context composition, prompt conventions,
+peer policy, and node-tool contracts; host-side files are compatibility facades
+only. No root build step writes into this package. The committed build is
+verified byte-for-byte before packaging, so stale generated output fails closed
+instead of silently shipping.
 
 ## Development
 

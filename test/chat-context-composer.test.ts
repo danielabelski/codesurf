@@ -6,7 +6,7 @@ import {
 } from '../src/main/chat/context-composer.ts'
 import {
   composeChatContext as composeDaemonContext,
-} from '../packages/codesurf-daemon/bin/context-composer.mjs'
+} from '@codesurf/daemon/context-composer'
 import { composeHostChatContext } from '../src/main/chat/request-context.ts'
 import { appendComposedUserContextToLatestUser } from '../src/main/chat/room-context-message.ts'
 

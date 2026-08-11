@@ -63,6 +63,36 @@
       "import": "./dist/secure-file-reader.js",
       "default": "./dist/secure-file-reader.js"
     },
+    "./context-composer": {
+      "types": "./dist/context-composer.d.ts",
+      "import": "./dist/context-composer.js",
+      "default": "./dist/context-composer.js"
+    },
+    "./prompt-conventions": {
+      "types": "./dist/prompt-conventions.d.ts",
+      "import": "./dist/prompt-conventions.js",
+      "default": "./dist/prompt-conventions.js"
+    },
+    "./peer-context-policy": {
+      "types": "./dist/peer-context-policy.d.ts",
+      "import": "./dist/peer-context-policy.js",
+      "default": "./dist/peer-context-policy.js"
+    },
+    "./peer-authority-policy": {
+      "types": "./dist/peer-authority-policy.d.ts",
+      "import": "./dist/peer-authority-policy.js",
+      "default": "./dist/peer-authority-policy.js"
+    },
+    "./peer-context-serialization": {
+      "types": "./dist/peer-context-serialization.d.ts",
+      "import": "./dist/peer-context-serialization.js",
+      "default": "./dist/peer-context-serialization.js"
+    },
+    "./node-tools": {
+      "types": "./dist/node-tools.d.ts",
+      "import": "./dist/node-tools.js",
+      "default": "./dist/node-tools.js"
+    },
     "./bin/codesurfd": "./bin/codesurfd.mjs",
     "./bin/chat-jobs": "./bin/chat-jobs.mjs",
     "./bin/checkpoints": "./bin/checkpoints.mjs",

@@ -1,4 +1,4 @@
-import { utf8Bytes, utf8Prefix } from './peer-context-serialization.ts'
+import { utf8Bytes, utf8Prefix } from './peer-context-serialization.js'
 
 /**
  * Central contract for context injected into provider prompts.

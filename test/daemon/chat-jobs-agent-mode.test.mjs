@@ -31,7 +31,7 @@ import {
   startCodexSdkThread,
 } from '../../packages/codesurf-daemon/bin/codex-sdk-provider.mjs'
 import { isCodexSdkEnabled } from '../../packages/codesurf-daemon/bin/codex-sdk-settings.mjs'
-import { CHAT_CONTEXT_LIMITS } from '../../packages/codesurf-daemon/bin/context-composer.mjs'
+import { CHAT_CONTEXT_LIMITS } from '@codesurf/daemon/context-composer'
 // Daemon-side AgentMode→tool mapping (Codex sandbox / Hermes toolsets).
 import * as daemonAgentTools from '../../packages/codesurf-daemon/bin/agent-mode-tools.mjs'
 // Runtime providers' shared mapping module (the SAME code chatClaude/chatCodex/

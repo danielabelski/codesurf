@@ -35,7 +35,7 @@ import {
   harnessReadsUnenforceable,
   HARNESS_READS_UNENFORCEABLE_ERROR,
 } from './agent-mode-tools.mjs'
-import { CHAT_CONTEXT_LIMITS } from './context-composer.mjs'
+import { CHAT_CONTEXT_LIMITS } from '../dist/context-composer.js'
 
 // Re-exported so existing importers (test/daemon/chat-jobs-agent-mode.test.mjs)
 // keep resolving `isToolAllowedByAgent` from here. Source of truth and the

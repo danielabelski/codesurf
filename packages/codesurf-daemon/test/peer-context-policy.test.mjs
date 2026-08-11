@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   PEER_CONTEXT_LIMITS,
   buildPeerContextPrompt,
-} from '../bin/peer-context-policy.mjs'
+} from '@codesurf/daemon/peer-context-policy'
 
 const fixtures = JSON.parse(readFileSync(
   new URL('./fixtures/peer-context-policy.json', import.meta.url),

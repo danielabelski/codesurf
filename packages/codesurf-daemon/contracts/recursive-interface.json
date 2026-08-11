@@ -8,13 +8,20 @@
     "chat-session-store",
     "client",
     "context-budget",
+    "context-composer",
+    "contextual-fragments",
     "contracts",
     "daemon",
     "fixtures",
     "manager",
+    "node-tools",
     "paths",
+    "peer-authority-policy",
+    "peer-context-policy",
+    "peer-context-serialization",
     "persona-model-binding",
     "process-tree",
+    "prompt-conventions",
     "secure-file-reader",
     "sse"
   ],
@@ -25,13 +32,20 @@
     "f_9efd52c28c3b38453e3005557b30cb17",
     "f_1d0a1f27ae70993ddcb39502abe3edb2",
     "f_e319607b9c6705ba67b7cb2c40cc8826",
+    "f_7754b3e830f1376f869566e7885287a4",
+    "f_82986311ea6bf299c96564c78de023e9",
     "f_4d63aaa250f8b1418bfc492959bb3e64",
     "f_84a71d368a0fb9444efc939585fe9d50",
     "f_bbef6b811b11a33a2642fed5ad2145ff",
     "f_0b1f6ccc9803323bae7b57de0352ee39",
+    "f_76a80109257fe78b8450b61c2d3a7be8",
     "f_20b23fe7620e51d012883bab1c4847e9",
+    "f_dcabd26d35692194b67ab1ed17574045",
+    "f_3220fc524e88af10c859c7d448af52c5",
+    "f_11909655e8644bc2b0d044c637aa83ff",
     "f_541fe53fd5737b20befc4f96f50a8a57",
     "f_9e6cd746cb7db0d635c3cb8cf9694b45",
+    "f_5b9c2a520d559a7cac2455ff21202223",
     "f_ae2eef32e1fd9d3c56742a243ba7d906",
     "f_98cf524c5863633eac6ded1aeae62eaf"
   ],
@@ -39,7 +53,7 @@
   "query": "codesurf-daemon",
   "feature": "codesurf-daemon",
   "feature_id": "f_17a2e36a8c358bc7b1433695717a92ce",
-  "frozen_at": "2026-08-11T20:24:59Z",
+  "frozen_at": "2026-08-11T20:43:59Z",
   "contracts": [
     {
       "name": "AGENT_MODE_RESOLUTION_DENIED_ERROR",
@@ -676,39 +690,6 @@
       "surface": "production"
     },
     {
-      "name": "CHAT_CONTEXT_BODY_LIMITS",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/context-composer.mjs",
-      "signature": "export { CHAT_CONTEXT_BODY_LIMITS }",
-      "outputs": [
-        "CHAT_CONTEXT_BODY_LIMITS"
-      ],
-      "line": 276,
-      "surface": "production"
-    },
-    {
-      "name": "CHAT_CONTEXT_LIMITS",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/context-composer.mjs",
-      "signature": "export { CHAT_CONTEXT_LIMITS }",
-      "outputs": [
-        "CHAT_CONTEXT_LIMITS"
-      ],
-      "line": 276,
-      "surface": "production"
-    },
-    {
-      "name": "composeChatContext",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/context-composer.mjs",
-      "signature": "export { composeChatContext }",
-      "outputs": [
-        "composeChatContext"
-      ],
-      "line": 276,
-      "surface": "production"
-    },
-    {
       "name": "expandFileReferences",
       "kind": "function",
       "path": "packages/codesurf-daemon/bin/file-references.mjs",
@@ -1110,61 +1091,6 @@
       "surface": "production"
     },
     {
-      "name": "getAuthoritativeNegotiatedPeerTools",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/peer-authority-policy.mjs",
-      "signature": "export { getAuthoritativeNegotiatedPeerTools }",
-      "outputs": [
-        "getAuthoritativeNegotiatedPeerTools"
-      ],
-      "line": 645,
-      "surface": "production"
-    },
-    {
-      "name": "resolveAuthoritativeCanvasPeers",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/peer-authority-policy.mjs",
-      "signature": "export { resolveAuthoritativeCanvasPeers }",
-      "outputs": [
-        "resolveAuthoritativeCanvasPeers"
-      ],
-      "line": 645,
-      "surface": "production"
-    },
-    {
-      "name": "selectAuthorizedPeerObservations",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/peer-authority-policy.mjs",
-      "signature": "export { selectAuthorizedPeerObservations }",
-      "outputs": [
-        "selectAuthorizedPeerObservations"
-      ],
-      "line": 645,
-      "surface": "production"
-    },
-    {
-      "name": "PEER_CONTEXT_LIMITS",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/peer-context-policy.mjs",
-      "signature": "export { PEER_CONTEXT_LIMITS }",
-      "outputs": [
-        "PEER_CONTEXT_LIMITS"
-      ],
-      "line": 478,
-      "surface": "production"
-    },
-    {
-      "name": "buildPeerContextPrompt",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/peer-context-policy.mjs",
-      "signature": "export { buildPeerContextPrompt }",
-      "outputs": [
-        "buildPeerContextPrompt"
-      ],
-      "line": 478,
-      "surface": "production"
-    },
-    {
       "name": "processTreeSpawnOptions",
       "kind": "function",
       "path": "packages/codesurf-daemon/bin/process-tree.mjs",
@@ -1196,83 +1122,6 @@
         "{ executionTarget = 'local', projectContext = {} } = {}"
       ],
       "line": 1,
-      "surface": "production"
-    },
-    {
-      "name": "CODESURF_ACTIVITY_CONVENTION",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { CODESURF_ACTIVITY_CONVENTION }",
-      "outputs": [
-        "CODESURF_ACTIVITY_CONVENTION"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "CODESURF_INSIGHT_CONVENTION",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { CODESURF_INSIGHT_CONVENTION }",
-      "outputs": [
-        "CODESURF_INSIGHT_CONVENTION"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "CODESURF_OUTPUT_CONVENTION",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { CODESURF_OUTPUT_CONVENTION }",
-      "outputs": [
-        "CODESURF_OUTPUT_CONVENTION"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "buildCodeSurfActivityConvention",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { buildCodeSurfActivityConvention }",
-      "outputs": [
-        "buildCodeSurfActivityConvention"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "buildCodeSurfInsightConvention",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { buildCodeSurfInsightConvention }",
-      "outputs": [
-        "buildCodeSurfInsightConvention"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "buildCodeSurfOutputConvention",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { buildCodeSurfOutputConvention }",
-      "outputs": [
-        "buildCodeSurfOutputConvention"
-      ],
-      "line": 64,
-      "surface": "production"
-    },
-    {
-      "name": "joinPromptSections",
-      "kind": "export",
-      "path": "packages/codesurf-daemon/bin/prompt-conventions.mjs",
-      "signature": "export { joinPromptSections }",
-      "outputs": [
-        "joinPromptSections"
-      ],
-      "line": 64,
       "surface": "production"
     },
     {
@@ -1904,6 +1753,92 @@
       "surface": "production"
     },
     {
+      "name": "ChatContextFragmentKind",
+      "kind": "type",
+      "path": "packages/codesurf-daemon/src/context-composer.ts",
+      "signature": "export type ChatContextFragmentKind",
+      "outputs": [
+        "type ChatContextFragmentKind"
+      ],
+      "line": 44,
+      "surface": "production"
+    },
+    {
+      "name": "ChatContextComposerInput",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/context-composer.ts",
+      "signature": "export interface ChatContextComposerInput",
+      "outputs": [
+        "interface ChatContextComposerInput"
+      ],
+      "line": 58,
+      "surface": "production"
+    },
+    {
+      "name": "ComposedChatContextFragment",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/context-composer.ts",
+      "signature": "export interface ComposedChatContextFragment",
+      "outputs": [
+        "interface ComposedChatContextFragment"
+      ],
+      "line": 73,
+      "surface": "production"
+    },
+    {
+      "name": "ComposedChatContext",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/context-composer.ts",
+      "signature": "export interface ComposedChatContext",
+      "outputs": [
+        "interface ComposedChatContext"
+      ],
+      "line": 83,
+      "surface": "production"
+    },
+    {
+      "name": "composeChatContext",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/context-composer.ts",
+      "signature": "export function composeChatContext(input: ChatContextComposerInput): ComposedChatContext",
+      "inputs": [
+        "input: ChatContextComposerInput"
+      ],
+      "outputs": [
+        "ComposedChatContext"
+      ],
+      "line": 168,
+      "surface": "production"
+    },
+    {
+      "name": "ContextualPromptFragment",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/contextual-fragments.ts",
+      "signature": "export interface ContextualPromptFragment",
+      "outputs": [
+        "interface ContextualPromptFragment"
+      ],
+      "line": 11,
+      "surface": "production"
+    },
+    {
+      "name": "createContextualPromptFragment",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/contextual-fragments.ts",
+      "signature": "export function createContextualPromptFragment( owner: Owner, text: string, maxUtf8Bytes: number, volatility: ContextualPromptFragment<Owner>['volatility'] = 'per-turn', ): ContextualPromptFragment<Owner>",
+      "inputs": [
+        "owner: Owner",
+        "text: string",
+        "maxUtf8Bytes: number",
+        "volatility: ContextualPromptFragment<Owner>['volatility'] = 'per-turn'"
+      ],
+      "outputs": [
+        "ContextualPromptFragment<Owner>"
+      ],
+      "line": 18,
+      "surface": "production"
+    },
+    {
       "name": "createDaemonManager",
       "kind": "export",
       "path": "packages/codesurf-daemon/src/index.ts",
@@ -2329,6 +2264,178 @@
       "surface": "production"
     },
     {
+      "name": "ToolSchema",
+      "kind": "type",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export type ToolSchema",
+      "outputs": [
+        "type ToolSchema"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "NodeMCPTool",
+      "kind": "type",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export type NodeMCPTool",
+      "outputs": [
+        "type NodeMCPTool"
+      ],
+      "line": 7,
+      "surface": "production"
+    },
+    {
+      "name": "getTileNodeTools",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getTileNodeTools(tileType: string): NodeMCPTool[]",
+      "inputs": [
+        "tileType: string"
+      ],
+      "outputs": [
+        "NodeMCPTool[]"
+      ],
+      "line": 421,
+      "surface": "production"
+    },
+    {
+      "name": "getAllNodeToolNames",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getAllNodeToolNames(tileType: string): string[]",
+      "inputs": [
+        "tileType: string"
+      ],
+      "outputs": [
+        "string[]"
+      ],
+      "line": 426,
+      "surface": "production"
+    },
+    {
+      "name": "getNodeToolSchemaByName",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getNodeToolSchemaByName(name: string): NodeMCPTool | undefined",
+      "inputs": [
+        "name: string"
+      ],
+      "outputs": [
+        "NodeMCPTool | undefined"
+      ],
+      "line": 430,
+      "surface": "production"
+    },
+    {
+      "name": "getAllNodeTools",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getAllNodeTools(): NodeMCPTool[]",
+      "outputs": [
+        "NodeMCPTool[]"
+      ],
+      "line": 438,
+      "surface": "production"
+    },
+    {
+      "name": "getPeerBridgeNodeTools",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getPeerBridgeNodeTools(): NodeMCPTool[]",
+      "outputs": [
+        "NodeMCPTool[]"
+      ],
+      "line": 446,
+      "surface": "production"
+    },
+    {
+      "name": "withCapabilityPrefix",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function withCapabilityPrefix(toolName: string): string",
+      "inputs": [
+        "toolName: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 455,
+      "surface": "production"
+    },
+    {
+      "name": "stripCapabilityPrefix",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function stripCapabilityPrefix(raw: string): string",
+      "inputs": [
+        "raw: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 459,
+      "surface": "production"
+    },
+    {
+      "name": "toCodesurfMcpToolName",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function toCodesurfMcpToolName(toolName: string): string",
+      "inputs": [
+        "toolName: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 464,
+      "surface": "production"
+    },
+    {
+      "name": "normalizeNodeToolName",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function normalizeNodeToolName(raw: string): string",
+      "inputs": [
+        "raw: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 468,
+      "surface": "production"
+    },
+    {
+      "name": "getDisconnectedPeerBridgeMcpToolNames",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function getDisconnectedPeerBridgeMcpToolNames(negotiatedTools: Iterable<string> = []): string[]",
+      "inputs": [
+        "negotiatedTools: Iterable<string> = []"
+      ],
+      "outputs": [
+        "string[]"
+      ],
+      "line": 474,
+      "surface": "production"
+    },
+    {
+      "name": "buildPeerCommandPayload",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/node-tools.ts",
+      "signature": "export function buildPeerCommandPayload( tileId: string, command: string, payload: Record<string, unknown> = {}, ): Record<string, unknown>",
+      "inputs": [
+        "tileId: string",
+        "command: string",
+        "payload: Record<string, unknown> = {}"
+      ],
+      "outputs": [
+        "Record<string, unknown>"
+      ],
+      "line": 482,
+      "surface": "production"
+    },
+    {
       "name": "defaultCodesurfHome",
       "kind": "function",
       "path": "packages/codesurf-daemon/src/paths.ts",
@@ -2337,6 +2444,255 @@
         "string"
       ],
       "line": 10,
+      "surface": "production"
+    },
+    {
+      "name": "CanvasAuthoritativePeer",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-authority-policy.ts",
+      "signature": "export interface CanvasAuthoritativePeer",
+      "outputs": [
+        "interface CanvasAuthoritativePeer"
+      ],
+      "line": 15,
+      "surface": "production"
+    },
+    {
+      "name": "resolveAuthoritativeCanvasPeers",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-authority-policy.ts",
+      "signature": "export function resolveAuthoritativeCanvasPeers( canvas: unknown, tileIdValue: unknown, ): CanvasAuthoritativePeer[]",
+      "inputs": [
+        "canvas: unknown",
+        "tileIdValue: unknown"
+      ],
+      "outputs": [
+        "CanvasAuthoritativePeer[]"
+      ],
+      "line": 42,
+      "surface": "production"
+    },
+    {
+      "name": "getAuthoritativeNegotiatedPeerTools",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-authority-policy.ts",
+      "signature": "export function getAuthoritativeNegotiatedPeerTools( peers: readonly CanvasAuthoritativePeer[], mcpEnabled: boolean | undefined, ): string[] | undefined",
+      "inputs": [
+        "peers: readonly CanvasAuthoritativePeer[]",
+        "mcpEnabled: boolean | undefined"
+      ],
+      "outputs": [
+        "string[] | undefined"
+      ],
+      "line": 82,
+      "surface": "production"
+    },
+    {
+      "name": "selectAuthorizedPeerObservations",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-authority-policy.ts",
+      "signature": "export function selectAuthorizedPeerObservations( value: unknown, authoritativePeers: readonly CanvasAuthoritativePeer[], ): unknown[]",
+      "inputs": [
+        "value: unknown",
+        "authoritativePeers: readonly CanvasAuthoritativePeer[]"
+      ],
+      "outputs": [
+        "unknown[]"
+      ],
+      "line": 91,
+      "surface": "production"
+    },
+    {
+      "name": "BoundedPeerAction",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export interface BoundedPeerAction",
+      "outputs": [
+        "interface BoundedPeerAction"
+      ],
+      "line": 48,
+      "surface": "production"
+    },
+    {
+      "name": "BoundedPeerContextEntry",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export interface BoundedPeerContextEntry",
+      "outputs": [
+        "interface BoundedPeerContextEntry"
+      ],
+      "line": 53,
+      "surface": "production"
+    },
+    {
+      "name": "BoundedPeerContext",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export interface BoundedPeerContext",
+      "outputs": [
+        "interface BoundedPeerContext"
+      ],
+      "line": 58,
+      "surface": "production"
+    },
+    {
+      "name": "PeerContextPolicyMetadata",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export interface PeerContextPolicyMetadata",
+      "outputs": [
+        "interface PeerContextPolicyMetadata"
+      ],
+      "line": 67,
+      "surface": "production"
+    },
+    {
+      "name": "PeerContextPolicyResult",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export interface PeerContextPolicyResult",
+      "outputs": [
+        "interface PeerContextPolicyResult"
+      ],
+      "line": 79,
+      "surface": "production"
+    },
+    {
+      "name": "buildPeerContextPrompt",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-policy.ts",
+      "signature": "export function buildPeerContextPrompt(value: unknown): PeerContextPolicyResult",
+      "inputs": [
+        "value: unknown"
+      ],
+      "outputs": [
+        "PeerContextPolicyResult"
+      ],
+      "line": 399,
+      "surface": "production"
+    },
+    {
+      "name": "ContextSerializationLimits",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export interface ContextSerializationLimits",
+      "outputs": [
+        "interface ContextSerializationLimits"
+      ],
+      "line": 3,
+      "surface": "production"
+    },
+    {
+      "name": "compareText",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function compareText(left: string, right: string): number",
+      "inputs": [
+        "left: string",
+        "right: string"
+      ],
+      "outputs": [
+        "number"
+      ],
+      "line": 18,
+      "surface": "production"
+    },
+    {
+      "name": "toWellFormedText",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function toWellFormedText(value: string): string",
+      "inputs": [
+        "value: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 22,
+      "surface": "production"
+    },
+    {
+      "name": "utf8Bytes",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function utf8Bytes(value: string): number",
+      "inputs": [
+        "value: string"
+      ],
+      "outputs": [
+        "number"
+      ],
+      "line": 33,
+      "surface": "production"
+    },
+    {
+      "name": "utf8Prefix",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function utf8Prefix(value: string, maxBytes: number): string",
+      "inputs": [
+        "value: string",
+        "maxBytes: number"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 37,
+      "surface": "production"
+    },
+    {
+      "name": "singleLine",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function singleLine(value: string): string",
+      "inputs": [
+        "value: string"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 49,
+      "surface": "production"
+    },
+    {
+      "name": "readDataProperty",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function readDataProperty( value: object, key: PropertyKey, )",
+      "inputs": [
+        "value: object",
+        "key: PropertyKey"
+      ],
+      "line": 57,
+      "surface": "production"
+    },
+    {
+      "name": "safeKeys",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function safeKeys(value: object): string[] | null",
+      "inputs": [
+        "value: object"
+      ],
+      "outputs": [
+        "string[] | null"
+      ],
+      "line": 70,
+      "surface": "production"
+    },
+    {
+      "name": "safeSerializeContextValue",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/peer-context-serialization.ts",
+      "signature": "export function safeSerializeContextValue( value: unknown, limits: ContextSerializationLimits, ): string",
+      "inputs": [
+        "value: unknown",
+        "limits: ContextSerializationLimits"
+      ],
+      "outputs": [
+        "string"
+      ],
+      "line": 141,
       "surface": "production"
     },
     {
@@ -2406,6 +2762,53 @@
         "terminateProcessTree"
       ],
       "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "joinPromptSections",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/prompt-conventions.ts",
+      "signature": "export function joinPromptSections(...sections: Array<string | undefined | null>): string | undefined",
+      "inputs": [
+        "...sections: Array<string | undefined | null>"
+      ],
+      "outputs": [
+        "string | undefined"
+      ],
+      "line": 9,
+      "surface": "production"
+    },
+    {
+      "name": "buildCodeSurfOutputConvention",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/prompt-conventions.ts",
+      "signature": "export function buildCodeSurfOutputConvention(): string",
+      "outputs": [
+        "string"
+      ],
+      "line": 45,
+      "surface": "production"
+    },
+    {
+      "name": "buildCodeSurfInsightConvention",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/prompt-conventions.ts",
+      "signature": "export function buildCodeSurfInsightConvention(): string",
+      "outputs": [
+        "string"
+      ],
+      "line": 67,
+      "surface": "production"
+    },
+    {
+      "name": "buildCodeSurfActivityConvention",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/prompt-conventions.ts",
+      "signature": "export function buildCodeSurfActivityConvention(): string",
+      "outputs": [
+        "string"
+      ],
+      "line": 83,
       "surface": "production"
     },
     {

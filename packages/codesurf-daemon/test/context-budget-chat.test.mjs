@@ -12,8 +12,8 @@ import {
   MAX_SKILLS_SUMMARY_BYTES,
   MAX_TRANSCRIPT_CONTEXT_PREVIEW_BYTES,
 } from '../bin/context-budget.mjs'
-import { PEER_CONTEXT_LIMITS } from '../bin/peer-context-policy.mjs'
-import { CHAT_CONTEXT_LIMITS } from '../bin/context-composer.mjs'
+import { PEER_CONTEXT_LIMITS } from '@codesurf/daemon/peer-context-policy'
+import { CHAT_CONTEXT_LIMITS } from '@codesurf/daemon/context-composer'
 import { StableSessionContextCache } from '../bin/stable-session-context.mjs'
 
 async function waitFor(check, timeoutMs = 5_000, intervalMs = 15) {

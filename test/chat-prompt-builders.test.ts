@@ -13,7 +13,7 @@ import {
 } from '../src/main/chat/peer-context-policy.ts'
 import {
   buildPeerContextPrompt as buildDaemonPeerContextPrompt,
-} from '../packages/codesurf-daemon/bin/peer-context-policy.mjs'
+} from '@codesurf/daemon/peer-context-policy'
 
 interface PeerPolicyFixture {
   name: string

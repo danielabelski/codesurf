@@ -19,13 +19,13 @@ import {
   truncateUtf8,
 } from './context-budget.mjs'
 import { applyProjectContextPolicy } from './project-context.mjs'
-import { buildPeerContextPrompt } from './peer-context-policy.mjs'
-import { composeChatContext } from './context-composer.mjs'
+import { buildPeerContextPrompt } from '../dist/peer-context-policy.js'
+import { composeChatContext } from '../dist/context-composer.js'
 import {
   buildCodeSurfActivityConvention,
   buildCodeSurfInsightConvention,
   buildCodeSurfOutputConvention,
-} from './prompt-conventions.mjs'
+} from '../dist/prompt-conventions.js'
 import { PI_HARNESS_UNAVAILABLE_ERROR } from './harness-policy.mjs'
 import {
   CODEX_SDK_UNAVAILABLE_CODE,

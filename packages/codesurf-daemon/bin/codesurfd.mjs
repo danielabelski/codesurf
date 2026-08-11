@@ -22,11 +22,11 @@ import {
   sweepStaleOwnedTempAttachments,
 } from './attachment-capabilities.mjs'
 import { createAttachmentSelectionRegistry } from './attachment-selections.mjs'
-import { buildPeerContextPrompt } from './peer-context-policy.mjs'
+import { buildPeerContextPrompt } from '../dist/peer-context-policy.js'
 import {
   resolveAuthoritativeCanvasPeers,
   selectAuthorizedPeerObservations,
-} from './peer-authority-policy.mjs'
+} from '../dist/peer-authority-policy.js'
 import { listPersonas, resolveAuthoritativeAgentMode } from './agent-mode-resolver.mjs'
 import { createDreamingManager, DREAMING_DEFAULTS } from '../vendor/dreaming.mjs'
 import {

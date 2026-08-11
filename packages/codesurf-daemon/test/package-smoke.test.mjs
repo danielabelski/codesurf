@@ -21,6 +21,12 @@ const PUBLIC_EXPORTS = [
   '@codesurf/daemon/context-budget',
   '@codesurf/daemon/process-tree',
   '@codesurf/daemon/secure-file-reader',
+  '@codesurf/daemon/context-composer',
+  '@codesurf/daemon/prompt-conventions',
+  '@codesurf/daemon/peer-context-policy',
+  '@codesurf/daemon/peer-authority-policy',
+  '@codesurf/daemon/peer-context-serialization',
+  '@codesurf/daemon/node-tools',
 ]
 
 function run(command, args, options = {}) {

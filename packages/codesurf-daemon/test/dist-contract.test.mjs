@@ -23,6 +23,12 @@ const COMPILED_EXPORTS = new Map([
   ['./context-budget', 'context-budget'],
   ['./process-tree', 'process-tree'],
   ['./secure-file-reader', 'secure-file-reader'],
+  ['./context-composer', 'context-composer'],
+  ['./prompt-conventions', 'prompt-conventions'],
+  ['./peer-context-policy', 'peer-context-policy'],
+  ['./peer-authority-policy', 'peer-authority-policy'],
+  ['./peer-context-serialization', 'peer-context-serialization'],
+  ['./node-tools', 'node-tools'],
 ])
 
 async function readJson(path) {
