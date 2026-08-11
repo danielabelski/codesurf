@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url'
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const DEFAULT_DAEMON_ENTRY = join(ROOT_DIR, 'bin', 'codesurfd.mjs')
 const TEST_TMP_ROOT = join(ROOT_DIR, '.tmp', 'daemon-tests')
-const DEFAULT_STARTUP_TIMEOUT_MS = 5_000
+// A cold daemon import can exceed five seconds on a loaded CI runner. Keep the
+// default bounded while leaving enough headroom for deterministic integration
+// tests; explicit timeout tests pass their own much smaller value.
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000
 const DEFAULT_TERM_TIMEOUT_MS = 5_000
 const DEFAULT_KILL_TIMEOUT_MS = 5_000
 const DEFAULT_OUTPUT_LIMIT_BYTES = 1024 * 1024

@@ -271,6 +271,20 @@ describe('MCP HTTP auth gates', () => {
   let port = 0
 
   before(async () => {
+    const injectProjectId = 'inject-project'
+    const injectProjectRoot = join(testCodesurfHome, injectProjectId)
+    mkdirSync(join(injectProjectRoot, '.codesurf', 'card-1'), { recursive: true })
+    writeFileSync(
+      join(testCodesurfHome, 'config.json'),
+      JSON.stringify({
+        projects: [{ id: injectProjectId, path: injectProjectRoot }],
+        workspaces: [{
+          id: 'inject-workspace',
+          projectIds: [injectProjectId],
+          primaryProjectId: injectProjectId,
+        }],
+      }),
+    )
     port = await startMCPServer()
   })
 
@@ -628,6 +642,9 @@ describe('MCP HTTP auth gates', () => {
         }),
       })
       assert.equal(res.status, 403)
+      assert.deepEqual(JSON.parse(res.body), {
+        error: 'Permission denied: /inject was not approved',
+      })
     } finally {
       delete (globalThis as Record<string, unknown>).__mcpAuthDialogResponse
     }

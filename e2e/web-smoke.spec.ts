@@ -24,9 +24,6 @@ test.describe('CodeSurf built-web smoke', () => {
       if (message.type() === 'error') consoleErrors.push(message.text())
     })
     const onboarding = page.getByRole('dialog', { name: 'Welcome to CodeSurf' })
-    await page.addLocatorHandler(onboarding, async () => {
-      await onboarding.getByRole('button', { name: 'Get started' }).click()
-    })
     const runtimeConfigResponse = page.waitForResponse(
       (response) =>
         response.url() === `${preview.url}codesurf-runtime-config.js` && response.status() === 200,
@@ -58,7 +55,6 @@ test.describe('CodeSurf built-web smoke', () => {
     )
     await expect(page.locator('#root')).not.toContainText('Renderer failed to start')
     await expect(page.locator('[data-canvas-surface="true"]')).toBeVisible({ timeout: 45_000 })
-    const onboarding = page.getByRole('dialog', { name: 'Welcome to CodeSurf' })
     await expect(onboarding).toBeVisible()
     await onboarding.getByRole('button', { name: 'Get started' }).click()
     await expect(onboarding).toBeHidden()

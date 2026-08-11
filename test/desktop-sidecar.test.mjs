@@ -5,10 +5,13 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -38,6 +41,17 @@ function writeExecutable(path, source) {
   chmodSync(path, 0o755)
 }
 
+function readPngDimensions(path) {
+  const contents = readFileSync(path)
+  assert.deepEqual(contents.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  assert.equal(contents.subarray(12, 16).toString('ascii'), 'IHDR')
+  return {
+    contents,
+    width: contents.readUInt32BE(16),
+    height: contents.readUInt32BE(20),
+  }
+}
+
 function waitFor(condition, timeoutMs = 10_000) {
   return new Promise((resolvePromise, reject) => {
     const started = Date.now()
@@ -62,6 +76,15 @@ after(() => {
 })
 
 describe('Native desktop sidecar staging', () => {
+  it('keeps Electron and Native package icon sources square and synchronized', () => {
+    const electronIcon = readPngDimensions(join(root, 'resources', 'icon.png'))
+    const nativeIcon = readPngDimensions(join(root, 'desktop', 'assets', 'icon.png'))
+
+    assert.equal(electronIcon.width, electronIcon.height)
+    assert.equal(nativeIcon.width, nativeIcon.height)
+    assert.deepEqual(nativeIcon.contents, electronIcon.contents)
+  })
+
   it('copies compiled daemon package files to both sidecar locations without source', () => {
     const fixture = makeTemp('codesurf-native-daemon-dist-')
     const rootDir = join(fixture, 'repo')
@@ -102,7 +125,10 @@ describe('Native desktop sidecar staging', () => {
       join(daemonDir, 'package.json'),
       `${JSON.stringify({ name: '@codesurf/daemon', version: '0.1.0', exports })}\n`,
     )
-    mkdirSync(gatewayDir, { recursive: true })
+    mkdirSync(join(gatewayDir, 'bin'), { recursive: true })
+    mkdirSync(join(gatewayDir, 'scripts'), { recursive: true })
+    writeFileSync(join(gatewayDir, 'scripts', 'gateway-tool.mjs'), 'export {}\n')
+    symlinkSync('../scripts/gateway-tool.mjs', join(gatewayDir, 'bin', 'gateway-tool'))
     writeFileSync(
       join(gatewayDir, 'package.json'),
       `${JSON.stringify({ name: '@codesurf/terminal-gateway', version: '0.1.0' })}\n`,
@@ -117,6 +143,18 @@ describe('Native desktop sidecar staging', () => {
       assert.ok(existsSync(join(packageRoot, 'dist', 'index.js')))
       assert.equal(existsSync(join(packageRoot, 'src')), false)
     }
+
+    const stagedGatewayLink = join(
+      appRoot,
+      'node_modules',
+      '@codesurf',
+      'terminal-gateway',
+      'bin',
+      'gateway-tool',
+    )
+    assert.equal(lstatSync(stagedGatewayLink).isSymbolicLink(), true)
+    assert.equal(readlinkSync(stagedGatewayLink), '../scripts/gateway-tool.mjs')
+    assert.equal(readFileSync(stagedGatewayLink, 'utf8'), 'export {}\n')
   })
 
   it('stages the root web build under the manifest-safe frontend path', () => {

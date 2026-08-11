@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, watch as watchDirectory, type FSWatcher } from 'node:fs'
-import { lstat, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join } from 'node:path'
 import { ApplicationMenu, BrowserView, BrowserWindow, Utils } from 'electrobun/bun'
@@ -2288,14 +2288,15 @@ async function runCoreIpcSelfCheck(): Promise<{ ok: boolean, checks: Array<{ nam
     const [workspaceDoc, projectsDoc] = await Promise.all([readWorkspacesDoc(), readProjectsDoc()])
     const record = workspaceDoc.workspaces?.find(candidate => candidate.id === listed[0]?.id)
     const project = projectsDoc.projects?.find(candidate => candidate.id === record?.primaryProjectId)
+    const canonicalFirstRunProjectPath = await realpath(FIRST_RUN_PROJECT_PATH)
     assert(record?.projectIds?.length === 1, 'first-run workspace registry is not singular and durable', workspaceDoc)
-    assert(project?.path === FIRST_RUN_PROJECT_PATH, 'first-run project authority is not app-owned', {
-      expected: FIRST_RUN_PROJECT_PATH,
+    assert(project?.path === canonicalFirstRunProjectPath, 'first-run project authority is not app-owned', {
+      expected: canonicalFirstRunProjectPath,
       project,
     })
 
     const [reloaded, reloadedActive] = await Promise.all([listWorkspaces(), getActiveWorkspace()])
-    assert(reloaded.length === 1 && reloaded[0]?.path === FIRST_RUN_PROJECT_PATH, 'reloaded workspace lost its project authority', reloaded)
+    assert(reloaded.length === 1 && reloaded[0]?.path === canonicalFirstRunProjectPath, 'reloaded workspace lost its project authority', reloaded)
     assert(reloadedActive?.id === listed[0]?.id, 'reloaded active workspace changed identity', reloadedActive)
     return {
       workspaceId: listed[0]?.id,

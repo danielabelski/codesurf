@@ -112,6 +112,8 @@ export interface ChatRequest {
   skillsPrompt?: string
   skillsSummary?: string | null
   contextBuckets?: ChatContextBucketBundle
+  /** Opaque host-issued receipts for durable attachment selections. */
+  attachmentSelections?: Array<{ selectionReceipt: string }>
   imageAttachments?: ChatImageAttachment[]
 }
 

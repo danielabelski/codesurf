@@ -8,6 +8,10 @@ import { WorkspaceSaveArbiter } from './workspaceSaveArbiter.ts'
 export class TileStateSaveCoordinator {
   private readonly arbiter = new WorkspaceSaveArbiter()
 
+  get activeLaneCount(): number {
+    return this.arbiter.activeLaneCount
+  }
+
   run<T>(storageId: string, tileId: string, operation: () => Promise<T>): Promise<T> {
     return this.arbiter.run(JSON.stringify([storageId, tileId]), operation)
   }

@@ -57,7 +57,15 @@ function ensureDirectory(path) {
 
 function copy(source, destination) {
   ensureDirectory(dirname(destination))
-  cpSync(source, destination, { recursive: true, dereference: true, force: true, preserveTimestamps: true })
+  // npm's package-local .bin links are relative and valid inside the staged
+  // dependency tree. Resolving them during copy rewrites them as absolute
+  // checkout paths, which makes the finished macOS bundle fail codesign.
+  cpSync(source, destination, {
+    recursive: true,
+    force: true,
+    preserveTimestamps: true,
+    verbatimSymlinks: true,
+  })
 }
 
 function packagePath(root, name) {

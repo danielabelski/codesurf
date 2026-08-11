@@ -394,6 +394,10 @@ test('startup sweep deletes only stale strict owned files in the direct temp roo
   const staleTime = now - OWNED_TEMP_ATTACHMENT_TTL_MS - 5_000
   const fresh = join(ownedRoot, ownedTempName(now, 'fresh.txt'))
   const stale = join(ownedRoot, ownedTempName(staleTime, 'stale.txt'))
+  const protectedStale = join(
+    ownedRoot,
+    ownedTempName(staleTime, 'protected.txt', '66666666-6666-4666-8666-666666666666'),
+  )
   const ordinary = join(ownedRoot, 'user-note.txt')
   const suspiciousMode = join(
     ownedRoot,
@@ -409,6 +413,7 @@ test('startup sweep deletes only stale strict owned files in the direct temp roo
   )
   await writeFile(fresh, 'FRESH\n', { mode: 0o600 })
   await writeFile(stale, 'STALE\n', { mode: 0o600 })
+  await writeFile(protectedStale, 'PROTECTED\n', { mode: 0o600 })
   await writeFile(ordinary, 'USER\n', { mode: 0o600 })
   await writeFile(suspiciousMode, 'WIDE\n', { mode: 0o600 })
   await chmod(suspiciousMode, 0o644)
@@ -416,16 +421,19 @@ test('startup sweep deletes only stale strict owned files in the direct temp roo
   await mkdir(directoryPath)
   const staleDate = new Date(staleTime)
   await utimes(stale, staleDate, staleDate)
+  await utimes(protectedStale, staleDate, staleDate)
   await utimes(suspiciousMode, staleDate, staleDate)
 
   const result = await sweepStaleOwnedTempAttachments({
     ownedTempRoot: ownedRoot,
     now,
+    protectedPaths: new Set([protectedStale]),
   })
 
   assert.equal(result.deleted, 1)
   await assertMissing(stale)
   assert.equal(await readFile(fresh, 'utf8'), 'FRESH\n')
+  assert.equal(await readFile(protectedStale, 'utf8'), 'PROTECTED\n')
   assert.equal(await readFile(ordinary, 'utf8'), 'USER\n')
   assert.equal(await readFile(suspiciousMode, 'utf8'), 'WIDE\n')
   assert.equal(await readFile(symlinkPath, 'utf8'), 'OUTSIDE\n')

@@ -3,11 +3,11 @@ import type { AppSettings, Workspace } from '../../../shared/types'
 import { withDefaultSettings } from '../../../shared/types'
 import type { MenuItem } from './ContextMenu'
 import { DevSandboxFrame } from './DevSandboxFrame'
+import { OnboardingOverlay } from './OnboardingOverlay'
 
 const LazyMCPPanel = React.lazy(() => import('./MCPPanel').then(m => ({ default: m.MCPPanel })))
 const LazySettingsPanel = React.lazy(() => import('./SettingsPanel').then(m => ({ default: m.SettingsPanel })))
 const LazyExtensionsGallery = React.lazy(() => import('./ExtensionsGallery').then(m => ({ default: m.ExtensionsGallery })))
-const LazyOnboardingOverlay = React.lazy(() => import('./OnboardingOverlay').then(m => ({ default: m.OnboardingOverlay })))
 const LazyContextMenu = React.lazy(() => import('./ContextMenu').then(m => ({ default: m.ContextMenu })))
 const LazyClusoWidgetMount = React.lazy(() =>
   import('./ClusoWidgetMount')
@@ -103,12 +103,10 @@ export function AppOverlays(props: AppOverlaysProps): JSX.Element {
         </Suspense>
       )}
       {settingsLoaded && !settings.onboardingComplete && (
-        <Suspense fallback={null}>
-          <LazyOnboardingOverlay
-            onComplete={() => updateAppSettings({ onboardingComplete: true })}
-            onOpenPlugins={() => setShowExtensionsGallery(true)}
-          />
-        </Suspense>
+        <OnboardingOverlay
+          onComplete={() => updateAppSettings({ onboardingComplete: true })}
+          onOpenPlugins={() => setShowExtensionsGallery(true)}
+        />
       )}
       {ctxMenu && (
         <Suspense fallback={null}>

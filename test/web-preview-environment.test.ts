@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { buildIsolatedWebPreviewEnv } from '../e2e/helpers/launch-web-preview.ts'
+import { buildIsolatedWebPreviewEnv } from '../e2e/helpers/web-preview-env.ts'
 
 test('built-web preview environment discards inherited CodeSurf runtime state', () => {
   const inherited = {

@@ -455,7 +455,7 @@ function resolveAllowedFsPath(input, { allowMissing = true } = {}) {
   for (const root of configuredProjectRoots()) {
     const rootReal = realPathIfPresent(root)
     if (!rootReal) continue
-    if (!pathIsInside(rootReal, candidate)) continue
+    if (!pathIsInside(root, candidate)) continue
 
     if (candidateReal && !pathIsInside(rootReal, candidateReal)) {
       continue

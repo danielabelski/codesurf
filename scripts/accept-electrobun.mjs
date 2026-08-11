@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -176,7 +176,7 @@ try {
   ])
   const persistedWorkspace = workspaceDoc?.workspaces?.find(entry => entry?.id === 'electrobun-local')
   const persistedProject = projectsDoc?.projects?.find(entry => entry?.id === persistedWorkspace?.primaryProjectId)
-  const expectedProjectPath = join(codesurfHome, 'projects', 'electrobun-local')
+  const expectedProjectPath = await realpath(join(codesurfHome, 'projects', 'electrobun-local'))
   assert(
     persistedWorkspace?.projectIds?.length === 1
       && persistedWorkspace.projectIds[0] === persistedWorkspace.primaryProjectId,

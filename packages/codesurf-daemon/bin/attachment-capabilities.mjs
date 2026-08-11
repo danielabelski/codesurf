@@ -482,6 +482,7 @@ export async function sweepStaleOwnedTempAttachments({
   ownedTempRoot,
   now = Date.now(),
   ttlMs = OWNED_TEMP_ATTACHMENT_TTL_MS,
+  protectedPaths = [],
 } = {}) {
   const boundedNow = Number.isFinite(Number(now)) ? Number(now) : Date.now()
   const boundedTtlMs = Math.max(
@@ -497,6 +498,16 @@ export async function sweepStaleOwnedTempAttachments({
   }
   const canonicalRoot = ownedRoot.canonicalRoot
   const securityContext = ownedRoot.securityContext
+  const protectedOwnedPaths = new Set()
+  for (const value of protectedPaths) {
+    const protectedPath = resolve(String(value ?? '').trim())
+    protectedOwnedPaths.add(protectedPath)
+    try {
+      protectedOwnedPaths.add(await fs.realpath(protectedPath))
+    } catch {
+      // Missing protected records are handled by the durable selection sweep.
+    }
+  }
   const entries = (await fs.readdir(canonicalRoot, { withFileTypes: true }))
     .sort((left, right) => left.name.localeCompare(right.name))
     .slice(0, MAX_STARTUP_SWEEP_ENTRIES)
@@ -511,6 +522,10 @@ export async function sweepStaleOwnedTempAttachments({
       continue
     }
     const candidatePath = resolve(canonicalRoot, entry.name)
+    if (protectedOwnedPaths.has(candidatePath)) {
+      skipped += 1
+      continue
+    }
     if (dirname(candidatePath) !== canonicalRoot) {
       skipped += 1
       continue

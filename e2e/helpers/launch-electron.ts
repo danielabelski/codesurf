@@ -18,6 +18,8 @@ const DAEMON_ENTRY = join(REPO_ROOT, 'bin/codesurfd.mjs')
 const APP_CLOSE_TIMEOUT_MS = 15_000
 const APP_PROCESS_EXIT_TIMEOUT_MS = 5_000
 const DAEMON_STOP_TIMEOUT_MS = 10_000
+const HOME_REMOVE_MAX_RETRIES = 10
+const HOME_REMOVE_RETRY_DELAY_MS = 100
 const E2E_AGENT_IDS = [
   'claude',
   'codex',
@@ -118,7 +120,15 @@ async function cleanupLaunch(
       ? () => terminateElectronProcess(processForCleanup)
       : undefined,
     stopDaemon: () => stopIsolatedDaemon(homeDir),
-    removeHome: () => rm(homeDir, { recursive: true, force: true }),
+    // Chromium helpers can finish flushing the isolated profile just after the
+    // Electron parent exits. Keep cleanup bounded, but tolerate that brief
+    // ENOTEMPTY/EBUSY window instead of making otherwise-green E2E runs flaky.
+    removeHome: () => rm(homeDir, {
+      recursive: true,
+      force: true,
+      maxRetries: HOME_REMOVE_MAX_RETRIES,
+      retryDelay: HOME_REMOVE_RETRY_DELAY_MS,
+    }),
   })
 }
 

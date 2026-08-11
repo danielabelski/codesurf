@@ -131,6 +131,12 @@ for (const event of events) process.stdout.write(JSON.stringify(event) + '\\n')
       const toolChip = chatTile.locator('[data-tool-block-kind="tool"]').filter({
         hasText: /command/i,
       })
+      const toolGroup = chatTile.getByText(/^\d+ tools$/i).last()
+      await expect(toolChip.or(toolGroup).first()).toBeVisible()
+      if (!(await toolChip.isVisible())) {
+        await expect(toolGroup).toBeVisible()
+        await toolGroup.click()
+      }
       await expect(toolChip).toBeVisible()
       await expect(chatTile.getByText('E2E_TOOL_OUTPUT', { exact: true })).toHaveCount(0)
       await toolChip.locator('button').first().click()

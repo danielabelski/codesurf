@@ -21,6 +21,7 @@ import {
   preflightAttachmentCapabilities,
   sweepStaleOwnedTempAttachments,
 } from './attachment-capabilities.mjs'
+import { createAttachmentSelectionRegistry } from './attachment-selections.mjs'
 import { buildPeerContextPrompt } from './peer-context-policy.mjs'
 import {
   resolveAuthoritativeCanvasPeers,
@@ -57,6 +58,11 @@ const PERMISSIONS_FILE = join(HOME, 'permissions.json')
 const AGENT_KANBAN_DIR = join(HOME, 'agent-kanban')
 const SESSION_TITLE_OVERRIDES_FILE = join(HOME, 'session-title-overrides.json')
 const CHAT_ATTACHMENTS_DIR = join(HOME, 'chat-attachments')
+const ATTACHMENT_SELECTIONS_PATH = join(HOME, 'attachment-selections.json')
+const attachmentSelectionRegistry = createAttachmentSelectionRegistry({
+  storePath: ATTACHMENT_SELECTIONS_PATH,
+  ownedTempRoot: CHAT_ATTACHMENTS_DIR,
+})
 const AUTH_TOKEN = randomUUID()
 const SESSION_TEXT_LIMIT = 120
 const PERMISSIONS_VERSION = 1
@@ -2413,6 +2419,8 @@ async function attachDaemonFileReferenceContext(request) {
     // provider transport. Fail before consuming a one-shot capability rather
     // than silently dropping pixels or forwarding a local path.
     supportedImageMediaTypes: [],
+    attachmentSelections: request.attachmentSelections,
+    attachmentSelectionRegistry,
   })
   if (!expansion.changed) return request
 
@@ -3424,6 +3432,71 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    if (method === 'POST' && url.pathname === '/file-references/selections/issue') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const cardId = String(body?.cardId ?? '').trim()
+      const workspaceDir = workspaceId ? resolveWorkspaceProjectPath(workspaceId) : null
+      if (!workspaceId || !cardId || !workspaceDir) {
+        sendJson(res, 400, { error: 'A registered workspaceId and cardId are required' })
+        return
+      }
+      try {
+        sendJson(res, 200, await attachmentSelectionRegistry.issue({
+          workspaceId,
+          cardId,
+          paths: body?.paths,
+          ownedTemporary: body?.ownedTemporary === true,
+        }))
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/file-references/selections/inspect') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const cardId = String(body?.cardId ?? '').trim()
+      const workspaceDir = workspaceId ? resolveWorkspaceProjectPath(workspaceId) : null
+      if (!workspaceId || !cardId || !workspaceDir) {
+        sendJson(res, 400, { error: 'A registered workspaceId and cardId are required' })
+        return
+      }
+      try {
+        sendJson(res, 200, await attachmentSelectionRegistry.inspect({
+          workspaceId,
+          cardId,
+          selectionReceipts: body?.selectionReceipts,
+        }))
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      return
+    }
+
+    if (method === 'POST' && url.pathname === '/file-references/selections/revoke') {
+      const body = await parseRequestBody(req)
+      const workspaceId = String(body?.workspaceId ?? '').trim()
+      const cardId = String(body?.cardId ?? '').trim()
+      const workspaceDir = workspaceId ? resolveWorkspaceProjectPath(workspaceId) : null
+      if (!workspaceId || !cardId || !workspaceDir) {
+        sendJson(res, 400, { error: 'A registered workspaceId and cardId are required' })
+        return
+      }
+      try {
+        sendJson(res, 200, await attachmentSelectionRegistry.revoke({
+          workspaceId,
+          cardId,
+          selectionReceipts: body?.selectionReceipts,
+          hostCleanupTokens: body?.hostCleanupTokens,
+        }))
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) })
+      }
+      return
+    }
+
     if (method === 'POST' && url.pathname === '/file-references/capabilities/issue') {
       const body = await parseRequestBody(req)
       const workspaceId = String(body?.workspaceId ?? '').trim()
@@ -3487,6 +3560,8 @@ const server = createServer(async (req, res) => {
         workspaceDir,
         executionTarget,
         supportedImageMediaTypes: body?.supportedImageMediaTypes,
+        attachmentSelections: body?.attachmentSelections,
+        attachmentSelectionRegistry,
       }))
       return
     }
@@ -4184,11 +4259,16 @@ async function start() {
     } catch { /* best-effort */ }
   }
 
-  // Renderer-authored bytes use an explicit, short-lived owned capability.
-  // Sweep only direct children with the strict owned filename contract; user
-  // picker files and arbitrary files in this directory are never candidates.
+  // Durable selection receipts survive daemon restarts. Expire their records
+  // first, then protect every remaining owned path while sweeping only orphaned
+  // strict-name temporary files from the host-owned attachment directory.
   try {
-    await sweepStaleOwnedTempAttachments({ ownedTempRoot: CHAT_ATTACHMENTS_DIR })
+    await attachmentSelectionRegistry.sweepExpired()
+    const protectedPaths = await attachmentSelectionRegistry.listProtectedOwnedPaths()
+    await sweepStaleOwnedTempAttachments({
+      ownedTempRoot: CHAT_ATTACHMENTS_DIR,
+      protectedPaths,
+    })
   } catch (error) {
     console.error('[codesurfd] initial owned attachment sweep failed:', error)
   }
@@ -4220,6 +4300,9 @@ async function start() {
     // does not grow without bound (and slow the dashboard poll).
     void chatJobs.sweepJobRetention().catch((error) => {
       console.error('[codesurfd] sweepJobRetention failed:', error)
+    })
+    void attachmentSelectionRegistry.sweepExpired().catch((error) => {
+      console.error('[codesurfd] attachment selection sweep failed:', error)
     })
   }, 24 * 60 * 60 * 1000)
 
@@ -4264,13 +4347,18 @@ async function shutdown() {
   }
   // Cancel in-flight jobs (and kill their CLI children) before closing the
   // server, so a restart/SIGTERM does not orphan agent subprocesses.
-  let chatShutdownError = null
-  try {
-    await disposeAttachmentCapabilities()
-    await chatJobs.shutdown()
-  } catch (error) {
-    chatShutdownError = error
-    console.error('[codesurfd] chat shutdown failed:', error)
+  const shutdownErrors = []
+  for (const [label, dispose] of [
+    ['attachment selection registry', () => attachmentSelectionRegistry.dispose()],
+    ['attachment capabilities', () => disposeAttachmentCapabilities()],
+    ['chat jobs', () => chatJobs.shutdown()],
+  ]) {
+    try {
+      await dispose()
+    } catch (error) {
+      shutdownErrors.push(error)
+      console.error(`[codesurfd] ${label} shutdown failed:`, error)
+    }
   }
   server.closeIdleConnections?.()
   let closeTimer
@@ -4289,7 +4377,10 @@ async function shutdown() {
     // subscribers; this is the final bound for any unrelated lingering socket.
     server.closeAllConnections?.()
   }
-  if (chatShutdownError) throw chatShutdownError
+  if (shutdownErrors.length === 1) throw shutdownErrors[0]
+  if (shutdownErrors.length > 1) {
+    throw new AggregateError(shutdownErrors, 'Multiple codesurfd shutdown steps failed')
+  }
 }
 
 process.on('SIGTERM', () => {

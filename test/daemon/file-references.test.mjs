@@ -60,9 +60,6 @@ test('expandFileReferences expands workspace-relative @path tokens without expos
   assert.equal(result.bodyText, 'Please review @src/app.ts.')
   assert.match(result.contextText, /^## Referenced workspace files/)
   assert.doesNotMatch(result.bodyText, /export const value/)
-  assert.equal(result.bodyText, 'Please review @src/app.ts and the attached README.')
-  assert.match(result.contextText, /^## Referenced workspace files/)
-  assert.doesNotMatch(result.bodyText, /export const value/)
 })
 
 test('expandFileReferences never follows references inside host-appended untrusted context', async t => {
