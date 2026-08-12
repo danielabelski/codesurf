@@ -15,7 +15,7 @@ import { resolveElectronExecutable } from './electron-path'
 const REPO_ROOT = join(__dirname, '../..')
 const MAIN_ENTRY = join(REPO_ROOT, 'dist-electron/main/index.js')
 const DAEMON_ENTRY = join(REPO_ROOT, 'bin/codesurfd.mjs')
-const APP_CLOSE_TIMEOUT_MS = 15_000
+const APP_CLOSE_TIMEOUT_MS = 30_000
 const APP_PROCESS_EXIT_TIMEOUT_MS = 5_000
 const DAEMON_STOP_TIMEOUT_MS = 10_000
 const HOME_REMOVE_MAX_RETRIES = 10
