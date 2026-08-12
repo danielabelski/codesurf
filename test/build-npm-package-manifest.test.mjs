@@ -30,6 +30,22 @@ test('npm package build preserves the authoritative root Node engine', async t =
   await writeFixtureFile(fixtureRoot, 'dist-electron/preload/index.js')
   await writeFixtureFile(fixtureRoot, 'bin/codesurf.cjs')
   await writeFixtureFile(fixtureRoot, 'bin/codesurfd.mjs')
+  await writeFixtureFile(
+    fixtureRoot,
+    'node_modules/@codesurf/daemon/package.json',
+    `${JSON.stringify({
+      name: '@codesurf/daemon',
+      type: 'module',
+      exports: {
+        './package-layout': './dist/package-layout.js',
+      },
+    })}\n`,
+  )
+  await mkdir(join(fixtureRoot, 'node_modules', '@codesurf', 'daemon', 'dist'), { recursive: true })
+  await cp(
+    join(ROOT_DIR, 'packages', 'codesurf-daemon', 'dist', 'package-layout.js'),
+    join(fixtureRoot, 'node_modules', '@codesurf', 'daemon', 'dist', 'package-layout.js'),
+  )
   const daemonExports = Object.fromEntries(
     [
       ['.', 'index'],
@@ -55,7 +71,12 @@ test('npm package build preserves the authoritative root Node engine', async t =
       name: '@codesurf/daemon',
       version: '0.1.0',
       type: 'module',
+      files: ['bin/', 'dist/', 'vendor/', 'README.md'],
       exports: daemonExports,
+      dependencies: {
+        'daemon-only-runtime': '1.2.3',
+        'better-sqlite3': '12.8.0',
+      },
       scripts: {
         build: 'node -e "process.exit(0)"',
         'verify:dist': 'node -e "process.exit(0)"',
@@ -82,11 +103,20 @@ test('npm package build preserves the authoritative root Node engine', async t =
   )
   assert.deepEqual(publishManifest.engines, rootManifest.engines)
   assert.equal(publishManifest.engines?.node, '>=22.12.0')
-  assert.equal(
-    await readFile(
-      join(fixtureRoot, 'release', 'npm', 'package', 'packages', 'codesurf-daemon', 'dist', 'index.js'),
-      'utf8',
-    ),
-    'export {}\n',
-  )
+  assert.equal(publishManifest.dependencies?.['@codesurf/daemon'], '0.1.0')
+  assert.equal(publishManifest.dependencies?.['daemon-only-runtime'], '1.2.3')
+  assert.equal(publishManifest.dependencies?.['better-sqlite3'], '12.8.0')
+  assert.deepEqual(publishManifest.bundleDependencies, ['@codesurf/daemon'])
+  for (const daemonRoot of [
+    join('packages', 'codesurf-daemon'),
+    join('node_modules', '@codesurf', 'daemon'),
+  ]) {
+    assert.equal(
+      await readFile(
+        join(fixtureRoot, 'release', 'npm', 'package', daemonRoot, 'dist', 'index.js'),
+        'utf8',
+      ),
+      'export {}\n',
+    )
+  }
 })

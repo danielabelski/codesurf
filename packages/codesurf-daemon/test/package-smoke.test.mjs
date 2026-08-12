@@ -27,6 +27,7 @@ const PUBLIC_EXPORTS = [
   '@codesurf/daemon/peer-authority-policy',
   '@codesurf/daemon/peer-context-serialization',
   '@codesurf/daemon/node-tools',
+  '@codesurf/daemon/package-layout',
 ]
 
 function run(command, args, options = {}) {

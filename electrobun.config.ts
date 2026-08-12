@@ -1,4 +1,45 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import type { ElectrobunConfig } from 'electrobun'
+
+const daemonPackagePath = 'packages/codesurf-daemon'
+const daemonManifest = JSON.parse(
+  readFileSync(resolve(process.cwd(), daemonPackagePath, 'package.json'), 'utf8'),
+) as { files?: unknown }
+
+// Electrobun bundles this config before evaluating it and cannot load workspace
+// package exports there. Read the package's public files contract directly;
+// daemon-dist-entrypoints.test.mjs proves this produces the same entries as
+// @codesurf/daemon/package-layout.
+function daemonRuntimeEntries(files: unknown): string[] {
+  if (!Array.isArray(files)) throw new Error('@codesurf/daemon must declare package files')
+  const forbiddenRoots = new Set(['contracts', 'node_modules', 'scripts', 'src', 'test'])
+  return [...new Set([...files, 'package.json'].map(value => {
+    if (typeof value !== 'string') throw new Error('daemon package files entries must be strings')
+    const entry = value.replace(/^\.\//u, '').replace(/\/+$/u, '')
+    if (
+      !entry
+      || entry.includes('\\')
+      || entry.includes('\0')
+      || /^[a-z]:/iu.test(entry)
+      || entry.startsWith('/')
+      || entry.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    ) {
+      throw new Error(`unsafe daemon package files entry: ${String(value)}`)
+    }
+    if (forbiddenRoots.has(entry.split('/')[0])) {
+      throw new Error(`daemon runtime files must not publish ${entry.split('/')[0]}/`)
+    }
+    return entry
+  }))]
+}
+
+const daemonRuntimeCopy = Object.fromEntries(
+  daemonRuntimeEntries(daemonManifest.files).map(entry => [
+    `${daemonPackagePath}/${entry}`,
+    `${daemonPackagePath}/${entry}`,
+  ]),
+)
 
 export default {
   app: {
@@ -21,11 +62,7 @@ export default {
       'dist-electron/renderer': 'views/mainview',
       'electrobun/helpers': 'helpers',
       'bin': 'bin',
-      'packages/codesurf-daemon/bin': 'packages/codesurf-daemon/bin',
-      'packages/codesurf-daemon/dist': 'packages/codesurf-daemon/dist',
-      'packages/codesurf-daemon/vendor': 'packages/codesurf-daemon/vendor',
-      'packages/codesurf-daemon/package.json': 'packages/codesurf-daemon/package.json',
-      'packages/codesurf-daemon/README.md': 'packages/codesurf-daemon/README.md',
+      ...daemonRuntimeCopy,
       'resources/icon.png': 'resources/icon.png',
     },
     buildFolder: 'build-electrobun',

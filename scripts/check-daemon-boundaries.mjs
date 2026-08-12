@@ -2,10 +2,11 @@ import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
 import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { getDaemonRuntimeEntries } from '@codesurf/daemon/package-layout'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PRODUCTION_ROOTS = ['src', 'scripts', 'electrobun']
-const TOP_LEVEL_FILES = ['electrobun.config.ts', 'electron.vite.config.ts']
+const TOP_LEVEL_FILES = ['bin/codesurf.cjs', 'electrobun.config.ts', 'electron.vite.config.ts']
 const LEGACY_ROOT_DAEMON_SHIMS = [
   'chat-jobs.mjs',
   'checkpoints.mjs',
@@ -39,7 +40,23 @@ function importSpecifiers(source) {
   return [
     ...source.matchAll(/\b(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/g),
     ...source.matchAll(/\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g),
+    ...source.matchAll(/\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g),
   ].map(match => match[1])
+}
+
+function packagedDaemonEntries(patterns) {
+  return (patterns ?? [])
+    .filter(pattern => pattern.startsWith('packages/codesurf-daemon/'))
+    .map(pattern => pattern
+      .slice('packages/codesurf-daemon/'.length)
+      .replace(/\/\*\*\/\*$/u, '')
+      .replace(/\/+$/u, ''))
+    .sort()
+}
+
+function sameEntries(actual, expected) {
+  return actual.length === expected.length
+    && actual.every((entry, index) => entry === expected[index])
 }
 
 const files = [
@@ -66,6 +83,35 @@ for (const file of files) {
       violations.push(`${relative(ROOT, file)}: imports private daemon path ${specifier}`)
     }
   }
+}
+
+const rootManifest = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'))
+const daemonManifest = JSON.parse(
+  await readFile(join(ROOT, 'packages', 'codesurf-daemon', 'package.json'), 'utf8'),
+)
+const runtimeEntries = getDaemonRuntimeEntries(daemonManifest).sort()
+for (const [label, patterns] of [
+  ['root npm package', rootManifest.files],
+  ['Electron package', rootManifest.build?.files],
+]) {
+  const actual = packagedDaemonEntries(patterns)
+  if (!sameEntries(actual, runtimeEntries)) {
+    violations.push(`${label}: daemon files ${JSON.stringify(actual)} do not match package contract ${JSON.stringify(runtimeEntries)}`)
+  }
+}
+
+for (const relativePath of [
+  'scripts/build-npm-package.mjs',
+  'scripts/desktop-sidecar.mjs',
+]) {
+  const source = await readFile(join(ROOT, relativePath), 'utf8')
+  if (!source.includes('getDaemonRuntimeEntries')) {
+    violations.push(`${relativePath}: must consume the package-owned daemon runtime layout`)
+  }
+}
+const electrobunConfig = await readFile(join(ROOT, 'electrobun.config.ts'), 'utf8')
+if (!electrobunConfig.includes('daemonRuntimeEntries(daemonManifest.files)')) {
+  violations.push('electrobun.config.ts: must derive copied daemon files from the package manifest')
 }
 
 if (violations.length > 0) {

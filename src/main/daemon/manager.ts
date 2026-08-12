@@ -36,11 +36,8 @@ function resolveDaemonScriptPath(): string {
     // Packaged: bin shipped via electron-builder `files`/`asarUnpack`.
     join(appPath, 'bin', 'codesurfd.mjs'),
     join(appPath, '..', 'app.asar.unpacked', 'bin', 'codesurfd.mjs'),
-    // Dev: we run from the source tree.
+    // Dev: use the same compatibility launcher from the source tree.
     join(process.cwd(), 'bin', 'codesurfd.mjs'),
-    // Fallback: the package's own bin (used if the launcher shim is removed).
-    join(appPath, 'packages', 'codesurf-daemon', 'bin', 'codesurfd.mjs'),
-    join(process.cwd(), 'packages', 'codesurf-daemon', 'bin', 'codesurfd.mjs'),
   ])
 }
 

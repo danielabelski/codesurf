@@ -4,7 +4,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { getDaemonPublicSpecifiers } from '@codesurf/daemon/package-layout'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
@@ -71,11 +72,18 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
     const tarballEntries = run('tar', ['-tzf', tarball])
       .split('\n')
       .filter(Boolean)
-    if (tarballEntries.some(path => /\/packages\/codesurf-daemon\/src(?:\/|$)/.test(path))) {
+    if (tarballEntries.some(path => (
+      /\/(?:packages\/codesurf-daemon|node_modules\/@codesurf\/daemon)\/src(?:\/|$)/.test(path)
+    ))) {
       throw new Error('Packaged npm tarball contains daemon source TypeScript')
     }
-    if (!tarballEntries.some(path => path.endsWith('/packages/codesurf-daemon/dist/index.js'))) {
-      throw new Error('Packaged npm tarball is missing compiled daemon dist')
+    for (const required of [
+      '/packages/codesurf-daemon/dist/index.js',
+      '/node_modules/@codesurf/daemon/dist/index.js',
+    ]) {
+      if (!tarballEntries.some(path => path.endsWith(required))) {
+        throw new Error(`Packaged npm tarball is missing daemon runtime: ${required}`)
+      }
     }
 
     writeFileSync(
@@ -107,35 +115,48 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
       throw new Error(`Unexpected packaged chat help output: ${chatHelp}`)
     }
 
-    const daemonPackage = join(installedRoot, 'packages', 'codesurf-daemon')
-    if (existsSync(join(daemonPackage, 'src'))) {
+    const compatibilityDaemonPackage = join(installedRoot, 'packages', 'codesurf-daemon')
+    const daemonPackage = join(installedRoot, 'node_modules', '@codesurf', 'daemon')
+    if (
+      existsSync(join(compatibilityDaemonPackage, 'src'))
+      || existsSync(join(daemonPackage, 'src'))
+    ) {
       throw new Error('Installed npm package contains daemon source TypeScript')
     }
     if (!existsSync(join(daemonPackage, 'dist', 'index.js'))) {
       throw new Error('Installed npm package is missing compiled daemon dist')
     }
-    const publicExports = [
-      '@codesurf/daemon',
-      '@codesurf/daemon/manager',
-      '@codesurf/daemon/client',
-      '@codesurf/daemon/sse',
-      '@codesurf/daemon/chat-cli',
-      '@codesurf/daemon/chat-session-store',
-      '@codesurf/daemon/paths',
-    ]
+    const installedDaemonManifest = JSON.parse(
+      readFileSync(join(daemonPackage, 'package.json'), 'utf8'),
+    )
+    const publicExports = getDaemonPublicSpecifiers(installedDaemonManifest)
     const importProbe = [
+      "import { createRequire } from 'node:module'",
+      "import { pathToFileURL } from 'node:url'",
+      `const packageRequire = createRequire(${JSON.stringify(pathToFileURL(join(installedRoot, 'package.json')).href)})`,
       `const exportsToLoad = ${JSON.stringify(publicExports)}`,
-      'await Promise.all(exportsToLoad.map(specifier => import(specifier)))',
-      "process.stdout.write('compiled-exports-ok')",
+      'await Promise.all(exportsToLoad.map(specifier => import(pathToFileURL(packageRequire.resolve(specifier)).href)))',
+      `await import(${JSON.stringify(pathToFileURL(join(daemonPackage, 'bin', 'harness-runtime.mjs')).href)})`,
+      "process.stdout.write('compiled-exports-and-harness-ok')",
     ].join(';')
     const importOutput = run(
       process.execPath,
       ['--no-experimental-strip-types', '--input-type=module', '-e', importProbe],
       { cwd: fixtureRoot },
     )
-    if (importOutput !== 'compiled-exports-ok') {
+    if (importOutput !== 'compiled-exports-and-harness-ok') {
       throw new Error(`Packaged daemon export smoke failed: ${importOutput}`)
     }
+
+    run(npmCommand, [
+      'ls',
+      '@codesurf/daemon',
+      '@ai-sdk/harness',
+      '@ai-sdk/harness-claude-code',
+      '@ai-sdk/harness-codex',
+      'better-sqlite3',
+      '--all',
+    ], { cwd: fixtureRoot })
 
     const nativeOutput = run(
       process.execPath,
@@ -171,7 +192,8 @@ export async function smokeNpmPackage(tarball = resolveTarball()) {
 
     console.log(`[smoke-npm-package] installed ${basename(tarball)}`)
     console.log(`[smoke-npm-package] ${cliOutput}`)
-    console.log('[smoke-npm-package] chat help and compiled exports loaded')
+    console.log('[smoke-npm-package] chat help, compiled exports, and lazy harness loaded')
+    console.log('[smoke-npm-package] bundled daemon dependency tree is valid')
     console.log('[smoke-npm-package] tarball contains dist and no daemon src')
     console.log('[smoke-npm-package] native modules loaded')
     console.log(`[smoke-npm-package] daemon healthy on protocol ${health.protocolVersion}`)

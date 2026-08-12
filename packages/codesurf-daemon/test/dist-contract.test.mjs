@@ -29,6 +29,7 @@ const COMPILED_EXPORTS = new Map([
   ['./peer-authority-policy', 'peer-authority-policy'],
   ['./peer-context-serialization', 'peer-context-serialization'],
   ['./node-tools', 'node-tools'],
+  ['./package-layout', 'package-layout'],
 ])
 
 async function readJson(path) {

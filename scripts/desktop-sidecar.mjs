@@ -22,6 +22,11 @@ import { spawnSync } from 'node:child_process'
 import { platform } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  getDaemonCompiledExports,
+  getDaemonPublicSpecifiers,
+  getDaemonRuntimeEntries,
+} from '@codesurf/daemon/package-layout'
 
 export const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const desktopDir = join(rootDir, 'desktop')
@@ -39,16 +44,6 @@ const nativeSdkAssetReadLimitBytes = 16 * 1024 * 1024
 const localRuntimePackages = [
   '@codesurf/daemon',
   '@codesurf/terminal-gateway',
-]
-const daemonPackageEntries = ['bin', 'dist', 'vendor', 'README.md', 'package.json']
-const daemonCompiledExports = [
-  '.',
-  './manager',
-  './client',
-  './sse',
-  './chat-cli',
-  './chat-session-store',
-  './paths',
 ]
 
 function ensureDirectory(path) {
@@ -83,25 +78,15 @@ function readPackageJson(path) {
 
 function assertDaemonDistLayout(source) {
   const manifest = readPackageJson(source)
-  for (const subpath of daemonCompiledExports) {
-    const target = manifest.exports?.[subpath]
-    if (
-      !target
-      || typeof target.types !== 'string'
-      || typeof target.import !== 'string'
-      || typeof target.default !== 'string'
-      || !target.types.startsWith('./dist/')
-      || !target.import.startsWith('./dist/')
-      || target.import !== target.default
-    ) {
-      throw new Error(`@codesurf/daemon export ${subpath} must resolve to compiled dist`)
-    }
+  const compiledExports = getDaemonCompiledExports(manifest)
+  for (const target of compiledExports) {
     for (const relativePath of [target.types, target.import]) {
       if (!existsSync(join(source, relativePath))) {
-        throw new Error(`@codesurf/daemon export ${subpath} is missing ${relativePath}`)
+        throw new Error(`@codesurf/daemon export ${target.subpath} is missing ${relativePath}`)
       }
     }
   }
+  return { manifest, compiledExports }
 }
 
 function verifyDaemonDist(root) {
@@ -109,7 +94,7 @@ function verifyDaemonDist(root) {
   if (!source || !existsSync(source)) {
     throw new Error(`Local @codesurf/daemon package is missing under ${root}`)
   }
-  assertDaemonDistLayout(source)
+  const { compiledExports } = assertDaemonDistLayout(source)
   const result = spawnSync(
     process.platform === 'win32' ? 'npm.cmd' : 'npm',
     ['--prefix', source, 'run', 'verify:dist'],
@@ -121,10 +106,9 @@ function verifyDaemonDist(root) {
       `@codesurf/daemon dist verification failed:\n${result.stdout || ''}${result.stderr || ''}`,
     )
   }
-  const importTargets = daemonCompiledExports.map(subpath => {
-    const manifest = readPackageJson(source)
-    return pathToFileURL(join(source, manifest.exports[subpath].import)).href
-  })
+  const importTargets = compiledExports.map(target => (
+    pathToFileURL(join(source, target.import)).href
+  ))
   const probe = `await Promise.all(${JSON.stringify(importTargets)}.map(target => import(target)))`
   const imported = spawnSync(
     process.execPath,
@@ -152,10 +136,10 @@ function copyLocalPackage(source, destination, name) {
     copy(source, destination)
     return
   }
-  assertDaemonDistLayout(source)
+  const { manifest } = assertDaemonDistLayout(source)
   rmSync(destination, { recursive: true, force: true })
   ensureDirectory(destination)
-  for (const entry of daemonPackageEntries) {
+  for (const entry of getDaemonRuntimeEntries(manifest)) {
     const entrySource = join(source, entry)
     if (!existsSync(entrySource)) {
       throw new Error(`@codesurf/daemon package entry is missing: ${entry}`)
@@ -413,9 +397,13 @@ export function stageSidecar({
 } = {}) {
   const sourceSupervisor = join(desktop, 'sidecar', 'supervisor.mjs')
   const sourceWebHost = join(root, 'scripts', 'web-host.mjs')
+  const sourceDaemonLauncher = join(root, 'bin', 'codesurfd.mjs')
   const terminalGateway = join(root, 'packages', 'codesurf-terminal-gateway', 'bin', 'codesurf-terminal-gateway.mjs')
   if (!existsSync(sourceSupervisor)) throw new Error(`Native supervisor is missing: ${sourceSupervisor}`)
   if (!existsSync(sourceWebHost)) throw new Error(`web-host is missing: ${sourceWebHost}`)
+  if (!existsSync(sourceDaemonLauncher)) {
+    throw new Error(`codesurfd compatibility launcher is missing: ${sourceDaemonLauncher}`)
+  }
   if (!existsSync(terminalGateway)) {
     throw new Error(`terminal gateway is missing: ${terminalGateway}. Build the workspace package before desktop:build.`)
   }
@@ -434,6 +422,7 @@ export function stageSidecar({
   chmodSync(join(stage, 'bin', platform() === 'win32' ? 'node.exe' : 'node'), 0o755)
   copy(sourceSupervisor, join(stage, 'supervisor.mjs'))
   copy(sourceWebHost, join(appRoot, 'scripts', 'web-host.mjs'))
+  copy(sourceDaemonLauncher, join(appRoot, 'bin', 'codesurfd.mjs'))
   stageRuntimeDependencies({ root, appRoot })
 
   writeFileSync(join(stage, 'runtime-manifest.json'), `${JSON.stringify({
@@ -513,6 +502,7 @@ export function assertPackageSidecar({ outputPath, target } = {}) {
     join(sidecar, 'bin', nodeName),
     join(sidecar, 'supervisor.mjs'),
     join(sidecar, 'app', 'scripts', 'web-host.mjs'),
+    join(sidecar, 'app', 'bin', 'codesurfd.mjs'),
     join(sidecar, 'app', 'packages', 'codesurf-daemon', 'bin', 'codesurfd.mjs'),
     join(sidecar, 'app', 'packages', 'codesurf-daemon', 'dist', 'index.js'),
     join(sidecar, 'app', 'packages', 'codesurf-daemon', 'dist', 'chat-cli.js'),
@@ -546,11 +536,15 @@ function assertSidecarRuntimeLoads({ sidecar, target }) {
   }
   const nodeBin = join(sidecar, 'bin', target === 'windows' ? 'node.exe' : 'node')
   const appRoot = join(sidecar, 'app')
-  const probe = "Promise.all([import('node-pty'), import('ws'), import('better-sqlite3'),"
-    + "import('@codesurf/daemon'), import('@codesurf/daemon/manager'),"
-    + "import('@codesurf/daemon/client'), import('@codesurf/daemon/sse'),"
-    + "import('@codesurf/daemon/chat-cli'), import('@codesurf/daemon/chat-session-store'),"
-    + "import('@codesurf/daemon/paths')])"
+  const daemonRoot = packagePath(appRoot, '@codesurf/daemon')
+  const daemonManifest = readPackageJson(daemonRoot)
+  const runtimeImports = [
+    'node-pty',
+    'ws',
+    'better-sqlite3',
+    ...getDaemonPublicSpecifiers(daemonManifest),
+  ]
+  const probe = `Promise.all(${JSON.stringify(runtimeImports)}.map(specifier => import(specifier)))`
     + '.then(() => process.exit(0))'
     + '.catch((error) => { console.error(error && error.message || error); process.exit(1) })'
   const result = spawnSync(nodeBin, ['-e', probe], { cwd: appRoot, stdio: 'inherit' })

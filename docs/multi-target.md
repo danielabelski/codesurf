@@ -36,6 +36,29 @@ vite.web.config.ts     standalone renderer for web/Native
 electron.vite.config.ts    Electron (unchanged)
 ```
 
+## Daemon module boundary
+
+`packages/codesurf-daemon` is the single source authority for the shared daemon
+and cross-host policy code. Electron, web, Native, and TUI adapters depend on its
+compiled `@codesurf/daemon/*` exports; the package never imports root `src/`,
+`test/`, or `scripts/` paths. Authored `bin/` modules are private implementation.
+The only executable boundary is the `codesurfd` manifest bin; root
+`bin/codesurfd.mjs` is a compatibility launcher with no daemon logic.
+
+Package-owned unit and daemon integration tests live under
+`packages/codesurf-daemon/test/`. Root tests cover host adapters and cross-surface
+contracts only. The enforced maintenance gates are:
+
+```bash
+npm --prefix packages/codesurf-daemon test  # isolated package, dist, pack, runtime
+npm run check:daemon-boundaries             # forbid host imports of package internals
+npm run check:daemon-interface              # compare the recursive feature surface
+```
+
+Intentional interface changes require `npm run update:daemon-interface`. CI has
+a daemon-only job that installs and tests the package before any root dependency
+installation can mask an undeclared dependency.
+
 ## Data flow
 
 ```

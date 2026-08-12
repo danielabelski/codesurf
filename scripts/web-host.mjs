@@ -527,7 +527,7 @@ async function daemonHealth(info) {
 }
 
 async function startOwnedDaemon() {
-  const daemonScript = resolve(ROOT, 'packages/codesurf-daemon/bin/codesurfd.mjs')
+  const daemonScript = resolve(ROOT, 'bin/codesurfd.mjs')
   if (!existsSync(daemonScript)) {
     throw new Error(`codesurfd not found at ${daemonScript}`)
   }

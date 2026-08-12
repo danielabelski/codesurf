@@ -45,9 +45,14 @@ Authored `bin/` modules are package-private implementation; `codesurfd` is the
 only executable boundary and is exposed through the manifest's `bin` field.
 The package is the source authority for context composition, prompt conventions,
 peer policy, and node-tool contracts; host-side files are compatibility facades
-only. No root build step writes into this package. The committed build is
-verified byte-for-byte before packaging, so stale generated output fails closed
-instead of silently shipping.
+only. Build hosts consume `@codesurf/daemon/package-layout`, making this
+manifest's `files` and compiled `exports` the single packaging contract instead
+of duplicating private directory lists. No root build step writes into this
+package. The committed build is verified byte-for-byte before packaging, so
+stale generated output fails closed instead of silently shipping. The umbrella
+`codesurf` npm artifact bundles this package and promotes its exact runtime
+dependencies into the published manifest, so a clean consumer does not rely on
+workspace-only dependency hoisting.
 
 ## Development
 

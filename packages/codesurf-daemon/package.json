@@ -92,6 +92,11 @@
       "types": "./dist/node-tools.d.ts",
       "import": "./dist/node-tools.js",
       "default": "./dist/node-tools.js"
+    },
+    "./package-layout": {
+      "types": "./dist/package-layout.d.ts",
+      "import": "./dist/package-layout.js",
+      "default": "./dist/package-layout.js"
     }
   },
   "bin": {

@@ -5,7 +5,6 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const https = require('https')
-const { pathToFileURL } = require('url')
 
 const APP_NAME = 'codesurf'
 const APP_DIR = path.join(__dirname, '..')
@@ -486,8 +485,7 @@ function getCurrentVersion() {
 
 function getDaemonPackageVersion() {
   try {
-    const pkgPath = path.join(APP_DIR, 'packages', 'codesurf-daemon', 'package.json')
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'))
+    const pkg = require('@codesurf/daemon/package.json')
     return typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version.trim() : '0.1.0'
   } catch {
     return '0.1.0'
@@ -495,8 +493,7 @@ function getDaemonPackageVersion() {
 }
 
 async function handleChatCommand(argv) {
-  const cliPath = path.join(APP_DIR, 'packages', 'codesurf-daemon', 'dist', 'chat-cli.js')
-  const { runCodesurfChatCli } = await import(pathToFileURL(cliPath).href)
+  const { runCodesurfChatCli } = await import('@codesurf/daemon/chat-cli')
   return await runCodesurfChatCli(argv, {
     appDir: APP_DIR,
     homeDir: CACHE_DIR,

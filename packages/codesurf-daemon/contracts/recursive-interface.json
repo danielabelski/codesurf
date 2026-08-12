@@ -15,6 +15,7 @@
     "fixtures",
     "manager",
     "node-tools",
+    "package-layout",
     "paths",
     "peer-authority-policy",
     "peer-context-policy",
@@ -39,6 +40,7 @@
     "f_bbef6b811b11a33a2642fed5ad2145ff",
     "f_0b1f6ccc9803323bae7b57de0352ee39",
     "f_76a80109257fe78b8450b61c2d3a7be8",
+    "f_b64cd6f1a1cc843abcc2205558563297",
     "f_20b23fe7620e51d012883bab1c4847e9",
     "f_dcabd26d35692194b67ab1ed17574045",
     "f_3220fc524e88af10c859c7d448af52c5",
@@ -53,7 +55,7 @@
   "query": "codesurf-daemon",
   "feature": "codesurf-daemon",
   "feature_id": "f_17a2e36a8c358bc7b1433695717a92ce",
-  "frozen_at": "2026-08-11T20:43:59Z",
+  "frozen_at": "2026-08-11T23:02:10Z",
   "contracts": [
     {
       "name": "AGENT_MODE_RESOLUTION_DENIED_ERROR",
@@ -2433,6 +2435,82 @@
         "Record<string, unknown>"
       ],
       "line": 482,
+      "surface": "production"
+    },
+    {
+      "name": "DaemonPackageExportTarget",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export interface DaemonPackageExportTarget",
+      "outputs": [
+        "interface DaemonPackageExportTarget"
+      ],
+      "line": 1,
+      "surface": "production"
+    },
+    {
+      "name": "DaemonPackageManifest",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export interface DaemonPackageManifest",
+      "outputs": [
+        "interface DaemonPackageManifest"
+      ],
+      "line": 7,
+      "surface": "production"
+    },
+    {
+      "name": "DaemonCompiledExport",
+      "kind": "interface",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export interface DaemonCompiledExport",
+      "outputs": [
+        "interface DaemonCompiledExport"
+      ],
+      "line": 12,
+      "surface": "production"
+    },
+    {
+      "name": "getDaemonRuntimeEntries",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export function getDaemonRuntimeEntries(manifest: DaemonPackageManifest): string[]",
+      "inputs": [
+        "manifest: DaemonPackageManifest"
+      ],
+      "outputs": [
+        "string[]"
+      ],
+      "line": 47,
+      "surface": "production"
+    },
+    {
+      "name": "getDaemonCompiledExports",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export function getDaemonCompiledExports( manifest: DaemonPackageManifest, ): DaemonCompiledExport[]",
+      "inputs": [
+        "manifest: DaemonPackageManifest"
+      ],
+      "outputs": [
+        "DaemonCompiledExport[]"
+      ],
+      "line": 58,
+      "surface": "production"
+    },
+    {
+      "name": "getDaemonPublicSpecifiers",
+      "kind": "function",
+      "path": "packages/codesurf-daemon/src/package-layout.ts",
+      "signature": "export function getDaemonPublicSpecifiers( manifest: DaemonPackageManifest, packageName = '@codesurf/daemon', ): string[]",
+      "inputs": [
+        "manifest: DaemonPackageManifest",
+        "packageName = '@codesurf/daemon'"
+      ],
+      "outputs": [
+        "string[]"
+      ],
+      "line": 92,
       "surface": "production"
     },
     {

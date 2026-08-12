@@ -123,7 +123,12 @@ describe('Native desktop sidecar staging', () => {
     writeFileSync(join(daemonDir, 'README.md'), '# daemon\n')
     writeFileSync(
       join(daemonDir, 'package.json'),
-      `${JSON.stringify({ name: '@codesurf/daemon', version: '0.1.0', exports })}\n`,
+      `${JSON.stringify({
+        name: '@codesurf/daemon',
+        version: '0.1.0',
+        files: ['bin/', 'dist/', 'vendor/', 'README.md'],
+        exports,
+      })}\n`,
     )
     mkdirSync(join(gatewayDir, 'bin'), { recursive: true })
     mkdirSync(join(gatewayDir, 'scripts'), { recursive: true })
