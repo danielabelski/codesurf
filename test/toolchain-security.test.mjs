@@ -27,10 +27,12 @@ const EXPECTED_TOOLCHAIN = {
     '@vitejs/plugin-react': '5.2.0',
     'brace-expansion': '5.0.9',
     ejs: '5.0.2',
+    electron: '41.10.5',
     'electron-builder': '26.15.3',
     eslint: '9.39.1',
     'eslint-plugin-react-hooks': '7.1.1',
     esbuild: '0.28.1',
+    'extract-zip': '2.0.1',
     globals: '17.8.0',
     'node-gyp': '12.4.0',
     postcss: '8.5.25',
@@ -45,8 +47,9 @@ const EXPECTED_OVERRIDES = {
   'brace-expansion': '$brace-expansion',
   ejs: '$ejs',
   esbuild: '$esbuild',
+  'fast-uri': '3.1.5',
   'monaco-editor': {
-    dompurify: '3.4.12',
+    dompurify: '3.4.13',
   },
   'vite-plugin-pwa': {
     'workbox-build': {
@@ -145,9 +148,10 @@ test('security-sensitive build tools remain on the reviewed exact versions', asy
   const exactTransitiveResolutions = {
     '@babel/core': '7.29.7',
     'brace-expansion': '5.0.9',
-    dompurify: '3.4.12',
+    dompurify: '3.4.13',
     ejs: '5.0.2',
     esbuild: '0.28.1',
+    'fast-uri': '3.1.5',
     'node-gyp': '12.4.0',
     '@rollup/plugin-terser': '1.0.0',
     'serialize-javascript': '7.0.7',
