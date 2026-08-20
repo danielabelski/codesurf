@@ -24,6 +24,7 @@ export interface ThinkingOption {
 export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
   claude: [
     { id: 'claude-fable-5', label: 'Fable 5' },
+    { id: 'claude-opus-5', label: 'Opus 5' },
     { id: 'claude-opus-4-8', label: 'Opus 4.8' },
     { id: 'claude-opus-4-7', label: 'Opus 4.7' },
     { id: 'claude-opus-4-6', label: 'Opus 4.6' },
@@ -33,6 +34,9 @@ export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
     { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
   ],
   codex: [
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
     { id: 'gpt-5.5', label: 'GPT-5.5' },
     { id: 'gpt-5.4', label: 'GPT-5.4' },
     { id: 'gpt-5.1-codex-mini', label: 'Codex Mini' },
@@ -42,8 +46,10 @@ export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
     { id: 'o3-mini', label: 'o3-mini' },
   ],
   opencode: [
+    { id: 'anthropic/claude-opus-5', label: 'Opus 5' },
     { id: 'anthropic/claude-sonnet-4-6', label: 'Sonnet 4.6' },
     { id: 'anthropic/claude-opus-4-6', label: 'Opus 4.6' },
+    { id: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
     { id: 'openai/gpt-5.4', label: 'GPT-5.4' },
     { id: 'openai/o4-mini', label: 'o4-mini' },
     { id: 'google/gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
@@ -52,12 +58,16 @@ export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
     { id: 'main', label: 'Main (default)', description: 'Configured default OpenClaw agent' },
   ],
   hermes: [
+    { id: 'openai-codex/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+    { id: 'openai-codex/gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+    { id: 'openai-codex/gpt-5.6-luna', label: 'GPT-5.6 Luna' },
     { id: 'openai-codex/gpt-5.5', label: 'GPT-5.5' },
     { id: 'openai-codex/gpt-5.4-mini', label: 'GPT-5.4 Mini' },
     { id: 'openai-codex/gpt-5.4', label: 'GPT-5.4' },
     { id: 'openai-codex/gpt-5.3-codex', label: 'Codex 5.3' },
     { id: 'openai-codex/gpt-5.1-codex-max', label: 'Codex Max' },
     { id: 'openai-codex/gpt-5.1-codex-mini', label: 'Codex Mini' },
+    { id: 'anthropic/claude-opus-5', label: 'Opus 5' },
     { id: 'anthropic/claude-opus-4-8', label: 'Opus 4.8' },
     { id: 'anthropic/claude-opus-4-7', label: 'Opus 4.7' },
     { id: 'anthropic/claude-opus-4-6', label: 'Opus 4.6' },
@@ -66,6 +76,7 @@ export const DEFAULT_MODELS: Record<BuiltinProvider, ModelOption[]> = {
     { id: 'gemini/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro' },
     { id: 'gemini/gemini-3-pro-preview', label: 'Gemini 3 Pro' },
     { id: 'gemini/gemini-3-flash-preview', label: 'Gemini 3 Flash' },
+    { id: 'openrouter/x-ai/grok-4.6', label: 'Grok 4.6', description: 'openrouter' },
     { id: 'openrouter/moonshotai/kimi-k2.6', label: 'Kimi K2.6', description: 'openrouter recommended' },
     { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', description: 'openrouter' },
     { id: 'openrouter/qwen/qwen3.6-plus', label: 'Qwen 3.6 Plus', description: 'openrouter' },

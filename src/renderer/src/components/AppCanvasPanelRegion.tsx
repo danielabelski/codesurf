@@ -1,5 +1,6 @@
-import React, { Suspense } from 'react'
-import type { LayoutTemplate, TileState } from '../../../shared/types'
+import React, { Suspense, type MutableRefObject } from 'react'
+import type { GroupState, LayoutTemplate, TileState } from '../../../shared/types'
+import { appendTileAndCommitSplit } from '../lib/layoutGroupMembership.ts'
 import type { AppTheme } from '../theme'
 import type { RenderTileBodyOptions } from '../hooks/useRenderTileBody'
 import {
@@ -38,7 +39,12 @@ export type AppCanvasPanelRegionProps = {
   onActivePanelChange: (panelId: string | null) => void
   onLaunchTemplate: (template: LayoutTemplate) => void | Promise<void>
   setTiles: React.Dispatch<React.SetStateAction<TileState[]>>
+  setGroups?: React.Dispatch<React.SetStateAction<GroupState[]>>
   setNextZIndex: React.Dispatch<React.SetStateAction<number>>
+  expandLayoutGroupId?: string | null
+  tilesRef?: MutableRefObject<TileState[]>
+  groupsRef?: MutableRefObject<GroupState[]>
+  onTabDropOutside?: (tileId: string, clientX: number, clientY: number) => void
 }
 
 export function AppCanvasPanelRegion(props: AppCanvasPanelRegionProps): JSX.Element | null {
@@ -62,17 +68,24 @@ export function AppCanvasPanelRegion(props: AppCanvasPanelRegionProps): JSX.Elem
     onActivePanelChange,
     onLaunchTemplate,
     setTiles,
+    setGroups,
     setNextZIndex,
+    expandLayoutGroupId,
+    tilesRef,
+    groupsRef,
+    onTabDropOutside,
   } = props
 
   if (!panelLayout) return null
 
   return (
-    <div style={{
-      position: 'absolute',
-      inset: 0,
-      zIndex: 50,
-    }}
+    <div
+      data-codesurf-fullscreen-panel=""
+      style={{
+        position: 'absolute',
+        inset: 0,
+        zIndex: 50,
+      }}
     >
       <Suspense fallback={null}>
         <LazyPanelLayout
@@ -110,8 +123,30 @@ export function AppCanvasPanelRegion(props: AppCanvasPanelRegionProps): JSX.Elem
               width: w,
               height: h,
               zIndex: nextZIndex,
+              ...(expandLayoutGroupId ? { groupId: expandLayoutGroupId } : {}),
             }
-            setTiles(prev => [...prev, newTile])
+            const latestTiles = tilesRef?.current ?? tiles
+            if (expandLayoutGroupId && groupsRef && setGroups && panelLayout) {
+              const result = appendTileAndCommitSplit({
+                tiles: latestTiles,
+                groups: groupsRef.current,
+                layout: panelLayout,
+                groupId: expandLayoutGroupId,
+                newTile,
+                panelId,
+                zone,
+              })
+              if (tilesRef) tilesRef.current = result.tiles
+              groupsRef.current = result.groups
+              setTiles(result.tiles)
+              setGroups(result.groups)
+              setNextZIndex(prev => prev + 1)
+              onLayoutChange(result.layout)
+              return
+            }
+            const nextTiles = [...latestTiles, newTile]
+            if (tilesRef) tilesRef.current = nextTiles
+            setTiles(nextTiles)
             setNextZIndex(prev => prev + 1)
             onLayoutChange(prev => prev ? splitLeaf(prev, panelId, newTile.id, zone) : prev)
           }}
@@ -122,6 +157,7 @@ export function AppCanvasPanelRegion(props: AppCanvasPanelRegionProps): JSX.Elem
             onLayoutChange(prev => prev ? closeToRightInLeaf(prev, panelId, tileId) : prev)
           }}
           onLaunchTemplate={onLaunchTemplate}
+          onTabDropOutside={onTabDropOutside}
         />
       </Suspense>
     </div>

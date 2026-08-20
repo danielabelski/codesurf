@@ -119,7 +119,7 @@ function App(): JSX.Element {
   const [chatReloadTokens, setChatReloadTokens] = useState<Record<string, number>>({})
   const [extActionsVersion, setExtActionsVersion] = useState(0)
   const [activePanelId, setActivePanelId] = useState<string | null>(null)
-  const [, setExpandLayoutGroupId] = useState<string | null>(null)
+  const [expandLayoutGroupId, setExpandLayoutGroupId] = useState<string | null>(null)
   const expandLayoutGroupIdRef = useRef<string | null>(null)
   // Non-layout group expanded as a fullscreen sub-canvas. Members stay free-floating.
   const [expandedCanvasGroupId, setExpandedCanvasGroupId] = useState<string | null>(null)
@@ -179,6 +179,7 @@ function App(): JSX.Element {
   useEffect(() => { activePanelIdRef.current = activePanelId }, [activePanelId])
   useEffect(() => { expandedTileIdRef.current = expandedTileId }, [expandedTileId])
   useEffect(() => { expandedCanvasGroupIdRef.current = expandedCanvasGroupId }, [expandedCanvasGroupId])
+  useEffect(() => { expandLayoutGroupIdRef.current = expandLayoutGroupId }, [expandLayoutGroupId])
   const currentWorkspaceIdRef = useRef<string | null>(workspace?.id ?? null)
   const workspaceTabsHydratedRef = useRef(false)
 
@@ -279,6 +280,8 @@ function App(): JSX.Element {
   // Keep tilesRef / groupsRef in sync with state
   tilesRef.current = tiles
   groupsRef.current = groups
+  const selectedTileIdRef = useRef<string | null>(selectedTileId)
+  selectedTileIdRef.current = selectedTileId
 
   // Context menus
   type CtxMenu = { x: number; y: number; items: MenuItem[] }
@@ -309,6 +312,7 @@ function App(): JSX.Element {
       activePanelIdRef,
       expandedTileIdRef,
       expandedCanvasGroupIdRef,
+      expandLayoutGroupIdRef,
       canvasPersistSuspendedRef,
     },
     setTiles,
@@ -406,6 +410,7 @@ function App(): JSX.Element {
     lockedConnectionsRef,
     savedLayoutRef,
     expandedCanvasGroupIdRef,
+    expandLayoutGroupIdRef,
     expandedCanvasPriorViewportRef,
     currentWorkspaceIdRef,
     expandedTileIdRef,
@@ -423,6 +428,7 @@ function App(): JSX.Element {
     setActivePanelId,
     setExpandedTileId,
     setExpandedCanvasGroupId,
+    setExpandLayoutGroupId,
     restoreViewport,
     resetViewportState,
     clearHistory,
@@ -670,6 +676,8 @@ function App(): JSX.Element {
     enterExpandedMode,
     enterTabbedView,
     handleCanvasEscape,
+    applyLivePanelLayout,
+    ejectPanelTab,
   } = useAppPanelViewMode({
     panelLayout,
     panelLayoutRef,
@@ -678,6 +686,8 @@ function App(): JSX.Element {
     expandedCanvasGroupIdRef,
     panelTileIdsRef,
     tilesRef,
+    groupsRef,
+    selectedTileIdRef,
     viewportRef,
     nextZIndexRef,
     persistCanvasStateRef,
@@ -786,11 +796,13 @@ function App(): JSX.Element {
     tilesRef,
     panelTileIdsRef,
     panelLayoutRef,
+    expandLayoutGroupIdRef,
     activePanelIdRef,
     viewportRef,
     nextZIndexRef,
     selectedTileId,
     setTiles,
+    setGroups,
     setNextZIndex,
     setSelectedTileId,
     setPanelLayout,
@@ -953,6 +965,7 @@ function App(): JSX.Element {
     viewport,
     nextZIndex,
     setTiles,
+    setGroups,
     setNextZIndex,
     setSelectedTileId,
     setSelectedTileIds,
@@ -1504,13 +1517,20 @@ function App(): JSX.Element {
     getInitialTileSize,
     snapValue,
     setPanelLayout,
+    applyLivePanelLayout,
     closeTile,
     addTile,
     exitExpandedMode,
     setActivePanelId,
     handleLaunchTemplate,
     setTiles,
+    setGroups,
     setNextZIndex,
+    expandLayoutGroupId,
+    tilesRef,
+    groupsRef,
+    screenToWorld,
+    ejectPanelTab,
   })
 
   useEffect(() => {
@@ -1726,17 +1746,22 @@ function App(): JSX.Element {
               pasteTiles={pasteTiles}
               setGroups={setGroups}
               setTiles={setTiles}
+              selectedTileId={selectedTileId}
+              selectedTileIds={selectedTileIds}
               setSelectedTileId={setSelectedTileId}
               setSelectedTileIds={setSelectedTileIds}
               saveCanvas={saveCanvas}
               persistCanvasState={persistCanvasState}
               tilesRef={tilesRef}
+              savedLayoutRef={savedLayoutRef}
               viewportRef={viewportRef}
               nextZIndexRef={nextZIndexRef}
               getPanelTileLabel={getPanelTileLabel}
               getPanelTileIcon={getPanelTileIcon}
               getInitialTileSize={getInitialTileSize}
               renderTileBody={renderTileBody}
+              screenToWorld={screenToWorld}
+              snapValue={snapValue}
             />
 
             <AppCanvasWorldOverlays dragState={dragState} guides={guides} />

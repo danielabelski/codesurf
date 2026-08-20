@@ -15,8 +15,10 @@ export type CanvasWorkspaceLoadAppliers = {
   setActivePanelId: (panelId: string | null) => void
   setExpandedTileId: (tileId: string | null) => void
   setExpandedCanvasGroupId: (groupId: string | null) => void
+  setExpandLayoutGroupId?: (groupId: string | null) => void
   savedLayoutRef: { current: PanelNode | null }
   expandedCanvasGroupIdRef: { current: string | null }
+  expandLayoutGroupIdRef?: { current: string | null }
   expandedCanvasPriorViewportRef: { current: CanvasState['viewport'] | null }
   // Always invoked with `saved.lockedConnections ?? []`, so the param is never
   // undefined — keep it non-nullable so a `Dispatch<SetStateAction<...>>` from
@@ -50,6 +52,11 @@ export function applySavedCanvasState(
   appliers.setExpandedTileId(saved.expandedTileId ?? null)
   appliers.setExpandedCanvasGroupId(saved.expandedCanvasGroupId ?? null)
   appliers.expandedCanvasGroupIdRef.current = saved.expandedCanvasGroupId ?? null
+  const expandId = saved.expandLayoutGroupId ?? null
+  const expandExists = Boolean(expandId && (saved.groups ?? []).some(group => group.id === expandId))
+  const nextExpandId = expandExists ? expandId : null
+  appliers.setExpandLayoutGroupId?.(nextExpandId)
+  if (appliers.expandLayoutGroupIdRef) appliers.expandLayoutGroupIdRef.current = nextExpandId
   appliers.expandedCanvasPriorViewportRef.current = saved.expandedCanvasPriorViewport ?? null
 }
 
@@ -62,9 +69,11 @@ export function applyEmptyCanvasWorkspaceState(
     | 'setActivePanelId'
     | 'setExpandedTileId'
     | 'setExpandedCanvasGroupId'
+    | 'setExpandLayoutGroupId'
     | 'setLockedConnections'
     | 'savedLayoutRef'
     | 'expandedCanvasGroupIdRef'
+    | 'expandLayoutGroupIdRef'
     | 'expandedCanvasPriorViewportRef'
   >,
   resetViewportState: () => void,
@@ -79,5 +88,7 @@ export function applyEmptyCanvasWorkspaceState(
   appliers.setExpandedTileId(null)
   appliers.setExpandedCanvasGroupId(null)
   appliers.expandedCanvasGroupIdRef.current = null
+  appliers.setExpandLayoutGroupId?.(null)
+  if (appliers.expandLayoutGroupIdRef) appliers.expandLayoutGroupIdRef.current = null
   appliers.expandedCanvasPriorViewportRef.current = null
 }

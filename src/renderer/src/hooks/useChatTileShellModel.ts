@@ -225,7 +225,7 @@ export function useChatTileShellModel(opts: UseChatTileShellModelOptions) {
     bargeIn: true,
   }
   const dictation = useChatDictation({ voiceSettings })
-  const { isDictating, dictationText, dictationError, toggleDictation } = dictation
+  const { isDictating, dictationText, dictationError, toggleDictation, clearDictationError } = dictation
   const autoSpeakEnabled = voiceSettings.autoSpeak === 'last-message'
   const [ttsState, setTtsState] = useState<TtsPlayerState>(() => ttsPlayer.state)
   useEffect(() => ttsPlayer.subscribe(setTtsState), [])
@@ -330,7 +330,7 @@ export function useChatTileShellModel(opts: UseChatTileShellModelOptions) {
     gitStatus, gitBranches, refreshGitState,
     ...persistence,
     updateBlockNote, exportNotesToClipboard,
-    voiceSettings, dictation, isDictating, dictationText, dictationError, toggleDictation,
+    voiceSettings, dictation, isDictating, dictationText, dictationError, toggleDictation, clearDictationError,
     autoSpeakEnabled, ttsState, lastAssistantMessage,
     planTodos, isPlanOpen, setIsPlanOpen, planUpdatedAt,
     pluginCommands, pluginSlashCommands,

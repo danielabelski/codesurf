@@ -7,6 +7,7 @@
  *   stop() releases the mic and tears down VAD.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { describeMicrophoneError, requestHostMicrophoneAccess } from '../lib/microphoneError'
 
 interface UseVadOptions {
   onSpeechStart?: () => void
@@ -24,9 +25,25 @@ interface UseVadResult {
   error: string | null
   start: () => Promise<void>
   stop: () => Promise<void>
+  clearError: () => void
 }
 
-type MicVAD = { start: () => void; pause: () => void; destroy: () => void }
+type MicVAD = { start: () => void | Promise<void>; pause: () => void | Promise<void>; destroy: () => void | Promise<void> }
+
+const MIC_CONSTRAINTS: MediaStreamConstraints = {
+  audio: {
+    channelCount: 1,
+    echoCancellation: true,
+    autoGainControl: true,
+    noiseSuppression: true,
+  },
+}
+
+function stopTracks(stream: MediaStream | null | undefined): void {
+  stream?.getTracks().forEach(track => {
+    try { track.stop() } catch { /* already stopped */ }
+  })
+}
 
 function getDefaultVadAssetPath(): string {
   if (typeof window === 'undefined') return './vad/'
@@ -39,12 +56,30 @@ export function useVoiceActivityDetector(opts: UseVadOptions = {}): UseVadResult
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const vadRef = useRef<MicVAD | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const startingRef = useRef(false)
   const optsRef = useRef(opts)
   optsRef.current = opts
 
   const start = useCallback(async () => {
-    if (vadRef.current) return
+    if (vadRef.current || startingRef.current) return
+    startingRef.current = true
+    setError(null)
+    // Open the mic (and AudioContext) in the same turn as the click/space
+    // gesture. MicVAD.new() first loads ONNX/WASM, which expires Chromium's
+    // transient user activation and otherwise fails with "Permission denied".
+    let stream: MediaStream | null = null
+    let audioContext: AudioContext | null = null
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Microphone is not available in this window')
+      }
+      await requestHostMicrophoneAccess()
+      audioContext = new AudioContext()
+      audioContextRef.current = audioContext
+      stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+      if (audioContext.state === 'suspended') await audioContext.resume()
+      const ownedStream = stream
       const mod = await import('@ricky0123/vad-web')
       const MicVAD = (mod as { MicVAD: { new: (cfg: Record<string, unknown>) => Promise<MicVAD> } }).MicVAD
       // Bundled assets live in renderer/public/vad/ so production builds
@@ -58,36 +93,55 @@ export function useVoiceActivityDetector(opts: UseVadOptions = {}): UseVadResult
         redemptionFrames: optsRef.current.redemptionFrames ?? 24,
         baseAssetPath,
         onnxWASMBasePath: baseAssetPath,
-        // The library defaults to silero_vad_v5.onnx; explicit just to be safe
-        // and survivable under Electron's tighter loader policies.
         model: 'v5',
+        audioContext,
+        startOnLoad: true,
+        getStream: async () => ownedStream,
+        pauseStream: async (active: MediaStream) => { stopTracks(active) },
+        resumeStream: async () => navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS),
         onSpeechStart: () => { setIsSpeaking(true); optsRef.current.onSpeechStart?.() },
         onSpeechEnd: (audio: Float32Array) => { setIsSpeaking(false); optsRef.current.onSpeechEnd?.(audio) },
         onVADMisfire: () => { setIsSpeaking(false); optsRef.current.onMisfire?.() },
       })
+      stream = null
+      audioContext = null
       vadRef.current = vad
-      vad.start()
       setIsListening(true)
       setError(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      stopTracks(stream)
+      if (audioContext) {
+        try { await audioContext.close() } catch { /* ignore */ }
+        if (audioContextRef.current === audioContext) audioContextRef.current = null
+      }
+      setError(describeMicrophoneError(err))
       setIsListening(false)
+    } finally {
+      startingRef.current = false
     }
   }, [])
 
   const stop = useCallback(async () => {
     const v = vadRef.current
-    if (!v) return
-    try { v.pause() } catch { /* ignore */ }
-    try { v.destroy() } catch { /* ignore */ }
     vadRef.current = null
+    if (v) {
+      try { await v.pause() } catch { /* ignore */ }
+      try { await v.destroy() } catch { /* ignore */ }
+    }
+    const ctx = audioContextRef.current
+    audioContextRef.current = null
+    if (ctx) {
+      try { await ctx.close() } catch { /* ignore */ }
+    }
     setIsListening(false)
     setIsSpeaking(false)
   }, [])
 
   useEffect(() => () => { void stop() }, [stop])
 
-  return { isListening, isSpeaking, error, start, stop }
+  const clearError = useCallback(() => setError(null), [])
+
+  return { isListening, isSpeaking, error, start, stop, clearError }
 }
 
 /** Encode Float32 mono 16kHz PCM as a WAV ArrayBuffer for STT upload. */

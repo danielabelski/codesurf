@@ -7,6 +7,7 @@ import { createChatStreamScope } from '../src/main/chat/room-stream-scope.ts'
 import {
   hasNonEmptyProviderResult,
   MAX_STABLE_SESSION_CONTEXTS,
+  StableContextAnnouncementCache,
   StableSessionContextCache,
 } from '../src/main/chat/stable-session-context.ts'
 
@@ -313,6 +314,37 @@ test('cache uses bounded LRU eviction and evicted sessions reinstall context', (
   assert.equal(select(scopeB, 'b').contextPrompt, STABLE_CONTEXT)
   assert.equal(cache.size, 2)
   assert.ok(MAX_STABLE_SESSION_CONTEXTS >= cache.size)
+})
+
+test('workspace instruction chips announce once until content or session changes', () => {
+  const cache = new StableContextAnnouncementCache()
+  const input = {
+    workspaceId: 'workspace-a',
+    cardId: 'card-a',
+    kind: 'memory',
+    content: '## Workspace Instructions\nFollow AGENTS.md',
+  }
+
+  assert.equal(cache.consume(input), true)
+  assert.equal(cache.consume({ ...input, sessionId: 'session-a' }), false)
+  assert.equal(cache.consume({ ...input, sessionId: 'session-a' }), false)
+  assert.equal(cache.consume({
+    ...input,
+    sessionId: 'session-a',
+    content: '## Workspace Instructions\nUpdated rules',
+  }), true)
+  assert.equal(cache.consume({
+    ...input,
+    sessionId: 'session-b',
+    content: '## Workspace Instructions\nUpdated rules',
+  }), true)
+  cache.clear('workspace-a', 'card-a')
+  assert.equal(cache.consume({
+    ...input,
+    sessionId: 'session-b',
+    content: '## Workspace Instructions\nUpdated rules',
+  }), true)
+  assert.equal(cache.consume({ ...input, kind: 'skills', sessionId: 'session-b' }), true)
 })
 
 test('runtime provider wiring uses the cache and Claude retains its true system channel', () => {

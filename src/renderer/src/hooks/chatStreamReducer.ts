@@ -123,10 +123,12 @@ export function applyChatStreamEvent(m: ChatMessage, event: ChatStreamEvent): Ch
       const thinkingId = typeof event.thinkingId === 'string'
         ? event.thinkingId
         : `think-${Date.now()}`
+      const existing = m.thinkingBlocks ?? []
+      if (existing.some(block => block.id === thinkingId)) return m
       return {
         ...m,
         thinking: { content: '', done: false, id: thinkingId },
-        thinkingBlocks: [...(m.thinkingBlocks ?? []), { id: thinkingId, content: '', done: false }],
+        thinkingBlocks: [...existing, { id: thinkingId, content: '', done: false }],
         contentBlocks: [...(m.contentBlocks ?? []), { type: 'thinking' as const, thinkingId }],
       }
     }

@@ -1,4 +1,4 @@
-import React, { Suspense, type Dispatch, type SetStateAction } from 'react'
+import React, { Suspense, type Dispatch, type MutableRefObject, type SetStateAction } from 'react'
 import {
   Ungroup,
   Grid2x2X,
@@ -10,15 +10,24 @@ import {
   LayoutGrid,
 } from 'lucide-react'
 import type { GroupState, TileState } from '../../../../shared/types'
+import { appendTileAndCommitSplit, commitGroupLayout, ejectTileFromLayout, pointerEjectPosition } from '../../lib/layoutGroupMembership.ts'
 import type { CanvasDragState, CanvasViewport, PersistCanvasStateFn, SaveCanvasFn } from '../../hooks/useCanvasEngine'
 import type { PanelNode } from '../panelLayoutTree'
 import {
   closeOthersInLeaf,
   closeToRightInLeaf,
   removeTileFromTree,
-  splitLeaf,
 } from '../panelLayoutTree'
 import { GroupResizeHandles, isGroupDragActive } from './groupResizeHandles'
+import {
+  groupChromeColors,
+  isGroupChromeActive,
+  LAYOUT_FRAME_BORDER_PX,
+  LAYOUT_FRAME_LEAF_RADII,
+  LAYOUT_FRAME_RADIUS_PX,
+} from '../../lib/groupChrome.ts'
+
+const CHROME_FADE = 'border-color 160ms ease, background-color 160ms ease, color 160ms ease'
 
 const LazyPanelLayout = React.lazy(() => import('../PanelLayout').then(m => ({ default: m.PanelLayout })))
 
@@ -59,17 +68,22 @@ export type CanvasGroupFramesProps = {
   pasteTiles: (pos?: { x: number, y: number }, intoGroupId?: string) => void
   setGroups: Dispatch<SetStateAction<GroupState[]>>
   setTiles: Dispatch<SetStateAction<TileState[]>>
+  selectedTileId: string | null
+  selectedTileIds: Set<string>
   setSelectedTileId: Dispatch<SetStateAction<string | null>>
   setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
   saveCanvas: SaveCanvasFn
   persistCanvasState: PersistCanvasStateFn
   tilesRef: React.MutableRefObject<TileState[]>
+  savedLayoutRef?: MutableRefObject<PanelNode | null>
   viewportRef: React.MutableRefObject<CanvasViewport>
   nextZIndexRef: React.MutableRefObject<number>
   getPanelTileLabel: (tileId: string) => string
   getPanelTileIcon: (tileId: string) => string | undefined
   getInitialTileSize: (type: TileState['type']) => { w: number, h: number }
   renderTileBody: (tile: TileState) => React.ReactNode
+  screenToWorld: (sx: number, sy: number) => { x: number, y: number }
+  snapValue: (value: number) => number
 }
 
 export function CanvasGroupFrames({
@@ -97,17 +111,22 @@ export function CanvasGroupFrames({
   pasteTiles,
   setGroups,
   setTiles,
+  selectedTileId,
+  selectedTileIds,
   setSelectedTileId,
   setSelectedTileIds,
   saveCanvas,
   persistCanvasState,
   tilesRef,
+  savedLayoutRef,
   viewportRef,
   nextZIndexRef,
   getPanelTileLabel,
   getPanelTileIcon,
   getInitialTileSize,
   renderTileBody,
+  screenToWorld,
+  snapValue,
 }: CanvasGroupFramesProps) {
   const sortedGroups = [...groups].sort(
     (a, b) => (a.parentGroupId ? 1 : 0) - (b.parentGroupId ? 1 : 0),
@@ -128,9 +147,15 @@ export function CanvasGroupFrames({
           const lb = b
           const layout = g.layout as PanelNode
           const color = g.color ?? '#4a9eff'
-          const borderColor = `${color}bb`
-          const labelColor = `${color}ee`
           const isDraggingThis = dragState.type === 'group' && dragState.groupId === g.id
+          const memberIds = collectGroupTileIds(g.id)
+          const chromeActive = isGroupChromeActive({
+            memberIds,
+            selectedTileId,
+            selectedTileIds,
+            dragging: isDraggingThis,
+          })
+          const { border: borderColor, label: labelColor, headerFill } = groupChromeColors(color, chromeActive)
           const headerHeight = 32
 
           return (
@@ -144,13 +169,14 @@ export function CanvasGroupFrames({
                 top: lb.y,
                 width: lb.w,
                 height: lb.h,
-                border: `2px solid ${borderColor}`,
-                borderRadius: 12,
+                border: `${LAYOUT_FRAME_BORDER_PX}px solid ${borderColor}`,
+                borderRadius: LAYOUT_FRAME_RADIUS_PX,
                 background: theme.surface.panel,
                 zIndex: isDraggingThis ? 99989 : 8,
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 cursor: 'default',
+                transition: CHROME_FADE,
               }}
               onMouseDown={event => event.stopPropagation()}
             >
@@ -165,14 +191,17 @@ export function CanvasGroupFrames({
                   alignItems: 'center',
                   gap: 8,
                   padding: '0 10px',
-                  background: `${color}22`,
+                  background: headerFill,
                   borderBottom: `1px solid ${borderColor}`,
                   cursor: isDraggingThis ? 'grabbing' : 'grab',
                   userSelect: 'none',
                   boxSizing: 'border-box',
+                  transition: CHROME_FADE,
                 }}
                 onMouseDown={event => {
                   event.stopPropagation()
+                  setSelectedTileIds(new Set(memberIds))
+                  setSelectedTileId(memberIds[0] ?? null)
                   setDragState({
                     type: 'group',
                     groupId: g.id,
@@ -193,6 +222,7 @@ export function CanvasGroupFrames({
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
+                  transition: 'color 160ms ease',
                 }}>
                   {g.label ?? 'layout'}
                 </span>
@@ -235,6 +265,10 @@ export function CanvasGroupFrames({
                 <Suspense fallback={null}>
                   <LazyPanelLayout
                     root={layout}
+                    dockMinEdgePx={28}
+                    insetBottom={0}
+                    outerRadii={LAYOUT_FRAME_LEAF_RADII}
+                    flushLeafChrome
                     getTileLabel={getPanelTileLabel}
                     renderTile={(tileId) => {
                       const tile = tiles.find(candidate => candidate.id === tileId)
@@ -247,17 +281,26 @@ export function CanvasGroupFrames({
                     }}
                     onLayoutChange={(newLayout) => {
                       setGroups(prev => {
-                        const updated = prev.map(group => group.id === g.id ? { ...group, layout: newLayout } : group)
-                        setTimeout(() => persistCanvasState(tilesRef.current, viewportRef.current, nextZIndexRef.current, updated), 0)
-                        return updated
+                        const committed = commitGroupLayout(tilesRef.current, prev, g.id, newLayout)
+                        tilesRef.current = committed.tiles
+                        if (savedLayoutRef) savedLayoutRef.current = newLayout
+                        setTiles(committed.tiles)
+                        setTimeout(() => persistCanvasState(committed.tiles, viewportRef.current, nextZIndexRef.current, committed.groups), 0)
+                        return committed.groups
                       })
                     }}
                     onCloseTab={(tileId) => {
-                      setGroups(prev => prev.map(group => {
-                        if (group.id !== g.id || !group.layout) return group
+                      setGroups(prev => {
+                        const group = prev.find(candidate => candidate.id === g.id)
+                        if (!group?.layout) return prev
                         const newLayout = removeTileFromTree(group.layout as PanelNode, tileId)
-                        return { ...group, layout: newLayout ?? undefined }
-                      }))
+                        const committed = commitGroupLayout(tilesRef.current, prev, g.id, newLayout)
+                        tilesRef.current = committed.tiles
+                        if (savedLayoutRef) savedLayoutRef.current = newLayout
+                        setTiles(committed.tiles)
+                        setTimeout(() => persistCanvasState(committed.tiles, viewportRef.current, nextZIndexRef.current, committed.groups), 0)
+                        return committed.groups
+                      })
                     }}
                     onAddTile={() => { /* handled externally */ }}
                     onExit={() => revertLayoutGroup(g.id)}
@@ -265,6 +308,31 @@ export function CanvasGroupFrames({
                     onActivePanelChange={() => { /* no-op for embedded */ }}
                     getTileType={(tileId) => tiles.find(tile => tile.id === tileId)?.type ?? 'note'}
                     getTileIcon={getPanelTileIcon}
+                    onTabDropOutside={(tileId, clientX, clientY) => {
+                      const world = screenToWorld(clientX, clientY)
+                      const current = tilesRef.current.find(candidate => candidate.id === tileId)
+                      const fallback = getInitialTileSize(current?.type ?? 'note')
+                      const width = current?.width || fallback.w
+                      const z = nextZIndexRef.current
+                      const position = pointerEjectPosition(world, width, snapValue)
+                      setGroups(prev => {
+                        const ejected = ejectTileFromLayout({
+                          tiles: tilesRef.current,
+                          groups: prev,
+                          groupId: g.id,
+                          tileId,
+                          position,
+                          zIndex: z,
+                        })
+                        tilesRef.current = ejected.tiles
+                        setTiles(ejected.tiles)
+                        setNextZIndex(next => next + 1)
+                        setSelectedTileId(tileId)
+                        setSelectedTileIds(new Set())
+                        persistCanvasState(ejected.tiles, viewportRef.current, z + 1, ejected.groups)
+                        return ejected.groups
+                      })
+                    }}
                     onSplitNew={(panelId, tileType, zone) => {
                       const { w, h } = getInitialTileSize(tileType as TileState['type'])
                       const newTile: TileState = {
@@ -277,21 +345,49 @@ export function CanvasGroupFrames({
                         zIndex: nextZIndex,
                         groupId: g.id,
                       }
-                      setTiles(prev => [...prev, newTile])
+                      const current = groups.find(candidate => candidate.id === g.id)
+                      if (!current?.layout) return
+                      const result = appendTileAndCommitSplit({
+                        tiles: tilesRef.current,
+                        groups,
+                        layout: current.layout as PanelNode,
+                        groupId: g.id,
+                        newTile,
+                        panelId,
+                        zone,
+                      })
+                      tilesRef.current = result.tiles
+                      setTiles(result.tiles)
                       setNextZIndex(prev => prev + 1)
-                      setGroups(prev => prev.map(group => group.id === g.id && group.layout
-                        ? { ...group, layout: splitLeaf(group.layout as PanelNode, panelId, newTile.id, zone) }
-                        : group))
+                      if (savedLayoutRef) savedLayoutRef.current = result.layout
+                      setGroups(result.groups)
+                      setTimeout(() => persistCanvasState(result.tiles, viewportRef.current, nextZIndexRef.current, result.groups), 0)
                     }}
                     onCloseOthers={(panelId, tileId) => {
-                      setGroups(prev => prev.map(group => group.id === g.id && group.layout
-                        ? { ...group, layout: closeOthersInLeaf(group.layout as PanelNode, panelId, tileId) }
-                        : group))
+                      setGroups(prev => {
+                        const group = prev.find(candidate => candidate.id === g.id)
+                        if (!group?.layout) return prev
+                        const newLayout = closeOthersInLeaf(group.layout as PanelNode, panelId, tileId)
+                        const committed = commitGroupLayout(tilesRef.current, prev, g.id, newLayout)
+                        tilesRef.current = committed.tiles
+                        if (savedLayoutRef) savedLayoutRef.current = newLayout
+                        setTiles(committed.tiles)
+                        setTimeout(() => persistCanvasState(committed.tiles, viewportRef.current, nextZIndexRef.current, committed.groups), 0)
+                        return committed.groups
+                      })
                     }}
                     onCloseToRight={(panelId, tileId) => {
-                      setGroups(prev => prev.map(group => group.id === g.id && group.layout
-                        ? { ...group, layout: closeToRightInLeaf(group.layout as PanelNode, panelId, tileId) }
-                        : group))
+                      setGroups(prev => {
+                        const group = prev.find(candidate => candidate.id === g.id)
+                        if (!group?.layout) return prev
+                        const newLayout = closeToRightInLeaf(group.layout as PanelNode, panelId, tileId)
+                        const committed = commitGroupLayout(tilesRef.current, prev, g.id, newLayout)
+                        tilesRef.current = committed.tiles
+                        if (savedLayoutRef) savedLayoutRef.current = newLayout
+                        setTiles(committed.tiles)
+                        setTimeout(() => persistCanvasState(committed.tiles, viewportRef.current, nextZIndexRef.current, committed.groups), 0)
+                        return committed.groups
+                      })
                     }}
                     onLaunchTemplate={() => { /* no-op in embedded mode */ }}
                   />
@@ -304,10 +400,15 @@ export function CanvasGroupFrames({
         const isNested = !!g.parentGroupId
         const defaultColor = isNested ? '#ffb432' : '#4a9eff'
         const color = g.color ?? defaultColor
-        const borderColor = `${color}cc`
-        const bgColor = `${color}14`
-        const labelColor = `${color}ee`
         const isDraggingThis = isGroupDragActive(dragState, g.id)
+        const memberIds = collectGroupTileIds(g.id)
+        const chromeActive = isGroupChromeActive({
+          memberIds,
+          selectedTileId,
+          selectedTileIds,
+          dragging: isDraggingThis,
+        })
+        const { border: borderColor, label: labelColor, fill: bgColor } = groupChromeColors(color, chromeActive)
 
         return (
           <div
@@ -320,20 +421,22 @@ export function CanvasGroupFrames({
               top: b.y,
               width: b.w,
               height: b.h,
-              border: `2px dashed ${borderColor}`,
-              borderRadius: 12,
+              border: `${LAYOUT_FRAME_BORDER_PX}px dashed ${borderColor}`,
+              borderRadius: LAYOUT_FRAME_RADIUS_PX,
               background: bgColor,
               zIndex: isDraggingThis ? 99989 : ('auto' as React.CSSProperties['zIndex']),
               boxSizing: 'border-box',
               cursor: isDraggingThis ? 'grabbing' : 'grab',
+              transition: CHROME_FADE,
             }}
             onMouseDown={event => {
               if ((event.target as HTMLElement) !== event.currentTarget) return
               event.stopPropagation()
-              const ids = collectGroupTileIds(g.id)
               const snapshots = tiles
-                .filter(tile => ids.includes(tile.id))
+                .filter(tile => memberIds.includes(tile.id))
                 .map(tile => ({ id: tile.id, x: tile.x, y: tile.y }))
+              setSelectedTileIds(new Set(memberIds))
+              setSelectedTileId(memberIds[0] ?? null)
               setDragState({ type: 'group', groupId: g.id, startX: event.clientX, startY: event.clientY, snapshots })
             }}
           >
@@ -481,6 +584,7 @@ export function CanvasGroupFrames({
                   cursor: 'text',
                   textTransform: 'uppercase',
                   letterSpacing: 0.5,
+                  transition: 'color 160ms ease',
                 }}
               >
                 {g.label ?? 'group'}

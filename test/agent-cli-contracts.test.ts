@@ -8,6 +8,7 @@ import {
   buildCursorAgentPrintArgs,
   buildGeminiPromptArgs,
   buildHermesChatArgs,
+  hermesChatHelpSupportsStreamJson,
   buildKiloRunArgs,
   buildOpenClawAgentArgs,
   buildOpenCodeRunArgs,
@@ -48,7 +49,20 @@ describe('agent CLI contract builders', () => {
       '--resume', 'hermes-session-1',
       '--ignore-rules',
     ])
-    expectNoFlags(args, ['--ignore-user-config', '--yolo'])
+    expectNoFlags(args, ['--ignore-user-config', '--yolo', '--stream-json'])
+  })
+
+  test('only emits --stream-json when the installed Hermes chat help advertises it', () => {
+    expect(hermesChatHelpSupportsStreamJson(`
+      -Q, --quiet           Quiet mode for programmatic use
+      --resume SESSION_ID
+    `)).toBe(false)
+    expect(hermesChatHelpSupportsStreamJson('unrecognized arguments: --stream-json')).toBe(false)
+    expect(hermesChatHelpSupportsStreamJson('  --stream-json     NDJSON events on stdout')).toBe(true)
+
+    const streamed = buildHermesChatArgs({ prompt: 'hi', streamJson: true })
+    expect(streamed).toContain('--stream-json')
+    expectNoFlags(streamed, ['--quiet'])
   })
 
   test('captures Hermes session ids while removing them from visible output', () => {
@@ -323,6 +337,7 @@ describe('agent CLI contract builders', () => {
     const source = readFileSync(`${process.cwd()}/src/main/chat/providers/hermes.ts`, 'utf8')
 
     expect(source).toContain('buildHermesSpawnArgs({')
+    expect(source).toContain('hermesBinarySupportsStreamJson(hermesBin)')
     expect(source).toContain('sanitizeAgentCliDiagnostic(stderrBuf.trim())')
     expect(source).not.toContain("args.push('--model', req.model)")
   })

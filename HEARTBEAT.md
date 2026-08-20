@@ -40,6 +40,8 @@ or this file is empty, add one observation from the codebase. Then stop.
 
 ## Done
 
+- [x] FIX: Daemon Claude jobs failed with `Native CLI binary for darwin-arm64 not found` — DONE 2026-08-20. `packages/codesurf-daemon/bin/chat-jobs.mjs` was the only `query()` call site that never set `pathToClaudeCodeExecutable`, so any pruned/mid-install `@anthropic-ai/claude-agent-sdk-<platform>` optional package killed every chat job with no fallback. Added `resolveClaudeExecutable(homeDir)` (bundled native binary -> `~/.codesurf/agent-paths.json` -> PATH) and wired it into the Claude options, matching `src/main/chat/providers/claude.ts:454`.
+
 - [x] FIX: Chat memory guard is now much more aggressive, and repeated WebContents destroyed listeners no longer stack up — DONE 2026-04-12. `src/renderer/src/components/ChatTile.tsx` now compacts older finished chat messages by dropping rich interleaved layout data, trimming tool/thinking payloads, lowering render/live caps, and flattening old blocks back to simpler text for memory safety. `src/main/ipc/bus.ts`, `src/main/ipc/terminal.ts`, and `src/main/ipc/fs.ts` now attach only one destroyed cleanup listener per renderer `WebContents`, fixing the earlier `MaxListenersExceededWarning` pattern.
 
 - [x] FIX: Discovery edges no longer stack directly on top of each other, and locked edges suppress same-pair proximity edges — DONE 2026-04-11. `src/renderer/src/App.tsx` now assigns lane offsets to identical ambient routes and gives locked connections precedence so only the locked route remains for that pair.

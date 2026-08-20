@@ -2,6 +2,7 @@ import { spawn, execFileSync } from 'child_process'
 import { getAgentPath, getShellEnvPath } from '../../agent-paths'
 import { buildSafeSpawnEnv } from '../../ipc/terminal-helpers'
 import {
+  hermesChatHelpSupportsStreamJson,
   sanitizeAgentCliDiagnostic,
 } from '../../agents/agent-cli-contracts'
 import { buildHermesSpawnArgs } from './agent-mode-payloads'
@@ -30,6 +31,37 @@ import { isProviderAcceptanceEvent } from '../provider-acceptance.ts'
 
 // Store hermes session IDs for multi-turn resume
 const hermesSessionIds = new Map<string, string>()
+
+/** Hermes often re-emits the full thinking/text snapshot; keep only the new tail. */
+function hermesSnapshotTail(incoming: string, accumulated: string): string {
+  if (!incoming) return ''
+  if (accumulated === incoming || (accumulated && accumulated.endsWith(incoming))) return ''
+  if (accumulated && incoming.startsWith(accumulated)) return incoming.slice(accumulated.length)
+  if (accumulated && accumulated.startsWith(incoming)) return ''
+  return incoming
+}
+
+const hermesStreamJsonSupport = new Map<string, boolean>()
+
+function hermesBinarySupportsStreamJson(bin: string): boolean {
+  const cached = hermesStreamJsonSupport.get(bin)
+  if (cached != null) return cached
+  const shellPath = getShellEnvPath()
+  let help = ''
+  try {
+    help = execFileSync(bin, ['chat', '--help'], {
+      encoding: 'utf-8',
+      timeout: 8000,
+      env: buildSafeSpawnEnv({ ...(shellPath && { PATH: shellPath }) }),
+    })
+  } catch (err) {
+    const failed = err as { stdout?: string, stderr?: string }
+    help = `${failed.stdout ?? ''}\n${failed.stderr ?? ''}`
+  }
+  const supported = hermesChatHelpSupportsStreamJson(help)
+  hermesStreamJsonSupport.set(bin, supported)
+  return supported
+}
 
 function resolveHermesBinary(): string | null {
   const detected = getAgentPath('hermes')
@@ -98,6 +130,7 @@ export function chatHermes(req: ChatRequest): void {
       userContent: lastUserMsg.content,
       existingSessionId,
       contextPrompt: stableContext.contextPrompt,
+      streamJson: hermesBinarySupportsStreamJson(hermesBin),
     })
   } catch (err) {
     invalidateStableContextSelection(stableContext)
@@ -140,6 +173,8 @@ export function chatHermes(req: ChatRequest): void {
   let stdoutBuf = ''
   let hadProviderError = false
   let sawProviderAcceptance = false
+  let accumulatedThinking = ''
+  let accumulatedText = ''
   const noteProviderAcceptance = (): void => {
     sawProviderAcceptance = true
     markRoomPromptAccepted(scope)
@@ -185,15 +220,23 @@ export function chatHermes(req: ChatRequest): void {
           }
           break
         case 'text':
-          if (typeof evt.text === 'string') {
-            noteProviderAcceptance()
-            sendStream(scope, { type: 'text', text: evt.text })
+          if (typeof evt.text === 'string' && evt.text) {
+            const tail = hermesSnapshotTail(evt.text, accumulatedText)
+            if (tail) {
+              accumulatedText += tail
+              noteProviderAcceptance()
+              sendStream(scope, { type: 'text', text: tail })
+            }
           }
           break
         case 'thinking':
-          if (typeof evt.text === 'string') {
-            noteProviderAcceptance()
-            sendStream(scope, { type: 'thinking', text: evt.text })
+          if (typeof evt.text === 'string' && evt.text) {
+            const tail = hermesSnapshotTail(evt.text, accumulatedThinking)
+            if (tail) {
+              accumulatedThinking += tail
+              noteProviderAcceptance()
+              sendStream(scope, { type: 'thinking', text: tail })
+            }
           }
           break
         case 'tool_start':

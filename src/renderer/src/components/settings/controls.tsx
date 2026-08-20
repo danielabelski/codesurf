@@ -108,6 +108,7 @@ export const SANS_FONTS = sortFonts([
   '"Helvetica Neue", Helvetica, Arial, sans-serif',
   '"Inter", "Segoe UI", sans-serif',
   '"Geist", "SF Pro Text", sans-serif',
+  '"Manrope", "SF Pro Text", "Segoe UI", sans-serif',
   '"Armata", sans-serif',
   '"Blinker", sans-serif',
   '"Datatype", sans-serif',

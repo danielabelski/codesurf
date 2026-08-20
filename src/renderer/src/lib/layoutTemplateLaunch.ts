@@ -1,15 +1,18 @@
-import type { LayoutTemplate, LayoutTemplateNode, LockedConnection, TileState } from '../../../shared/types'
+import type { GroupState, LayoutTemplate, LayoutTemplateNode, LockedConnection, TileState } from '../../../shared/types.ts'
+import { attachLayoutGroupToGenerated } from './layoutGroupMembership.ts'
 import {
   findFirstLeafId,
   type PanelNode,
-} from '../components/panelLayoutTree'
+} from '../components/panelLayoutTree.ts'
 
 export type GeneratedLayoutTemplate = {
   tiles: TileState[]
+  groups: GroupState[]
   panelLayout: PanelNode
   activePanelId: string
   connections: LockedConnection[]
   nextZIndex: number
+  expandLayoutGroupId: string
 }
 
 const DEFAULT_VIEWPORT_WIDTH = 1600
@@ -128,11 +131,18 @@ export function generateLayoutFromTemplate(
   const generatedActivePanelId = findFirstLeafId(generatedPanelLayout)
   if (!generatedActivePanelId) return null
 
-  return {
+  const attached = attachLayoutGroupToGenerated({
     tiles: generatedTiles,
     panelLayout: generatedPanelLayout,
+  })
+
+  return {
+    tiles: attached.tiles,
+    groups: attached.groups,
+    panelLayout: generatedPanelLayout,
     activePanelId: generatedActivePanelId,
-    connections: generateAdjacentConnections(generatedTiles),
+    connections: generateAdjacentConnections(attached.tiles),
     nextZIndex: counters.zIndex,
+    expandLayoutGroupId: attached.expandLayoutGroupId,
   }
 }

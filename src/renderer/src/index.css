@@ -59,6 +59,14 @@
 }
 
 @font-face {
+  font-family: 'Manrope';
+  src: url('./assets/fonts/Manrope-VariableFont_wght.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
   font-family: 'Metrophobic';
   src: url('./assets/fonts/Metrophobic-Regular.ttf') format('truetype');
   font-style: normal;
@@ -163,6 +171,9 @@
   --cs-sidebar-row-pad-x: 8px;
   --cs-thread-content-max-width: 800px;
   --cs-chat-composer-side-inset: 24px;
+  /* Must stay >= the panel shell radius (10px) or overflow:hidden clips the
+     composer card into a nested second corner at the bottom of the tile. */
+  --cs-chat-composer-bottom-inset: 14px;
   --cs-chat-composer-min-width: 400px;
   --cs-chat-composer-control-size: 28px;
   --cs-chat-composer-radius: 14px;
@@ -447,13 +458,13 @@ button:focus-visible,
 
 .cs-chat-composer-card {
   backdrop-filter: saturate(120%);
-  outline: 1px solid transparent;
-  outline-offset: -1px;
+  outline: none;
   transition: outline-color 120ms ease, filter 120ms ease;
 }
 
 .cs-chat-composer-card:focus-within {
-  outline-color: var(--cs-th-composer-outline-focus);
+  outline: 1px solid var(--cs-th-composer-outline-focus);
+  outline-offset: -1px;
   filter: saturate(108%);
 }
 

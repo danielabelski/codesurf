@@ -71,6 +71,7 @@ export function useAppCanvasGroupInteraction(params: UseAppCanvasGroupInteractio
     workspacePath: tileActions.workspacePath,
     saveCanvas: engine.saveCanvas,
     setTiles: state.setTiles,
+    setGroups: state.setGroups,
     setSelectedTileId: state.setSelectedTileId,
     setSelectedTileIds: state.setSelectedTileIds,
     setCtxMenu: state.setCtxMenu,

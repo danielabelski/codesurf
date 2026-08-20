@@ -7,6 +7,7 @@ import { useTheme } from '../ThemeContext'
 import { isDaemonBackedHost } from '../platform/detect'
 import { getDroppedPaths, shellEscapePath } from '../utils/dnd'
 import { resolveTerminalPeerWrite } from './terminalPeerCommands'
+import { terminalSessionLease } from '../lib/terminalSessionRetain'
 
 interface Props {
   tileId: string
@@ -74,6 +75,7 @@ export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height,
   useEffect(() => {
     if (!containerRef.current || mountedRef.current) return
     mountedRef.current = true
+    terminalSessionLease.retain(tileId)
     ptyReadyRef.current = false
     unavailableRef.current = false
     setTerminalUnavailable(null)
@@ -205,11 +207,7 @@ export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height,
           : create(tileId, workspaceId, workspaceDir, launchBin, launchArgs)
 
         request.then(({ buffer }) => {
-          if (cancelled) {
-            const detach = window.electron?.terminal?.detach?.(tileId)
-            void detach?.catch(() => {})
-            return
-          }
+          if (cancelled) return
           ptyReady = true
           ptyReadyRef.current = true
           exited = false
@@ -261,9 +259,9 @@ export function TerminalTile({ tileId, workspaceId, workspaceDir, width, height,
       ro?.disconnect()
       cleanupRef.current?.()
       cleanupRef.current = null
-      // Detach (not destroy) so tmux sessions survive unmount/reload
-      const detach = window.electron?.terminal?.detach?.(tileId)
-      void detach?.catch(() => {})
+      // Refcounted detach: fullscreen + canvas both mount this tile.
+      // Only the last instance may drop the PTY attachment.
+      terminalSessionLease.release(tileId)
       termRef.current?.dispose()
       termRef.current = null
       fitRef.current = null

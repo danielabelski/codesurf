@@ -1,13 +1,14 @@
 import React from 'react'
-import { FileText, Folder, Plus, ShieldCheck, Trash2 } from 'lucide-react'
+import { FileText, Folder, Plus, ShieldCheck, Trash2, X } from 'lucide-react'
 import { useTheme } from '../../ThemeContext'
-import { stackEdgeShadow } from '../../theme'
+import { stackEdgeShadow, type EdgeShadowTone } from '../../theme'
 import { basename } from '../../utils/dnd'
 import type { Persona, ExecutionHostRecord } from '../../../../shared/types'
 import type { TtsPlayerState } from '../../utils/ttsPlayer'
 import { FooterPill } from './ChatComposerControls'
 import { Dropdown, DropdownItem, MenuPortal } from './ChatComposerMenus'
 import { getAgentIcon } from '../../config/agentModes'
+import { PersonaAvatar } from '../PersonaAvatar'
 
 export interface ChatComposerAutocompleteItem {
   key: string
@@ -61,15 +62,18 @@ export function ChatComposerWrap({
 export function ChatComposerCard({
   style,
   children,
+  edgeTone = 'default',
 }: {
   style?: React.CSSProperties
   children: React.ReactNode
+  /** Hairline ring. One stroke only — callers must not also set a 0.5px border. */
+  edgeTone?: EdgeShadowTone
 }): JSX.Element {
   const theme = useTheme()
   const { boxShadow, ...restStyle } = style ?? {}
 
   return (
-    <div className="cs-chat-composer-card" style={{ ...restStyle, boxShadow: stackEdgeShadow(theme, boxShadow as string | undefined) }}>
+    <div className="cs-chat-composer-card" style={{ ...restStyle, boxShadow: stackEdgeShadow(theme, boxShadow as string | undefined, edgeTone) }}>
       {children}
     </div>
   )
@@ -709,12 +713,16 @@ export function ChatComposerVoiceStatus({
   dictationText,
   dictationError,
   ttsState,
+  onRetryDictation,
+  onDismissDictationError,
   onStopVoicePlayback,
 }: {
   isDictating: boolean
   dictationText: string
   dictationError: string | null
   ttsState: TtsPlayerState
+  onRetryDictation?: () => void
+  onDismissDictationError?: () => void
   onStopVoicePlayback: () => void
 }): JSX.Element | null {
   const theme = useTheme()
@@ -736,9 +744,36 @@ export function ChatComposerVoiceStatus({
             animation: isDictating ? 'chat-pulse 1s ease-in-out infinite' : 'none',
           }} />
           {dictationError ? (
-            <span style={{ color: theme.chat.muted }}>
-              Voice: <span style={{ color: theme.status.warning }}>{dictationError}</span>
-            </span>
+            <>
+              <button
+                type="button"
+                onClick={onRetryDictation}
+                onMouseDown={e => e.preventDefault()}
+                title="Retry microphone"
+                style={{
+                  background: 'transparent', border: 'none', padding: 0, margin: 0,
+                  cursor: onRetryDictation ? 'pointer' : 'default',
+                  color: theme.chat.muted, font: 'inherit', textAlign: 'left',
+                }}
+              >
+                Voice: <span style={{ color: theme.status.warning }}>{dictationError}</span>
+              </button>
+              {onDismissDictationError && (
+                <button
+                  type="button"
+                  onClick={onDismissDictationError}
+                  onMouseDown={e => e.preventDefault()}
+                  title="Dismiss"
+                  style={{
+                    marginLeft: 'auto', background: 'transparent', border: 'none',
+                    cursor: 'pointer', padding: 2, display: 'flex',
+                    color: theme.chat.subtle,
+                  }}
+                >
+                  <X size={10} strokeWidth={2.2} />
+                </button>
+              )}
+            </>
           ) : (
             <>
               <span>Recording{dictationText ? ': ' : ''}</span>
@@ -895,7 +930,7 @@ export function ChatComposerAgentMenu({
   return (
     <div ref={anchorRef} style={{ position: 'relative' }}>
       <FooterPill
-        prefix={getAgentIcon(selected?.icon)}
+        prefix={selected ? <PersonaAvatar persona={selected} size={16} /> : getAgentIcon(undefined)}
         label={selected ? selected.name : 'Persona'}
         color={selected?.color ?? '#8f96a0'}
         active={showMenu}
@@ -913,7 +948,7 @@ export function ChatComposerAgentMenu({
             {agentModes.map(item => (
               <DropdownItem
                 key={item.id}
-                icon={getAgentIcon(item.icon)}
+                icon={<PersonaAvatar persona={item} size={16} />}
                 label={item.name}
                 sublabel={item.description}
                 active={agentId === item.id}

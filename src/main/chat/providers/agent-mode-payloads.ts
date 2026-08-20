@@ -51,6 +51,8 @@ export interface HermesSpawnInput extends AgentModeSelection {
   userContent: string
   existingSessionId?: string | null
   contextPrompt?: string
+  /** Only set after probing `hermes chat --help` for `--stream-json`. */
+  streamJson?: boolean
 }
 
 // Build the `hermes chat` argv chatHermes spawns. AgentMode.tools maps onto
@@ -69,7 +71,7 @@ export function buildHermesSpawnArgs(input: HermesSpawnInput): string[] {
     model: input.model,
     resumeSessionId: input.existingSessionId ?? undefined,
     toolsets,
-    streamJson: true,
+    streamJson: input.streamJson === true,
   })
 }
 

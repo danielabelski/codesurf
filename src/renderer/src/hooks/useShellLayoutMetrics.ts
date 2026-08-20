@@ -302,7 +302,7 @@ export function computeShellLayoutMetricsGrouped(params: UseShellLayoutMetricsPa
     discovery,
     openWorkspaceTabs,
     hasWorkspaceTabs: openWorkspaceTabs.length > 0,
-    workspaceTitleFallback: workspace?.name?.trim() || 'WORKSPACES',
+    workspaceTitleFallback: workspace?.name?.trim() || 'Workspaces',
     showTopWorkspacePickerTab: showWorkspacePickerTab || (!workspace && openWorkspaceTabs.length === 0),
   }
 }

@@ -6,6 +6,7 @@ import {
   computeExpandedCanvasMembership,
   computePanelTileIds,
 } from '../src/renderer/src/lib/canvasVisibility.ts'
+import { createLeaf } from '../src/renderer/src/components/panelLayoutTree.ts'
 import type { GroupState, TileState } from '../src/shared/types.ts'
 
 function tile(id: string, groupId?: string): TileState {
@@ -17,12 +18,20 @@ function group(id: string, opts: Partial<GroupState> = {}): GroupState {
 }
 
 describe('computePanelTileIds', () => {
-  test('includes tiles in layoutMode groups', () => {
-    const groups = [group('g1', { layoutMode: true })]
+  test('includes tiles in a layoutMode group tree', () => {
+    const groups = [group('g1', { layoutMode: true, layout: createLeaf(['a']) })]
     const tiles = [tile('a', 'g1'), tile('b')]
     const ids = computePanelTileIds([], groups, tiles)
     assert.equal(ids.has('a'), true)
     assert.equal(ids.has('b'), false)
+  })
+
+  test('does not hide a tile that only has the layout groupId', () => {
+    const groups = [group('g1', { layoutMode: true, layout: createLeaf(['a']) })]
+    const tiles = [tile('a', 'g1'), tile('ghost', 'g1')]
+    const ids = computePanelTileIds([], groups, tiles)
+    assert.equal(ids.has('a'), true)
+    assert.equal(ids.has('ghost'), false)
   })
 })
 

@@ -90,6 +90,71 @@ test('daemon-07: debounced metadata stays consistent with the timeline after a m
   assert.equal(timeline.some(e => e.type === 'done'), true)
 })
 
+test('daemon emits Workspace Instructions once per unchanged conversation', async t => {
+  const homeDir = await makeTestTempDir('chat-jobs-memory-once-')
+  const workspaceDir = join(homeDir, 'workspace')
+  await mkdir(workspaceDir, { recursive: true })
+  t.after(async () => { await rm(homeDir, { recursive: true, force: true }) })
+
+  const manager = createChatJobManager({
+    homeDir,
+    claudeQuery: () => (async function* () {
+      yield { ...textDelta('ok'), session_id: 'thread-stable' }
+      yield { type: 'result', result: 'ok', session_id: 'thread-stable', total_cost_usd: 0, num_turns: 1 }
+    })(),
+  })
+
+  const base = {
+    cardId: 'card-stable',
+    workspaceId: 'ws-stable',
+    provider: 'claude',
+    model: 'claude-test',
+    mode: 'bypassPermissions',
+    workspaceDir,
+    memoryPrompt: '## Workspace Instructions\nKeep replies terse.',
+    skillsPrompt: '## Skills\nverify-before-done',
+    skillsSummary: 'Included 1 skill.',
+  }
+
+  const first = await manager.startJob({
+    ...base,
+    messages: [{ role: 'user', content: 'first turn' }],
+  })
+  assert.equal((await waitForCompletedJob(manager, first.id)).status, 'completed')
+
+  const second = await manager.startJob({
+    ...base,
+    sessionId: 'thread-stable',
+    messages: [{ role: 'user', content: 'second turn' }],
+  })
+  assert.equal((await waitForCompletedJob(manager, second.id)).status, 'completed')
+
+  const changed = await manager.startJob({
+    ...base,
+    sessionId: 'thread-stable',
+    memoryPrompt: '## Workspace Instructions\nNow prefer detailed answers.',
+    messages: [{ role: 'user', content: 'third turn' }],
+  })
+  assert.equal((await waitForCompletedJob(manager, changed.id)).status, 'completed')
+
+  const firstTimeline = await readTimeline(homeDir, first.id)
+  const secondTimeline = await readTimeline(homeDir, second.id)
+  const changedTimeline = await readTimeline(homeDir, changed.id)
+  const memoryStarts = timeline => timeline.filter(event =>
+    event.type === 'tool_start' && event.toolId === 'codesurf-memory-context',
+  )
+  const skillStarts = timeline => timeline.filter(event =>
+    event.type === 'tool_start' && event.toolId === 'codesurf-skills-context',
+  )
+
+  assert.equal(memoryStarts(firstTimeline).length, 1)
+  assert.equal(skillStarts(firstTimeline).length, 1)
+  assert.equal(memoryStarts(secondTimeline).length, 0)
+  assert.equal(skillStarts(secondTimeline).length, 0)
+  assert.equal(memoryStarts(changedTimeline).length, 1)
+  assert.equal(skillStarts(changedTimeline).length, 0)
+})
+
 test('daemon: empty Claude result after context preflight fails instead of completing a blank assistant turn', async t => {
   const homeDir = await makeTestTempDir('chat-jobs-empty-claude-result-')
   const workspaceDir = join(homeDir, 'workspace')

@@ -1,7 +1,9 @@
-import { startTransition } from 'react'
+import { startTransition, type ReactNode } from 'react'
 import { Mic } from 'lucide-react'
 import type { ToolBlock, ChatMessage } from '../../../../shared/chat-types'
-import type { VoiceSettings } from '../../../../shared/types'
+import type { Persona, VoiceSettings } from '../../../../shared/types'
+import { resolveReplyAvatarPersona, type ReplyAvatarPersona } from '../../lib/replyAvatar'
+import { ReplyAvatar } from './ReplyAvatar'
 import { useTheme } from '../../ThemeContext'
 import { WorkingDots } from '../shared/streamdown-utils'
 import { speakMessage } from '../../hooks/useAutoSpeak'
@@ -47,6 +49,8 @@ export interface ChatTileTranscriptMessagesProps {
   monoSize: number
   ttsState: TtsPlayerState
   voiceSettings: Pick<VoiceSettings, 'ttsProvider' | 'ttsVoice' | 'spokifyModel'>
+  personas: ReadonlyArray<Pick<Persona, 'id' | 'name' | 'color'>>
+  fallbackProvider?: string | null
 }
 
 export function ChatTileTranscriptMessages({
@@ -64,6 +68,8 @@ export function ChatTileTranscriptMessages({
   monoSize,
   ttsState,
   voiceSettings,
+  personas,
+  fallbackProvider,
 }: ChatTileTranscriptMessagesProps): JSX.Element {
   const theme = useTheme()
 
@@ -158,6 +164,20 @@ export function ChatTileTranscriptMessages({
     )
   }
 
+  const wrapAssistant = (
+    key: string,
+    persona: ReplyAvatarPersona,
+    streaming: boolean,
+    body: ReactNode,
+  ): JSX.Element => (
+    <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%', minWidth: 0 }}>
+      <ReplyAvatar persona={persona} streaming={streaming} />
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+        {body}
+      </div>
+    </div>
+  )
+
   const isChipOnly = (msg: ChatMessage): boolean => {
     if (msg.role !== 'assistant') return false
     const blocks = msg.contentBlocks ?? []
@@ -178,6 +198,12 @@ export function ChatTileTranscriptMessages({
       if (k.startsWith(prefix)) clusterExploded.add(k.slice(prefix.length))
     }
     const finalItems = collateClusterChips(clusterItems, clusterExploded)
+    const clusterStreaming = Boolean(
+      lastMsg
+      && isStreaming
+      && lastMsg.isStreaming
+      && lastMsg.id === renderedMessages[renderedMessages.length - 1]?.id
+    )
     nodes.push(
       <BlockNoteAffordance
         key={`cluster-${clusterId}`}
@@ -186,7 +212,12 @@ export function ChatTileTranscriptMessages({
         onComposerActiveChange={onAnnotationComposerActiveChange}
         onUpdateNote={(text) => updateBlockNote({ kind: 'message', messageId: lastId }, text)}
       >
-        {renderChipRow(finalItems.map((item, idx) => renderChipItem(item, clusterId, idx)), `cluster-row-${clusterId}`)}
+        {wrapAssistant(
+          `cluster-avatar-${clusterId}`,
+          resolveReplyAvatarPersona(lastMsg ?? {}, personas, fallbackProvider),
+          clusterStreaming,
+          renderChipRow(finalItems.map((item, idx) => renderChipItem(item, clusterId, idx)), `cluster-row-${clusterId}`),
+        )}
       </BlockNoteAffordance>
     )
     clusterItems = []
@@ -232,6 +263,8 @@ export function ChatTileTranscriptMessages({
           gap: 2,
           ...(isLiveMessage ? {} : CHAT_OFFSCREEN_MESSAGE_STYLE),
         }}>
+          {(() => {
+            const body = <>
           {(() => {
             const hasInlineThinking = (msg.contentBlocks ?? []).some(b => b.type === 'thinking')
             const legacyThinking = msg.thinking
@@ -440,6 +473,17 @@ export function ChatTileTranscriptMessages({
               {relativeTime(msg.timestamp)}
             </div>
           )}
+            </>
+            if (msg.role === 'assistant') {
+              return wrapAssistant(
+                `avatar-${msg.id}`,
+                resolveReplyAvatarPersona(msg, personas, fallbackProvider),
+                isLiveMessage,
+                body,
+              )
+            }
+            return body
+          })()}
         </div>
       </BlockNoteAffordance>
     )

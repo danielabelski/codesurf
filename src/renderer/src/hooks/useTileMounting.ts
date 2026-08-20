@@ -4,7 +4,8 @@ import {
   type MutableRefObject,
   type SetStateAction,
 } from 'react'
-import type { TileState, Workspace } from '../../../shared/types'
+import type { GroupState, TileState, Workspace } from '../../../shared/types'
+import { addTilesToGroupLayout, removeTileFromAllGroupLayouts } from '../lib/layoutGroupMembership.ts'
 import { isMediaFile } from '../utils/dnd'
 import {
   findClearPosition,
@@ -40,7 +41,9 @@ export type UseTileMountingOptions = {
   tilesRef: MutableRefObject<TileState[]>
   panelTileIdsRef: MutableRefObject<Set<string>>
   panelLayoutRef: MutableRefObject<PanelNode | null>
+  expandLayoutGroupIdRef: MutableRefObject<string | null>
   activePanelIdRef: MutableRefObject<string | null>
+  setGroups: Dispatch<SetStateAction<GroupState[]>>
   viewportRef: MutableRefObject<CanvasViewport>
   nextZIndexRef: MutableRefObject<number>
   selectedTileId: string | null
@@ -64,7 +67,9 @@ export function useTileMounting({
   tilesRef,
   panelTileIdsRef,
   panelLayoutRef,
+  expandLayoutGroupIdRef,
   activePanelIdRef,
+  setGroups,
   viewportRef,
   nextZIndexRef,
   selectedTileId,
@@ -171,30 +176,39 @@ export function useTileMounting({
     options?: { panelId?: string | null, preview?: boolean },
   ): string => {
     const panelId = options?.panelId ?? activePanelIdRef.current
+    const layoutGroupId = expandLayoutGroupIdRef.current
+    const tileToMount = layoutGroupId && panelLayoutRef.current
+      ? { ...newTile, groupId: layoutGroupId }
+      : newTile
     let updatedTiles = tilesRef.current
     let newNZ = nextZIndexRef.current
     setTiles(prev => {
-      updatedTiles = [...prev, newTile]
+      updatedTiles = [...prev, tileToMount]
       tilesRef.current = updatedTiles
-      newNZ = Math.max(nextZIndexRef.current, newTile.zIndex) + 1
+      newNZ = Math.max(nextZIndexRef.current, tileToMount.zIndex) + 1
       nextZIndexRef.current = newNZ
       saveCanvas(updatedTiles, viewportRef.current, newNZ)
       return updatedTiles
     })
     setNextZIndex(newNZ)
-    setSelectedTileId(newTile.id)
+    setSelectedTileId(tileToMount.id)
     if (panelLayoutRef.current && panelId) {
-      setPanelLayout(prev => prev ? addTabToLeaf(prev, panelId, newTile.id, { preview: options?.preview }) : prev)
+      setPanelLayout(prev => prev ? addTabToLeaf(prev, panelId, tileToMount.id, { preview: options?.preview }) : prev)
       setActivePanelId(panelId)
     }
-    window.setTimeout(() => triggerDiscoveryPulse(newTile.id, updatedTiles), 40)
-    return newTile.id
+    if (layoutGroupId) {
+      setGroups(prev => addTilesToGroupLayout(prev, updatedTiles, layoutGroupId, [tileToMount.id]))
+    }
+    window.setTimeout(() => triggerDiscoveryPulse(tileToMount.id, updatedTiles), 40)
+    return tileToMount.id
   }, [
     activePanelIdRef,
+    expandLayoutGroupIdRef,
     nextZIndexRef,
     panelLayoutRef,
     saveCanvas,
     setActivePanelId,
+    setGroups,
     setNextZIndex,
     setPanelLayout,
     setSelectedTileId,
@@ -211,10 +225,13 @@ export function useTileMounting({
     options?: { preview?: boolean },
   ): string => {
     cleanupTileResources(currentTileId)
+    const layoutGroupId = expandLayoutGroupIdRef.current
+    const tileToAdd = layoutGroupId ? { ...newTile, groupId: layoutGroupId } : newTile
+    setGroups(prev => removeTileFromAllGroupLayouts(prev, currentTileId))
     let updatedTiles = tilesRef.current
     let newNZ = nextZIndexRef.current
     setTiles(prev => {
-      updatedTiles = [...prev.filter(tile => tile.id !== currentTileId), newTile]
+      updatedTiles = [...prev.filter(tile => tile.id !== currentTileId), tileToAdd]
       tilesRef.current = updatedTiles
       newNZ = Math.max(nextZIndexRef.current, newTile.zIndex) + 1
       nextZIndexRef.current = newNZ
@@ -222,9 +239,9 @@ export function useTileMounting({
       return updatedTiles
     })
     setNextZIndex(newNZ)
-    setSelectedTileId(newTile.id)
+    setSelectedTileId(tileToAdd.id)
     setPanelLayout(prev => prev
-      ? setActiveTab(replaceTabInLeaf(prev, panelId, currentTileId, newTile.id, { preview: options?.preview }), panelId, newTile.id)
+      ? setActiveTab(replaceTabInLeaf(prev, panelId, currentTileId, tileToAdd.id, { preview: options?.preview }), panelId, tileToAdd.id)
       : prev)
     setActivePanelId(panelId)
     setChatTileSessionMatches(prev => {
@@ -233,14 +250,16 @@ export function useTileMounting({
       delete next[currentTileId]
       return next
     })
-    window.setTimeout(() => triggerDiscoveryPulse(newTile.id, updatedTiles), 40)
-    return newTile.id
+    window.setTimeout(() => triggerDiscoveryPulse(tileToAdd.id, updatedTiles), 40)
+    return tileToAdd.id
   }, [
     cleanupTileResources,
+    expandLayoutGroupIdRef,
     nextZIndexRef,
     saveCanvas,
     setActivePanelId,
     setChatTileSessionMatches,
+    setGroups,
     setNextZIndex,
     setPanelLayout,
     setSelectedTileId,
@@ -272,6 +291,7 @@ export function useTileMounting({
 
   const closeTile = useCallback((id: string) => {
     cleanupTileResources(id)
+    setGroups(prev => removeTileFromAllGroupLayouts(prev, id))
     setTiles(prev => {
       const updated = prev.filter(tile => tile.id !== id)
       saveCanvas(updated, viewportRef.current, nextZIndexRef.current)
@@ -299,6 +319,7 @@ export function useTileMounting({
     selectedTileId,
     setActivePanelId,
     setChatTileSessionMatches,
+    setGroups,
     setPanelLayout,
     setSelectedTileId,
     setTiles,

@@ -124,16 +124,15 @@ export function buildHermesChatArgs(request: {
   ignoreUserConfig?: boolean
   bypassPermissions?: boolean
   /**
-   * When true, request NDJSON event streaming from Hermes
-   * (`--stream-json`) instead of plain `--quiet` batch output.
-   * Consumers must parse stdout line-by-line as JSON events.
-   * Requires Hermes >= the version that ships `--stream-json` on the
-   * `chat` subcommand. Falls back to `--quiet` when false/unset so
-   * older Hermes binaries keep working.
+   * When true AND the installed `hermes chat` binary advertises
+   * `--stream-json`, request NDJSON events. Hermes Agent (Nous) 0.20.x
+   * has no such flag — argparse rejects unknown arguments — so the
+   * default is `--quiet` (final response + session info). Probe with
+   * `hermesChatHelpSupportsStreamJson` before setting this.
    */
   streamJson?: boolean
 }): string[] {
-  const outputFlag = request.streamJson ? '--stream-json' : '--quiet'
+  const outputFlag = request.streamJson === true ? '--stream-json' : '--quiet'
   const args = ['chat', '--query', request.prompt, outputFlag, '--source', 'tool']
   const selection = resolveHermesModelSelection(request.model, request.provider)
   pushFlag(args, '--model', selection.model)
@@ -149,6 +148,13 @@ export function buildHermesChatArgs(request: {
   if (request.ignoreUserConfig) args.push('--ignore-user-config')
   if (request.bypassPermissions) args.push('--yolo')
   return args
+}
+
+/** True when `hermes chat --help` documents `--stream-json`. */
+export function hermesChatHelpSupportsStreamJson(helpText: string): boolean {
+  const text = String(helpText ?? '')
+  if (/unrecognized arguments/i.test(text)) return false
+  return /(?:^|\s)--stream-json\b/.test(text)
 }
 
 export function parseHermesOutput(stdout: string): ParsedAgentCliOutput {

@@ -238,10 +238,14 @@ export function splitLeaf(node: PanelNode, targetPanelId: string, tileId: string
     if (node.id !== targetPanelId) return node
     if (zone === 'center') return addTabToLeaf(node, targetPanelId, tileId)
     const existingTabs = node.tabs.filter(id => id !== tileId)
+    // A solo tab cannot split against an empty remainder — that used to
+    // duplicate the same tile into both sides of a new split.
+    if (existingTabs.length === 0) return node
     const existingLeaf: PanelLeaf = {
       ...node,
-      tabs: existingTabs.length > 0 ? existingTabs : node.tabs,
-      activeTab: existingTabs.length > 0 && node.activeTab === tileId ? existingTabs[0] : node.activeTab,
+      tabs: existingTabs,
+      activeTab: existingTabs.includes(node.activeTab) ? node.activeTab : existingTabs[0],
+      previewTabId: normalizePreviewTabId(existingTabs, node.previewTabId),
     }
     const newLeaf = createLeaf([tileId])
     const direction: 'horizontal' | 'vertical' = zone === 'left' || zone === 'right' ? 'horizontal' : 'vertical'
@@ -249,4 +253,25 @@ export function splitLeaf(node: PanelNode, targetPanelId: string, tileId: string
     return { type: 'split', id: newPanelId(), direction, children, sizes: [50, 50] }
   }
   return { ...node, children: node.children.map(c => splitLeaf(c, targetPanelId, tileId, zone)) }
+}
+
+/**
+ * Move `tileId` onto `targetPanelId` at `zone`. No-ops when the target is
+ * missing (e.g. a panel id from a different layout instance) so a canvas
+ * tab drag cannot drop the tile out of its tree.
+ */
+export function dockTileInTree(
+  root: PanelNode,
+  tileId: string,
+  fromPanelId: string,
+  targetPanelId: string,
+  zone: DockZone,
+): PanelNode {
+  if (!findLeafById(root, targetPanelId)) return root
+  if (fromPanelId === targetPanelId && zone === 'center') return root
+  if (fromPanelId === targetPanelId) return splitLeaf(root, targetPanelId, tileId, zone)
+  const stripped = removeTileFromTree(root, tileId)
+  if (!stripped) return root
+  if (!findLeafById(stripped, targetPanelId)) return root
+  return splitLeaf(stripped, targetPanelId, tileId, zone)
 }

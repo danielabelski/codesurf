@@ -120,11 +120,12 @@ export function getDefaultElectrobunInvokeResponse(channel: string): unknown {
   if (channel === 'system:memStats') return { heapUsed: 0, heapTotal: 0, rss: 0 }
   if (channel === 'system:daemonStatus') return null
   if (channel === 'system:daemonSummary') return null
+  if (channel === 'system:requestMediaAccess') return { granted: true, status: 'granted' }
   if (channel === 'db:status') return { ok: false, runtime: 'electrobun-fallback', message: 'Electrobun runtime DB handler was unavailable.' }
   if (channel === 'jobs:recent') return { jobs: [], total: 0, limit: 50, offset: 0 }
   if (channel === 'updater:check') return { ok: true, status: 'disabled-electrobun-runtime', updateAvailable: false }
   if (channel === 'chat:writeTempAttachment') return { ok: false, error: 'Electrobun runtime attachment handler was unavailable.' }
-  if (channel === 'chat:csagentModels') return []
+  if (channel === 'chat:csagentModels') return { models: [] }
   if (channel === 'transcribe:run') return { ok: false, error: 'Electrobun runtime transcribe handler was unavailable.' }
   if (channel === 'tts:synthesize') return { ok: false, error: 'Electrobun runtime TTS handler was unavailable.' }
   if (channel === 'spokify:run') return { ok: false, error: 'Electrobun runtime spokify handler was unavailable.' }
@@ -599,6 +600,7 @@ export function createElectrobunElectronFacade(options: FacadeOptions): any {
       daemonStatus: makeInvoker(invoke, 'system:daemonStatus'),
       daemonSummary: makeInvoker(invoke, 'system:daemonSummary'),
       restartDaemon: makeInvoker(invoke, 'system:restartDaemon'),
+      requestMediaAccess: makeInvoker(invoke, 'system:requestMediaAccess'),
       onGcRequested: (callback: () => void) => eventHub.on('system:gc-requested', () => callback()),
     },
     homedir: options.homedir,

@@ -124,7 +124,8 @@ export function useChatTileProviders({
     if (provider === 'csagent' && !requestedProviderOptionsRef.current.csagent) {
       requestedProviderOptionsRef.current.csagent = true
       window.electron?.chat?.csagentModels?.().then((result: any) => {
-        if (result?.models?.length) setCsagentModels(result.models)
+        if (Array.isArray(result?.models)) setCsagentModels(result.models)
+        else requestedProviderOptionsRef.current.csagent = false
       }).catch(() => {
         requestedProviderOptionsRef.current.csagent = false
       })

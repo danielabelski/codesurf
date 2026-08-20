@@ -29,6 +29,18 @@ type UseChatTileComposerMenusArgs = {
   onCloseAutocomplete?: () => void
 }
 
+/** True when the event started on a menu trigger or the portaled menu itself. */
+export function isInsideComposerMenu(
+  target: EventTarget | null,
+  menuRoots: readonly { current: Element | null }[],
+): boolean {
+  if (!target) return false
+  const maybeEl = target as Partial<Element> & { parentElement?: Element | null }
+  const el = typeof maybeEl.closest === 'function' ? maybeEl as Element : maybeEl.parentElement
+  if (el && typeof el.closest === 'function' && el.closest('[data-chat-menu-portal="true"]')) return true
+  return menuRoots.some(ref => Boolean(ref.current?.contains(target as Node)))
+}
+
 export function useChatTileComposerMenus({
   textareaRef,
   acRef,
@@ -113,13 +125,12 @@ export function useChatTileComposerMenus({
   ]
 
   useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node
-      const targetEl = e.target instanceof Element ? e.target : null
-      const insideAnyMenu = menuRefs.some(ref => ref.current?.contains(target))
-        || Boolean(targetEl?.closest('[data-chat-menu-portal="true"]'))
-      if (insideAnyMenu) return
+    const handlePointerDown = (e: Event) => {
+      // Capture: panel layout / canvas tiles stop mousedown bubbling so the
+      // canvas doesn't pan. Bubble-phase document listeners never see those.
+      if (isInsideComposerMenu(e.target, menuRefs)) return
       closeAllMenus()
+      const target = e.target as Node
       if (acRef.current && !acRef.current.contains(target) && target !== textareaRef.current) {
         onCloseAutocomplete?.()
       }
@@ -131,10 +142,12 @@ export function useChatTileComposerMenus({
         closeAllMenus()
       }
     }
-    document.addEventListener('mousedown', handleClick)
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('mousedown', handlePointerDown, true)
     document.addEventListener('keydown', handleKey, true)
     return () => {
-      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('mousedown', handlePointerDown, true)
       document.removeEventListener('keydown', handleKey, true)
     }
   }, [anyMenuOpen, acRef, closeAllMenus, onCloseAutocomplete, textareaRef])

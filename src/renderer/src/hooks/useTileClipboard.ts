@@ -6,6 +6,7 @@ import {
   type SetStateAction,
 } from 'react'
 import type { GroupState, TileState } from '../../../shared/types'
+import { assignTilesToGroup, removeTileFromAllGroupLayouts } from '../lib/layoutGroupMembership.ts'
 import type { SaveCanvasFn } from './useCanvasEngine'
 import type { CanvasViewport } from './useCanvasEngine'
 
@@ -17,6 +18,7 @@ export type UseTileClipboardOptions = {
   viewport: CanvasViewport
   nextZIndex: number
   setTiles: Dispatch<SetStateAction<TileState[]>>
+  setGroups: Dispatch<SetStateAction<GroupState[]>>
   setNextZIndex: Dispatch<SetStateAction<number>>
   setSelectedTileId: Dispatch<SetStateAction<string | null>>
   setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
@@ -34,6 +36,7 @@ export function useTileClipboard({
   viewport,
   nextZIndex,
   setTiles,
+  setGroups,
   setNextZIndex,
   setSelectedTileId,
   setSelectedTileIds,
@@ -62,6 +65,11 @@ export function useTileClipboard({
     pasteTargetGroupIdRef.current = cut ? active[0]?.groupId : undefined
     if (cut) {
       const ids = new Set(active.map(tile => tile.id))
+      setGroups(prev => {
+        let next = prev
+        for (const id of ids) next = removeTileFromAllGroupLayouts(next, id)
+        return next
+      })
       setTiles(prev => {
         const updated = prev.filter(tile => !ids.has(tile.id))
         saveCanvas(updated, viewport, nextZIndex)
@@ -70,7 +78,7 @@ export function useTileClipboard({
       setSelectedTileId(null)
       setSelectedTileIds(new Set())
     }
-  }, [getActiveTiles, viewport, nextZIndex, saveCanvas, setSelectedTileId, setSelectedTileIds, setTiles])
+  }, [getActiveTiles, viewport, nextZIndex, saveCanvas, setGroups, setSelectedTileId, setSelectedTileIds, setTiles])
 
   const pasteTiles = useCallback((pos?: { x: number, y: number }, intoGroupId?: string) => {
     if (clipboardRef.current.length === 0) return
@@ -104,9 +112,15 @@ export function useTileClipboard({
       groupId: targetGroup,
     }))
     setTiles(prev => {
-      const updated = [...prev, ...newTiles]
-      saveCanvas(updated, viewport, newNZ)
-      return updated
+      const assigned = assignTilesToGroup(
+        [...prev, ...newTiles],
+        groups,
+        newTiles.map(tile => tile.id),
+        targetGroup,
+      )
+      setGroups(assigned.groups)
+      saveCanvas(assigned.tiles, viewport, newNZ, assigned.groups)
+      return assigned.tiles
     })
     setNextZIndex(newNZ)
     setSelectedTileIds(new Set(newTiles.map(tile => tile.id)))
@@ -114,6 +128,7 @@ export function useTileClipboard({
   }, [
     groups,
     groupBoundsRef,
+    setGroups,
     nextZIndex,
     saveCanvas,
     setNextZIndex,

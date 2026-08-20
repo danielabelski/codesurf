@@ -1,15 +1,19 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { ListTodo } from 'lucide-react'
 import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import { renderExtensionIcon } from './extensionIcons'
 import { useTileTodos, type TileTodoItem } from '../state/tileTodosStore'
 import {
-  createLeaf,
+  panelAtPoint,
+  resolveTabDrop,
+  zoneAtPoint,
+} from '../lib/panelDock'
+import {
+  dockTileInTree,
   pinTabInLeaf,
-  removeTileFromTree,
   setActiveTab,
-  splitLeaf,
   type DockZone,
   type PanelLeaf,
   type PanelNode,
@@ -44,55 +48,6 @@ function getLeafBorderRadius(edges: PanelOuterEdges, outerRadii: PanelCornerRadi
   const bottomRight = edges.bottom && edges.right ? outerRadii.bottomRight : 0
   const bottomLeft = edges.bottom && edges.left ? outerRadii.bottomLeft : 0
   return `${topLeft}px ${topRight}px ${bottomRight}px ${bottomLeft}px`
-}
-
-// ─── Panel element registry ───────────────────────────────────────────────────
-// Mouse-event drag needs to know where each panel is on screen.
-// Components register their DOM element here on mount.
-const _panelElements = new Map<string, HTMLDivElement>()
-
-function registerPanel(id: string, el: HTMLDivElement | null) {
-  if (el) _panelElements.set(id, el)
-  else _panelElements.delete(id)
-}
-
-function getLivePanelElement(panelId: string): HTMLDivElement | null {
-  const el = _panelElements.get(panelId) ?? null
-  if (!el) return null
-  if (!el.isConnected) {
-    _panelElements.delete(panelId)
-    return null
-  }
-  const rect = el.getBoundingClientRect()
-  if (rect.width <= 0 || rect.height <= 0) return null
-  return el
-}
-
-function getPanelAtPoint(x: number, y: number): string | null {
-  let bestMatch: { id: string; area: number } | null = null
-  for (const [id] of _panelElements) {
-    const el = getLivePanelElement(id)
-    if (!el) continue
-    const r = el.getBoundingClientRect()
-    if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue
-    const area = r.width * r.height
-    if (!bestMatch || area < bestMatch.area) bestMatch = { id, area }
-  }
-  return bestMatch?.id ?? null
-}
-
-function getZone(x: number, y: number, panelId: string): DockZone {
-  const el = getLivePanelElement(panelId)
-  if (!el) return 'center'
-  const r = el.getBoundingClientRect()
-  const rx = (x - r.left) / r.width
-  const ry = (y - r.top) / r.height
-  const edge = 0.25
-  if (rx < edge) return 'left'
-  if (rx > 1 - edge) return 'right'
-  if (ry < edge) return 'top'
-  if (ry > 1 - edge) return 'bottom'
-  return 'center'
 }
 
 function setWebviewsInteractionBlocked(blocked: boolean): void {
@@ -146,14 +101,18 @@ function DockOverlay({ zone }: { zone: DockZone | null }): JSX.Element | null {
     center: { position: 'absolute', inset: 0 },
   }
   return (
-    <div style={{
-      ...styles[zone],
-      background: theme.surface.accentSoft,
-      border: `2px solid ${theme.border.accent}`,
-      borderRadius: 4,
-      pointerEvents: 'none',
-      zIndex: 10,
-    }} />
+    <div
+      data-codesurf-dock-overlay=""
+      data-codesurf-dock-zone={zone}
+      style={{
+        ...styles[zone],
+        background: theme.surface.accentSoft,
+        border: `2px solid ${theme.border.accent}`,
+        borderRadius: 4,
+        pointerEvents: 'none',
+        zIndex: 20,
+      }}
+    />
   )
 }
 
@@ -624,29 +583,23 @@ interface LeafPanelProps {
   onCloseToRight: (panelId: string, tileId: string) => void
   onLaunchTemplate?: (template: import('../../../shared/types').LayoutTemplate) => void
   outerRadii: PanelCornerRadii
+  flushLeafChrome?: boolean
 }
 
-function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, onActivate, onPinTab, onCloseTab, onTabMouseDown, onPanelFocus, onAddTile, dragTarget, onExit, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, onLaunchTemplate, outerRadii }: LeafPanelProps): JSX.Element {
+function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, onActivate, onPinTab, onCloseTab, onTabMouseDown, onPanelFocus, onAddTile, dragTarget, onExit, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, onLaunchTemplate, outerRadii, flushLeafChrome }: LeafPanelProps): JSX.Element {
   const theme = useTheme()
   const keepMountedWhenInactive = useCallback((tileId: string) => {
     const type = getTileType(tileId)
     return type === 'terminal' || type === 'browser' || type === 'chat' || type.startsWith('ext:')
   }, [getTileType])
-  const panelRef = useRef<HTMLDivElement>(null)
   const tabs = leaf.tabs.map(id => ({ id, label: getTileLabel(id) }))
   const isEmpty = tabs.length === 0
   const dockZone = dragTarget?.panelId === leaf.id ? dragTarget.zone : null
   const borderRadius = getLeafBorderRadius(outerEdges, outerRadii)
 
-  useEffect(() => {
-    const el = panelRef.current
-    registerPanel(leaf.id, el)
-    return () => { registerPanel(leaf.id, null) }
-  }, [leaf.id])
-
   return (
     <div
-      ref={panelRef}
+      data-codesurf-panel-id={leaf.id}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -657,8 +610,8 @@ function LeafPanel({ leaf, outerEdges, getTileLabel, renderTile, isInteracting, 
         borderRadius,
         overflow: 'hidden',
         background: theme.surface.panel,
-        border: '0.5px solid transparent',
-        boxShadow: 'var(--cs-edge-shadow-strong)',
+        border: flushLeafChrome ? 'none' : '0.5px solid transparent',
+        boxShadow: flushLeafChrome ? 'none' : 'var(--cs-edge-shadow-strong)',
         boxSizing: 'border-box',
       }}
       onClick={() => onPanelFocus(leaf.id)}
@@ -729,15 +682,26 @@ export interface PanelLayoutProps {
   insetBottom?: number
   onLaunchTemplate?: (template: import('../../../shared/types').LayoutTemplate) => void
   outerRadii?: PanelCornerRadii
+  /** Minimum edge thickness in viewport px so canvas-zoom still has L/R/T/B snap. */
+  dockMinEdgePx?: number
+  /** Dropped a tab on the free canvas — leave this layout. */
+  onTabDropOutside?: (tileId: string, clientX: number, clientY: number) => void
+  /** Skip the leaf hairline when a parent frame already paints the border. */
+  flushLeafChrome?: boolean
 }
 
-export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, onCloseTab, onAddTile, onExit, activePanelId: _activePanelId, onActivePanelChange, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, insetBottom = 4, onLaunchTemplate, outerRadii = DEFAULT_PANEL_CORNER_RADII }: PanelLayoutProps): JSX.Element {
+export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, onCloseTab, onAddTile, onExit, activePanelId: _activePanelId, onActivePanelChange, getTileType, getTileIcon, onSplitNew, onCloseOthers, onCloseToRight, insetBottom = 0, onLaunchTemplate, outerRadii = DEFAULT_PANEL_CORNER_RADII, dockMinEdgePx, onTabDropOutside, flushLeafChrome = false }: PanelLayoutProps): JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
+  const layoutRootRef = useRef<HTMLDivElement>(null)
+  const dockMinEdgePxRef = useRef(dockMinEdgePx)
+  dockMinEdgePxRef.current = dockMinEdgePx
   const [dragTarget, setDragTarget] = useState<{ panelId: string; zone: DockZone } | null>(null)
   const [ghost, setGhost] = useState<{ x: number; y: number; label: string } | null>(null)
   const [panelInteractionActive, setPanelInteractionActive] = useState(false)
   const handleDockRef = useRef<(tileId: string, fromPanelId: string, targetPanelId: string, zone: DockZone) => void>(() => {})
+  const onTabDropOutsideRef = useRef(onTabDropOutside)
+  onTabDropOutsideRef.current = onTabDropOutside
 
   useEffect(() => {
     return () => setWebviewsInteractionBlocked(false)
@@ -754,16 +718,8 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
   }, [root, onLayoutChange, onActivePanelChange])
 
   const handleDock = useCallback((tileId: string, fromPanelId: string, targetPanelId: string, zone: DockZone) => {
-    if (fromPanelId === targetPanelId && zone === 'center') return
-
-    if (fromPanelId === targetPanelId) {
-      onLayoutChange(splitLeaf(root, targetPanelId, tileId, zone))
-      return
-    }
-
-    let updated = removeTileFromTree(root, tileId) ?? createLeaf([tileId])
-    updated = splitLeaf(updated, targetPanelId, tileId, zone)
-    onLayoutChange(updated)
+    const next = dockTileInTree(root, tileId, fromPanelId, targetPanelId, zone)
+    if (next !== root) onLayoutChange(next)
   }, [root, onLayoutChange])
   handleDockRef.current = handleDock
 
@@ -790,9 +746,13 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
 
       setGhost({ x: ev.clientX, y: ev.clientY, label })
 
-      const panelId = getPanelAtPoint(ev.clientX, ev.clientY)
+      const rootEl = layoutRootRef.current
+      const panelId = panelAtPoint(rootEl, ev.clientX, ev.clientY)
       if (panelId) {
-        setDragTarget({ panelId, zone: getZone(ev.clientX, ev.clientY, panelId) })
+        setDragTarget({
+          panelId,
+          zone: zoneAtPoint(rootEl, ev.clientX, ev.clientY, panelId, { minEdgePx: dockMinEdgePxRef.current }),
+        })
       } else {
         setDragTarget(null)
       }
@@ -810,10 +770,17 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
 
       if (!dragging) return
 
-      const targetPanelId = getPanelAtPoint(ev.clientX, ev.clientY)
-      if (!targetPanelId) return
-      const zone = getZone(ev.clientX, ev.clientY, targetPanelId)
-      handleDockRef.current(tileId, fromPanelId, targetPanelId, zone)
+      const rootEl = layoutRootRef.current
+      const targetPanelId = panelAtPoint(rootEl, ev.clientX, ev.clientY)
+      const drop = resolveTabDrop(targetPanelId, Boolean(onTabDropOutsideRef.current))
+      if (drop === 'dock' && targetPanelId) {
+        const zone = zoneAtPoint(rootEl, ev.clientX, ev.clientY, targetPanelId, { minEdgePx: dockMinEdgePxRef.current })
+        handleDockRef.current(tileId, fromPanelId, targetPanelId, zone)
+        return
+      }
+      if (drop === 'eject') {
+        onTabDropOutsideRef.current?.(tileId, ev.clientX, ev.clientY)
+      }
     }
 
     document.addEventListener('mousemove', onMove)
@@ -872,6 +839,7 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
           onCloseToRight={onCloseToRight}
           onLaunchTemplate={onLaunchTemplate}
           outerRadii={outerRadii}
+          flushLeafChrome={flushLeafChrome}
         />
       )
     }
@@ -933,6 +901,8 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
 
   return (
     <div
+      ref={layoutRootRef}
+      data-codesurf-panel-layout=""
       style={{ position: 'absolute', top: 0, right: 0, bottom: insetBottom, left: 0, zIndex: 99990, background: 'transparent', display: 'flex', flexDirection: 'column', border: 'none' }}
       onMouseDown={e => e.stopPropagation()}
       onWheel={e => e.stopPropagation()}
@@ -942,29 +912,37 @@ export function PanelLayout({ root, getTileLabel, renderTile, onLayoutChange, on
         {renderNode(root, { top: true, right: true, bottom: true, left: true })}
       </div>
 
-      {panelInteractionActive && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'transparent',
-            pointerEvents: 'auto',
-            userSelect: 'none',
-            zIndex: 99995,
-          }}
-        />
-      )}
-
-      {/* Drag ghost — follows cursor */}
-      {ghost && (
-        <div style={{
-          position: 'fixed', left: ghost.x + 12, top: ghost.y - 10,
-          background: theme.surface.panelElevated, border: `1px solid ${theme.border.accent}`,
-          borderRadius: 4, padding: '2px 10px', fontSize: fonts.secondarySize, color: theme.text.primary,
-          pointerEvents: 'none', zIndex: 100000, userSelect: 'none',
-        }}>
-          {ghost.label}
-        </div>
+      {typeof document !== 'undefined' && createPortal(
+        <>
+          {panelInteractionActive && (
+            <div
+              data-codesurf-dock-shield=""
+              style={{
+                position: 'fixed',
+                inset: 0,
+                background: 'transparent',
+                pointerEvents: 'auto',
+                userSelect: 'none',
+                cursor: 'grabbing',
+                zIndex: 99995,
+              }}
+            />
+          )}
+          {ghost && (
+            <div
+              data-codesurf-dock-ghost=""
+              style={{
+                position: 'fixed', left: ghost.x + 12, top: ghost.y - 10,
+                background: theme.surface.panelElevated, border: `1px solid ${theme.border.accent}`,
+                borderRadius: 4, padding: '2px 10px', fontSize: fonts.secondarySize, color: theme.text.primary,
+                pointerEvents: 'none', zIndex: 100000, userSelect: 'none',
+              }}
+            >
+              {ghost.label}
+            </div>
+          )}
+        </>,
+        document.body,
       )}
     </div>
   )

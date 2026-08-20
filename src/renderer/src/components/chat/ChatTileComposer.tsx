@@ -51,6 +51,8 @@ import { ThinkingIcon, renderChatSurfaceIcon } from './ChatTileViews'
 import {
   CHAT_COMPOSER_WIDTH,
   CHAT_COMPOSER_MIN_WIDTH_STYLE,
+  CHAT_COMPOSER_BOTTOM_INSET,
+  CHAT_COMPOSER_RADIUS,
   CHAT_COMPOSER_MIN_HEIGHT,
   CHAT_COMPOSER_TEXTAREA_MIN_HEIGHT,
   TOOLBAR_ICON_SIZE,
@@ -141,6 +143,8 @@ export interface ChatTileComposerProps {
   dictationText: string
   dictationError: string | null
   ttsState: TtsPlayerState
+  onRetryDictation: () => void
+  onDismissDictationError: () => void
   onStopVoicePlayback: () => void
 
   openChatSurfaces: ActiveChatSurface[]
@@ -270,7 +274,7 @@ export function ChatTileComposer({
   isStartScreen,
   isDropTarget,
   composerBackground,
-  composerBorder,
+  composerBorder: _composerBorder,
   acRef,
   acType,
   acQuery,
@@ -284,6 +288,8 @@ export function ChatTileComposer({
   dictationText,
   dictationError,
   ttsState,
+  onRetryDictation,
+  onDismissDictationError,
   onStopVoicePlayback,
   openChatSurfaces,
   activeChatSurface,
@@ -397,25 +403,29 @@ export function ChatTileComposer({
       flexShrink: 0,
       width: CHAT_COMPOSER_WIDTH,
       minWidth: CHAT_COMPOSER_MIN_WIDTH_STYLE,
-      margin: isStartScreen ? '12px auto 6px auto' : '0 auto 6px auto',
+      margin: isStartScreen
+        ? `12px auto ${CHAT_COMPOSER_BOTTOM_INSET} auto`
+        : `0 auto ${CHAT_COMPOSER_BOTTOM_INSET} auto`,
       display: 'flex',
       flexDirection: 'column',
       gap: 6,
     }}>
-      <ChatComposerCard style={{
+      <ChatComposerCard
+        edgeTone={isDropTarget ? 'accent' : 'default'}
+        style={{
         minHeight: CHAT_COMPOSER_MIN_HEIGHT,
-        border: isDropTarget ? `1px solid ${theme.accent.base}` : `0.5px solid ${composerBorder}`,
-        borderRadius: 14,
+        border: 'none',
+        borderRadius: CHAT_COMPOSER_RADIUS,
         background: isDropTarget ? theme.surface.accentSoft : composerBackground,
         position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         boxShadow: isDropTarget
-          ? `0 0 0 1px ${theme.border.accent}, 0 0 22px ${theme.accent.soft}`
+          ? `0 0 22px ${theme.accent.soft}`
           : theme.mode === 'light'
-            ? `0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 12%, transparent), 0 10px 28px color-mix(in srgb, ${theme.text.primary} 9%, transparent)`
-            : `0 10px 28px color-mix(in srgb, #000 18%, transparent)`,
-        transition: 'border-color 120ms ease, background 120ms ease, box-shadow 120ms ease',
+            ? '0 10px 28px rgba(0, 0, 0, 0.08)'
+            : '0 10px 28px rgba(0, 0, 0, 0.18)',
+        transition: 'background 120ms ease, box-shadow 120ms ease',
       }}>
         <ChatComposerAutocompletePopup
           popupRef={acRef}
@@ -434,6 +444,8 @@ export function ChatTileComposer({
           dictationText={dictationText}
           dictationError={dictationError}
           ttsState={ttsState}
+          onRetryDictation={onRetryDictation}
+          onDismissDictationError={onDismissDictationError}
           onStopVoicePlayback={onStopVoicePlayback}
         />
 

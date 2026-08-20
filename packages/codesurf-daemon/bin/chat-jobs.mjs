@@ -3,14 +3,15 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import { chmodSync, createReadStream, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
-import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import {
   processTreeSpawnOptions,
   terminateProcessTree,
 } from './process-tree.mjs'
-import { StableSessionContextCache } from './stable-session-context.mjs'
+import { StableContextAnnouncementCache, StableSessionContextCache } from './stable-session-context.mjs'
 import { buildMemoryPrompt, loadMemoryContext } from './memory-loader.mjs'
 import { buildContextBucketBundle, describeContextBucketsForTool } from './context-buckets.mjs'
 import {
@@ -114,6 +115,86 @@ async function findClaudeResumeTranscript(sessionId, workspaceDir) {
   } catch {
     return null
   }
+}
+
+let cachedClaudeExecutable = null
+
+/**
+ * Resolve the Claude Code executable passed to the agent SDK.
+ *
+ * The SDK otherwise resolves its own bundled native binary and throws
+ * `Native CLI binary for <platform>-<arch> not found` whenever the optional
+ * @anthropic-ai/claude-agent-sdk-<platform>-<arch> package is absent — pruned
+ * installs, --omit=optional, a mid-flight npm install, or a packaged build that
+ * dropped the 200MB binary. The Electron main process already passes an explicit
+ * path (src/main/chat/providers/claude.ts); daemon jobs must do the same or they
+ * fail with no fallback.
+ */
+export function resolveClaudeExecutable(homeDir) {
+  if (cachedClaudeExecutable) return cachedClaudeExecutable
+  const exeSuffix = process.platform === 'win32' ? '.exe' : ''
+  const candidates = []
+  try {
+    const sdkEntry = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk')
+    const platformPkg = `@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}`
+    try {
+      candidates.push(createRequire(sdkEntry).resolve(`${platformPkg}/claude${exeSuffix}`))
+    } catch {}
+    // Hoisted optional-dep sibling of sdk.mjs. createRequire can miss this
+    // under Electron-as-node even when the 200MB binary is on disk.
+    candidates.push(join(dirname(sdkEntry), '..', platformPkg, `claude${exeSuffix}`))
+  } catch {}
+  try {
+    const raw = JSON.parse(readFileSync(join(homeDir, 'agent-paths.json'), 'utf8'))
+    const configured = typeof raw?.claude?.path === 'string' ? raw.claude.path.trim() : ''
+    if (configured) candidates.push(configured)
+  } catch {}
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (dir) candidates.push(join(dir, `claude${exeSuffix}`))
+  }
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) {
+      cachedClaudeExecutable = candidate
+      return candidate
+    }
+  }
+  return null
+}
+
+/**
+ * Text the assistant snapshot still owes the timeline after stream deltas.
+ *
+ * Stream events key by Claude content-block index (thinking=0, text=1, …).
+ * The assembled `assistant` message often strips thinking, so text lands at
+ * index 0. The old fallback then re-emitted the full snapshot as a new delta
+ * (`Hello. The CodeSurf pe` + full `Hello. The CodeSurf peer-…` → overlapping
+ * transcript). Prefer the accumulated stream over a mismatched index.
+ */
+export function remainingAssistantSnapshotText(blockText, alreadyStreamed, accumulated) {
+  if (typeof blockText !== 'string' || blockText.length === 0) return ''
+  if (blockText === alreadyStreamed || (accumulated && (accumulated === blockText || accumulated.endsWith(blockText)))) {
+    return ''
+  }
+  if (alreadyStreamed && blockText.startsWith(alreadyStreamed)) {
+    return blockText.slice(alreadyStreamed.length)
+  }
+  if (alreadyStreamed && alreadyStreamed.startsWith(blockText)) return ''
+  if (accumulated && blockText.startsWith(accumulated)) {
+    return blockText.slice(accumulated.length)
+  }
+  if (accumulated && accumulated.startsWith(blockText)) return ''
+  return alreadyStreamed ? '' : blockText
+}
+
+function longestStreamedPrefix(blockText, streamedTextByIndex) {
+  let best = ''
+  if (typeof blockText !== 'string' || !streamedTextByIndex) return best
+  for (const value of streamedTextByIndex.values()) {
+    if (typeof value === 'string' && value && blockText.startsWith(value) && value.length > best.length) {
+      best = value
+    }
+  }
+  return best
 }
 
 function readPermissionGrants(homeDir) {
@@ -1180,7 +1261,10 @@ function resolveHermesModelSelection(model, provider) {
 }
 
 function buildHermesChatArgs(request) {
-  const args = ['chat', '--query', request.prompt, '--quiet', '--source', 'tool']
+  // Hermes Agent (Nous) 0.20.x has no --stream-json; argparse rejects it.
+  // Only pass the flag when a caller has probed `hermes chat --help`.
+  const outputFlag = request.streamJson === true ? '--stream-json' : '--quiet'
+  const args = ['chat', '--query', request.prompt, outputFlag, '--source', 'tool']
   const selection = resolveHermesModelSelection(request.model, request.provider)
   pushOpenCodeFlag(args, '--model', selection.model)
   pushOpenCodeFlag(args, '--provider', selection.provider)
@@ -1189,6 +1273,21 @@ function buildHermesChatArgs(request) {
   if (request.ignoreRules) args.push('--ignore-rules')
   if (request.bypassPermissions) args.push('--yolo')
   return args
+}
+
+export function stripHermesReasoningChrome(text) {
+  return String(text ?? '')
+    .split('\n')
+    .filter(line => {
+      const trimmed = line.trim()
+      if (!trimmed) return true
+      if (/^┌─\s*Reasoning\b/i.test(trimmed)) return false
+      if (/^[┌└│├┤┬┴┼─━═]+$/.test(trimmed.replace(/\s/g, ''))) return false
+      return true
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function parseHermesOutput(stdout) {
@@ -1204,7 +1303,7 @@ function parseHermesOutput(stdout) {
   }
   return {
     sessionId,
-    text: textLines.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    text: stripHermesReasoningChrome(textLines.join('\n').replace(/\n{3,}/g, '\n\n')),
   }
 }
 
@@ -1631,6 +1730,7 @@ export function createChatJobManager({
 
   const liveJobs = new Map()
   const stableSessionContexts = new StableSessionContextCache()
+  const stableContextAnnouncements = new StableContextAnnouncementCache()
 
   function selectCodexStableContext(request) {
     return stableSessionContexts.select({
@@ -2445,8 +2545,10 @@ export function createChatJobManager({
       max: { type: 'enabled', budget_tokens: 131072 },
     }
     const claudeResumeSessionId = resolveClaudeResumeSessionId(request.sessionId)
+    const claudeExecutable = resolveClaudeExecutable(homeDir)
     const options = {
       model: request.model,
+      ...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
       abortController,
       persistSession: true,
       includePartialMessages: true,
@@ -2586,6 +2688,7 @@ export function createChatJobManager({
       let sawAssistantOutput = false
       const streamedTextByIndex = new Map()
       let streamTurn = 0
+      let currentThinkingId = null
 
       for await (const msg of q) {
         const sid = msg?.session_id
@@ -2604,7 +2707,11 @@ export function createChatJobManager({
               await appendEvent(job.id, { type: 'text', text: evt.delta.text })
             } else if (evt.delta?.type === 'thinking_delta' && evt.delta.thinking) {
               sawAssistantOutput = true
-              await appendEvent(job.id, { type: 'thinking', text: evt.delta.thinking })
+              await appendEvent(job.id, {
+                type: 'thinking',
+                text: evt.delta.thinking,
+                ...(currentThinkingId ? { thinkingId: currentThinkingId } : {}),
+              })
             } else if (evt.delta?.type === 'input_json_delta' && evt.delta.partial_json) {
               await appendEvent(job.id, { type: 'tool_input', text: evt.delta.partial_json })
             }
@@ -2617,17 +2724,25 @@ export function createChatJobManager({
                 toolId: evt.content_block.id,
               })
             } else if (evt.content_block?.type === 'thinking') {
-              await appendEvent(job.id, { type: 'thinking_start' })
+              currentThinkingId = `think-${streamTurn}-${evt.index ?? 0}`
+              await appendEvent(job.id, { type: 'thinking_start', thinkingId: currentThinkingId })
             }
           } else if (evt?.type === 'content_block_stop') {
-            await appendEvent(job.id, { type: 'block_stop', index: evt.index })
+            await appendEvent(job.id, {
+              type: 'block_stop',
+              index: evt.index,
+              ...(currentThinkingId ? { thinkingId: currentThinkingId } : {}),
+            })
+            currentThinkingId = null
           }
         } else if (msg.type === 'assistant') {
           const message = msg.message
+          let sawToolUse = false
           if (message?.content) {
             for (let idx = 0; idx < message.content.length; idx += 1) {
               const block = message.content[idx]
               if (block.type === 'tool_use') {
+                sawToolUse = true
                 sawAssistantOutput = true
                 await appendEvent(job.id, {
                   type: 'tool_use',
@@ -2637,22 +2752,23 @@ export function createChatJobManager({
                 })
               } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
                 const key = `${streamTurn}:${idx}`
-                const alreadyStreamed = streamedTextByIndex.get(key) ?? ''
-                if (block.text !== alreadyStreamed) {
-                  const tail = block.text.startsWith(alreadyStreamed)
-                    ? block.text.slice(alreadyStreamed.length)
-                    : block.text
-                  if (tail.length > 0) {
-                    assistantText += tail
-                    sawAssistantOutput = true
-                    await appendEvent(job.id, { type: 'text', text: tail })
-                    streamedTextByIndex.set(key, block.text)
-                  }
+                const alreadyStreamed = longestStreamedPrefix(block.text, streamedTextByIndex)
+                  || streamedTextByIndex.get(key)
+                  || ''
+                const tail = remainingAssistantSnapshotText(block.text, alreadyStreamed, assistantText)
+                if (tail.length > 0) {
+                  assistantText += tail
+                  sawAssistantOutput = true
+                  await appendEvent(job.id, { type: 'text', text: tail })
+                  streamedTextByIndex.set(key, block.text)
                 }
               }
             }
           }
-          streamTurn += 1
+          // includePartialMessages emits intermediate assistant snapshots of the
+          // same turn. Only advance the stream-index namespace after tools,
+          // when the next assistant message is actually a new turn.
+          if (sawToolUse) streamTurn += 1
         } else if (msg.type === 'tool_use_summary') {
           if (typeof msg.summary === 'string' && msg.summary.trim()) sawAssistantOutput = true
           await appendEvent(job.id, {
@@ -3239,11 +3355,102 @@ export function createChatJobManager({
 
     let stdoutBuf = ''
     let stderrBuf = ''
+    let pendingLine = ''
+    let jsonEventCount = 0
+    let accumulatedThinking = ''
+    let accumulatedText = ''
+    let thinkingOpen = false
+    let eventQueue = Promise.resolve()
     let exitCode = null
     let procError = null
 
+    const closeThinking = async () => {
+      if (!thinkingOpen) return
+      thinkingOpen = false
+      await appendEvent(job.id, { type: 'block_stop' })
+    }
+
+    const handleHermesEvent = async (evt) => {
+      if (!evt || typeof evt !== 'object' || typeof evt.type !== 'string') return
+      jsonEventCount += 1
+      switch (evt.type) {
+        case 'session':
+          if (typeof evt.sessionId === 'string' && evt.sessionId.trim()) {
+            await appendEvent(job.id, { type: 'session', sessionId: evt.sessionId.trim() })
+          }
+          break
+        case 'thinking': {
+          if (typeof evt.text !== 'string' || !evt.text) break
+          const tail = remainingAssistantSnapshotText(evt.text, accumulatedThinking, accumulatedThinking)
+          if (!tail) break
+          if (!thinkingOpen) {
+            thinkingOpen = true
+            await appendEvent(job.id, { type: 'thinking_start', thinkingId: 'think-hermes-0' })
+          }
+          accumulatedThinking += tail
+          await appendEvent(job.id, { type: 'thinking', text: tail, thinkingId: 'think-hermes-0' })
+          break
+        }
+        case 'text': {
+          if (typeof evt.text !== 'string' || !evt.text) break
+          await closeThinking()
+          const tail = remainingAssistantSnapshotText(evt.text, accumulatedText, accumulatedText)
+          if (!tail) break
+          accumulatedText += tail
+          await appendEvent(job.id, { type: 'text', text: tail })
+          break
+        }
+        case 'tool_start':
+          await closeThinking()
+          await appendEvent(job.id, {
+            type: 'tool_start',
+            toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
+            toolName: typeof evt.toolName === 'string' ? evt.toolName : 'tool',
+          })
+          break
+        case 'tool_input':
+          await appendEvent(job.id, {
+            type: 'tool_input',
+            toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
+            text: typeof evt.text === 'string' ? evt.text : '',
+          })
+          break
+        case 'tool_summary':
+          await appendEvent(job.id, {
+            type: 'tool_summary',
+            toolId: typeof evt.toolId === 'string' ? evt.toolId : undefined,
+            toolName: typeof evt.toolName === 'string' ? evt.toolName : undefined,
+            text: typeof evt.text === 'string' ? evt.text : '',
+          })
+          break
+        case 'error':
+          await closeThinking()
+          await appendEvent(job.id, {
+            type: 'error',
+            error: typeof evt.error === 'string' ? evt.error : 'Unknown Hermes error',
+          })
+          break
+        default:
+          break
+      }
+    }
+
+    const consumeStdout = (chunk, flushPartial) => {
+      pendingLine += chunk
+      const lines = pendingLine.split(/\r?\n/)
+      pendingLine = flushPartial ? '' : (lines.pop() ?? '')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        stdoutBuf += `${line}\n`
+        let evt = null
+        try { evt = JSON.parse(trimmed) } catch { continue }
+        eventQueue = eventQueue.then(() => handleHermesEvent(evt)).catch(() => {})
+      }
+    }
+
     proc.stdout?.on('data', (chunk) => {
-      stdoutBuf += chunk.toString()
+      consumeStdout(chunk.toString(), false)
     })
     proc.stderr?.on('data', (chunk) => {
       stderrBuf += chunk.toString()
@@ -3259,6 +3466,9 @@ export function createChatJobManager({
         resolveJob()
       })
     })
+    consumeStdout('', true)
+    await eventQueue
+    await closeThinking()
 
     const processTreeExit = await job.cancel()
     if (!processTreeExit.confirmed) {
@@ -3274,7 +3484,7 @@ export function createChatJobManager({
     } else if (typeof exitCode === 'number' && exitCode !== 0) {
       const diagnostic = stderrBuf.trim() || stdoutBuf.trim() || `Hermes exited with code ${exitCode}`
       await appendEvent(job.id, { type: 'error', error: sanitizeAgentCliDiagnostic(diagnostic) })
-    } else {
+    } else if (jsonEventCount === 0) {
       const parsed = parseHermesOutput(stdoutBuf)
       if (parsed.sessionId) await appendEvent(job.id, { type: 'session', sessionId: parsed.sessionId })
       if (parsed.text) await appendEvent(job.id, { type: 'text', text: parsed.text })
@@ -3719,14 +3929,18 @@ export function createChatJobManager({
       const contextValidation = revalidateDaemonContextRequest(request)
       request = contextValidation.request
 
-      const memoryContext = await loadMemoryContext({
-        homeDir,
-        workspaceDir,
-        projectPaths: [workspaceDir],
-        executionTarget: request.executionTarget ?? 'local',
-      })
-      if (job.cancelRequested) return
-      const instructionPrompt = String(request.memoryPrompt ?? '').trim() || buildMemoryPrompt(memoryContext)
+      const callerMemoryPrompt = String(request.memoryPrompt ?? '').trim()
+      let memoryContext = null
+      if (!callerMemoryPrompt) {
+        memoryContext = await loadMemoryContext({
+          homeDir,
+          workspaceDir,
+          projectPaths: [workspaceDir],
+          executionTarget: request.executionTarget ?? 'local',
+        })
+        if (job.cancelRequested) return
+      }
+      const instructionPrompt = callerMemoryPrompt || buildMemoryPrompt(memoryContext)
       const suppliedContext = request.contextBuckets ?? memoryContext
       const contextBuckets = buildContextBucketBundle(suppliedContext, instructionPrompt)
       const suppliedContextSummary = String(suppliedContext?.inspect?.summary ?? '').trim()
@@ -3743,7 +3957,16 @@ export function createChatJobManager({
           }).text
         : undefined
       const memoryInput = buildMemoryContextInput(contextBuckets, instructionPrompt)
-      if (memorySummary) {
+      const announcementScope = {
+        workspaceId: request.workspaceId,
+        cardId: request.cardId,
+        sessionId: request.sessionId,
+      }
+      if (memorySummary && stableContextAnnouncements.consume({
+        ...announcementScope,
+        kind: 'memory',
+        content: `${memorySummary}\n${memoryInput ?? ''}`,
+      })) {
         await appendEvent(job.id, {
           type: 'tool_start',
           toolId: 'codesurf-memory-context',
@@ -3775,7 +3998,11 @@ export function createChatJobManager({
             reason: `maximum skills summary bytes (${MAX_SKILLS_SUMMARY_BYTES})`,
           }).text
         : ''
-      if (skillsSummary) {
+      if (skillsSummary && stableContextAnnouncements.consume({
+        ...announcementScope,
+        kind: 'skills',
+        content: `${skillsSummary}\n${skillsPrompt}`,
+      })) {
         await appendEvent(job.id, {
           type: 'tool_start',
           toolId: 'codesurf-skills-context',

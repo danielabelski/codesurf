@@ -4,8 +4,10 @@ import {
   type SetStateAction,
 } from 'react'
 import type { GroupState, TileState } from '../../../shared/types.ts'
-import { createLeaf } from '../components/panelLayoutTree.ts'
-import { tilesToPanelNode } from '../lib/layoutSnap.ts'
+import {
+  convertGroupToLayoutGroup,
+  correctLayoutBoundsOrientation,
+} from '../lib/layoutGroupMembership.ts'
 import type { SaveCanvasFn, CanvasViewport } from './useCanvasEngine.ts'
 
 export type UseCanvasGroupManagerOptions = {
@@ -40,7 +42,10 @@ export function computeCanvasGroupBounds(
 ): { x: number; y: number; w: number; h: number } | null {
   const group = groups.find(candidate => candidate.id === groupId)
   if (group?.layoutMode && group.layoutBounds) {
-    return group.layoutBounds as { x: number; y: number; w: number; h: number }
+    return correctLayoutBoundsOrientation(
+      group.layoutBounds as { x: number; y: number; w: number; h: number },
+      group.layout,
+    )
   }
   const ids = new Set(collectCanvasGroupTileIds(tiles, groups, groupId))
   const members = tiles.filter(tile => ids.has(tile.id))
@@ -151,24 +156,12 @@ export function useCanvasGroupManager({
   }, [tiles, groups])
 
   const convertGroupToLayout = useCallback((groupId: string) => {
-    const members = tiles.filter(tile => tile.groupId === groupId)
-    const memberTileIds = members.map(tile => tile.id)
-    if (memberTileIds.length === 0) return
-    const bounds = groupBounds(groupId)
-    if (!bounds) return
-    const rects = members.map(tile => ({ id: tile.id, x: tile.x, y: tile.y, width: tile.width, height: tile.height }))
-    const layout = tilesToPanelNode(rects) ?? createLeaf(memberTileIds, memberTileIds[0])
-    setGroups(prev => {
-      const updated = prev.map(group => group.id === groupId ? {
-        ...group,
-        layoutMode: true,
-        layout,
-        layoutBounds: bounds,
-      } : group)
-      setTiles(current => { saveCanvas(current, viewport, nextZIndex, updated); return current })
-      return updated
-    })
-  }, [tiles, groupBounds, viewport, nextZIndex, saveCanvas, setGroups, setTiles])
+    const converted = convertGroupToLayoutGroup(tiles, groups, groupId)
+    if (!converted) return
+    setGroups(converted.groups)
+    setTiles(converted.tiles)
+    saveCanvas(converted.tiles, viewport, nextZIndex, converted.groups)
+  }, [tiles, groups, viewport, nextZIndex, saveCanvas, setGroups, setTiles])
 
   const revertLayoutGroup = useCallback((groupId: string) => {
     setGroups(prev => {

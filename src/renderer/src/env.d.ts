@@ -97,7 +97,7 @@ interface ElectronAPI {
     opencodeModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }>; source?: string; loading?: boolean }>
     onOpencodeModelsUpdated(cb: (payload: { models: Array<{ id: string; label: string; description?: string }>; source: string; error?: string }) => void): () => void
     openclawAgents(): Promise<{ agents: Array<{ id: string; label: string; description?: string }> }>
-    csagentModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }> }>
+    csagentModels(): Promise<{ models: Array<{ id: string; label: string; description?: string }>; error?: string }>
     selectFiles(workspaceId: string, cardId: string): Promise<Array<{ capability: string; displayName: string }>>
     authorizeDroppedFiles(workspaceId: string, cardId: string, files: File[]): Promise<Array<{ capability: string; displayName: string }>>
     writeTempAttachment(payload: { workspaceId: string; cardId: string; data: string; mime?: string; ext?: string; filenameHint?: string }): Promise<{ ok: true; attachment: { capability: string; displayName: string } } | { ok: false; error: string }>
@@ -651,6 +651,11 @@ interface ElectronAPI {
       } | null
     }>
     onGcRequested(callback: () => void): () => void
+    requestMediaAccess?(args?: { kind?: 'microphone' | 'camera' }): Promise<{
+      granted: boolean
+      status: string
+      openedSettings?: boolean
+    }>
   }
 }
 

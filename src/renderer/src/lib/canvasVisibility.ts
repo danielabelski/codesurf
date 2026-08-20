@@ -4,6 +4,7 @@
  */
 
 import type { GroupState, TileState } from '../../../shared/types'
+import { tileIdsInLayout } from './layoutGroupMembership.ts'
 
 export type ExpandedCanvasMembership = {
   tileIds: Set<string>
@@ -17,15 +18,12 @@ export type ExpandedCanvasMembership = {
 export function computePanelTileIds(
   layoutTileIds: readonly string[],
   groups: GroupState[],
-  tiles: TileState[],
+  _tiles: TileState[],
 ): Set<string> {
   const ids = new Set<string>(layoutTileIds)
   for (const g of groups) {
-    if (g.layoutMode) {
-      for (const t of tiles) {
-        if (t.groupId === g.id) ids.add(t.id)
-      }
-    }
+    if (!g.layoutMode) continue
+    for (const tileId of tileIdsInLayout(g.layout)) ids.add(tileId)
   }
   return ids
 }

@@ -218,6 +218,17 @@ describe('chat stream reducer', () => {
     expect(serializableMessage(result)).toEqual(EXPECTED_REDUCTIONS.interleavedBlocks)
   })
 
+  test('duplicate thinking_start with the same id does not add a second chip', () => {
+    const result = reduce([
+      { type: 'thinking_start', thinkingId: 'th1' },
+      { type: 'thinking_start', thinkingId: 'th1' },
+      { type: 'thinking', thinkingId: 'th1', text: 'once' },
+    ])
+    expect(result.thinkingBlocks?.length).toBe(1)
+    expect(result.contentBlocks?.filter(block => block.type === 'thinking').length).toBe(1)
+    expect(result.thinkingBlocks?.[0]?.content).toBe('once')
+  })
+
   test('done marks any still-running tool blocks as done', () => {
     const result = reduce([
       { type: 'tool_start', toolId: 't1', toolName: 'Read' },

@@ -242,6 +242,8 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
         content: 'The selected agent could not be resolved — its persona and tool restrictions are not ready yet (or failed to load). Wait a moment and resend, or clear the selected agent.',
         timestamp: Date.now(),
         isStreaming: false,
+        agentId: agentId ?? null,
+        provider: provider || undefined,
       }])
       return false
     }
@@ -290,6 +292,8 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
         content: '',
         timestamp: Date.now(),
         isStreaming: true,
+        agentId: agentId ?? null,
+        provider: activeProvider || undefined,
       },
     ])
     const optimisticState: ChatTilePersistedState = {
@@ -687,6 +691,8 @@ export function useChatTileMessaging(options: UseChatTileMessagingOptions): UseC
           content: `Steer failed: ${result?.error ?? 'No active steerable stream'}`,
           timestamp: Date.now(),
           isStreaming: false,
+          agentId: agentId ?? null,
+          provider: provider || undefined,
         }])
         return
       }

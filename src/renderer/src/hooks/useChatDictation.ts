@@ -22,6 +22,7 @@ interface UseChatDictationResult {
   dictationText: string
   dictationError: string | null
   toggleDictation: () => void
+  clearDictationError: () => void
   /** Register a handler to receive transcribed text from each utterance. */
   onTranscription: (handler: (text: string) => void) => void
 }
@@ -89,14 +90,20 @@ export function useChatDictation({ voiceSettings }: UseChatDictationOptions): Us
     if (vad.isListening) {
       void vad.stop()
     } else {
+      setDictationError(null)
       bargeIn()  // any active TTS audio is silenced when we start listening
       void vad.start()
     }
+  }, [vad])
+
+  const clearDictationError = useCallback(() => {
+    vad.clearError()
+    setDictationError(null)
   }, [vad])
 
   const onTranscription = useCallback((handler: (text: string) => void) => {
     onTranscriptionRef.current = handler
   }, [])
 
-  return { isDictating, dictationText, dictationError, toggleDictation, onTranscription }
+  return { isDictating, dictationText, dictationError, toggleDictation, clearDictationError, onTranscription }
 }

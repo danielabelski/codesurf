@@ -93,6 +93,7 @@ export type CanvasEnginePersistRefs = {
   activePanelIdRef: MutableRefObject<string | null>
   expandedTileIdRef: MutableRefObject<string | null>
   expandedCanvasGroupIdRef: MutableRefObject<string | null>
+  expandLayoutGroupIdRef: MutableRefObject<string | null>
   /** When true, debounced canvas persistence is deferred until drag ends. */
   canvasPersistSuspendedRef?: MutableRefObject<boolean>
 }
@@ -137,6 +138,7 @@ function buildCanvasStatePayload(
     tabViewActive: Boolean(persistRefs.panelLayoutRef.current),
     expandedTileId: persistRefs.expandedTileIdRef.current,
     expandedCanvasGroupId: persistRefs.expandedCanvasGroupIdRef.current,
+    expandLayoutGroupId: persistRefs.expandLayoutGroupIdRef.current,
     expandedCanvasPriorViewport,
     lockedConnections: persistRefs.lockedConnectionsRef.current.length > 0
       ? persistRefs.lockedConnectionsRef.current

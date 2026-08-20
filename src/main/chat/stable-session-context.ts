@@ -228,7 +228,122 @@ export class StableSessionContextCache {
   }
 }
 
+/**
+ * Transcript chips for memory/skills must not repeat on every turn.
+ * Process-local: a restart re-announces once, then stays quiet until
+ * the content hash or conversation session changes.
+ */
+export class StableContextAnnouncementCache {
+  private readonly entries = new Map<string, { hash: string, sessionId: string | null }>()
+  private readonly maxEntries: number
+
+  constructor(maxEntries = MAX_STABLE_SESSION_CONTEXTS) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+      throw new Error('Stable context announcement cache size must be a positive integer')
+    }
+    this.maxEntries = maxEntries
+  }
+
+  consume(input: {
+    workspaceId?: string | null
+    cardId?: string | null
+    kind: string
+    sessionId?: string | null
+    content?: string | null
+  }): boolean {
+    const content = String(input.content ?? '').trim()
+    if (!content) return false
+    const key = JSON.stringify([
+      String(input.workspaceId ?? ''),
+      String(input.cardId ?? ''),
+      String(input.kind ?? ''),
+    ])
+    const hash = contextHash(content)
+    const sessionId = normalizedSessionId(input.sessionId)
+    const current = this.entries.get(key)
+    if (current && current.hash === hash) {
+      if (!current.sessionId || !sessionId || current.sessionId === sessionId) {
+        if (sessionId && current.sessionId !== sessionId) {
+          this.entries.delete(key)
+          this.entries.set(key, { hash, sessionId })
+        }
+        return false
+      }
+    }
+    this.entries.delete(key)
+    this.entries.set(key, { hash, sessionId })
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value
+      if (oldest === undefined) return true
+      this.entries.delete(oldest)
+    }
+    return true
+  }
+
+  clear(workspaceId?: string | null, cardId?: string | null): void {
+    const workspace = String(workspaceId ?? '')
+    const card = String(cardId ?? '')
+    for (const key of [...this.entries.keys()]) {
+      const parsed = JSON.parse(key) as [string, string, string]
+      if (parsed[0] === workspace && parsed[1] === card) this.entries.delete(key)
+    }
+  }
+}
+
 const stableSessionContexts = new StableSessionContextCache()
+const stableContextAnnouncements = new StableContextAnnouncementCache()
+const runtimeStableLoads = new Map<string, unknown>()
+
+function runtimeStableLoadKey(
+  kind: string,
+  workspaceId?: string | null,
+  cardId?: string | null,
+  extra?: string | null,
+): string {
+  return JSON.stringify([
+    kind,
+    String(workspaceId ?? ''),
+    String(cardId ?? ''),
+    String(extra ?? ''),
+  ])
+}
+
+export function readRuntimeStableLoad<T>(
+  kind: string,
+  workspaceId?: string | null,
+  cardId?: string | null,
+  extra?: string | null,
+): { hit: true, value: T } | { hit: false } {
+  const key = runtimeStableLoadKey(kind, workspaceId, cardId, extra)
+  if (!runtimeStableLoads.has(key)) return { hit: false }
+  return { hit: true, value: runtimeStableLoads.get(key) as T }
+}
+
+export function writeRuntimeStableLoad(
+  kind: string,
+  workspaceId: string | null | undefined,
+  cardId: string | null | undefined,
+  extra: string | null | undefined,
+  value: unknown,
+): void {
+  const key = runtimeStableLoadKey(kind, workspaceId, cardId, extra)
+  runtimeStableLoads.delete(key)
+  runtimeStableLoads.set(key, value)
+  while (runtimeStableLoads.size > MAX_STABLE_SESSION_CONTEXTS) {
+    const oldest = runtimeStableLoads.keys().next().value
+    if (oldest === undefined) return
+    runtimeStableLoads.delete(oldest)
+  }
+}
+
+export function clearRuntimeStableLoads(scope: ChatStreamScope): void {
+  const workspace = String(scope.workspaceId ?? '')
+  const card = String(scope.cardId ?? '')
+  for (const key of [...runtimeStableLoads.keys()]) {
+    const parsed = JSON.parse(key) as [string, string, string, string]
+    if (parsed[1] === workspace && parsed[2] === card) runtimeStableLoads.delete(key)
+  }
+}
 
 export function selectStableContextForTurn(input: StableContextTurnInput): StableContextSelection {
   return stableSessionContexts.select(input)
@@ -259,6 +374,25 @@ export function invalidateStableContextSelection(selection: StableContextSelecti
   stableSessionContexts.invalidate(selection)
 }
 
+export function consumeStableContextAnnouncement(input: {
+  scope: ChatStreamScope
+  kind: string
+  sessionId?: string | null
+  content?: string | null
+}): boolean {
+  return stableContextAnnouncements.consume({
+    workspaceId: input.scope.workspaceId,
+    cardId: input.scope.cardId,
+    kind: input.kind,
+    sessionId: input.sessionId,
+    content: input.content,
+  })
+}
+
 export function clearStableSessionContext(scope: ChatStreamScope, provider?: string): void {
   stableSessionContexts.clear(scope, provider)
+  if (provider === undefined) {
+    stableContextAnnouncements.clear(scope.workspaceId, scope.cardId)
+    clearRuntimeStableLoads(scope)
+  }
 }

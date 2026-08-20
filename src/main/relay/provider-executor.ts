@@ -476,12 +476,6 @@ async function runHermesTurn(
     resumeSessionId: existingSessionId,
     ignoreRules: true,
     bypassPermissions: spawnRequest.mode === 'bypassPermissions',
-    // Relay path is batch (Promise<string>); we still use --stream-json so
-    // the consumer sees a faithful event log if it ever taps stdout, and
-    // so a single Hermes binary version is required across both chat and
-    // relay paths. The NDJSON parser concatenates text deltas into the
-    // final string we return here.
-    streamJson: true,
   })
   const result = await runRelayProviderCli({
     label: 'Hermes',

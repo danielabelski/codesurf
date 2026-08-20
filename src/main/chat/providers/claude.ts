@@ -679,6 +679,23 @@ export function chatClaude(req: ChatRequest): void {
                   }
                 } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
                   const key = `${streamTurn}:${idx}`
+                  const accumulated = assistantText.value
+                  // Thinking blocks occupy stream indices the assembled message
+                  // omits. Never re-emit a snapshot we already streamed.
+                  if (accumulated === block.text || accumulated.endsWith(block.text)) continue
+                  if (accumulated && block.text.startsWith(accumulated)) {
+                    const caughtUp = block.text.slice(accumulated.length)
+                    if (caughtUp.length > 0) {
+                      assistantText.append(caughtUp)
+                      noteAssistantOutput()
+                      sendStream(scope, { type: 'text', text: caughtUp })
+                    }
+                    streamedTextByIndex.set(key, {
+                      length: block.text.length,
+                      tail: appendBoundedSuffix('', block.text, MAX_PROVIDER_DEDUP_TAIL_BYTES),
+                    })
+                    continue
+                  }
                   const alreadyStreamed = streamedTextByIndex.get(key)
                   const matchesStreamedPrefix = Boolean(
                     alreadyStreamed
@@ -704,12 +721,18 @@ export function chatClaude(req: ChatRequest): void {
                 }
               }
             }
-            // Advance turn so the next assistant message gets fresh indices.
-            const finishedTurnPrefix = `${streamTurn}:`
-            for (const key of streamedTextByIndex.keys()) {
-              if (key.startsWith(finishedTurnPrefix)) streamedTextByIndex.delete(key)
+            // includePartialMessages yields intermediate snapshots of the same
+            // turn. Only advance the stream-index namespace after tool_use,
+            // when the next assistant message is a new turn.
+            const sawToolUse = Array.isArray(message?.content)
+              && message.content.some((block: { type?: string }) => block.type === 'tool_use')
+            if (sawToolUse) {
+              const finishedTurnPrefix = `${streamTurn}:`
+              for (const key of streamedTextByIndex.keys()) {
+                if (key.startsWith(finishedTurnPrefix)) streamedTextByIndex.delete(key)
+              }
+              streamTurn += 1
             }
-            streamTurn += 1
           } else if (msg.type === 'tool_use_summary') {
             sendStream(scope, {
               type: 'tool_summary',

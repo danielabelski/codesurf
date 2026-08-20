@@ -7,6 +7,7 @@ import {
   type MutableRefObject,
 } from 'react'
 import type { TileState, GroupState } from '../../../shared/types'
+import { assignTileToGroup } from '../lib/layoutGroupMembership.ts'
 import type { CanvasViewport } from './useCanvasEngine.ts'
 import {
   computeAlignmentGuides,
@@ -655,15 +656,12 @@ export function useCanvasDragSync(options: UseCanvasDragSyncOptions): void {
           }
 
           if (newGroupId !== tile.groupId) {
-            const updated = updateIndexedCanvasTiles(
-              prev,
-              ensureTileIndex(prev),
-              [{ id: tile.id }],
-              current => ({ ...current, groupId: newGroupId }),
-            )
-            saveCanvas(updated, viewport, nextZIndex, undefined, beforeTiles)
-            window.setTimeout(() => triggerDiscoveryPulse(tile.id, updated), 40)
-            return updated
+            const assigned = assignTileToGroup(prev, groupsRef.current, tile.id, newGroupId)
+            groupsRef.current = assigned.groups
+            latestOptionsRef.current.setGroups(assigned.groups)
+            saveCanvas(assigned.tiles, viewport, nextZIndex, assigned.groups, beforeTiles)
+            window.setTimeout(() => triggerDiscoveryPulse(tile.id, assigned.tiles), 40)
+            return assigned.tiles
           }
           saveCanvas(prev, viewport, nextZIndex, undefined, beforeTiles)
           window.setTimeout(() => triggerDiscoveryPulse(tile.id, prev), 40)

@@ -130,3 +130,54 @@ export class StableSessionContextCache {
     }
   }
 }
+
+export class StableContextAnnouncementCache {
+  #entries = new Map()
+  #maxEntries
+
+  constructor(maxEntries = MAX_STABLE_SESSION_CONTEXTS) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+      throw new Error('Stable context announcement cache size must be a positive integer')
+    }
+    this.#maxEntries = maxEntries
+  }
+
+  consume(input = {}) {
+    const content = normalizedText(input.content)
+    if (!content) return false
+    const key = JSON.stringify([
+      normalizedText(input.workspaceId),
+      normalizedText(input.cardId),
+      normalizedText(input.kind),
+    ])
+    const hash = contextHash(content)
+    const sessionId = normalizedSessionId(input.sessionId)
+    const current = this.#entries.get(key)
+    if (current && current.hash === hash) {
+      if (!current.sessionId || !sessionId || current.sessionId === sessionId) {
+        if (sessionId && current.sessionId !== sessionId) {
+          this.#entries.delete(key)
+          this.#entries.set(key, { hash, sessionId })
+        }
+        return false
+      }
+    }
+    this.#entries.delete(key)
+    this.#entries.set(key, { hash, sessionId })
+    while (this.#entries.size > this.#maxEntries) {
+      const oldest = this.#entries.keys().next().value
+      if (oldest === undefined) return true
+      this.#entries.delete(oldest)
+    }
+    return true
+  }
+
+  clear(workspaceId, cardId) {
+    const workspace = normalizedText(workspaceId)
+    const card = normalizedText(cardId)
+    for (const key of [...this.#entries.keys()]) {
+      const parsed = JSON.parse(key)
+      if (parsed[0] === workspace && parsed[1] === card) this.#entries.delete(key)
+    }
+  }
+}

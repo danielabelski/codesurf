@@ -10,6 +10,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import type { TileState, GroupState } from '../../../shared/types.ts'
+import { assignTileToGroup } from '../lib/layoutGroupMembership.ts'
 import type { PanelNode } from '../components/panelLayoutTree.ts'
 import type { CanvasViewport, SaveCanvasFn } from './canvasEngineMath.ts'
 
@@ -139,6 +140,7 @@ export type UseTileContextMenuOptions = {
   workspacePath: string | null | undefined
   saveCanvas: SaveCanvasFn
   setTiles: Dispatch<SetStateAction<TileState[]>>
+  setGroups: Dispatch<SetStateAction<GroupState[]>>
   setSelectedTileId: Dispatch<SetStateAction<string | null>>
   setSelectedTileIds: Dispatch<SetStateAction<Set<string>>>
   setCtxMenu: Dispatch<SetStateAction<{ x: number; y: number; items: CanvasContextMenuItem[] } | null>>
@@ -160,6 +162,7 @@ export function useTileContextMenu(options: UseTileContextMenuOptions) {
     workspacePath,
     saveCanvas,
     setTiles,
+    setGroups,
     setSelectedTileId,
     setSelectedTileIds,
     setCtxMenu,
@@ -192,9 +195,10 @@ export function useTileContextMenu(options: UseTileContextMenuOptions) {
     if (tile.groupId) {
       items.push({ label: 'Remove from group', action: () => {
         setTiles(prev => {
-          const updated = prev.map(t => t.id === tile.id ? { ...t, groupId: undefined } : t)
-          saveCanvas(updated, viewport, nextZIndex)
-          return updated
+          const assigned = assignTileToGroup(prev, groups, tile.id, undefined)
+          setGroups(assigned.groups)
+          saveCanvas(assigned.tiles, viewport, nextZIndex, assigned.groups)
+          return assigned.tiles
         })
       } })
       items.push({ label: 'Ungroup', action: () => ungroupTiles(tile.groupId!) })
@@ -208,9 +212,10 @@ export function useTileContextMenu(options: UseTileContextMenuOptions) {
           label: `Add to ${g.label ?? g.id.slice(-6)}`,
           action: () => {
             setTiles(prev => {
-              const updated = prev.map(t => t.id === tile.id ? { ...t, groupId: g.id } : t)
-              saveCanvas(updated, viewport, nextZIndex)
-              return updated
+              const assigned = assignTileToGroup(prev, groups, tile.id, g.id)
+              setGroups(assigned.groups)
+              saveCanvas(assigned.tiles, viewport, nextZIndex, assigned.groups)
+              return assigned.tiles
             })
           },
         })
@@ -247,6 +252,7 @@ export function useTileContextMenu(options: UseTileContextMenuOptions) {
     workspacePath,
     saveCanvas,
     setTiles,
+    setGroups,
     setSelectedTileId,
     setSelectedTileIds,
     setCtxMenu,

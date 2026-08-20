@@ -710,6 +710,12 @@ const electronApi = {
     daemonStatus: () => ipcRenderer.invoke('system:daemonStatus'),
     daemonSummary: () => ipcRenderer.invoke('system:daemonSummary'),
     restartDaemon: () => ipcRenderer.invoke('system:restartDaemon'),
+    requestMediaAccess: (args?: { kind?: 'microphone' | 'camera' }) =>
+      ipcRenderer.invoke('system:requestMediaAccess', args) as Promise<{
+        granted: boolean
+        status: string
+        openedSettings?: boolean
+      }>,
     onGcRequested: (callback: () => void) => {
       const handler = () => {
         // window.gc exists when renderer is launched with --js-flags=--expose-gc

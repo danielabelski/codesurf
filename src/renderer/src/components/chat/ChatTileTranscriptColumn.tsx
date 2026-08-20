@@ -1,7 +1,7 @@
 import React from 'react'
 import { ArrowDown } from 'lucide-react'
 import type { ChatMessage } from '../../../../shared/chat-types'
-import type { VoiceSettings } from '../../../../shared/types'
+import type { Persona, VoiceSettings } from '../../../../shared/types'
 import type { TtsPlayerState } from '../../utils/ttsPlayer'
 import type { BlockNoteTarget } from '../../hooks/useChatTileBlockNotes'
 import { useTheme } from '../../ThemeContext'
@@ -76,6 +76,8 @@ export interface ChatTileTranscriptColumnProps {
    *  Null until the terminal has been opened at least once. */
   embeddedTerminal: React.ReactNode
   children: React.ReactNode
+  personas: ReadonlyArray<Pick<Persona, 'id' | 'name' | 'color'>>
+  fallbackProvider?: string | null
 }
 
 export function ChatTileTranscriptColumn({
@@ -132,6 +134,8 @@ export function ChatTileTranscriptColumn({
   activeView,
   embeddedTerminal,
   children,
+  personas,
+  fallbackProvider,
 }: ChatTileTranscriptColumnProps): JSX.Element {
   const theme = useTheme()
   const terminalActive = activeView === 'terminal'
@@ -248,6 +252,8 @@ export function ChatTileTranscriptColumn({
             monoSize={monoSize}
             ttsState={ttsState}
             voiceSettings={voiceSettings}
+            personas={personas}
+            fallbackProvider={fallbackProvider}
           />
         </div>
       </div>

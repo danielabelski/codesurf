@@ -1456,7 +1456,7 @@ model=""
 provider=""
 source=""
 toolsets=""
-quiet=0
+stream_json=0
 query_seen=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -1464,8 +1464,8 @@ while [ "$#" -gt 0 ]; do
       query_seen=1
       shift 2
       ;;
-    --quiet)
-      quiet=1
+    --quiet|--stream-json)
+      stream_json=1
       shift
       ;;
     --source)
@@ -1496,7 +1496,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-if [ "$query_seen" != "1" ] || [ "$quiet" != "1" ] || [ "$source" != "tool" ]; then
+if [ "$query_seen" != "1" ] || [ "$stream_json" != "1" ] || [ "$source" != "tool" ]; then
   printf '%s\n' "missing hermes programmatic chat flags" >&2
   exit 4
 fi
@@ -1508,8 +1508,8 @@ if [ "$toolsets" != "terminal,file" ]; then
   printf '%s\n' "expected terminal,file toolsets got $toolsets" >&2
   exit 6
 fi
-printf '%s\n' 'session_id: hermes-session-test'
-printf '%s\n' 'HERMES OK'
+printf '%s\n' '{"type":"session","sessionId":"hermes-session-test"}'
+printf '%s\n' '{"type":"text","text":"HERMES OK"}'
 exit 0
 `, 'utf8')
   await chmod(fakeHermesPath, 0o755)

@@ -1,4 +1,6 @@
 import { ipcMain } from 'electron'
+import { requestOsMediaAccess } from '../security/mediaAccess'
+import { parseMediaAccessKind } from '../security/mediaAccessPlan'
 import { getHeapStatistics } from 'v8'
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { join } from 'path'
@@ -297,5 +299,9 @@ export function registerSystemIPC(): void {
   ipcMain.handle('system:restartDaemon', async () => {
     const info = await restartDaemon()
     return sanitizeDaemonState({ running: true, info })
+  })
+
+  ipcMain.handle('system:requestMediaAccess', async (event, args?: { kind?: string }) => {
+    return await requestOsMediaAccess(parseMediaAccessKind(args?.kind), event.sender)
   })
 }

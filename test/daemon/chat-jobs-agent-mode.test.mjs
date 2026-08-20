@@ -1023,7 +1023,8 @@ test('runtime Hermes: buildHermesSpawnArgs (the chatHermes call path) reflects A
   assert.ok(args[queryIdx + 1].includes('PERSONA-RT-HERMES'), 'persona must be in the real --query prompt')
   assert.ok(args[queryIdx + 1].includes('BOUNDED-PEER-RT-HERMES'), 'bounded peers must be in the real --query prompt')
   assert.ok(args[queryIdx + 1].indexOf('PERSONA-RT-HERMES') < args[queryIdx + 1].indexOf('BOUNDED-PEER-RT-HERMES'), 'stable persona must precede volatile peer context')
-  assert.ok(args.includes('--stream-json'), 'chatHermes requests NDJSON streaming')
+  assert.ok(args.includes('--quiet'), 'chatHermes uses --quiet unless this Hermes build advertises --stream-json')
+  assert.ok(!args.includes('--stream-json'), 'do not pass --stream-json to Hermes Agent 0.20.x (argparse rejects it)')
 
   // deny-all [] → query-only: empty toolset is dropped (no --toolsets flag).
   const denyAll = buildHermesSpawnArgs({ agentMode: { tools: [] }, mode: 'full', model: 'm', userContent: 'go' })

@@ -13,6 +13,7 @@ import { isHarnessEnabled } from './harness-settings.mjs'
 import { resolveOmnigentSettings } from './omnigent-settings.mjs'
 import { createCheckpointStore } from './checkpoints.mjs'
 import { loadMemoryContext } from './memory-loader.mjs'
+import { createStableContextLoadCache } from './stable-context-load-cache.mjs'
 import { createSkillsIndex } from './skills-index.mjs'
 import { expandFileReferences } from './file-references.mjs'
 import {
@@ -86,6 +87,7 @@ const skillsIndex = createSkillsIndex({
   homeDir: HOME,
   userHomeDir: homedir(),
 })
+const stableContextLoads = createStableContextLoadCache()
 
 function ensureDir(dirPath, mode) {
   mkdirSync(dirPath, { recursive: true, mode: mode ?? 0o700 })
@@ -3587,10 +3589,15 @@ const server = createServer(async (req, res) => {
       const needsContextBuckets = !(request?.contextBuckets && typeof request.contextBuckets === 'object')
       if ((needsMemoryPrompt || needsContextBuckets) && typeof request?.workspaceId === 'string' && request.workspaceId.trim()) {
         try {
-          const memoryContext = await loadWorkspaceMemoryContext(
-            request.workspaceId.trim(),
-            request.executionTarget === 'cloud' ? 'cloud' : 'local',
-          )
+          const cacheKey = stableContextLoads.key('memory', request)
+          const cached = stableContextLoads.get(cacheKey)
+          const memoryContext = cached.hit
+            ? cached.value
+            : await loadWorkspaceMemoryContext(
+              request.workspaceId.trim(),
+              request.executionTarget === 'cloud' ? 'cloud' : 'local',
+            )
+          if (!cached.hit) stableContextLoads.set(cacheKey, memoryContext)
           const prompt = String(memoryContext?.prompt ?? '').trim()
           const contextBuckets = memoryContext?.contextBuckets && typeof memoryContext.contextBuckets === 'object'
             ? memoryContext.contextBuckets
@@ -3610,11 +3617,16 @@ const server = createServer(async (req, res) => {
       }
       if (!String(request?.skillsPrompt ?? '').trim()) {
         try {
-          const skillIndex = await loadWorkspaceSkillsIndex({
-            workspaceId: typeof request?.workspaceId === 'string' ? request.workspaceId : null,
-            workspaceDir: typeof request?.workspaceDir === 'string' ? request.workspaceDir : null,
-            cardId: typeof request?.cardId === 'string' ? request.cardId : null,
-          })
+          const cacheKey = stableContextLoads.key('skills', request)
+          const cached = stableContextLoads.get(cacheKey)
+          const skillIndex = cached.hit
+            ? cached.value
+            : await loadWorkspaceSkillsIndex({
+              workspaceId: typeof request?.workspaceId === 'string' ? request.workspaceId : null,
+              workspaceDir: typeof request?.workspaceDir === 'string' ? request.workspaceDir : null,
+              cardId: typeof request?.cardId === 'string' ? request.cardId : null,
+            })
+          if (!cached.hit) stableContextLoads.set(cacheKey, skillIndex)
           const skillsPrompt = String(skillIndex?.selection?.prompt ?? '').trim()
           if (skillsPrompt) {
             request = {

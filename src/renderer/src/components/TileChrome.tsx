@@ -11,6 +11,7 @@ import { useTheme } from '../ThemeContext'
 import { useAppFonts } from '../FontContext'
 import { useTileColor } from '../TileColorContext'
 import { getEdgeShadow } from '../theme'
+import { tileFrameChrome } from '../lib/groupChrome.ts'
 import { useTileTodos } from '../state/tileTodosStore'
 import type { DrawerData, DrawerTab } from './tile-chrome/types'
 import { DRAWER_WIDTH, DRAWER_TYPES, fileLabel, getTitlebarForeground } from './tile-chrome/labels'
@@ -413,11 +414,14 @@ function TileChromeComponent({
 
   const pendingTasks = drawerData.tasks.filter(t => t.status !== 'done').length
   const totalActivity = pendingTasks + drawerData.tools.filter(t => t.status === 'running').length
+  const frame = tileFrameChrome(titlebarColor ?? theme.accent.base, Boolean(isSelected))
   const tilePanelShadow = theme.mode === 'light'
     ? isSelected
-      ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.accent.base} 40%, white 10%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 24%, transparent), 0 8px 18px color-mix(in srgb, ${theme.text.primary} 13%, transparent)`
+      ? `0 8px 18px color-mix(in srgb, ${theme.text.primary} 13%, transparent)`
       : `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 70%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 20%, transparent), 0 7px 16px color-mix(in srgb, ${theme.text.primary} 11%, transparent)`
-    : isSelected ? getEdgeShadow(theme, 'accent') : getEdgeShadow(theme, 'strong')
+    : isSelected
+      ? '0 8px 18px rgba(0, 0, 0, 0.28)'
+      : getEdgeShadow(theme, 'strong')
   const drawerPanelShadow = theme.mode === 'light'
     ? `inset 0 0 0 0.5px color-mix(in srgb, ${theme.surface.app} 70%, transparent), 0 0 0 0.5px color-mix(in srgb, ${theme.text.primary} 18%, transparent), 0 7px 16px color-mix(in srgb, ${theme.text.primary} 10%, transparent)`
     : getEdgeShadow(theme, 'strong')
@@ -484,11 +488,12 @@ function TileChromeComponent({
         style={{
           width: '100%', height: '100%',
           borderRadius: getCurvierBlockRadius(tile.borderRadius), overflow: allowOverflow ? 'visible' : 'hidden',
-          border: '1px solid transparent',
+          border: `2px solid ${frame.border}`,
           boxShadow: tilePanelShadow,
           background: theme.surface.panel,
           position: 'relative',
           zIndex: 1,
+          transition: 'border-color 160ms ease, box-shadow 160ms ease',
         }}
       >
         {/* Titlebar */}
@@ -497,8 +502,9 @@ function TileChromeComponent({
           data-tile-titlebar="true"
           style={{
             height: tile.hideTitlebar ? 0 : 32,
-            background: titlebarColor ?? theme.surface.titlebar,
-            borderBottom: tile.hideTitlebar ? 'none' : titlebarColor ? 'none' : `1px solid ${theme.border.default}`,
+            background: titlebarColor ?? frame.titlebarFill ?? theme.surface.titlebar,
+            borderBottom: tile.hideTitlebar ? 'none' : titlebarColor ? 'none' : `1px solid ${frame.titlebarBorder ?? theme.border.default}`,
+            transition: 'background-color 160ms ease, border-color 160ms ease, color 160ms ease',
             display: tile.hideTitlebar ? 'none' : 'flex',
             alignItems: 'center', justifyContent: 'space-between',
             padding: '0 8px 0 0', userSelect: 'none', flexShrink: 0, cursor: 'move',
@@ -525,7 +531,7 @@ function TileChromeComponent({
             style={{
               width: 28, height: '100%',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'grab', flexShrink: 0, color: titlebarMuted, fontSize: fonts.secondarySize
+              cursor: 'grab', flexShrink: 0, color: frame.label ?? titlebarMuted, fontSize: fonts.secondarySize
             }}
           >
             ::
@@ -538,7 +544,7 @@ function TileChromeComponent({
             />
           ) : (
             <span style={{
-              flex: 1, fontSize: fonts.size, fontWeight: Math.min(900, fonts.weight + 100), color: titlebarForeground,
+              flex: 1, fontSize: fonts.size, fontWeight: Math.min(900, fonts.weight + 100), color: frame.label ?? titlebarForeground,
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
             }}>
               {fileLabel(tile)}

@@ -11,6 +11,7 @@ import { getCanonicalWorkspaceId } from '../lib/workspaceHelpers'
 import { applyEmptyCanvasWorkspaceState, applySavedCanvasState } from '../lib/canvasWorkspaceLoad'
 import { dedupeLockedConnections } from '../lib/canvasStateHelpers'
 import { generateLayoutFromTemplate } from '../lib/layoutTemplateLaunch'
+import { ensureLayoutGroup } from '../lib/layoutGroupMembership.ts'
 import { awaitCanvasBeforeWorkspaceSwitch } from '../lib/orderedCanvasPersistence'
 import {
   commitWorkspaceCanvasOwnership,
@@ -32,6 +33,7 @@ export type UseAppWorkspaceOrchestrationParams = {
   lockedConnectionsRef: RefObject<LockedConnection[]>
   savedLayoutRef: RefObject<PanelNode | null>
   expandedCanvasGroupIdRef: RefObject<string | null>
+  expandLayoutGroupIdRef: RefObject<string | null>
   expandedCanvasPriorViewportRef: RefObject<CanvasState['viewport'] | null>
   currentWorkspaceIdRef: RefObject<string | null>
   setWorkspace: React.Dispatch<React.SetStateAction<Workspace | null>>
@@ -48,6 +50,7 @@ export type UseAppWorkspaceOrchestrationParams = {
   setActivePanelId: React.Dispatch<React.SetStateAction<string | null>>
   setExpandedTileId: React.Dispatch<React.SetStateAction<string | null>>
   setExpandedCanvasGroupId: React.Dispatch<React.SetStateAction<string | null>>
+  setExpandLayoutGroupId: React.Dispatch<React.SetStateAction<string | null>>
   restoreViewport: (viewport: CanvasState['viewport']) => void
   resetViewportState: () => void
   /** Clear undo/redo history stacks on workspace switch (H-3 fix). */
@@ -82,6 +85,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     lockedConnectionsRef,
     savedLayoutRef,
     expandedCanvasGroupIdRef,
+    expandLayoutGroupIdRef,
     expandedCanvasPriorViewportRef,
     currentWorkspaceIdRef,
     setWorkspace,
@@ -98,6 +102,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     setActivePanelId,
     setExpandedTileId,
     setExpandedCanvasGroupId,
+    setExpandLayoutGroupId,
     restoreViewport,
     resetViewportState,
     clearHistory,
@@ -142,15 +147,21 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
       expandedCanvasGroupIdRef.current = next
       setExpandedCanvasGroupId(next)
     },
+    setExpandLayoutGroupId: (next: string | null) => {
+      expandLayoutGroupIdRef.current = next
+      setExpandLayoutGroupId(next)
+    },
     setLockedConnections: (next: LockedConnection[]) => {
       lockedConnectionsRef.current = next
       setLockedConnections(next)
     },
     savedLayoutRef,
     expandedCanvasGroupIdRef,
+    expandLayoutGroupIdRef,
     expandedCanvasPriorViewportRef,
   }), [
     activePanelIdRef,
+    expandLayoutGroupIdRef,
     expandedCanvasGroupIdRef,
     expandedCanvasPriorViewportRef,
     expandedTileIdRef,
@@ -161,6 +172,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     restoreViewport,
     savedLayoutRef,
     setActivePanelId,
+    setExpandLayoutGroupId,
     setExpandedCanvasGroupId,
     setExpandedTileId,
     setGroups,
@@ -204,6 +216,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
             groupsRef.current = []
             lockedConnectionsRef.current = []
             expandedCanvasGroupIdRef.current = null
+            expandLayoutGroupIdRef.current = null
             expandedCanvasPriorViewportRef.current = null
             setTiles([])
             setGroups([])
@@ -217,6 +230,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
             setActivePanelId(emptyPanel.id)
             setExpandedTileId(null)
             setExpandedCanvasGroupId(null)
+            setExpandLayoutGroupId(null)
           },
         )
         if (outgoingWorkspaceId) {
@@ -228,6 +242,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     activePanelIdRef,
     clearHistory,
     currentWorkspaceIdRef,
+    expandLayoutGroupIdRef,
     expandedTileIdRef,
     expandedCanvasGroupIdRef,
     expandedCanvasPriorViewportRef,
@@ -239,6 +254,7 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     resetViewportState,
     savedLayoutRef,
     setActivePanelId,
+    setExpandLayoutGroupId,
     setExpandedTileId,
     setGroups,
     setLockedConnections,
@@ -454,10 +470,12 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
 
     const {
       tiles: generatedTiles,
+      groups: generatedGroups,
       panelLayout: generatedPanelLayout,
       activePanelId: generatedActivePanelId,
       connections: generatedConnections,
       nextZIndex: zIdx,
+      expandLayoutGroupId: generatedExpandId,
     } = generated
 
     if (!workspace?.id) {
@@ -468,13 +486,14 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
 
       const nextState: CanvasState = {
         tiles: generatedTiles,
-        groups: [],
+        groups: generatedGroups,
         viewport: { tx: 0, ty: 0, zoom: 1 },
         nextZIndex: zIdx,
         panelLayout: generatedPanelLayout,
         activePanelId: generatedActivePanelId,
         tabViewActive: true,
         expandedTileId: null,
+        expandLayoutGroupId: generatedExpandId,
         lockedConnections: generatedConnections.length > 0 ? generatedConnections : undefined,
       }
 
@@ -505,10 +524,10 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
       && groupsRef.current.length === 0
     if (!canInsertIntoActiveLeaf && !canReplaceWorkspaceState) return
 
-    const nextTiles = canInsertIntoActiveLeaf
+    const mergedTiles = canInsertIntoActiveLeaf
       ? [...tilesRef.current, ...generatedTiles]
       : generatedTiles
-    const nextGroups = canInsertIntoActiveLeaf ? groupsRef.current : []
+    const mergedGroups = canInsertIntoActiveLeaf ? groupsRef.current : generatedGroups
     const nextViewport = canInsertIntoActiveLeaf ? viewportRef.current : { tx: 0, ty: 0, zoom: 1 }
     const nextConnections = canInsertIntoActiveLeaf
       ? dedupeLockedConnections([...lockedConnectionsRef.current, ...generatedConnections])
@@ -516,6 +535,15 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     const nextPanelLayout = canInsertIntoActiveLeaf && currentLayout && activeLeaf
       ? replaceLeafInPanelTree(currentLayout, activeLeaf.id, generatedPanelLayout)
       : generatedPanelLayout
+    const ensured = ensureLayoutGroup({
+      tiles: mergedTiles,
+      groups: mergedGroups,
+      layout: nextPanelLayout,
+      reuseGroupId: canInsertIntoActiveLeaf ? expandLayoutGroupIdRef.current : generatedExpandId,
+    })
+    const nextTiles = ensured.tiles
+    const nextGroups = ensured.groups
+    const nextExpandId = ensured.groupId || generatedExpandId
 
     const nextState: CanvasState = {
       tiles: nextTiles,
@@ -526,9 +554,13 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
       activePanelId: generatedActivePanelId,
       tabViewActive: true,
       expandedTileId: null,
+      expandLayoutGroupId: nextExpandId,
       lockedConnections: nextConnections.length > 0 ? nextConnections : undefined,
     }
 
+    tilesRef.current = nextTiles
+    groupsRef.current = nextGroups
+    expandLayoutGroupIdRef.current = nextExpandId
     setTiles(nextTiles)
     setGroups(nextGroups)
     setLockedConnections(nextConnections)
@@ -538,17 +570,20 @@ export function useAppWorkspaceOrchestration(params: UseAppWorkspaceOrchestratio
     setPanelLayout(nextPanelLayout)
     setActivePanelId(generatedActivePanelId)
     setExpandedTileId(null)
+    setExpandLayoutGroupId(nextExpandId)
     await window.electron.canvas.save(workspace.id, nextState).catch(() => {})
   }, [
     workspace,
     activePanelIdRef,
     buildCanvasLoadAppliers,
     currentWorkspaceIdRef,
+    expandLayoutGroupIdRef,
     groupsRef,
     lockedConnectionsRef,
     panelLayoutRef,
     savedLayoutRef,
     setActivePanelId,
+    setExpandLayoutGroupId,
     setExpandedTileId,
     setGroups,
     setLockedConnections,

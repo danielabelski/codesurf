@@ -52,6 +52,20 @@ import {
   invalidateStableContextSelection,
   selectStableContextForTurn,
 } from './stable-session-context.ts'
+import {
+  createPiTranslateState,
+  translatePiAgentEvent,
+} from './pi-stream-translate.ts'
+import {
+  catalogUsablePiModels,
+  collectPiProviderProbe,
+  formatPiCatalogError,
+  parsePiModelRef,
+  planPiLaunchModel,
+  type PiModelOption,
+  type PiProviderProbeResult,
+  type PiProviderProbeSample,
+} from './pi-model-availability.ts'
 
 /** Internal provider id (neutral). Never surface 'pi'/'earendil' to users. */
 export const CSAGENT_PROVIDER_ID = 'csagent' as const
@@ -198,6 +212,9 @@ interface PiModelInfo {
 interface PiModelRegistry {
   find(provider: string, id: string): unknown
   getAvailable(): PiModelInfo[]
+  getApiKeyForProvider?(provider: string): Promise<string | undefined>
+  getError?(): string | undefined
+  refresh?(): void
 }
 
 interface PiRuntime {
@@ -369,24 +386,15 @@ function buildCsagentContextPreamble(req: CsagentRunRequest): string | undefined
 
 /**
  * Translate the subscribe-channel AgentSessionEvent stream into codesurf's
- * agent:stream event schema.
- *
- * MANDATORY mitigation (both required even though deltas are pre-extracted):
- *  1. Suffix-delta: the runtime's message_update carries per-token deltas via
- *     assistantMessageEvent.delta, so we forward only the tail — never a full
- *     snapshot. (No diffing needed; the channel already gives us the suffix.)
- *  2. Microtask-coalesced flush: buffer translated events and flush once per
- *     microtask in a single batch, so a token storm cannot storm agent:stream.
+ * agent:stream event schema, then microtask-coalesce the flush so a token
+ * storm cannot storm agent:stream.
  */
 function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessionEvent) => void {
   const scopeKey = chatStreamScopeKey(csagentScope(req))
   const pending: StreamEvent[] = []
   let scheduled = false
-  // This pi build delivers a whole assistant message via message_end (no
-  // per-token message_update). We still keep the streaming path for builds that
-  // DO stream, and use this flag to avoid double-emitting the text on message_end.
-  let streamedTextThisMsg = false
   let doneEmitted = false
+  const state = createPiTranslateState()
   const flush = (): void => {
     scheduled = false
     const batch = pending.splice(0)
@@ -397,25 +405,6 @@ function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessio
     if (!scheduled) {
       scheduled = true
       queueMicrotask(flush)
-    }
-  }
-
-  // Emit a finalized assistant message's content blocks (text / thinking / tool_call).
-  const emitAssistantContent = (msg: PiMessage): void => {
-    for (const block of msg.content ?? []) {
-      if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 0) {
-        enqueue({ type: 'text', text: block.text })
-      } else if (block.type === 'thinking') {
-        const t = block.thinking ?? block.text
-        if (typeof t === 'string' && t.length > 0) enqueue({ type: 'thinking', text: t })
-      } else if (block.type === 'tool_call') {
-        enqueue({
-          type: 'tool_use',
-          toolName: block.name,
-          toolId: block.id,
-          toolInput: safeJson(block.arguments ?? block.input),
-        })
-      }
     }
   }
 
@@ -432,97 +421,11 @@ function makeTranslator(req: CsagentRunRequest, emit: EmitFn): (e: PiAgentSessio
   }
 
   return (e: PiAgentSessionEvent): void => {
-    switch (e.type) {
-      case 'message_start':
-        if (e.message?.role === 'assistant') streamedTextThisMsg = false
-        break
-      case 'message_update': {
-        const a = e.assistantMessageEvent
-        if (!a) break
-        if (a.type === 'text_delta' && typeof a.delta === 'string') {
-          enqueue({ type: 'text', text: a.delta })
-          streamedTextThisMsg = true
-        } else if (a.type === 'thinking_delta' && typeof a.delta === 'string') {
-          enqueue({ type: 'thinking', text: a.delta })
-          streamedTextThisMsg = true
-        } else if (a.type === 'thinking_start') {
-          enqueue({ type: 'thinking_start' })
-        }
-        break
-      }
-      case 'message_end':
-        // Only the assistant's message is the reply; the user message is echoed
-        // back too and must be ignored. If nothing streamed (this build), emit
-        // the finalized content now so the reply actually reaches the UI.
-        if (e.message?.role === 'assistant') {
-          if (!streamedTextThisMsg) emitAssistantContent(e.message)
-          enqueue({ type: 'block_stop' })
-        }
-        break
-      case 'tool_execution_start':
-        enqueue({ type: 'tool_start', toolId: e.toolCallId, toolName: e.toolName })
-        enqueue({ type: 'tool_input', toolId: e.toolCallId, text: safeJson(e.args) })
-        break
-      case 'tool_execution_update':
-        enqueue({ type: 'tool_progress', toolName: e.toolName })
-        break
-      case 'tool_execution_end':
-        enqueue({
-          type: 'tool_use',
-          toolName: e.toolName,
-          toolId: e.toolCallId,
-          toolInput: safeJson(e.args),
-        })
-        enqueue({
-          type: 'tool_summary',
-          toolId: e.toolCallId,
-          toolName: e.toolName,
-          text: summarizeToolResult(e.isError, e.result),
-        })
-        break
-      case 'turn_end':
-        // This build batches tool results on the turn (no tool_execution_* events),
-        // so surface them here. Do NOT emit done — agent_end is the real end.
-        for (const r of e.toolResults ?? []) {
-          enqueue({
-            type: 'tool_summary',
-            toolId: r.toolCallId,
-            toolName: r.toolName,
-            text: summarizeToolResult(r.isError, r.result ?? r.output),
-          })
-        }
-        break
-      case 'compaction_start':
-        enqueue({
-          type: 'tool_summary',
-          toolId: `csagent-compaction-${Date.now()}`,
-          toolName: 'Compacting context',
-          text: 'Compacting context...',
-        })
-        break
-      case 'agent_end':
-        emitDone()
-        break
-      default:
-        break
+    for (const ev of translatePiAgentEvent(e, state)) {
+      if (ev.type === 'done') emitDone()
+      else enqueue(ev)
     }
   }
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {}, null, 2)
-  } catch {
-    return String(value ?? '')
-  }
-}
-
-function summarizeToolResult(isError: boolean | undefined, value: unknown): string {
-  if (isError) {
-    return `Error: ${typeof value === 'string' ? value : safeJson(value)}`
-  }
-  if (typeof value === 'string') return value.slice(0, 500)
-  return safeJson(value).slice(0, 500)
 }
 
 function safeStats(scopeKey: string): PiSessionStats | undefined {
@@ -531,6 +434,54 @@ function safeStats(scopeKey: string): PiSessionStats | undefined {
   } catch {
     return undefined
   }
+}
+
+function drainAuthErrorText(auth: { drainErrors?: () => unknown[] } | null | undefined): string {
+  try {
+    const drained = typeof auth?.drainErrors === 'function' ? auth.drainErrors() : []
+    if (!Array.isArray(drained) || drained.length === 0) return ''
+    return drained
+      .map(error => error instanceof Error ? error.message : String(error))
+      .map(message => message.trim())
+      .filter(Boolean)
+      .join('; ')
+  } catch {
+    return ''
+  }
+}
+
+async function probeUsablePiProviders(
+  registry: PiModelRegistry,
+  auth: { getApiKey?: (provider: string) => Promise<string | undefined>; drainErrors?: () => unknown[] } | null,
+  candidates: PiModelInfo[],
+): Promise<PiProviderProbeResult> {
+  const providers = [...new Set(candidates.map(candidate => candidate.provider).filter(Boolean))]
+  const canProbe = typeof registry.getApiKeyForProvider === 'function'
+    || typeof auth?.getApiKey === 'function'
+  if (!canProbe) {
+    return collectPiProviderProbe(providers.map(provider => ({ provider, apiKey: 'unprobed' })))
+  }
+
+  const samples: PiProviderProbeSample[] = []
+  for (const provider of providers) {
+    try {
+      const apiKey = typeof registry.getApiKeyForProvider === 'function'
+        ? await registry.getApiKeyForProvider(provider)
+        : await auth?.getApiKey?.(provider)
+      samples.push({
+        provider,
+        apiKey: apiKey || null,
+        error: apiKey ? undefined : (drainAuthErrorText(auth) || `No API key for provider: ${provider}`),
+      })
+    } catch (error) {
+      samples.push({
+        provider,
+        apiKey: null,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  return collectPiProviderProbe(samples)
 }
 
 /**
@@ -588,11 +539,37 @@ export async function runCodesurfAgent(
     if (!_csagentAuth) _csagentAuth = rt.AuthStorage.create()
     if (!_csagentModels) _csagentModels = rt.ModelRegistry.create(_csagentAuth)
 
-    // Resolve the model from the "provider/id" convention; undefined lets the
-    // runtime pick its default rather than hard-failing.
-    const [provider, ...idParts] = String(req.model).split('/')
-    const id = idParts.join('/')
-    const model = provider && id ? _csagentModels.find(provider, id) : undefined
+    const candidates: PiModelInfo[] = _csagentModels.getAvailable?.() ?? []
+    const probe = await awaitGuardedPreparation(
+      launchGuard,
+      probeUsablePiProviders(_csagentModels, _csagentAuth, candidates),
+    )
+    if (!probe.ok) return
+    const usableModels: PiModelOption[] = catalogUsablePiModels(candidates, probe.value.usable)
+    const requestedRef = parsePiModelRef(req.model)
+    const plan = planPiLaunchModel({
+      requested: req.model,
+      usableModels,
+      requestedProviderError: requestedRef
+        ? probe.value.errorByProvider.get(requestedRef.provider)
+        : undefined,
+    })
+    if (!plan.ok) {
+      if (!launchIsCurrent()) return
+      emit({ type: 'error', error: plan.error })
+      emit({ type: 'done' })
+      return
+    }
+    const model = _csagentModels.find(plan.ref.provider, plan.ref.id)
+    if (!model) {
+      if (!launchIsCurrent()) return
+      emit({
+        type: 'error',
+        error: `Pi cannot use ${plan.ref.provider}/${plan.ref.id}: model is not in the local registry.`,
+      })
+      emit({ type: 'done' })
+      return
+    }
 
     // Open/resume the session JSONL under ~/.codesurf/agent-sessions. The runtime
     // names fresh files `<timestamp>_<sessionId>.jsonl` (create), so resume must
@@ -622,7 +599,7 @@ export async function runCodesurfAgent(
         resourceLoader: loader,
         sessionManager,
         thinkingLevel: mapThinking(req.thinking),
-        ...(model ? { model } : {}),
+        model,
       }),
       ({ session }) => { try { session.dispose() } catch { /* incomplete session */ } },
     )
@@ -776,24 +753,36 @@ export function hasCsagentSession(scope: ChatStreamScope): boolean {
   return csagentSessions.has(chatStreamScopeKey(scope))
 }
 
+export interface CsagentModelsResult {
+  models: Array<{ id: string; label: string; description?: string }>
+  error?: string
+}
+
 /**
- * List the models the user's installed pi can actually use (auth-configured),
- * via ModelRegistry.getAvailable(). Returned in codesurf's "provider/id" model
- * convention so the chat tile can offer real models instead of a static list.
- * Best-effort: any failure yields [] and the caller keeps its static defaults.
+ * List models the installed Pi runtime can actually call. `getAvailable()` only
+ * checks that credentials exist; this also probes `getApiKey` so expired OAuth
+ * does not show up as a selectable model. Failures are returned as `error`
+ * instead of being swallowed into the static default list.
  */
-export async function listCsagentModels(): Promise<Array<{ id: string; label: string; description?: string }>> {
+export async function listCsagentModels(): Promise<CsagentModelsResult> {
   try {
     const rt = await getCsagentRuntime()
     if (!_csagentAuth) _csagentAuth = rt.AuthStorage.create()
     if (!_csagentModels) _csagentModels = rt.ModelRegistry.create(_csagentAuth)
-    const available: PiModelInfo[] = _csagentModels.getAvailable?.() ?? []
-    return available.map(m => ({
-      id: `${m.provider}/${m.id}`,
-      label: m.name || m.id,
-      description: m.provider,
-    }))
-  } catch {
-    return []
+    try { _csagentModels.refresh?.() } catch { /* keep previously loaded models */ }
+    const candidates: PiModelInfo[] = _csagentModels.getAvailable?.() ?? []
+    const probe = await probeUsablePiProviders(_csagentModels, _csagentAuth, candidates)
+    const models = catalogUsablePiModels(candidates, probe.usable)
+    const error = formatPiCatalogError({
+      models,
+      probeErrors: probe.errors,
+      runtimeError: models.length === 0 ? _csagentModels.getError?.() : undefined,
+    })
+    return error ? { models, error } : { models }
+  } catch (error) {
+    return {
+      models: [],
+      error: error instanceof Error ? error.message : String(error),
+    }
   }
 }

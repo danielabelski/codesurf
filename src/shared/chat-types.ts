@@ -86,6 +86,10 @@ export interface ChatMessage {
   contentBlocks?: ContentBlock[]
   cost?: number
   turns?: number
+  /** Persona that produced this assistant turn. Null/absent = no persona. */
+  agentId?: string | null
+  /** Provider id used for the fallback reply avatar. */
+  provider?: string
   /** User-written margin note "stuck" to this whole message. */
   note?: BlockNote
 }

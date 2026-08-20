@@ -29,6 +29,8 @@ describe('wave 22 shell view extractions', () => {
     expect(SIDEBAR_SOURCE).toContain('MainStatusBar')
     expect(TABBAR_SOURCE).toContain('WorkspaceTabIcon')
     expect(TABBAR_SOURCE).toContain('openWorkspaceTabs.map')
+    expect(TABBAR_SOURCE).toContain('<WorkspaceTabLabel active>Workspace</WorkspaceTabLabel>')
+    expect(TABBAR_SOURCE).not.toContain('WORKSPACE')
     expect(OVERLAYS_SOURCE).toContain('LazyCommandPalette')
     expect(OVERLAYS_SOURCE).toContain('DevSandboxFrame')
   })

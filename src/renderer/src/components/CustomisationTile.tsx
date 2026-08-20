@@ -4,7 +4,12 @@ import { useAppFonts } from '../FontContext'
 import type { PromptTemplate, PromptField, SkillDefinition, Persona } from '../../../shared/types'
 import { ChatMarkdown } from './shared/streamdown-utils'
 import { DEFAULT_PERSONAS as DEFAULT_MODES, AGENT_COLORS, AGENT_ICONS } from '../config/agentModes'
+import { PersonaAvatar } from './PersonaAvatar'
 import { useChatTileWorkspaceSkills } from '../hooks/useChatTileWorkspaceSkills'
+import {
+  unreadableScanLocationsFromProbes,
+  type UnreadableScanLocation,
+} from '../lib/scanLocationProbe'
 
 type Tab = 'prompts' | 'skills' | 'tools' | 'agents'
 
@@ -224,8 +229,10 @@ function LocationsPanel({ title, value, onChange, onClose, workspacePath }: {
 
 // ─── Card ────────────────────────────────────────────────────────────────────
 
-function ItemCard({ title, description, chips, onEdit, onDelete, color }: {
+function ItemCard({ title, description, chips, onEdit, onDelete, color, avatar }: {
   title: string; description?: string; chips?: string[]; onEdit: () => void; onDelete?: () => void; color?: string
+  /** Optional face drawn in place of the colour dot. Personas carry one. */
+  avatar?: React.ReactNode
 }): JSX.Element {
   const theme = useTheme()
   const fonts = useAppFonts()
@@ -245,7 +252,7 @@ function ItemCard({ title, description, chips, onEdit, onDelete, color }: {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: description ? 6 : 0 }}>
-        {color && <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 }} />}
+        {avatar ?? (color && <span style={{ width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 }} />)}
         <span style={{ fontSize: fonts.size, fontWeight: 600, color: theme.text.primary, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
         {onDelete && (
           <button onClick={e => { e.stopPropagation(); onDelete() }} style={{
@@ -358,15 +365,13 @@ function resolveLocations(raw: string, homePath: string, workspacePath: string):
     .map(l => l.replace(/^\$HOME/, homePath).replace(/^\$WORKSPACE/, workspacePath))
 }
 
-type UnreadableScanLocation = { path: string, code: string }
-
 async function probeUnreadableScanLocations(paths: string[]): Promise<UnreadableScanLocation[]> {
-  const unreadable: UnreadableScanLocation[] = []
+  const results: { path: string, probe: { ok: true } | { ok: false, code: string } | null }[] = []
   for (const path of paths) {
-    const probe = await window.electron.fs.probeDir?.(path).catch(() => ({ ok: false as const, code: 'UNKNOWN' }))
-    if (!probe || probe.ok === false) unreadable.push({ path, code: probe?.code ?? 'UNKNOWN' })
+    const probe = await window.electron.fs.probeDir?.(path).catch(() => ({ ok: false as const, code: 'UNKNOWN' })) ?? null
+    results.push({ path, probe })
   }
-  return unreadable
+  return unreadableScanLocationsFromProbes(results)
 }
 
 // ─── Prompts section ─────────────────────────────────────────────────────────
@@ -1235,6 +1240,7 @@ export function AgentsSection({ workspacePath, hideHeaderText = false }: { works
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 8 }}>
           {items.map(m => (
             <ItemCard key={m.id} title={m.name || 'Untitled'} description={m.description} color={m.color}
+              avatar={<PersonaAvatar persona={m} size={22} />}
               chips={[
                 m.tools ? `${m.tools.length} tool${m.tools.length !== 1 ? 's' : ''}` : 'All tools',
                 ...(m.isBuiltin ? ['Built-in'] : []),
@@ -1271,7 +1277,10 @@ function AgentEditor({ item, modes, workspacePath, onSave, onCancel }: { item: P
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <span style={{ fontSize: fonts.size, fontWeight: 600, color: theme.text.primary }}>{item.name ? 'Edit Persona' : 'New Persona'}</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <PersonaAvatar persona={draft} size={32} animate="always" />
+        <span style={{ fontSize: fonts.size, fontWeight: 600, color: theme.text.primary }}>{item.name ? 'Edit Persona' : 'New Persona'}</span>
+      </div>
       <Field label="Name"><Input value={draft.name} onChange={v => up({ name: v })} placeholder="Persona name" /></Field>
       <Field label="Description"><Input value={draft.description} onChange={v => up({ description: v })} placeholder="What is this persona for?" /></Field>
       <Field label="System Prompt"><Input value={draft.systemPrompt} onChange={v => up({ systemPrompt: v })} placeholder="Instructions for the persona..." multiline rows={6} /></Field>

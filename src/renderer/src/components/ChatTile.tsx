@@ -280,6 +280,7 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
     dictationText,
     dictationError,
     toggleDictation,
+    clearDictationError,
     ttsState,
     planTodos,
     isPlanOpen,
@@ -414,10 +415,10 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
   const isStartScreen = messages.length === 0 && !isStreaming
 
   // Embedded terminal: mount it the first time the Terminal tab is opened and
-  // keep it mounted thereafter. TerminalTile unmount fires `terminal:detach`,
-  // which kills the PTY — so we never unmount on tab switch; the transcript
-  // column hides it with layout-preserving CSS instead. The PTY backend is
-  // keyed by tileId, so we derive a deterministic embedded id from the chat id.
+  // keep it mounted thereafter. A last-instance detach still drops the PTY
+  // attachment, so we never unmount on tab switch; the transcript column hides
+  // it with layout-preserving CSS instead. The PTY backend is keyed by tileId,
+  // so we derive a deterministic embedded id from the chat id.
   const [terminalMounted, setTerminalMounted] = useState(activeView === 'terminal')
   useEffect(() => {
     if (activeView === 'terminal') setTerminalMounted(true)
@@ -572,6 +573,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
         }}
         activeView={activeView}
         embeddedTerminal={embeddedTerminal}
+        personas={agentModes}
+        fallbackProvider={provider}
       >
         <ChatTileComposer
           isStartScreen={isStartScreen}
@@ -591,6 +594,8 @@ export function ChatTile({ tileId, workspaceId, workspaceDir: _workspaceDir, wid
           dictationText={dictationText}
           dictationError={dictationError}
           ttsState={ttsState}
+          onRetryDictation={toggleDictation}
+          onDismissDictationError={clearDictationError}
           onStopVoicePlayback={() => bargeIn()}
           openChatSurfaces={openChatSurfaces}
           activeChatSurface={activeChatSurface}

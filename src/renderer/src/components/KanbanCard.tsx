@@ -67,7 +67,7 @@ export const MODELS: Record<string, string[]> = {
   gemini:   ['gemini-2.5-pro', 'gemini-2.5-flash'],
   opencode: ['claude-sonnet-4-5', 'gpt-4.1'],
   openclaw: ['claude-sonnet-4-6', 'claude-opus-4-6', 'gpt-5.4', 'o4-mini'],
-  hermes:   ['openai-codex/gpt-5.5', 'openai-codex/gpt-5.4-mini', 'openai-codex/gpt-5.4', 'anthropic/claude-opus-4-7', 'gemini/gemini-3.1-pro-preview'],
+  hermes:   ['openai-codex/gpt-5.6-sol', 'openai-codex/gpt-5.6-terra', 'openai-codex/gpt-5.6-luna', 'openai-codex/gpt-5.5', 'anthropic/claude-opus-5', 'openrouter/x-ai/grok-4.6'],
   shell:    []
 }
 

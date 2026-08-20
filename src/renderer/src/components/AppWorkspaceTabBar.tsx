@@ -421,29 +421,17 @@ export function AppWorkspaceTabBar(props: AppWorkspaceTabBarProps): JSX.Element 
                   background: 'transparent',
                   color: 'inherit',
                   fontSize: Math.max(11, workspaceTabLabelSize),
-                  fontWeight: 700,
+                  fontWeight: 400,
                   lineHeight: 1,
                   letterSpacing: 0,
                   cursor: 'default',
+                  transform: `translateY(${workspaceTabTextOffset}px)`,
                 }}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 12, height: 12, lineHeight: 0, color: 'currentColor', flexShrink: 0 }}>
                   <Plus size={12} strokeWidth={2.1} />
                 </span>
-                <span
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    minWidth: 0,
-                    lineHeight: 1,
-                    transform: 'translateY(-1px)',
-                  }}
-                >
-                  WORKSPACE
-                </span>
+                <WorkspaceTabLabel active>Workspace</WorkspaceTabLabel>
               </button>
               {openWorkspaceTabs.length > 0 && (
                 <button

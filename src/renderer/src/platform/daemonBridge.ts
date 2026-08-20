@@ -584,6 +584,7 @@ export function createDaemonBackedElectronApi(): typeof window.electron {
 
     // MainStatusBar + SettingsPanel require this on every host.
     system: {
+      requestMediaAccess: async () => ({ granted: true, status: 'granted' }),
       cleanupTile: async () => ({ ok: true, channelsDropped: 0 }),
       gc: async () => {
         const w = window as unknown as { gc?: () => void }

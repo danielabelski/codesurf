@@ -34,3 +34,4 @@ opensrc/morph-labs--morph-typescript-sdk/
 /.codesurf
 review-full-remediation-snapshot.tar.gz
 review-full-remediation.patch
+/.codex

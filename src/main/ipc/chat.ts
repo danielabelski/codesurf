@@ -98,6 +98,12 @@ import {
   stopAllActiveChatProcesses,
   type ChatStreamScope,
 } from '../chat/runtime'
+import { hostShouldPrefetchStableContext } from '../chat/hostStableContextLoad.ts'
+import {
+  consumeStableContextAnnouncement,
+  readRuntimeStableLoad,
+  writeRuntimeStableLoad,
+} from '../chat/stable-session-context.ts'
 import { isValidAgentRoomId } from '../agent-room/validation.ts'
 import { appendComposedUserContextToLatestUser } from '../chat/room-context-message.ts'
 import { composeHostChatContext } from '../chat/request-context.ts'
@@ -784,12 +790,22 @@ function revalidateRuntimeContextRequest(req: ChatRequest): ChatRequest {
   }
 }
 
-function emitMemoryContextLoaded(scope: ChatStreamScope, context: LoadedMemoryContext | null | undefined): void {
+function emitMemoryContextLoaded(
+  scope: ChatStreamScope,
+  context: LoadedMemoryContext | null | undefined,
+  sessionId?: string | null,
+): void {
   const summary = summarizeMemoryContext(context)
   if (!summary) return
+  const input = buildMemoryContextInput(context)
+  if (!consumeStableContextAnnouncement({
+    scope,
+    kind: 'memory',
+    sessionId,
+    content: `${summary}\n${input ?? ''}`,
+  })) return
   const toolId = `codesurf-memory-${Date.now()}`
   sendStream(scope, { type: 'tool_start', toolId, toolName: 'Workspace Instructions' })
-  const input = buildMemoryContextInput(context)
   if (input) {
     sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
@@ -808,24 +824,44 @@ function buildSelectedSkillsPrompt(index: Awaited<ReturnType<typeof daemonClient
   return String(index?.selection?.prompt ?? '').trim() || undefined
 }
 
-function emitSelectedSkillsLoaded(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSelectedSkillsLoaded(
+  scope: ChatStreamScope,
+  index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined,
+  sessionId?: string | null,
+): void {
   const summary = summarizeSelectedSkills(index)
   if (!summary) return
+  const input = buildSelectedSkillsPrompt(index)
+  if (!consumeStableContextAnnouncement({
+    scope,
+    kind: 'skills',
+    sessionId,
+    content: `${summary}\n${input ?? ''}`,
+  })) return
   const toolId = `codesurf-skills-${Date.now()}`
   sendStream(scope, { type: 'tool_start', toolId, toolName: 'Included Skills' })
-  const input = buildSelectedSkillsPrompt(index)
   if (input) {
     sendStream(scope, { type: 'tool_input', toolId, text: previewContextToolInput(input).text })
   }
   sendStream(scope, { type: 'tool_summary', toolId, toolName: 'Included Skills', text: summary })
 }
 
-function emitSkippedSkillLocations(scope: ChatStreamScope, index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined): void {
+function emitSkippedSkillLocations(
+  scope: ChatStreamScope,
+  index: Awaited<ReturnType<typeof daemonClient.listSkills>> | null | undefined,
+  sessionId?: string | null,
+): void {
   const skipped = index?.skippedLocations ?? []
   if (skipped.length === 0) return
-  const toolId = `codesurf-skills-skipped-${Date.now()}`
   const lines = skipped.map(entry => `${entry.path} (${entry.code})`).join('\n')
   const summary = `${skipped.length} skill location${skipped.length === 1 ? '' : 's'} could not be read. Skills from those paths were skipped.`
+  if (!consumeStableContextAnnouncement({
+    scope,
+    kind: 'skills-skipped',
+    sessionId,
+    content: `${summary}\n${lines}`,
+  })) return
+  const toolId = `codesurf-skills-skipped-${Date.now()}`
   sendStream(scope, { type: 'tool_start', toolId, toolName: 'Skill Scan Warning' })
   if (lines) {
     sendStream(scope, { type: 'tool_input', toolId, text: lines })
@@ -850,21 +886,37 @@ function emitFileReferenceExpansion(
 
 async function loadRuntimeMemoryContext(req: ChatRequest): Promise<LoadedMemoryContext | null> {
   if (!req.workspaceId) return null
-  return await daemonClient.loadMemoryContext(
+  const executionTarget = req.executionTarget === 'cloud' ? 'cloud' : 'local'
+  const cached = readRuntimeStableLoad<LoadedMemoryContext | null>(
+    'memory',
     req.workspaceId,
-    req.executionTarget === 'cloud' ? 'cloud' : 'local',
+    req.cardId,
+    executionTarget,
   )
+  if (cached.hit) return cached.value
+  const loaded = await daemonClient.loadMemoryContext(req.workspaceId, executionTarget)
+  writeRuntimeStableLoad('memory', req.workspaceId, req.cardId, executionTarget, loaded)
+  return loaded
 }
 
 async function loadRuntimeSkillsContext(req: ChatRequest): Promise<Awaited<ReturnType<typeof daemonClient.listSkills>> | null> {
   const workspaceId = String(req.workspaceId ?? '').trim()
   const workspaceDir = String(req.workspaceDir ?? '').trim()
   if (!workspaceId && !workspaceDir) return null
-  return await daemonClient.listSkills({
+  const cached = readRuntimeStableLoad<Awaited<ReturnType<typeof daemonClient.listSkills>> | null>(
+    'skills',
+    workspaceId || workspaceDir,
+    req.cardId,
+    null,
+  )
+  if (cached.hit) return cached.value
+  const loaded = await daemonClient.listSkills({
     workspaceId: workspaceId || null,
     workspaceDir: workspaceDir || null,
     cardId: req.cardId,
   })
+  writeRuntimeStableLoad('skills', workspaceId || workspaceDir, req.cardId, null, loaded)
+  return loaded
 }
 
 async function selectChatExecutionHost(req: ChatRequest): Promise<ExecutionHostRecord | null> {
@@ -1412,32 +1464,36 @@ export function registerChatIPC(): void {
 
     let memoryPrompt: string | undefined
     let memoryContext: Awaited<ReturnType<typeof daemonClient.loadMemoryContext>> | null = null
-    try {
-      memoryContext = await loadRuntimeMemoryContext(effectiveRequest)
-      memoryPrompt = String(memoryContext?.prompt ?? '').trim() || undefined
-    } catch (error) {
-      if (!preparationIsCurrent()) return preparationSuperseded()
-      sendStream(scope, {
-        type: 'error',
-        error: error instanceof Error ? error.message : String(error),
-      })
-      sendStream(scope, { type: 'done' })
-      return { ok: false }
-    }
-    if (!preparationIsCurrent()) return preparationSuperseded()
-
     let skillsPrompt: string | undefined
     let skillsSummary: string | null = null
     let skillsContext: Awaited<ReturnType<typeof daemonClient.listSkills>> | null = null
-    try {
-      skillsContext = await loadRuntimeSkillsContext(effectiveRequest)
-      skillsPrompt = buildSelectedSkillsPrompt(skillsContext)
-      skillsSummary = summarizeSelectedSkills(skillsContext) ?? null
-    } catch (error) {
-      console.warn(
-        '[chat] Skills index unavailable; continuing without skill context:',
-        error instanceof Error ? error.message : String(error),
-      )
+    // Daemon jobs strip caller memory/skills and rebuild them. Prefetching here
+    // only wastes /memory/load and /skills/list on every turn.
+    if (hostShouldPrefetchStableContext(daemonHost)) {
+      try {
+        memoryContext = await loadRuntimeMemoryContext(effectiveRequest)
+        memoryPrompt = String(memoryContext?.prompt ?? '').trim() || undefined
+      } catch (error) {
+        if (!preparationIsCurrent()) return preparationSuperseded()
+        sendStream(scope, {
+          type: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        })
+        sendStream(scope, { type: 'done' })
+        return { ok: false }
+      }
+      if (!preparationIsCurrent()) return preparationSuperseded()
+
+      try {
+        skillsContext = await loadRuntimeSkillsContext(effectiveRequest)
+        skillsPrompt = buildSelectedSkillsPrompt(skillsContext)
+        skillsSummary = summarizeSelectedSkills(skillsContext) ?? null
+      } catch (error) {
+        console.warn(
+          '[chat] Skills index unavailable; continuing without skill context:',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
     }
     if (!preparationIsCurrent()) return preparationSuperseded()
 
@@ -1505,9 +1561,9 @@ export function registerChatIPC(): void {
       return await sendChatToDaemon(requestWithFileReferences, daemonHost, preparationLease)
     }
 
-    emitMemoryContextLoaded(scope, memoryContext)
-    emitSelectedSkillsLoaded(scope, skillsContext)
-    emitSkippedSkillLocations(scope, skillsContext)
+    emitMemoryContextLoaded(scope, memoryContext, effectiveRequest.sessionId)
+    emitSelectedSkillsLoaded(scope, skillsContext, effectiveRequest.sessionId)
+    emitSkippedSkillLocations(scope, skillsContext, effectiveRequest.sessionId)
 
     if (requestedRunMode === 'background') {
       await cleanupOwnedImageAttachmentsForScope(scope)
@@ -2091,7 +2147,5 @@ export function registerChatIPC(): void {
 
   // Pi (csagent) models from the user's installed pi ModelRegistry (auth-configured).
   // Best-effort: returns [] if pi isn't installed/authed — the tile keeps its defaults.
-  ipcMain.handle('chat:csagentModels', async () => {
-    return { models: await listCsagentModels() }
-  })
+  ipcMain.handle('chat:csagentModels', async () => listCsagentModels())
 }

@@ -220,6 +220,7 @@ describe('Electrobun window.electron facade', () => {
   test('only returns defaults for optional reads when the runtime is unavailable', () => {
     expect(getDefaultElectrobunInvokeResponse('window:isFresh')).toBe(false)
     expect(getDefaultElectrobunInvokeResponse('pets:list')).toEqual([])
+    expect(getDefaultElectrobunInvokeResponse('chat:csagentModels')).toEqual({ models: [] })
     expect(getDefaultElectrobunInvokeResponse('activity:health')).toEqual({
       available: false,
       status: 'unavailable',

@@ -1,5 +1,5 @@
-import { useMemo } from 'react'
-import type { TileState } from '../../../shared/types'
+import { useMemo, type MutableRefObject } from 'react'
+import type { GroupState, TileState } from '../../../shared/types'
 import type { AppCanvasConnectionsProps } from '../components/AppCanvasConnections'
 import type { PanelCornerRadii, AppCanvasPanelRegionProps } from '../components/AppCanvasPanelRegion'
 import type { CanvasDragState } from './useCanvasEngine'
@@ -13,6 +13,7 @@ import type { PanelNode } from '../components/panelLayoutTree'
 import type { AppTheme } from '../theme'
 import type { RenderTileBodyOptions } from './useRenderTileBody'
 import type { LayoutTemplate } from '../../../shared/types'
+import { pointerEjectPosition } from '../lib/layoutGroupMembership.ts'
 
 type DiscoveryShellColors = { line: string, dot: string, bg: string, text: string }
 
@@ -55,13 +56,20 @@ export type UseAppCanvasPanelRegionPropsParams = {
   getInitialTileSize: (type: TileState['type']) => { w: number, h: number }
   snapValue: (value: number) => number
   setPanelLayout: React.Dispatch<React.SetStateAction<PanelNode | null>>
+  applyLivePanelLayout?: React.Dispatch<React.SetStateAction<PanelNode | null>>
   closeTile: (tileId: string) => void
   addTile: (type: TileState['type'], filePath?: string, world?: { x: number, y: number }) => string
   exitExpandedMode: () => void
   setActivePanelId: React.Dispatch<React.SetStateAction<string | null>>
   handleLaunchTemplate: (template: LayoutTemplate) => void | Promise<void>
   setTiles: React.Dispatch<React.SetStateAction<TileState[]>>
+  setGroups?: React.Dispatch<React.SetStateAction<GroupState[]>>
   setNextZIndex: React.Dispatch<React.SetStateAction<number>>
+  expandLayoutGroupId?: string | null
+  tilesRef?: MutableRefObject<TileState[]>
+  groupsRef?: MutableRefObject<GroupState[]>
+  screenToWorld?: (sx: number, sy: number) => { x: number, y: number }
+  ejectPanelTab?: (tileId: string, position: { x: number, y: number }, zIndex: number) => void
 }
 
 export function useAppCanvasConnectionProps(params: UseAppCanvasConnectionPropsParams): Omit<AppCanvasConnectionsProps, 'layer'> {
@@ -153,13 +161,20 @@ export function useAppCanvasPanelRegionProps(params: UseAppCanvasPanelRegionProp
     getInitialTileSize,
     snapValue,
     setPanelLayout,
+    applyLivePanelLayout,
     closeTile,
     addTile,
     exitExpandedMode,
     setActivePanelId,
     handleLaunchTemplate,
     setTiles,
+    setGroups,
     setNextZIndex,
+    expandLayoutGroupId,
+    tilesRef,
+    groupsRef,
+    screenToWorld,
+    ejectPanelTab,
   } = params
 
   return useMemo(() => ({
@@ -175,14 +190,28 @@ export function useAppCanvasPanelRegionProps(params: UseAppCanvasPanelRegionProp
     viewportCenter,
     getInitialTileSize,
     snapValue,
-    onLayoutChange: setPanelLayout,
+    onLayoutChange: applyLivePanelLayout ?? setPanelLayout,
     onCloseTab: closeTile,
     onAddTile: addTile,
     onExitExpandedMode: exitExpandedMode,
     onActivePanelChange: setActivePanelId,
     onLaunchTemplate: handleLaunchTemplate,
     setTiles,
+    setGroups,
     setNextZIndex,
+    expandLayoutGroupId,
+    tilesRef,
+    groupsRef,
+    onTabDropOutside: ejectPanelTab && screenToWorld
+      ? (tileId, clientX, clientY) => {
+        const current = tilesRef?.current.find(tile => tile.id === tileId)
+          ?? tiles.find(tile => tile.id === tileId)
+        const fallback = getInitialTileSize(current?.type ?? 'note')
+        const position = pointerEjectPosition(screenToWorld(clientX, clientY), current?.width || fallback.w, snapValue)
+        ejectPanelTab(tileId, position, nextZIndex)
+        setNextZIndex(value => value + 1)
+      }
+      : undefined,
   }), [
     panelLayout,
     mainPanelCornerRadii,
@@ -197,12 +226,19 @@ export function useAppCanvasPanelRegionProps(params: UseAppCanvasPanelRegionProp
     getInitialTileSize,
     snapValue,
     setPanelLayout,
+    applyLivePanelLayout,
     closeTile,
     addTile,
     exitExpandedMode,
     setActivePanelId,
     handleLaunchTemplate,
     setTiles,
+    setGroups,
     setNextZIndex,
+    expandLayoutGroupId,
+    tilesRef,
+    groupsRef,
+    screenToWorld,
+    ejectPanelTab,
   ])
 }

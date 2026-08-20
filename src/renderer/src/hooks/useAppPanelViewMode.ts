@@ -1,13 +1,24 @@
-import { useCallback, useEffect, type MutableRefObject, type RefObject } from 'react'
+import { useCallback, useEffect, type MutableRefObject, type RefObject, type SetStateAction } from 'react'
 import type { GroupState, TileState } from '../../../shared/types'
-import { panelTreeHasSplit } from '../lib/layoutSnap'
 import {
-  addTabToLeaf,
-  createLeaf,
+  findFirstLeafId,
   getAllTileIds,
-  removeTileFromTree,
   type PanelNode,
 } from '../components/panelLayoutTree'
+import {
+  activateTileInLayout,
+  applyLayoutToGroup,
+  applyPanelTabEject,
+  commitGroupLayout,
+  ensureLayoutGroup,
+  layoutBoundsForArrangement,
+  measureFullscreenPanelSize,
+  findReusableArrangementGroupId,
+  resolveExpandFromTile,
+  resolveWorkspaceTabArrangement,
+  tileIdsInLayout,
+  type ArrangementResolution,
+} from '../lib/layoutGroupMembership.ts'
 
 export type UseAppPanelViewModeParams = {
   panelLayout: PanelNode | null
@@ -17,6 +28,8 @@ export type UseAppPanelViewModeParams = {
   expandedCanvasGroupIdRef: RefObject<string | null>
   panelTileIdsRef: RefObject<Set<string>>
   tilesRef: RefObject<TileState[]>
+  groupsRef: RefObject<GroupState[]>
+  selectedTileIdRef: RefObject<string | null>
   viewportRef: RefObject<{ tx: number, ty: number, zoom: number }>
   nextZIndexRef: RefObject<number>
   persistCanvasStateRef: RefObject<((tiles: TileState[], viewport: { tx: number, ty: number, zoom: number }, nextZIndex: number, groups: GroupState[]) => void) | null>
@@ -34,11 +47,11 @@ export function useAppPanelViewMode(params: UseAppPanelViewModeParams) {
   const {
     panelLayout,
     panelLayoutRef,
-    expandedTileIdRef,
     expandLayoutGroupIdRef,
     expandedCanvasGroupIdRef,
-    panelTileIdsRef,
     tilesRef,
+    groupsRef,
+    selectedTileIdRef,
     viewportRef,
     nextZIndexRef,
     persistCanvasStateRef,
@@ -52,70 +65,75 @@ export function useAppPanelViewMode(params: UseAppPanelViewModeParams) {
     exitCanvasExpandedRef,
   } = params
 
-  const promoteExpandedTileToLayoutGroup = useCallback(() => {
-    if (expandLayoutGroupIdRef.current) return
-    const anchorTileId = expandedTileIdRef.current
-    if (!anchorTileId) return
-    const layout = panelLayoutRef.current
-    if (!layout) return
-    if (!panelTreeHasSplit(layout)) return
-    const tileIds = getAllTileIds(layout)
+  const persistNow = useCallback((tiles: TileState[], groups: GroupState[]) => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    persistCanvasStateRef.current?.(tiles, viewport, nextZIndexRef.current ?? 1, groups)
+  }, [nextZIndexRef, persistCanvasStateRef, viewportRef])
 
-    const groupId = `group-${Date.now()}`
-    const anchor = tilesRef.current.find(tile => tile.id === anchorTileId)
-
-    const DEFAULT_W = 800
-    const DEFAULT_H = 600
-    const baseX = anchor?.x ?? (viewportRef.current ? -viewportRef.current.tx / viewportRef.current.zoom : 0)
-    const baseY = anchor?.y ?? (viewportRef.current ? -viewportRef.current.ty / viewportRef.current.zoom : 0)
-    const w = Math.max(anchor?.width ?? 0, DEFAULT_W)
-    const h = Math.max(anchor?.height ?? 0, DEFAULT_H)
-    const layoutBounds = { x: baseX, y: baseY, w, h }
-
-    const newGroup: GroupState = {
-      id: groupId,
-      color: '#4a9eff',
-      layoutMode: true,
-      layout,
-      layoutBounds,
-    }
-
-    const ids = new Set(tileIds)
-    setGroups(prev => {
-      const updatedGroups = [...prev, newGroup]
-      setTiles(tPrev => {
-        const updatedTiles = tPrev.map(tile => ids.has(tile.id) ? { ...tile, groupId } : tile)
-        setTimeout(() => persistCanvasStateRef.current?.(updatedTiles, viewportRef.current!, nextZIndexRef.current!, updatedGroups), 0)
-        return updatedTiles
-      })
-      return updatedGroups
+  const applyArrangement = useCallback((
+    resolution: ArrangementResolution,
+    activeTileId?: string | null,
+  ): string | null => {
+    if (resolution.tileIds.length === 0) return null
+    const ensured = ensureLayoutGroup({
+      tiles: tilesRef.current,
+      groups: groupsRef.current,
+      layout: resolution.layout,
+      reuseGroupId: resolution.reuseGroupId,
     })
+    if (!ensured.groupId) return null
 
-    setExpandLayoutGroupId(groupId)
-    expandLayoutGroupIdRef.current = groupId
+    tilesRef.current = ensured.tiles
+    groupsRef.current = ensured.groups
+    setTiles(ensured.tiles)
+    setGroups(ensured.groups)
+
+    const activated = activeTileId
+      ? activateTileInLayout(ensured.layout, activeTileId)
+      : { layout: ensured.layout, activePanelId: findFirstLeafId(ensured.layout) }
+
+    expandLayoutGroupIdRef.current = ensured.groupId
+    setExpandLayoutGroupId(ensured.groupId)
+    savedLayoutRef.current = activated.layout
+    setPanelLayout(activated.layout)
+    setActivePanelId(activated.activePanelId)
     setExpandedTileId(null)
+    persistNow(ensured.tiles, ensured.groups)
+    return ensured.groupId
   }, [
     expandLayoutGroupIdRef,
-    expandedTileIdRef,
-    panelLayoutRef,
-    tilesRef,
-    viewportRef,
-    nextZIndexRef,
-    persistCanvasStateRef,
+    groupsRef,
+    persistNow,
+    savedLayoutRef,
+    setActivePanelId,
     setExpandLayoutGroupId,
     setExpandedTileId,
     setGroups,
+    setPanelLayout,
     setTiles,
+    tilesRef,
   ])
+
+  const promoteExpandedTileToLayoutGroup = useCallback(() => {
+    if (expandLayoutGroupIdRef.current) return
+    const layout = panelLayoutRef.current
+    if (!layout) return
+    const tileIds = getAllTileIds(layout)
+    if (tileIds.length === 0) return
+    applyArrangement({
+      tileIds,
+      layout,
+      reuseGroupId: findReusableArrangementGroupId(tilesRef.current, groupsRef.current, tileIds),
+    })
+  }, [applyArrangement, expandLayoutGroupIdRef, groupsRef, panelLayoutRef, tilesRef])
 
   useEffect(() => {
     if (!panelLayout) return
     if (expandLayoutGroupIdRef.current) return
-    if (!expandedTileIdRef.current) return
-    if (panelTreeHasSplit(panelLayout)) {
-      promoteExpandedTileToLayoutGroup()
-    }
-  }, [panelLayout, promoteExpandedTileToLayoutGroup, expandLayoutGroupIdRef, expandedTileIdRef])
+    if (tileIdsInLayout(panelLayout).length === 0) return
+    promoteExpandedTileToLayoutGroup()
+  }, [panelLayout, promoteExpandedTileToLayoutGroup, expandLayoutGroupIdRef])
 
   const exitExpandedMode = useCallback(() => {
     promoteExpandedTileToLayoutGroup()
@@ -123,11 +141,25 @@ export function useAppPanelViewMode(params: UseAppPanelViewModeParams) {
     const expandingGroup = expandLayoutGroupIdRef.current
     setPanelLayout(prev => {
       if (expandingGroup && prev) {
-        setGroups(grps => {
-          const updated = grps.map(group => group.id === expandingGroup ? { ...group, layout: prev } : group)
-          setTimeout(() => persistCanvasStateRef.current?.(tilesRef.current!, viewportRef.current!, nextZIndexRef.current!, updated), 0)
-          return updated
-        })
+        const committed = commitGroupLayout(tilesRef.current, groupsRef.current, expandingGroup, prev)
+        const fitted = applyLayoutToGroup(
+          committed.groups,
+          expandingGroup,
+          prev,
+          layoutBoundsForArrangement({
+            tiles: committed.tiles,
+            tileIds: getAllTileIds(prev),
+            layout: prev,
+            existing: committed.groups.find(group => group.id === expandingGroup)?.layoutBounds,
+            panelSize: measureFullscreenPanelSize(),
+          }),
+        )
+        tilesRef.current = committed.tiles
+        groupsRef.current = fitted
+        savedLayoutRef.current = prev
+        setTiles(committed.tiles)
+        setGroups(fitted)
+        setTimeout(() => persistNow(committed.tiles, committed.groups), 0)
       } else if (!expandingGroup) {
         savedLayoutRef.current = prev
       }
@@ -138,71 +170,74 @@ export function useAppPanelViewMode(params: UseAppPanelViewModeParams) {
     setExpandLayoutGroupId(null)
     expandLayoutGroupIdRef.current = null
   }, [
-    promoteExpandedTileToLayoutGroup,
     expandLayoutGroupIdRef,
-    setPanelLayout,
-    setGroups,
-    persistCanvasStateRef,
-    tilesRef,
-    viewportRef,
-    nextZIndexRef,
+    persistNow,
+    promoteExpandedTileToLayoutGroup,
     savedLayoutRef,
-    setExpandedTileId,
     setActivePanelId,
     setExpandLayoutGroupId,
+    setExpandedTileId,
+    setGroups,
+    setPanelLayout,
+    setTiles,
+    tilesRef,
+    groupsRef,
+  ])
+
+  const applyLivePanelLayout = useCallback((next: SetStateAction<PanelNode | null>) => {
+    setPanelLayout(prev => {
+      const layout = typeof next === 'function' ? next(prev) : next
+      if (!layout) return layout
+      savedLayoutRef.current = layout
+      const groupId = expandLayoutGroupIdRef.current
+      if (groupId) {
+        const committed = commitGroupLayout(tilesRef.current, groupsRef.current, groupId, layout)
+        tilesRef.current = committed.tiles
+        groupsRef.current = committed.groups
+        setTiles(committed.tiles)
+        setGroups(committed.groups)
+        persistNow(committed.tiles, committed.groups)
+      }
+      return layout
+    })
+  }, [
+    expandLayoutGroupIdRef,
+    groupsRef,
+    persistNow,
+    savedLayoutRef,
+    setGroups,
+    setPanelLayout,
+    setTiles,
+    tilesRef,
   ])
 
   const enterExpandedMode = useCallback((tileId: string) => {
-    const SIBLING_CAP = 8
-    const clicked = tilesRef.current.find(tile => tile.id === tileId)
-    const siblingIds = clicked?.groupId
-      ? tilesRef.current
-        .filter(tile => tile.id !== tileId && tile.groupId === clicked.groupId && !panelTileIdsRef.current.has(tile.id))
-        .map(tile => tile.id)
-        .slice(0, SIBLING_CAP - 1)
-      : []
-    const ordered = [tileId, ...siblingIds]
-    const leaf = createLeaf(ordered, tileId)
-    setExpandedTileId(tileId)
-    setPanelLayout(leaf)
-    setActivePanelId(leaf.id)
-  }, [panelTileIdsRef, setExpandedTileId, setPanelLayout, setActivePanelId, tilesRef])
+    const resolution = resolveExpandFromTile({
+      tileId,
+      tiles: tilesRef.current,
+      groups: groupsRef.current,
+    })
+    applyArrangement(resolution, tileId)
+  }, [applyArrangement, groupsRef, tilesRef])
 
   const enterTabbedView = useCallback(() => {
-    const currentIds = tilesRef.current.map(tile => tile.id)
-    const currentIdSet = new Set(currentIds)
-
-    if (savedLayoutRef.current) {
-      let restored: PanelNode = savedLayoutRef.current
-
-      const savedIds = getAllTileIds(savedLayoutRef.current)
-      for (const id of savedIds) {
-        if (!currentIdSet.has(id)) {
-          restored = removeTileFromTree(restored, id) ?? restored
-        }
-      }
-
-      const restoredIds = new Set(getAllTileIds(restored))
-      const newIds = currentIds.filter(id => !restoredIds.has(id))
-      const firstLeaf = (function find(node: PanelNode): string | null {
-        if (node.type === 'leaf') return node.id
-        return find(node.children[0])
-      })(restored)
-
-      for (const id of newIds) {
-        if (firstLeaf) restored = addTabToLeaf(restored, firstLeaf, id)
-      }
-
-      setPanelLayout(restored)
-      setActivePanelId(firstLeaf)
-      setExpandedTileId(null)
-    } else {
-      const leaf = createLeaf(currentIds, currentIds[0])
-      setPanelLayout(leaf)
-      setActivePanelId(leaf.id)
-      setExpandedTileId(null)
-    }
-  }, [savedLayoutRef, setPanelLayout, setActivePanelId, setExpandedTileId, tilesRef])
+    if (expandLayoutGroupIdRef.current && panelLayoutRef.current) return
+    const resolution = resolveWorkspaceTabArrangement({
+      tiles: tilesRef.current,
+      groups: groupsRef.current,
+      savedLayout: savedLayoutRef.current,
+      selectedTileId: selectedTileIdRef.current,
+    })
+    applyArrangement(resolution)
+  }, [
+    applyArrangement,
+    expandLayoutGroupIdRef,
+    groupsRef,
+    panelLayoutRef,
+    savedLayoutRef,
+    selectedTileIdRef,
+    tilesRef,
+  ])
 
   const handleCanvasEscape = useCallback(() => {
     if (expandedCanvasGroupIdRef.current) {
@@ -212,10 +247,48 @@ export function useAppPanelViewMode(params: UseAppPanelViewModeParams) {
     exitExpandedMode()
   }, [expandedCanvasGroupIdRef, exitCanvasExpandedRef, exitExpandedMode])
 
+  const ejectPanelTab = useCallback((tileId: string, position: { x: number, y: number }, zIndex: number) => {
+    const next = applyPanelTabEject({
+      tiles: tilesRef.current,
+      groups: groupsRef.current,
+      panelLayout: panelLayoutRef.current,
+      expandLayoutGroupId: expandLayoutGroupIdRef.current,
+      tileId,
+      position,
+      zIndex,
+    })
+    tilesRef.current = next.tiles
+    groupsRef.current = next.groups
+    setTiles(next.tiles)
+    setGroups(next.groups)
+    persistNow(next.tiles, next.groups)
+    savedLayoutRef.current = next.panelLayout
+    setPanelLayout(next.panelLayout)
+    setExpandLayoutGroupId(next.expandLayoutGroupId)
+    expandLayoutGroupIdRef.current = next.expandLayoutGroupId
+    setActivePanelId(next.activePanelId)
+    if (!next.panelLayout) setExpandedTileId(null)
+  }, [
+    expandLayoutGroupIdRef,
+    groupsRef,
+    panelLayoutRef,
+    persistNow,
+    savedLayoutRef,
+    setActivePanelId,
+    setExpandLayoutGroupId,
+    setExpandedTileId,
+    setGroups,
+    setPanelLayout,
+    setTiles,
+    tilesRef,
+  ])
+
   return {
     exitExpandedMode,
     enterExpandedMode,
     enterTabbedView,
     handleCanvasEscape,
+    applyLivePanelLayout,
+    ejectPanelTab,
   }
 }

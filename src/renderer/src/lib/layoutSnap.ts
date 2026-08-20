@@ -32,12 +32,9 @@ let snapPanelCounter = 0
 const snapPanelId = (): string => `panel-snap-${Date.now()}-${snapPanelCounter++}`
 
 /**
- * The A2 promotion discriminator: does this panel tree contain a real spatial
- * arrangement (a split), or is it just a single leaf with tabs?
- *
- * "tabs != layout" — a leaf full of tabs is "siblings reachable as tabs", which
- * must stay transient. Only a `split` node means the user actually arranged
- * panes, which is the moment an arrangement "becomes a layout".
+ * True when the panel tree has a spatial split (columns/rows), not only tabs.
+ * Tab-only trees are still layout groups when they represent a fullscreen
+ * arrangement; this helper is for callers that need the split/tab distinction.
  */
 export function panelTreeHasSplit(node: PanelNode): boolean {
   if (node.type === 'leaf') return false
