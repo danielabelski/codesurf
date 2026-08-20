@@ -185,7 +185,7 @@ export function SettingRow({ label, description, children }: { label: string; de
     }}>
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 500, marginBottom: description ? 3 : 0 }}>{label}</div>
-        {description && <div style={{ fontSize: fonts.secondarySize, color: theme.text.disabled }}>{description}</div>}
+        {description && <div style={{ fontSize: fonts.secondarySize, fontFamily: fonts.secondary, fontWeight: fonts.secondaryWeight, lineHeight: fonts.secondaryLineHeight, color: theme.text.disabled }}>{description}</div>}
       </div>
       <div style={{ flexShrink: 0 }}>{children}</div>
     </div>
@@ -274,8 +274,8 @@ export function CompactFontRow({ label, description, token, fontOptions, onChang
       borderRadius: 10,
     }}>
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: fonts.size, color: theme.text.primary, fontWeight: 600 }}>{label}</div>
-        <div style={{ fontSize: fonts.secondarySize, color: theme.text.disabled, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{description}</div>
+        <div style={{ fontSize: fonts.size, fontFamily: fonts.primary, color: theme.text.primary, fontWeight: 600 }}>{label}</div>
+        <div style={{ fontSize: fonts.secondarySize, fontFamily: fonts.secondary, fontWeight: fonts.secondaryWeight, color: theme.text.disabled, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{description}</div>
       </div>
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
         <div style={{ flex: 1, minWidth: 0 }}>

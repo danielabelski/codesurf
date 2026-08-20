@@ -544,7 +544,7 @@ function TileChromeComponent({
             />
           ) : (
             <span style={{
-              flex: 1, fontSize: fonts.size, fontWeight: Math.min(900, fonts.weight + 100), color: frame.label ?? titlebarForeground,
+              flex: 1, fontFamily: fonts.primary, fontSize: fonts.size, fontWeight: Math.min(900, fonts.weight + 100), color: frame.label ?? titlebarForeground,
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
             }}>
               {fileLabel(tile)}

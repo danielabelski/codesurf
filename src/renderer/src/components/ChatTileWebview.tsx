@@ -240,7 +240,7 @@ export function ChatTileWebview(props: Props): React.ReactNode {
             justifyContent: 'center',
             color: theme.chat?.muted ?? '#888',
             fontSize: 12,
-            fontFamily: '-apple-system, sans-serif',
+            fontFamily: 'var(--cs-font-primary, inherit)',
             background: theme.chat?.background ?? '#1e1e1e',
           }}
         >

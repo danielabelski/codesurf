@@ -158,6 +158,8 @@
   --color-popover-foreground: var(--cs-th-text-primary, #cccccc);
   --color-sidebar: var(--cs-th-sidebar, #1e1e1e);
   --radius: 0.5rem;
+  --font-sans: var(--cs-font-primary);
+  --font-mono: var(--cs-font-mono);
 }
 
 :root {
@@ -170,6 +172,9 @@
   --cs-sidebar-row-radius: 10px;
   --cs-sidebar-row-pad-x: 8px;
   --cs-thread-content-max-width: 800px;
+  --cs-font-primary: "Saira", "SF Pro Rounded", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --cs-font-secondary: var(--cs-font-primary);
+  --cs-font-mono: "Geist Mono", "FiraCode Nerd Font Mono", ui-monospace, "SF Mono", "Menlo", "Monaco", "JetBrains Mono", "Fira Code", monospace;
   --cs-chat-composer-side-inset: 24px;
   /* Must stay >= the panel shell radius (10px) or overflow:hidden clips the
      composer card into a nested second corner at the bottom of the tile. */
@@ -243,7 +248,14 @@ html, body, #root {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  font-family: var(--cs-font-primary);
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
 }
 
 /* Override Tailwind preflight line-height on html so the app root's

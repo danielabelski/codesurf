@@ -89,6 +89,13 @@ export function useAppThemeCssVars(theme: AppTheme, appFonts: AppFonts) {
     root.style.setProperty('--cs-edge-shadow-subtle', getEdgeShadow(theme, 'subtle'))
     root.style.setProperty('--cs-edge-shadow-strong', getEdgeShadow(theme, 'strong'))
     root.style.setProperty('--cs-edge-shadow-accent', getEdgeShadow(theme, 'accent'))
+    root.style.setProperty('--cs-font-primary', appFonts.primary)
+    root.style.setProperty('--cs-font-secondary', appFonts.secondary)
+    root.style.setProperty('--cs-font-mono', appFonts.mono)
+    root.style.setProperty('--font-sans', appFonts.primary)
+    root.style.setProperty('--font-mono', appFonts.mono)
+    root.style.fontFamily = appFonts.primary
+    if (document.body) document.body.style.fontFamily = appFonts.primary
     root.style.setProperty('--ct-font-primary', appFonts.primary)
     root.style.setProperty('--ct-font-primary-size', `${appFonts.size}px`)
     root.style.setProperty('--ct-font-primary-line', String(appFonts.lineHeight))

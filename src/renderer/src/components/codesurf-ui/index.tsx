@@ -20,8 +20,10 @@ const text = 'var(--ct-text, inherit)'
 const muted = 'var(--ct-text-muted, var(--ct-text, inherit))'
 const panel = 'var(--ct-panel, rgba(127,127,127,0.06))'
 const accent = 'var(--ct-accent, #4f46e5)'
-const fontSans = 'var(--ct-font-sans, inherit)'
-const fontSize = 'var(--ct-font-size, 13px)'
+const fontSans = 'var(--ct-font-primary, var(--ct-font-sans, inherit))'
+const fontSecondary = 'var(--ct-font-secondary, var(--ct-font-subtle, var(--ct-font-primary, inherit)))'
+const fontSize = 'var(--ct-font-primary-size, var(--ct-font-size, 13px))'
+const fontSecondarySize = 'var(--ct-font-secondary-size, var(--ct-font-subtle-size, 12px))'
 
 const controlBase: React.CSSProperties = {
   font: 'inherit',
@@ -53,7 +55,7 @@ export function Button({
       style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         cursor: 'pointer', borderRadius: radius, padding: '5px 12px',
-        fontFamily: fontSans, fontSize, lineHeight: 1.4,
+        fontFamily: fontSecondary, fontSize: fontSecondarySize, lineHeight: 1.4,
         transition: 'background 0.15s, opacity 0.15s', outline: 'none',
         ...variants[variant], ...style,
       }}

@@ -23,6 +23,8 @@ describe('useAppThemeCssVars extraction', () => {
     expect(HOOK_SOURCE).toContain("setVar('--cs-th-app'")
     expect(HOOK_SOURCE).toContain("root.style.setProperty('--color-background'")
     expect(HOOK_SOURCE).toContain("root.style.setProperty('--ct-font-primary'")
+    expect(HOOK_SOURCE).toContain("root.style.setProperty('--cs-font-primary'")
+    expect(HOOK_SOURCE).toContain("root.style.setProperty('--cs-font-secondary'")
     expect(HOOK_SOURCE).toContain('getEdgeShadow(theme')
     expect(HOOK_SOURCE).toContain('--cs-th-scrollbar-thumb')
   })

@@ -1,8 +1,9 @@
 import type React from 'react'
+import { DEFAULT_FONTS } from '../../../../shared/types'
 
-// Use the canonical font stacks from shared/types.ts DEFAULT_FONTS
-export const FONT_SANS = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
-export const FONT_MONO = '"JetBrains Mono", "Menlo", "Monaco", "SF Mono", "Fira Code", monospace'
+// Canonical stacks — same tokens as Settings → Fonts (primary / mono).
+export const FONT_SANS = DEFAULT_FONTS.primary.family
+export const FONT_MONO = DEFAULT_FONTS.mono.family
 export const FONT_SIZE_DEFAULT = 13
 export const MONO_SIZE_DEFAULT = 13
 

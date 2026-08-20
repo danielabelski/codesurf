@@ -5,6 +5,20 @@ import { expect } from './node-expect.ts'
 
 const ROOT = process.cwd()
 
+describe('app font tokens', () => {
+  test('html/body use the primary token so settings actually cascade', () => {
+    const css = readFileSync(join(ROOT, 'src/renderer/src/index.css'), 'utf8')
+    const hook = readFileSync(join(ROOT, 'src/renderer/src/hooks/useAppThemeCssVars.ts'), 'utf8')
+    const layout = readFileSync(join(ROOT, 'src/renderer/src/components/chat/chatTileLayout.ts'), 'utf8')
+    const bridge = readFileSync(join(ROOT, 'src/main/extensions/bridge.ts'), 'utf8')
+    expect(css).toContain('font-family: var(--cs-font-primary)')
+    expect(hook).toContain("root.style.setProperty('--cs-font-primary', appFonts.primary)")
+    expect(hook).toContain("root.style.setProperty('--cs-font-secondary', appFonts.secondary)")
+    expect(layout).toContain('DEFAULT_FONTS.primary.family')
+    expect(bridge).toContain('font-family:var(--ct-font-primary,var(--ct-font-sans,sans-serif))')
+  })
+})
+
 describe('Manrope UI font', () => {
   test('is available for primary and secondary font pickers and is bundled', () => {
     const controls = readFileSync(join(ROOT, 'src/renderer/src/components/settings/controls.tsx'), 'utf8')
